@@ -1,0 +1,12 @@
+{
+  "name": "Pyxis T-Deck",
+  "version": "v0.1.0",
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "firmware/firmware.bin", "offset": 65536 }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pyxis T-Deck Flasher</title>
+    <style>
+        :root {
+            --primary: #3b82f6;
+            --primary-hover: #2563eb;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --bg: #0f172a;
+            --card: #1e293b;
+            --text: #e2e8f0;
+            --muted: #94a3b8;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 2rem 1rem;
+            line-height: 1.6;
+        }
+
+        .container { max-width: 700px; margin: 0 auto; }
+
+        header { text-align: center; margin-bottom: 2.5rem; }
+
+        h1 { color: var(--primary); font-size: 2rem; margin-bottom: 0.5rem; }
+
+        .subtitle { color: var(--muted); font-size: 1.1rem; }
+
+        .card {
+            background: var(--card);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1.25rem;
+        }
+
+        .card h2 { font-size: 1.25rem; margin-bottom: 1rem; }
+
+        .flash-section { text-align: center; padding: 2rem; }
+
+        .status-box {
+            background: rgba(0,0,0,0.2);
+            border-radius: 8px;
+            padding: 1rem;
+            margin-bottom: 1.5rem;
+            text-align: left;
+        }
+
+        .status-box .label { color: var(--muted); font-size: 0.875rem; }
+        .status-box .value { font-size: 1.1rem; font-weight: 500; }
+
+        .status-detected { color: var(--success); }
+        .status-not-detected { color: var(--muted); }
+        .status-checking { color: var(--warning); }
+        .status-flashing { color: var(--primary); }
+
+        .button-group {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin-bottom: 1.5rem;
+        }
+
+        button {
+            font-family: inherit;
+            font-size: 1rem;
+            padding: 0.75rem 1.5rem;
+            border-radius: 8px;
+            border: none;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .btn-primary { background: var(--primary); color: white; }
+        .btn-primary:hover { background: var(--primary-hover); }
+        .btn-danger { background: var(--danger); color: white; }
+
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.5rem;
+            margin-bottom: 1.5rem;
+            padding: 1rem;
+            background: rgba(239, 68, 68, 0.1);
+            border-radius: 8px;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+
+        .checkbox-group input[type="checkbox"] {
+            width: 1.25rem;
+            height: 1.25rem;
+            cursor: pointer;
+        }
+
+        .checkbox-group label { cursor: pointer; color: var(--danger); }
+
+        .hidden { display: none !important; }
+
+        .progress-container {
+            margin: 1.5rem 0;
+            text-align: left;
+        }
+
+        .progress-bar {
+            height: 24px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 12px;
+            overflow: hidden;
+            margin-bottom: 0.5rem;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--primary), var(--success));
+            border-radius: 12px;
+            transition: width 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: 600;
+            font-size: 0.875rem;
+        }
+
+        .progress-text {
+            font-size: 0.875rem;
+            color: var(--muted);
+        }
+
+        #log {
+            background: rgba(0,0,0,0.3);
+            border-radius: 8px;
+            padding: 1rem;
+            margin-top: 1rem;
+            font-family: monospace;
+            font-size: 0.8rem;
+            max-height: 200px;
+            overflow-y: auto;
+            text-align: left;
+        }
+
+        #log .log-entry { margin-bottom: 0.25rem; }
+        #log .log-info { color: var(--muted); }
+        #log .log-success { color: var(--success); }
+        #log .log-error { color: var(--danger); }
+
+        .version { margin-top: 1rem; font-size: 0.875rem; color: var(--muted); }
+
+        .requirements ul { list-style: none; padding-left: 0; }
+        .requirements li {
+            padding: 0.5rem 0;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        .requirements li:last-child { border-bottom: none; }
+
+        .warning {
+            background: rgba(245, 158, 11, 0.15);
+            border-left: 3px solid var(--warning);
+            padding: 1rem;
+            margin-top: 1rem;
+            border-radius: 0 8px 8px 0;
+            font-size: 0.9rem;
+        }
+        .warning strong { color: var(--warning); }
+
+        footer {
+            text-align: center;
+            margin-top: 2rem;
+            color: var(--muted);
+            font-size: 0.875rem;
+        }
+        footer a { color: var(--primary); text-decoration: none; }
+        footer a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Pyxis T-Deck Flasher</h1>
+            <p class="subtitle">Flash your LilyGO T-Deck Plus with Pyxis firmware</p>
+        </header>
+
+        <div class="card flash-section">
+            <h2>Install Firmware</h2>
+
+            <div class="status-box">
+                <div class="label">Device Status</div>
+                <div class="value" id="device-status">
+                    <span class="status-not-detected">Not connected</span>
+                </div>
+            </div>
+
+            <div class="button-group">
+                <button id="connect-btn" class="btn-primary">Connect & Detect</button>
+                <button id="flash-btn" class="btn-primary hidden" disabled>Flash Firmware</button>
+                <button id="disconnect-btn" class="btn-danger hidden">Disconnect</button>
+            </div>
+
+            <div id="erase-option" class="checkbox-group hidden">
+                <input type="checkbox" id="erase-checkbox">
+                <label for="erase-checkbox">Full install (erase settings & messages)</label>
+            </div>
+
+            <div id="progress-container" class="progress-container hidden">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progress-fill" style="width: 0%">0%</div>
+                </div>
+                <div class="progress-text" id="progress-text">Preparing...</div>
+            </div>
+
+            <div id="log"></div>
+
+            <p class="version">Firmware version: <span id="firmware-version">dev</span></p>
+        </div>
+
+        <div class="card requirements">
+            <h2>Requirements</h2>
+            <ul>
+                <li><strong>Browser:</strong> Chrome, Edge, or Opera (Web Serial API required)</li>
+                <li><strong>Device:</strong> LilyGO T-Deck Plus (ESP32-S3, 8MB Flash)</li>
+                <li><strong>Cable:</strong> USB-C data cable (not charge-only)</li>
+            </ul>
+        </div>
+
+        <div class="card">
+            <h2>How It Works</h2>
+            <ul style="list-style: none; padding: 0;">
+                <li style="padding: 0.5rem 0;"><strong>1.</strong> Click "Connect & Detect" and select your T-Deck</li>
+                <li style="padding: 0.5rem 0;"><strong>2.</strong> Flasher checks if microReticulum is installed</li>
+                <li style="padding: 0.5rem 0;"><strong>3.</strong> Click "Flash Firmware" - settings preserved by default</li>
+                <li style="padding: 0.5rem 0;"><strong>4.</strong> Only check "Full install" for a clean wipe</li>
+            </ul>
+
+            <div class="warning">
+                <strong>Tip:</strong> Update mode only flashes the app, preserving your settings and messages.
+            </div>
+        </div>
+
+        <footer>
+            <p>
+                <a href="https://github.com/liamcottle/reticulum-meshchat" target="_blank">GitHub</a>
+                &nbsp;|&nbsp;
+                <a href="https://github.com/liamcottle/reticulum-meshchat/releases" target="_blank">Releases</a>
+            </p>
+            <p style="margin-top: 0.5rem;">Powered by esptool-js</p>
+        </footer>
+    </div>
+
+    <script type="module">
+        import { ESPLoader, Transport } from 'https://unpkg.com/esptool-js/bundle.js';
+
+        const connectBtn = document.getElementById('connect-btn');
+        const flashBtn = document.getElementById('flash-btn');
+        const disconnectBtn = document.getElementById('disconnect-btn');
+        const eraseOption = document.getElementById('erase-option');
+        const eraseCheckbox = document.getElementById('erase-checkbox');
+        const deviceStatus = document.getElementById('device-status');
+        const logDiv = document.getElementById('log');
+        const progressContainer = document.getElementById('progress-container');
+        const progressFill = document.getElementById('progress-fill');
+        const progressText = document.getElementById('progress-text');
+
+        let port = null;
+        let transport = null;
+        let esploader = null;
+        let isInstalled = false;
+        let detectedVersion = null;
+        let chip = null;
+
+        // Firmware file offsets
+        const FIRMWARE_FILES = {
+            full: [
+                { offset: 0x0, name: 'bootloader.bin', path: 'firmware/bootloader.bin' },
+                { offset: 0x8000, name: 'partitions.bin', path: 'firmware/partitions.bin' },
+                { offset: 0xe000, name: 'boot_app0.bin', path: 'firmware/boot_app0.bin' },
+                { offset: 0x10000, name: 'firmware.bin', path: 'firmware/firmware.bin' }
+            ],
+            update: [
+                { offset: 0x10000, name: 'firmware.bin', path: 'firmware/firmware.bin' }
+            ]
+        };
+
+        function log(message, type = 'info') {
+            logDiv.classList.remove('hidden');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            const time = new Date().toLocaleTimeString();
+            entry.textContent = `[${time}] ${message}`;
+            logDiv.appendChild(entry);
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        function updateStatus(html) {
+            deviceStatus.innerHTML = html;
+        }
+
+        function setProgress(percent, text) {
+            progressContainer.classList.remove('hidden');
+            progressFill.style.width = `${percent}%`;
+            progressFill.textContent = `${Math.round(percent)}%`;
+            progressText.textContent = text;
+        }
+
+        async function connect() {
+            connectBtn.disabled = true;
+            connectBtn.textContent = 'Connecting...';
+            log('Requesting serial port...');
+
+            try {
+                port = await navigator.serial.requestPort();
+                await port.open({ baudRate: 115200 });
+                log('Port opened, detecting firmware...');
+                updateStatus('<span class="status-checking">Detecting firmware...</span>');
+
+                // Detect if microReticulum is installed
+                await detectFirmware();
+
+            } catch (error) {
+                log(`Connection error: ${error.message}`, 'error');
+                updateStatus('<span class="status-not-detected">Connection failed</span>');
+                connectBtn.textContent = 'Connect & Detect';
+                connectBtn.disabled = false;
+                await cleanup();
+            }
+        }
+
+        async function detectFirmware() {
+            try {
+                // Wait for streams to be ready
+                await new Promise(r => setTimeout(r, 100));
+
+                if (!port.readable || !port.writable) {
+                    throw new Error('Port streams not available');
+                }
+
+                // Send VERSION command
+                log('Sending VERSION command...');
+                const writer = port.writable.getWriter();
+                const encoder = new TextEncoder();
+                await writer.write(encoder.encode('VERSION\n'));
+                await new Promise(r => setTimeout(r, 200));
+                await writer.write(encoder.encode('VERSION\n'));
+                writer.releaseLock();
+                await new Promise(r => setTimeout(r, 300));
+
+                // Read response
+                const reader = port.readable.getReader();
+                const decoder = new TextDecoder();
+                let response = '';
+                const startTime = Date.now();
+
+                try {
+                    while (Date.now() - startTime < 2000) {
+                        const result = await Promise.race([
+                            reader.read(),
+                            new Promise(r => setTimeout(() => r({ done: true }), 500))
+                        ]);
+                        if (result.done) break;
+                        if (result.value) {
+                            response += decoder.decode(result.value);
+                            if (response.includes('microReticulum')) break;
+                        }
+                    }
+                } finally {
+                    reader.releaseLock();
+                }
+
+                log(`Response: ${response.trim().substring(0, 100) || '(no response)'}`);
+
+                if (response.includes('microReticulum')) {
+                    const match = response.match(/microReticulum v([\d.]+)/);
+                    detectedVersion = match ? match[1] : 'unknown';
+                    isInstalled = true;
+
+                    updateStatus(`<span class="status-detected">microReticulum v${detectedVersion} - Update mode</span>`);
+                    log(`Detected v${detectedVersion} - will preserve settings`, 'success');
+                    flashBtn.textContent = 'Update Firmware';
+                } else {
+                    isInstalled = false;
+                    updateStatus('<span class="status-not-detected">Not installed - Install mode</span>');
+                    log('microReticulum not detected');
+                    flashBtn.textContent = 'Install Firmware';
+                }
+
+                eraseOption.classList.remove('hidden');
+                flashBtn.classList.remove('hidden');
+                flashBtn.disabled = false;
+                disconnectBtn.classList.remove('hidden');
+                connectBtn.classList.add('hidden');
+
+            } catch (error) {
+                log(`Detection error: ${error.message}`, 'error');
+                updateStatus('<span class="status-not-detected">Detection failed - Install mode</span>');
+                isInstalled = false;
+                flashBtn.textContent = 'Install Firmware';
+                eraseOption.classList.remove('hidden');
+                flashBtn.classList.remove('hidden');
+                flashBtn.disabled = false;
+                disconnectBtn.classList.remove('hidden');
+                connectBtn.classList.add('hidden');
+            }
+        }
+
+        async function flash() {
+            const useFullInstall = eraseCheckbox.checked || !isInstalled;
+            const files = useFullInstall ? FIRMWARE_FILES.full : FIRMWARE_FILES.update;
+
+            flashBtn.disabled = true;
+            disconnectBtn.disabled = true;
+            log(`Starting ${useFullInstall ? 'full install' : 'update'}...`);
+            updateStatus(`<span class="status-flashing">Flashing...</span>`);
+
+            try {
+                // Close current serial connection and reopen via Transport for bootloader
+                try { await port.close(); } catch (e) {}
+
+                log('Entering bootloader mode...');
+                transport = new Transport(port, true);
+
+                const flashOptions = {
+                    transport,
+                    baudrate: 921600,
+                    romBaudrate: 115200,
+                };
+
+                esploader = new ESPLoader(flashOptions);
+                chip = await esploader.main();
+                log(`Connected to ${chip} bootloader`, 'success');
+
+                // Load firmware files
+                const fileArray = [];
+                let totalSize = 0;
+
+                for (const file of files) {
+                    log(`Loading ${file.name}...`);
+                    const response = await fetch(file.path);
+                    if (!response.ok) throw new Error(`Failed to load ${file.name}`);
+                    const arrayBuffer = await response.arrayBuffer();
+                    // Convert to binary string as expected by esptool-js
+                    const bytes = new Uint8Array(arrayBuffer);
+                    let binaryString = '';
+                    for (let i = 0; i < bytes.length; i++) {
+                        binaryString += String.fromCharCode(bytes[i]);
+                    }
+                    fileArray.push({
+                        data: binaryString,
+                        address: file.offset
+                    });
+                    totalSize += arrayBuffer.byteLength;
+                    log(`Loaded ${file.name} (${arrayBuffer.byteLength} bytes)`);
+                }
+
+                log(`Total size: ${totalSize} bytes`);
+                setProgress(0, 'Writing to flash...');
+
+                // Flash all files
+                log('Starting flash write...');
+                await esploader.writeFlash({
+                    fileArray,
+                    flashSize: 'keep',
+                    flashMode: 'keep',
+                    flashFreq: 'keep',
+                    eraseAll: false,
+                    compress: true,
+                    reportProgress: (fileIndex, written, total) => {
+                        const fileName = files[fileIndex]?.name || 'file';
+                        const percent = (written / total) * 100;
+                        setProgress(percent, `Writing ${fileName}... ${Math.round(percent)}%`);
+                        if (written === total) {
+                            log(`${fileName} complete`, 'success');
+                        }
+                    }
+                });
+
+                setProgress(100, 'Verifying...');
+                log('Flash complete!', 'success');
+
+                // Reset device to run new firmware
+                log('Resetting device...');
+                await transport.setDTR(false);
+                await transport.setRTS(true);
+                await new Promise(r => setTimeout(r, 100));
+                await transport.setRTS(false);
+
+                setProgress(100, 'Done!');
+                updateStatus('<span class="status-detected">Flash complete! Device is restarting...</span>');
+
+                await cleanup();
+
+                flashBtn.classList.add('hidden');
+                disconnectBtn.classList.add('hidden');
+                eraseOption.classList.add('hidden');
+                connectBtn.classList.remove('hidden');
+                connectBtn.textContent = 'Connect & Detect';
+                connectBtn.disabled = false;
+
+            } catch (error) {
+                log(`Flash error: ${error.message}`, 'error');
+                updateStatus('<span class="status-not-detected">Flash failed</span>');
+                setProgress(0, 'Failed');
+
+                flashBtn.disabled = false;
+                disconnectBtn.disabled = false;
+            }
+        }
+
+        async function cleanup() {
+            try {
+                if (transport) await transport.disconnect();
+                if (port) await port.close();
+            } catch (e) {}
+            transport = null;
+            esploader = null;
+            port = null;
+        }
+
+        async function disconnect() {
+            log('Disconnecting...');
+            await cleanup();
+            updateStatus('<span class="status-not-detected">Disconnected</span>');
+
+            flashBtn.classList.add('hidden');
+            disconnectBtn.classList.add('hidden');
+            eraseOption.classList.add('hidden');
+            progressContainer.classList.add('hidden');
+            connectBtn.classList.remove('hidden');
+            connectBtn.textContent = 'Connect & Detect';
+            connectBtn.disabled = false;
+        }
+
+        connectBtn.addEventListener('click', connect);
+        flashBtn.addEventListener('click', flash);
+        disconnectBtn.addEventListener('click', disconnect);
+
+        eraseCheckbox.addEventListener('change', () => {
+            if (isInstalled) {
+                flashBtn.textContent = eraseCheckbox.checked ? 'Full Install' : 'Update Firmware';
+            }
+        });
+
+        // Load manifest version
+        fetch('manifest-install.json')
+            .then(r => r.json())
+            .then(data => {
+                document.getElementById('firmware-version').textContent = data.version;
+            })
+            .catch(() => {});
+    </script>
+</body>
+</html>
