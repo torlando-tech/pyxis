@@ -7,6 +7,8 @@
 #include <Preferences.h>
 #include <time.h>
 #include <sys/time.h>
+#include <esp_system.h>
+#include <soc/rtc_cntl_reg.h>
 
 // Reticulum
 #include <Reticulum.h>
@@ -72,8 +74,10 @@
 #endif
 
 // Firmware version for web flasher detection
-#define FIRMWARE_VERSION "1.0.0"
-#define FIRMWARE_NAME "microReticulum"
+#ifndef FIRMWARE_VERSION
+#define FIRMWARE_VERSION "dev"
+#endif
+#define FIRMWARE_NAME "Pyxis"
 
 using namespace RNS;
 using namespace LXMF;
@@ -1036,7 +1040,7 @@ void setup() {
     INFO("\n");
     INFO("╔══════════════════════════════════════╗");
     INFO("║   LXMF Messenger for T-Deck Plus    ║");
-    INFO("║   microReticulum + LVGL UI          ║");
+    INFO("║   Pyxis + LVGL UI                   ║");
     INFO("╚══════════════════════════════════════╝");
     INFO("");
 
@@ -1165,6 +1169,13 @@ void loop() {
             serial_cmd_buffer.trim();
             if (serial_cmd_buffer == "VERSION") {
                 Serial.println(String(FIRMWARE_NAME) + " v" + FIRMWARE_VERSION);
+            } else if (serial_cmd_buffer == "BOOTLOADER") {
+                Serial.println("ENTERING_BOOTLOADER");
+                Serial.flush();
+                delay(100);
+                // Set RTC flag to force download mode on next reset
+                REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
+                esp_restart();
             }
             serial_cmd_buffer = "";
         } else if (serial_cmd_buffer.length() < 32) {
