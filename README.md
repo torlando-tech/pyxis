@@ -17,3 +17,6 @@ Other features:
 - Choose a propagation node (and sycn with it)
 - Set auto announce timer
 - Light up keyboard (user toggle) 
+
+## Why "Pyxis"
+Pyxis, latin for "compass," is a [constellation](https://en.wikipedia.org/wiki/Pyxis) in the southern sky depicting a mariner's compass. Small but essential, the compass ensures every message finds its destination - even when the path is uncertain. 
