@@ -83,7 +83,6 @@
 
         .btn-primary { background: var(--primary); color: white; }
         .btn-primary:hover { background: var(--primary-hover); }
-        .btn-danger { background: var(--danger); color: white; }
 
         button:disabled { opacity: 0.5; cursor: not-allowed; }
 
@@ -197,21 +196,19 @@
             <h2>Install Firmware</h2>
 
             <div class="status-box">
-                <div class="label">Device Status</div>
+                <div class="label">Status</div>
                 <div class="value" id="device-status">
-                    <span class="status-not-detected">Not connected</span>
+                    <span class="status-not-detected">Ready to flash</span>
                 </div>
             </div>
 
-            <div class="button-group">
-                <button id="connect-btn" class="btn-primary">Connect & Detect</button>
-                <button id="flash-btn" class="btn-primary hidden" disabled>Flash Firmware</button>
-                <button id="disconnect-btn" class="btn-danger hidden">Disconnect</button>
-            </div>
-
-            <div id="erase-option" class="checkbox-group hidden">
+            <div class="checkbox-group">
                 <input type="checkbox" id="erase-checkbox">
                 <label for="erase-checkbox">Full install (erase settings & messages)</label>
+            </div>
+
+            <div class="button-group">
+                <button id="flash-btn" class="btn-primary">Flash Firmware</button>
             </div>
 
             <div id="progress-container" class="progress-container hidden">
@@ -238,14 +235,14 @@
         <div class="card">
             <h2>How It Works</h2>
             <ul style="list-style: none; padding: 0;">
-                <li style="padding: 0.5rem 0;"><strong>1.</strong> Click "Connect & Detect" and select your T-Deck</li>
-                <li style="padding: 0.5rem 0;"><strong>2.</strong> Flasher checks if microReticulum is installed</li>
-                <li style="padding: 0.5rem 0;"><strong>3.</strong> Click "Flash Firmware" - settings preserved by default</li>
-                <li style="padding: 0.5rem 0;"><strong>4.</strong> Only check "Full install" for a clean wipe</li>
+                <li style="padding: 0.5rem 0;"><strong>1.</strong> Connect T-Deck via USB-C</li>
+                <li style="padding: 0.5rem 0;"><strong>2.</strong> Click "Flash Firmware" and select the serial port</li>
+                <li style="padding: 0.5rem 0;"><strong>3.</strong> Wait for the firmware to be written</li>
             </ul>
 
             <div class="warning">
-                <strong>Tip:</strong> Update mode only flashes the app, preserving your settings and messages.
+                <strong>Tip:</strong> By default, only the firmware is updated - settings and messages are preserved.
+                Check "Full install" for a clean wipe.
             </div>
         </div>
 
@@ -260,12 +257,9 @@
     </div>
 
     <script type="module">
-        import { ESPLoader, Transport } from 'https://unpkg.com/esptool-js/bundle.js';
+        import { ESPLoader, Transport } from './js/esptool.js';
 
-        const connectBtn = document.getElementById('connect-btn');
         const flashBtn = document.getElementById('flash-btn');
-        const disconnectBtn = document.getElementById('disconnect-btn');
-        const eraseOption = document.getElementById('erase-option');
         const eraseCheckbox = document.getElementById('erase-checkbox');
         const deviceStatus = document.getElementById('device-status');
         const logDiv = document.getElementById('log');
@@ -273,14 +267,6 @@
         const progressFill = document.getElementById('progress-fill');
         const progressText = document.getElementById('progress-text');
 
-        let port = null;
-        let transport = null;
-        let esploader = null;
-        let isInstalled = false;
-        let detectedVersion = null;
-        let chip = null;
-
-        // Firmware file offsets
         const FIRMWARE_FILES = {
             full: [
                 { offset: 0x0, name: 'bootloader.bin', path: 'firmware/bootloader.bin' },
@@ -314,131 +300,37 @@
             progressText.textContent = text;
         }
 
-        async function connect() {
-            connectBtn.disabled = true;
-            connectBtn.textContent = 'Connecting...';
-            log('Requesting serial port...');
-
-            try {
-                port = await navigator.serial.requestPort();
-                await port.open({ baudRate: 115200 });
-                log('Port opened, detecting firmware...');
-                updateStatus('<span class="status-checking">Detecting firmware...</span>');
-
-                // Detect if microReticulum is installed
-                await detectFirmware();
-
-            } catch (error) {
-                log(`Connection error: ${error.message}`, 'error');
-                updateStatus('<span class="status-not-detected">Connection failed</span>');
-                connectBtn.textContent = 'Connect & Detect';
-                connectBtn.disabled = false;
-                await cleanup();
-            }
-        }
-
-        async function detectFirmware() {
-            try {
-                // Wait for streams to be ready
-                await new Promise(r => setTimeout(r, 100));
-
-                if (!port.readable || !port.writable) {
-                    throw new Error('Port streams not available');
-                }
-
-                // Send VERSION command
-                log('Sending VERSION command...');
-                const writer = port.writable.getWriter();
-                const encoder = new TextEncoder();
-                await writer.write(encoder.encode('VERSION\n'));
-                await new Promise(r => setTimeout(r, 200));
-                await writer.write(encoder.encode('VERSION\n'));
-                writer.releaseLock();
-                await new Promise(r => setTimeout(r, 300));
-
-                // Read response
-                const reader = port.readable.getReader();
-                const decoder = new TextDecoder();
-                let response = '';
-                const startTime = Date.now();
-
-                try {
-                    while (Date.now() - startTime < 2000) {
-                        const result = await Promise.race([
-                            reader.read(),
-                            new Promise(r => setTimeout(() => r({ done: true }), 500))
-                        ]);
-                        if (result.done) break;
-                        if (result.value) {
-                            response += decoder.decode(result.value);
-                            if (response.includes('microReticulum')) break;
-                        }
-                    }
-                } finally {
-                    reader.releaseLock();
-                }
-
-                log(`Response: ${response.trim().substring(0, 100) || '(no response)'}`);
-
-                if (response.includes('microReticulum')) {
-                    const match = response.match(/microReticulum v([\d.]+)/);
-                    detectedVersion = match ? match[1] : 'unknown';
-                    isInstalled = true;
-
-                    updateStatus(`<span class="status-detected">microReticulum v${detectedVersion} - Update mode</span>`);
-                    log(`Detected v${detectedVersion} - will preserve settings`, 'success');
-                    flashBtn.textContent = 'Update Firmware';
-                } else {
-                    isInstalled = false;
-                    updateStatus('<span class="status-not-detected">Not installed - Install mode</span>');
-                    log('microReticulum not detected');
-                    flashBtn.textContent = 'Install Firmware';
-                }
-
-                eraseOption.classList.remove('hidden');
-                flashBtn.classList.remove('hidden');
-                flashBtn.disabled = false;
-                disconnectBtn.classList.remove('hidden');
-                connectBtn.classList.add('hidden');
-
-            } catch (error) {
-                log(`Detection error: ${error.message}`, 'error');
-                updateStatus('<span class="status-not-detected">Detection failed - Install mode</span>');
-                isInstalled = false;
-                flashBtn.textContent = 'Install Firmware';
-                eraseOption.classList.remove('hidden');
-                flashBtn.classList.remove('hidden');
-                flashBtn.disabled = false;
-                disconnectBtn.classList.remove('hidden');
-                connectBtn.classList.add('hidden');
-            }
-        }
-
+        // Identical to rnode-flasher's approach
         async function flash() {
-            const useFullInstall = eraseCheckbox.checked || !isInstalled;
+            const useFullInstall = eraseCheckbox.checked;
             const files = useFullInstall ? FIRMWARE_FILES.full : FIRMWARE_FILES.update;
+            let transport = null;
 
             flashBtn.disabled = true;
-            disconnectBtn.disabled = true;
-            log(`Starting ${useFullInstall ? 'full install' : 'update'}...`);
-            updateStatus(`<span class="status-flashing">Flashing...</span>`);
+            updateStatus('<span class="status-checking">Starting...</span>');
 
             try {
-                // Close current serial connection and reopen via Transport for bootloader
-                try { await port.close(); } catch (e) {}
+                log('Select your T-Deck serial port...');
+                const serialPort = await navigator.serial.requestPort({ filters: [] });
 
-                log('Entering bootloader mode...');
-                transport = new Transport(port, true);
+                log('Connecting to device...');
+                updateStatus('<span class="status-checking">Connecting...</span>');
 
-                const flashOptions = {
-                    transport,
+                transport = new Transport(serialPort, false);
+                const esploader = new ESPLoader({
+                    transport: transport,
                     baudrate: 921600,
-                    romBaudrate: 115200,
-                };
+                    debugLogging: false,
+                    enableTracing: false,
+                    terminal: {
+                        clean() {},
+                        writeLine(data) { log(data); },
+                        write(data) { log(data); },
+                    },
+                });
 
-                esploader = new ESPLoader(flashOptions);
-                chip = await esploader.main();
-                log(`Connected to ${chip} bootloader`, 'success');
+                const chip = await esploader.main();
+                log(`Connected to ${chip}`, 'success');
 
                 // Load firmware files
                 const fileArray = [];
@@ -449,31 +341,27 @@
                     const response = await fetch(file.path);
                     if (!response.ok) throw new Error(`Failed to load ${file.name}`);
                     const arrayBuffer = await response.arrayBuffer();
-                    // Convert to binary string as expected by esptool-js
                     const bytes = new Uint8Array(arrayBuffer);
                     let binaryString = '';
                     for (let i = 0; i < bytes.length; i++) {
                         binaryString += String.fromCharCode(bytes[i]);
                     }
-                    fileArray.push({
-                        data: binaryString,
-                        address: file.offset
-                    });
+                    fileArray.push({ data: binaryString, address: file.offset });
                     totalSize += arrayBuffer.byteLength;
                     log(`Loaded ${file.name} (${arrayBuffer.byteLength} bytes)`);
                 }
 
-                log(`Total size: ${totalSize} bytes`);
+                // Flash
+                log(`Flashing ${totalSize} bytes...`);
+                updateStatus('<span class="status-flashing">Flashing...</span>');
                 setProgress(0, 'Writing to flash...');
 
-                // Flash all files
-                log('Starting flash write...');
                 await esploader.writeFlash({
                     fileArray,
-                    flashSize: 'keep',
-                    flashMode: 'keep',
-                    flashFreq: 'keep',
-                    eraseAll: false,
+                    flashSize: '8MB',
+                    flashMode: 'DIO',
+                    flashFreq: '80MHz',
+                    eraseAll: useFullInstall,
                     compress: true,
                     reportProgress: (fileIndex, written, total) => {
                         const fileName = files[fileIndex]?.name || 'file';
@@ -485,71 +373,27 @@
                     }
                 });
 
-                setProgress(100, 'Verifying...');
-                log('Flash complete!', 'success');
-
-                // Reset device to run new firmware
+                // Reset device
                 log('Resetting device...');
                 await transport.setDTR(false);
-                await transport.setRTS(true);
                 await new Promise(r => setTimeout(r, 100));
-                await transport.setRTS(false);
+                await transport.setDTR(true);
 
                 setProgress(100, 'Done!');
                 updateStatus('<span class="status-detected">Flash complete! Device is restarting...</span>');
-
-                await cleanup();
-
-                flashBtn.classList.add('hidden');
-                disconnectBtn.classList.add('hidden');
-                eraseOption.classList.add('hidden');
-                connectBtn.classList.remove('hidden');
-                connectBtn.textContent = 'Connect & Detect';
-                connectBtn.disabled = false;
+                log('Flash complete!', 'success');
 
             } catch (error) {
-                log(`Flash error: ${error.message}`, 'error');
-                updateStatus('<span class="status-not-detected">Flash failed</span>');
-                setProgress(0, 'Failed');
-
+                log(`Error: ${error.message}`, 'error');
+                updateStatus('<span class="status-not-detected">Flash failed - try again</span>');
+                progressContainer.classList.add('hidden');
+            } finally {
+                try { if (transport) await transport.disconnect(); } catch (e) {}
                 flashBtn.disabled = false;
-                disconnectBtn.disabled = false;
             }
         }
 
-        async function cleanup() {
-            try {
-                if (transport) await transport.disconnect();
-                if (port) await port.close();
-            } catch (e) {}
-            transport = null;
-            esploader = null;
-            port = null;
-        }
-
-        async function disconnect() {
-            log('Disconnecting...');
-            await cleanup();
-            updateStatus('<span class="status-not-detected">Disconnected</span>');
-
-            flashBtn.classList.add('hidden');
-            disconnectBtn.classList.add('hidden');
-            eraseOption.classList.add('hidden');
-            progressContainer.classList.add('hidden');
-            connectBtn.classList.remove('hidden');
-            connectBtn.textContent = 'Connect & Detect';
-            connectBtn.disabled = false;
-        }
-
-        connectBtn.addEventListener('click', connect);
         flashBtn.addEventListener('click', flash);
-        disconnectBtn.addEventListener('click', disconnect);
-
-        eraseCheckbox.addEventListener('change', () => {
-            if (isInstalled) {
-                flashBtn.textContent = eraseCheckbox.checked ? 'Full Install' : 'Update Firmware';
-            }
-        });
 
         // Load manifest version
         fetch('manifest-install.json')
