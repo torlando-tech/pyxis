@@ -14,7 +14,7 @@ Other features:
 - GPS-synced time
 - One really annoying beep when you get a new message (user toggle)
 - View the announce stream
-- Choose a propagation node (and sycn with it)
+- Choose a propagation node (and sync with it)
 - Set auto announce timer
 - Light up keyboard (user toggle)
 - Will crash in about 5 minutes of normal use (sorry)
