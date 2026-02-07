@@ -1,0 +1,108 @@
+name: Build and Release Firmware
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v1.0.0)'
+        required: true
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO and esptool
+        run: |
+          pip install platformio esptool
+
+      - name: Build T-Deck firmware
+        run: pio run -e tdeck-bluedroid
+
+      - name: Copy firmware binaries
+        run: |
+          mkdir -p docs/flasher/firmware
+          cp .pio/build/tdeck-bluedroid/bootloader.bin docs/flasher/firmware/
+          cp .pio/build/tdeck-bluedroid/partitions.bin docs/flasher/firmware/
+          cp .pio/build/tdeck-bluedroid/firmware.bin docs/flasher/firmware/
+          BOOT_APP0=$(find ~/.platformio -name "boot_app0.bin" | head -1)
+          cp "$BOOT_APP0" docs/flasher/firmware/
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update manifest files with version
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          # Full install manifest
+          cat > docs/flasher/manifest-install.json << EOF
+          {
+            "name": "Pyxis T-Deck",
+            "version": "${VERSION}",
+            "builds": [
+              {
+                "chipFamily": "ESP32-S3",
+                "parts": [
+                  { "path": "firmware/bootloader.bin", "offset": 0 },
+                  { "path": "firmware/partitions.bin", "offset": 32768 },
+                  { "path": "firmware/boot_app0.bin", "offset": 57344 },
+                  { "path": "firmware/firmware.bin", "offset": 65536 }
+                ]
+              }
+            ]
+          }
+          EOF
+          # Update-only manifest
+          cat > docs/flasher/manifest-update.json << EOF
+          {
+            "name": "Pyxis T-Deck",
+            "version": "${VERSION}",
+            "builds": [
+              {
+                "chipFamily": "ESP32-S3",
+                "parts": [
+                  { "path": "firmware/firmware.bin", "offset": 65536 }
+                ]
+              }
+            ]
+          }
+          EOF
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./docs/flasher
+          destination_dir: flasher
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            docs/flasher/firmware/firmware.bin
+          generate_release_notes: true
+          name: ${{ steps.version.outputs.VERSION }}

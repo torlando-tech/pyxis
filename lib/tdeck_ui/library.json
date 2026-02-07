@@ -1,0 +1,25 @@
+{
+    "name": "tdeck_ui",
+    "version": "0.1.0",
+    "description": "T-Deck hardware drivers and LVGL UI for microReticulum",
+    "keywords": "tdeck, lvgl, ui, reticulum",
+    "license": "MIT",
+    "frameworks": ["arduino"],
+    "platforms": ["espressif32"],
+    "dependencies": {
+        "lvgl": "^8.3.11",
+        "ArduinoJson": "^7.4.2",
+        "MsgPack": "^0.4.2",
+        "Crypto": "^0.4.0"
+    },
+    "build": {
+        "flags": "-std=gnu++11 -I../../../../deps/microReticulum/src",
+        "srcFilter": [
+            "+<Hardware/TDeck/*.cpp>",
+            "+<UI/*.cpp>",
+            "+<UI/LVGL/*.cpp>",
+            "+<UI/LXMF/*.cpp>"
+        ],
+        "includeDir": "."
+    }
+}

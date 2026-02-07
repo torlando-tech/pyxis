@@ -1,0 +1,4 @@
+[submodule "deps/microReticulum"]
+	path = deps/microReticulum
+	url = https://github.com/torlando-tech/microReticulum.git
+	branch = feat/t-deck

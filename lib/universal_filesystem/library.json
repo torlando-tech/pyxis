@@ -1,0 +1,7 @@
+{
+    "name": "universal_filesystem",
+    "version": "0.1.0",
+    "description": "Universal filesystem abstraction for SPIFFS/LittleFS",
+    "frameworks": ["arduino"],
+    "platforms": ["espressif32"]
+}

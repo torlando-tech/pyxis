@@ -1,0 +1,5 @@
+{
+    "name": "tone",
+    "version": "1.0.0",
+    "description": "Simple I2S tone generator for T-Deck Plus speaker"
+}
