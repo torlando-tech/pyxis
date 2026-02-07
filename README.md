@@ -1,5 +1,6 @@
 # Pyxis
-An LXMF client firmware for T-Deck
+An LXMF client firmware for T-Deck, built on a [highly modified fork](https://github.com/torlando-tech/microReticulum/tree/feat/t-deck) of [microReticulum](https://github.com/attermann/microReticulum)
+
 Very much WIP, don't expect stability :) 
 
 ## Features
