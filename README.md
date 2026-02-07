@@ -8,6 +8,7 @@ Reticulum transport over:
 - AutoInterface (local wifi)
 - TCP Client
 - BLE Interface (barely working if at all)
+Other features:
 - GPS-synced time
 - One really annoying beep when you get a new message (user toggle)
 - View the announce stream
