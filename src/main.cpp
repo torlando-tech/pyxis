@@ -114,6 +114,10 @@ bool initial_sync_done = false;
 // Connection tracking
 bool last_tcp_online = false;
 bool last_lora_online = false;
+bool last_wifi_connected = false;
+
+// Forward declarations
+void start_tcp_interface();
 
 // Screen timeout
 bool screen_off = false;
@@ -583,26 +587,9 @@ void setup_reticulum() {
     INFO(msg.c_str());
 
     // Add TCP client interface (if enabled and WiFi connected)
-    if (app_settings.tcp_enabled && WiFi.status() == WL_CONNECTED) {
-        String server_addr = app_settings.tcp_host + ":" + String(app_settings.tcp_port);
-        msg = std::string("Connecting to RNS server at ") + server_addr.c_str();
-        INFO(msg.c_str());
-
-        tcp_interface_impl = new TCPClientInterface("tcp0");
-        tcp_interface_impl->set_target_host(app_settings.tcp_host.c_str());
-        tcp_interface_impl->set_target_port(app_settings.tcp_port);
-        tcp_interface = new Interface(tcp_interface_impl);
-
-        if (!tcp_interface->start()) {
-            ERROR("Failed to connect to RNS server!");
-        } else {
-            INFO("Connected to RNS server");
-            Transport::register_interface(*tcp_interface);
-        }
-    } else if (!app_settings.tcp_enabled) {
-        INFO("TCP interface disabled in settings");
-    } else {
-        WARNING("WiFi not connected - skipping TCP interface");
+    start_tcp_interface();
+    if (!tcp_interface_impl && app_settings.tcp_enabled) {
+        INFO("WiFi not connected yet - TCP will start when WiFi connects");
     }
 
     // Add LoRa interface (if enabled)
@@ -885,17 +872,11 @@ void setup_ui_manager() {
                 if (tcp_interface_impl) {
                     INFO("Stopping TCP interface...");
                     tcp_interface_impl->stop();
-                    // Note: We don't delete it to avoid Transport issues
                 }
 
-                if (new_settings.tcp_enabled && WiFi.status() == WL_CONNECTED) {
-                    INFO("Starting TCP interface...");
-                    if (tcp_interface_impl) {
-                        tcp_interface_impl->set_target_host(new_settings.tcp_host.c_str());
-                        tcp_interface_impl->set_target_port(new_settings.tcp_port);
-                        tcp_interface_impl->start();
-                    }
-                } else if (!new_settings.tcp_enabled) {
+                if (new_settings.tcp_enabled) {
+                    start_tcp_interface();
+                } else {
                     INFO("TCP interface disabled");
                 }
             }
@@ -1030,6 +1011,35 @@ void setup_ui_manager() {
     ledcWrite(0, app_settings.brightness);
 
     INFO("UI manager ready");
+}
+
+// Create and start TCP interface, register with Transport.
+// Safe to call multiple times - no-op if interface already exists.
+void start_tcp_interface() {
+    if (!app_settings.tcp_enabled || WiFi.status() != WL_CONNECTED) {
+        return;
+    }
+
+    if (!tcp_interface_impl) {
+        String server_addr = app_settings.tcp_host + ":" + String(app_settings.tcp_port);
+        INFO(("Creating TCP interface to " + std::string(server_addr.c_str())).c_str());
+
+        tcp_interface_impl = new TCPClientInterface("tcp0");
+        tcp_interface_impl->set_target_host(app_settings.tcp_host.c_str());
+        tcp_interface_impl->set_target_port(app_settings.tcp_port);
+        tcp_interface = new Interface(tcp_interface_impl);
+
+        if (!tcp_interface->start()) {
+            INFO("TCP initial connection failed, will retry in background");
+        }
+        Transport::register_interface(*tcp_interface);
+    } else {
+        // Interface exists, just update settings and restart
+        INFO("Starting TCP interface...");
+        tcp_interface_impl->set_target_host(app_settings.tcp_host.c_str());
+        tcp_interface_impl->set_target_port(app_settings.tcp_port);
+        tcp_interface_impl->start();
+    }
 }
 
 void setup() {
@@ -1275,6 +1285,14 @@ void loop() {
     // Periodic RNS status check (check all interfaces)
     if (millis() - last_status_check > STATUS_CHECK_INTERVAL) {
         last_status_check = millis();
+
+        // Start TCP interface when WiFi becomes available
+        bool wifi_connected = (WiFi.status() == WL_CONNECTED);
+        if (wifi_connected && !last_wifi_connected && !tcp_interface_impl && app_settings.tcp_enabled) {
+            INFO("WiFi connected - starting TCP interface");
+            start_tcp_interface();
+        }
+        last_wifi_connected = wifi_connected;
 
         bool tcp_online = tcp_interface && tcp_interface->online();
         bool lora_online = lora_interface && lora_interface->online();
