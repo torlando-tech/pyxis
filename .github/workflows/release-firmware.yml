@@ -102,7 +102,9 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.version.outputs.VERSION }}
           files: |
             docs/flasher/firmware/firmware.bin
           generate_release_notes: true
           name: ${{ steps.version.outputs.VERSION }}
+          draft: true
