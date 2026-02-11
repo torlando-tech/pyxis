@@ -69,6 +69,12 @@ CONFIG_BOOTLOADER_LOG_LEVEL=2
 CONFIG_BOOT_ROM_LOG_ALWAYS_OFF=y
 
 # ============================================================================
+# FreeRTOS Timer Service Task
+# Default 2048 is too small when NimBLE/WiFi timer callbacks run
+# ============================================================================
+CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096
+
+# ============================================================================
 # Task Watchdog Timer (TWDT)
 # Detects task starvation and deadlock conditions
 # ============================================================================
