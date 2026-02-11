@@ -169,6 +169,8 @@ void SX1262Interface::start_receive() {
         if (state != RADIOLIB_ERR_NONE) {
             ERROR("SX1262Interface: Failed to start receive, code " + std::to_string(state));
         }
+    } else {
+        ERROR("SX1262Interface: Failed to acquire SPI mutex for start_receive!");
     }
 #endif
 }
@@ -266,8 +268,16 @@ void SX1262Interface::send_outgoing(const Bytes& data) {
     int16_t state = _radio->transmit(buf, len);
 
     _transmitting = false;
+
+    // Return to receive mode immediately while still holding SPI mutex
+    // (no gap for display task to steal the bus and leave radio in STANDBY)
+    int16_t rxState = _radio->startReceive();
     xSemaphoreGive(_spi_mutex);
     delete[] buf;
+
+    if (rxState != RADIOLIB_ERR_NONE) {
+        ERROR("SX1262Interface: Failed to restart receive after TX, code " + std::to_string(rxState));
+    }
 
     if (state == RADIOLIB_ERR_NONE) {
         DEBUG("SX1262Interface: Sent " + std::to_string(len) + " bytes");
@@ -276,9 +286,6 @@ void SX1262Interface::send_outgoing(const Bytes& data) {
     } else {
         ERROR("SX1262Interface: Transmit failed, code " + std::to_string(state));
     }
-
-    // Return to receive mode
-    start_receive();
 #endif
 }
 
