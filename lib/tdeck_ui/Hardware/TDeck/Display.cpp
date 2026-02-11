@@ -16,6 +16,9 @@ namespace TDeck {
 SPIClass* Display::_spi = nullptr;
 uint8_t Display::_brightness = Disp::BACKLIGHT_DEFAULT;
 bool Display::_initialized = false;
+volatile uint32_t Display::_flush_count = 0;
+volatile uint32_t Display::_last_flush_ms = 0;
+uint32_t Display::_last_health_log_ms = 0;
 
 bool Display::init() {
     if (_initialized) {
@@ -201,6 +204,8 @@ void Display::draw_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t col
 }
 
 void Display::lvgl_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {
+    uint32_t start = millis();
+
     int32_t w = area->x2 - area->x1 + 1;
     int32_t h = area->y2 - area->y1 + 1;
 
@@ -216,8 +221,34 @@ void Display::lvgl_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_
 
     end_write();
 
+    _flush_count++;
+    _last_flush_ms = millis();
+
+    uint32_t elapsed = _last_flush_ms - start;
+    if (elapsed > 50) {
+        Serial.printf("[DISP] WARNING: flush took %lu ms (%ldx%ld, %zu bytes) - SPI contention?\n",
+            elapsed, w, h, len);
+    }
+
     // Tell LVGL we're done flushing
     lv_disp_flush_ready(drv);
+}
+
+void Display::log_health() {
+    uint32_t now = millis();
+
+    // Log every 10 seconds
+    if (now - _last_health_log_ms < 10000) return;
+    _last_health_log_ms = now;
+
+    uint32_t since_flush = now - _last_flush_ms;
+    if (since_flush > 2000) {
+        Serial.printf("[DISP] STALLED: no flush for %lu ms! flush_count=%lu\n",
+            since_flush, _flush_count);
+    } else {
+        Serial.printf("[DISP] ok: last_flush=%lu ms ago, total_flushes=%lu\n",
+            since_flush, _flush_count);
+    }
 }
 
 void Display::write_command(uint8_t cmd) {

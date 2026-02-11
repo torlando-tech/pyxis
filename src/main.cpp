@@ -1193,6 +1193,9 @@ void loop() {
     // Handle LVGL rendering (must be called frequently for smooth UI)
     UI::LVGL::LVGLInit::task_handler();
 
+    // Monitor display health
+    Hardware::TDeck::Display::log_health();
+
     // Handle deferred WiFi reconnect (from LVGL task)
     if (wifi_reconnect_pending) {
         wifi_reconnect_pending = false;

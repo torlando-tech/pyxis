@@ -134,6 +134,18 @@ private:
     static uint8_t _brightness;
     static bool _initialized;
 
+    // Display health monitoring
+    static volatile uint32_t _flush_count;
+    static volatile uint32_t _last_flush_ms;
+    static uint32_t _last_health_log_ms;
+
+public:
+    // Check display health (call from main loop periodically)
+    static void log_health();
+    static uint32_t last_flush_ms() { return _last_flush_ms; }
+    static uint32_t flush_count() { return _flush_count; }
+private:
+
     // Low-level SPI functions
     static void write_command(uint8_t cmd);
     static void write_data(uint8_t data);
