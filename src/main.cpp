@@ -116,6 +116,11 @@ bool last_tcp_online = false;
 bool last_lora_online = false;
 bool last_wifi_connected = false;
 
+// Pending WiFi reconnect (deferred from LVGL task to main loop)
+volatile bool wifi_reconnect_pending = false;
+String pending_wifi_ssid;
+String pending_wifi_password;
+
 // Forward declarations
 void start_tcp_interface();
 
@@ -803,24 +808,16 @@ void setup_ui_manager() {
             INFO(("Brightness changed to " + String(brightness)).c_str());
         });
 
-        // Set WiFi reconnect callback
+        // Set WiFi reconnect callback (deferred to main loop to avoid blocking LVGL task)
         settings->set_wifi_reconnect_callback([](const String& ssid, const String& password) {
-            INFO(("Reconnecting WiFi to: " + ssid).c_str());
-            WiFi.disconnect();
-            delay(100);
-            WiFi.begin(ssid.c_str(), password.c_str());
-
-            // Wait for connection (with timeout)
-            uint32_t start = millis();
-            while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
-                delay(100);
+            if (ssid.isEmpty()) {
+                WARNING("WiFi reconnect skipped: SSID is empty");
+                return;
             }
-
-            if (WiFi.status() == WL_CONNECTED) {
-                INFO(("WiFi connected! IP: " + WiFi.localIP().toString()).c_str());
-            } else {
-                WARNING("WiFi reconnection failed");
-            }
+            pending_wifi_ssid = ssid;
+            pending_wifi_password = password;
+            wifi_reconnect_pending = true;
+            INFO(("WiFi reconnect queued for: " + ssid).c_str());
         });
 
         // Set save callback (update app_settings and apply)
@@ -1195,6 +1192,28 @@ void loop() {
 
     // Handle LVGL rendering (must be called frequently for smooth UI)
     UI::LVGL::LVGLInit::task_handler();
+
+    // Handle deferred WiFi reconnect (from LVGL task)
+    if (wifi_reconnect_pending) {
+        wifi_reconnect_pending = false;
+        INFO(("Reconnecting WiFi to: " + pending_wifi_ssid).c_str());
+        WiFi.disconnect();
+        delay(100);
+        WiFi.begin(pending_wifi_ssid.c_str(), pending_wifi_password.c_str());
+
+        uint32_t start = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
+            delay(100);
+        }
+
+        if (WiFi.status() == WL_CONNECTED) {
+            INFO(("WiFi connected! IP: " + WiFi.localIP().toString()).c_str());
+        } else {
+            WARNING("WiFi reconnection failed");
+        }
+        pending_wifi_ssid = "";
+        pending_wifi_password = "";
+    }
 
     // Process Reticulum
     reticulum->loop();
