@@ -21,6 +21,7 @@ SX1262Interface::SX1262Interface(const char* name) : InterfaceImpl(name) {
     _IN = true;
     _OUT = true;
     _HW_MTU = HW_MTU;
+    _AUTOCONFIGURE_MTU = true;
 
     // Calculate bitrate from modulation parameters (matching Python RNS formula)
     // bitrate = sf * ((4.0/cr) / (2^sf / (bw/1000))) * 1000
