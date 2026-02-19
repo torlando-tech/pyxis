@@ -34,6 +34,14 @@ void tone_play(uint16_t frequency, uint16_t duration_ms, uint8_t volume = 50);
 void tone_stop();
 
 /**
+ * Deinitialize the I2S driver, releasing I2S_NUM_0.
+ * Call this before another component (e.g., LXST voice playback)
+ * needs to take ownership of I2S_NUM_0.
+ * After calling this, tone_play() will automatically reinitialize.
+ */
+void tone_deinit();
+
+/**
  * Check if a tone is currently playing
  * @return true if playing, false if silent
  */

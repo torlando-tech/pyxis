@@ -62,6 +62,7 @@ namespace I2C {
     constexpr uint8_t KEYBOARD_ADDR = 0x55;
     constexpr uint8_t TOUCH_ADDR_1 = 0x5D;   // Primary GT911 address
     constexpr uint8_t TOUCH_ADDR_2 = 0x14;   // Alternative GT911 address
+    constexpr uint8_t ES7210_ADDR = 0x40;    // ES7210 mic array ADC (AD0=GND, AD1=GND)
 
     // I2C timing
     constexpr uint32_t FREQUENCY = 400000;   // 400kHz
@@ -152,11 +153,17 @@ namespace Radio {
 }
 
 namespace Audio {
-    // I2S speaker output pins
+    // I2S speaker output pins (I2S_NUM_0)
     constexpr uint8_t I2S_BCK = 7;        // Bit clock
     constexpr uint8_t I2S_WS = 5;         // Word select (LRCK)
     constexpr uint8_t I2S_DOUT = 6;       // Data out
     // Note: Pin::POWER_EN (10) must be HIGH to enable speaker power
+
+    // ES7210 microphone array I2S capture pins (I2S_NUM_1)
+    constexpr uint8_t MIC_MCLK = 48;     // Master clock output to ES7210
+    constexpr uint8_t MIC_SCK = 47;      // Bit clock (SCLK/BCLK)
+    constexpr uint8_t MIC_LRCK = 21;     // Word select (LRCK)
+    constexpr uint8_t MIC_DIN = 14;      // Data in (SDOUT1 from ES7210)
 }
 
 namespace SDCard {

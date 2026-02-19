@@ -1,0 +1,12 @@
+{
+    "name": "lxst_audio",
+    "version": "0.1.0",
+    "description": "LXST real-time voice streaming for ESP32-S3 T-Deck Plus",
+    "frameworks": "arduino",
+    "platforms": "espressif32",
+    "dependencies": {
+        "Wire": "*",
+        "tdeck_ui": "*",
+        "tone": "*"
+    }
+}
