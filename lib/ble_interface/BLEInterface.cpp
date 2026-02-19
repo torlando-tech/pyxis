@@ -119,7 +119,11 @@ void BLEInterface::stop() {
         _platform.reset();
     }
 
-    _fragmenters.clear();
+    for (size_t i = 0; i < MAX_FRAGMENTERS; i++) {
+        _fragmenter_pool[i].clear();
+    }
+    _pending_handshake_count = 0;
+    _pending_data_count = 0;
     _online = false;
 
     INFO("BLEInterface: Stopped");
@@ -130,9 +134,10 @@ void BLEInterface::loop() {
     double now = Utilities::OS::time();
 
     // Process any pending handshakes (deferred from callback for stack safety)
-    if (!_pending_handshakes.empty()) {
+    if (_pending_handshake_count > 0) {
         std::lock_guard<std::recursive_mutex> lock(_mutex);
-        for (const auto& pending : _pending_handshakes) {
+        for (size_t i = 0; i < _pending_handshake_count; i++) {
+            const PendingHandshake& pending = _pending_handshake_pool[i];
             DEBUG("BLEInterface: Processing deferred handshake for " +
                   pending.identity.toHex().substr(0, 8) + "...");
 
@@ -143,21 +148,58 @@ void BLEInterface::loop() {
             // Create fragmenter for this peer
             PeerInfo* peer = _peer_manager.getPeerByIdentity(pending.identity);
             uint16_t mtu = peer ? peer->mtu : MTU::MINIMUM;
-            _fragmenters[pending.identity] = BLEFragmenter(mtu);
+
+            // Find or allocate a fragmenter slot
+            FragmenterSlot* fslot = nullptr;
+            for (size_t j = 0; j < MAX_FRAGMENTERS; j++) {
+                if (_fragmenter_pool[j].in_use && _fragmenter_pool[j].identity == pending.identity) {
+                    fslot = &_fragmenter_pool[j];
+                    break;
+                }
+            }
+            if (!fslot) {
+                for (size_t j = 0; j < MAX_FRAGMENTERS; j++) {
+                    if (!_fragmenter_pool[j].in_use) {
+                        fslot = &_fragmenter_pool[j];
+                        break;
+                    }
+                }
+            }
+            if (fslot) {
+                fslot->in_use = true;
+                fslot->identity = pending.identity;
+                fslot->fragmenter = BLEFragmenter(mtu);
+            }
 
             INFO("BLEInterface: Handshake complete with " + pending.identity.toHex().substr(0, 8) +
                  "... (we are " + (pending.is_central ? "central" : "peripheral") + ")");
         }
-        _pending_handshakes.clear();
+        _pending_handshake_count = 0;
     }
 
     // Process any pending data fragments (deferred from callback for stack safety)
-    if (!_pending_data.empty()) {
+    if (_pending_data_count > 0) {
         std::lock_guard<std::recursive_mutex> lock(_mutex);
-        for (const auto& pending : _pending_data) {
-            _reassembler.processFragment(pending.identity, pending.data);
+        size_t requeue_count = 0;
+        for (size_t i = 0; i < _pending_data_count; i++) {
+            Bytes& stored_id = _pending_data_pool[i].identity;
+            // Check if this entry was MAC-keyed (size 6) and try to resolve to identity
+            if (stored_id.size() == Limits::MAC_SIZE) {
+                Bytes resolved = _identity_manager.getIdentityForMac(stored_id);
+                if (resolved.size() == Limits::IDENTITY_SIZE) {
+                    stored_id = resolved;
+                } else {
+                    // Still no identity — keep for next loop iteration
+                    if (requeue_count != i) {
+                        _pending_data_pool[requeue_count] = _pending_data_pool[i];
+                    }
+                    requeue_count++;
+                    continue;
+                }
+            }
+            _reassembler.processFragment(stored_id, _pending_data_pool[i].data);
         }
-        _pending_data.clear();
+        _pending_data_count = requeue_count;
     }
 
     // Debug: log loop status every 10 seconds
@@ -175,6 +217,17 @@ void BLEInterface::loop() {
 
     // Platform loop
     _platform->loop();
+
+    // Periodic advertising refresh (combat Android/system silent stops)
+    if (_role == Role::PERIPHERAL || _role == Role::DUAL) {
+        if (now - _last_advertising_refresh >= Timing::ADVERTISING_REFRESH_INTERVAL) {
+            if (_platform && !_platform->isAdvertising()) {
+                DEBUG("BLEInterface: Refreshing advertising");
+                _platform->startAdvertising();
+            }
+            _last_advertising_refresh = now;
+        }
+    }
 
     // Periodic scanning (central mode)
     if (_role == Role::CENTRAL || _role == Role::DUAL) {
@@ -243,18 +296,35 @@ bool BLEInterface::sendToPeer(const Bytes& peer_identity, const Bytes& data) {
         return false;
     }
 
-    // Get or create fragmenter for this peer
-    auto frag_it = _fragmenters.find(peer_identity);
-    if (frag_it == _fragmenters.end()) {
-        _fragmenters[peer_identity] = BLEFragmenter(peer->mtu);
-        frag_it = _fragmenters.find(peer_identity);
+    // Get or create fragmenter for this peer (linear search pool)
+    FragmenterSlot* fslot = nullptr;
+    for (size_t i = 0; i < MAX_FRAGMENTERS; i++) {
+        if (_fragmenter_pool[i].in_use && _fragmenter_pool[i].identity == peer_identity) {
+            fslot = &_fragmenter_pool[i];
+            break;
+        }
+    }
+    if (!fslot) {
+        for (size_t i = 0; i < MAX_FRAGMENTERS; i++) {
+            if (!_fragmenter_pool[i].in_use) {
+                fslot = &_fragmenter_pool[i];
+                fslot->in_use = true;
+                fslot->identity = peer_identity;
+                fslot->fragmenter = BLEFragmenter(peer->mtu);
+                break;
+            }
+        }
+    }
+    if (!fslot) {
+        WARNING("BLEInterface: Fragmenter pool full, cannot send to peer");
+        return false;
     }
 
     // Update MTU if changed
-    frag_it->second.setMTU(peer->mtu);
+    fslot->fragmenter.setMTU(peer->mtu);
 
     // Fragment the data
-    std::vector<Bytes> fragments = frag_it->second.fragment(data);
+    std::vector<Bytes> fragments = fslot->fragmenter.fragment(data);
 
     INFO("BLEInterface: Sending " + std::to_string(fragments.size()) + " frags to " +
          peer_identity.toHex().substr(0, 8) + " via " + (peer->is_central ? "write" : "notify") +
@@ -508,7 +578,12 @@ void BLEInterface::onDisconnected(const ConnectionHandle& conn, uint8_t reason) 
 
     if (identity.size() > 0) {
         // Clean up identity-keyed peer
-        _fragmenters.erase(identity);
+        for (size_t i = 0; i < MAX_FRAGMENTERS; i++) {
+            if (_fragmenter_pool[i].in_use && _fragmenter_pool[i].identity == identity) {
+                _fragmenter_pool[i].clear();
+                break;
+            }
+        }
         _reassembler.clearForPeer(identity);
         _peer_manager.setPeerState(identity, PeerState::DISCOVERED);
     } else {
@@ -532,9 +607,11 @@ void BLEInterface::onMTUChanged(const ConnectionHandle& conn, uint16_t mtu) {
     // Update fragmenter if exists
     Bytes identity = _identity_manager.getIdentityForMac(mac);
     if (identity.size() > 0) {
-        auto it = _fragmenters.find(identity);
-        if (it != _fragmenters.end()) {
-            it->second.setMTU(mtu);
+        for (size_t i = 0; i < MAX_FRAGMENTERS; i++) {
+            if (_fragmenter_pool[i].in_use && _fragmenter_pool[i].identity == identity) {
+                _fragmenter_pool[i].fragmenter.setMTU(mtu);
+                break;
+            }
         }
     }
 
@@ -644,15 +721,15 @@ void BLEInterface::onHandshakeComplete(const Bytes& mac, const Bytes& identity, 
 
     // Queue the handshake for processing in loop() to avoid stack overflow in NimBLE callback
     // The NimBLE task has limited stack space, so we defer heavy processing
-    if (_pending_handshakes.size() >= MAX_PENDING_HANDSHAKES) {
+    if (_pending_handshake_count >= MAX_PENDING_HANDSHAKES) {
         WARNING("BLEInterface: Pending handshake queue full, dropping handshake");
         return;
     }
-    PendingHandshake pending;
+    PendingHandshake& pending = _pending_handshake_pool[_pending_handshake_count];
     pending.mac = mac;
     pending.identity = identity;
     pending.is_central = is_central;
-    _pending_handshakes.push_back(pending);
+    _pending_handshake_count++;
     DEBUG("BLEInterface::onHandshakeComplete: Queued handshake for deferred processing");
 }
 
@@ -676,10 +753,12 @@ void BLEInterface::onMacRotation(const Bytes& old_mac, const Bytes& new_mac, con
     // Update peer manager with new MAC
     _peer_manager.updatePeerMac(identity, new_mac);
 
-    // Update fragmenter key if exists (identity stays the same, but log it)
-    auto frag_it = _fragmenters.find(identity);
-    if (frag_it != _fragmenters.end()) {
-        DEBUG("BLEInterface: Fragmenter preserved for rotated identity");
+    // Fragmenter is keyed by identity, so it stays valid after MAC rotation
+    for (size_t i = 0; i < MAX_FRAGMENTERS; i++) {
+        if (_fragmenter_pool[i].in_use && _fragmenter_pool[i].identity == identity) {
+            DEBUG("BLEInterface: Fragmenter preserved for rotated identity");
+            break;
+        }
     }
 }
 
@@ -793,11 +872,23 @@ void BLEInterface::sendKeepalives() {
     auto connected = _peer_manager.getConnectedPeers();
     for (PeerInfo* peer : connected) {
         if (peer->hasIdentity()) {
-            // Don't use sendToPeer for keepalives (no fragmentation needed)
+            bool sent = false;
             if (peer->is_central) {
-                _platform->write(peer->conn_handle, keepalive, false);
+                sent = _platform->write(peer->conn_handle, keepalive, false);
             } else {
-                _platform->notify(peer->conn_handle, keepalive);
+                sent = _platform->notify(peer->conn_handle, keepalive);
+            }
+
+            if (sent) {
+                peer->consecutive_keepalive_failures = 0;
+            } else {
+                peer->consecutive_keepalive_failures++;
+                if (peer->consecutive_keepalive_failures >= PeerInfo::MAX_KEEPALIVE_FAILURES) {
+                    WARNING("BLEInterface: Keepalive failed " +
+                            std::to_string(peer->consecutive_keepalive_failures) +
+                            " times, disconnecting " + peer->identity.toHex().substr(0, 8));
+                    _platform->disconnect(peer->conn_handle);
+                }
             }
         }
     }
@@ -818,22 +909,30 @@ void BLEInterface::performMaintenance() {
     // Recalculate peer scores
     _peer_manager.recalculateScores();
 
-    // Clean up stale peers
+    // Clean up stale peers (also marks zombies as DISCONNECTING)
     _peer_manager.cleanupStalePeers();
 
-    // Clean up fragmenters for peers that no longer exist
+    // Force-disconnect zombie peers
     {
-        std::lock_guard<std::recursive_mutex> lock(_mutex);
-        std::vector<Bytes> orphaned_fragmenters;
-        for (const auto& kv : _fragmenters) {
-            if (!_peer_manager.getPeerByIdentity(kv.first)) {
-                orphaned_fragmenters.push_back(kv.first);
+        auto all = _peer_manager.getAllPeers();
+        for (PeerInfo* peer : all) {
+            if (peer->state == PeerState::DISCONNECTING && peer->conn_handle != 0xFFFF) {
+                WARNING("BLEInterface: Force-disconnecting zombie peer " +
+                        peer->identity.toHex().substr(0, 8));
+                _platform->disconnect(peer->conn_handle);
             }
         }
-        for (const Bytes& identity : orphaned_fragmenters) {
-            _fragmenters.erase(identity);
-            _reassembler.clearForPeer(identity);
-            TRACE("BLEInterface: Cleaned up orphaned fragmenter for " + identity.toHex().substr(0, 8));
+    }
+
+    // Clean up fragmenters for peers that no longer exist
+    for (size_t i = 0; i < MAX_FRAGMENTERS; i++) {
+        if (_fragmenter_pool[i].in_use) {
+            if (!_peer_manager.getPeerByIdentity(_fragmenter_pool[i].identity)) {
+                TRACE("BLEInterface: Cleaned up orphaned fragmenter for " +
+                      _fragmenter_pool[i].identity.toHex().substr(0, 8));
+                _reassembler.clearForPeer(_fragmenter_pool[i].identity);
+                _fragmenter_pool[i].clear();
+            }
         }
     }
 
@@ -862,19 +961,27 @@ void BLEInterface::handleIncomingData(const ConnectionHandle& conn, const Bytes&
     // Queue data for deferred processing (avoid stack overflow in NimBLE callback)
     Bytes identity = _identity_manager.getIdentityForMac(mac);
     if (identity.size() == 0) {
-        WARNING("BLEInterface: Received data from peer without identity");
+        // No identity yet - buffer data for replay after handshake completes
+        // This handles the race where data arrives before deferred handshake is processed
+        TRACE("BLEInterface: Buffering data from peer without identity (handshake pending)");
+        if (_pending_data_count < MAX_PENDING_DATA) {
+            PendingData& pending = _pending_data_pool[_pending_data_count];
+            pending.identity = mac;  // Use MAC as temporary key
+            pending.data = data;
+            _pending_data_count++;
+        }
         return;
     }
 
-    if (_pending_data.size() >= MAX_PENDING_DATA) {
+    if (_pending_data_count >= MAX_PENDING_DATA) {
         WARNING("BLEInterface: Pending data queue full, dropping data");
         return;
     }
 
-    PendingData pending;
+    PendingData& pending = _pending_data_pool[_pending_data_count];
     pending.identity = identity;
     pending.data = data;
-    _pending_data.push_back(pending);
+    _pending_data_count++;
 }
 
 void BLEInterface::initiateHandshake(const ConnectionHandle& conn) {

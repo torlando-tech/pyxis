@@ -1186,7 +1186,7 @@ bool NimBLEPlatform::connectNative(const BLEAddress& address, uint16_t timeout_m
         conn.peer_address = address;
         conn.local_role = Role::CENTRAL;
         conn.state = ConnectionState::CONNECTED;
-        conn.mtu = client->getMTU();
+        conn.mtu = client->getMTU() - MTU::ATT_OVERHEAD;
 
         _connections[conn_handle] = conn;
         _clients[conn_handle] = client;
@@ -1677,7 +1677,7 @@ void NimBLEPlatform::onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) 
     conn.peer_address = fromNimBLE(connInfo.getAddress());
     conn.local_role = Role::PERIPHERAL;  // We are peripheral, they are central
     conn.state = ConnectionState::CONNECTED;
-    conn.mtu = MTU::MINIMUM;
+    conn.mtu = MTU::MINIMUM - MTU::ATT_OVERHEAD;
 
     _connections[conn_handle] = conn;
 
@@ -1783,7 +1783,7 @@ void NimBLEPlatform::onConnect(NimBLEClient* pClient) {
     conn.peer_address = peer_addr;
     conn.local_role = Role::CENTRAL;  // We are central
     conn.state = ConnectionState::CONNECTED;
-    conn.mtu = pClient->getMTU();
+    conn.mtu = pClient->getMTU() - MTU::ATT_OVERHEAD;
 
     _connections[conn_handle] = conn;
     _clients[conn_handle] = pClient;
@@ -2111,7 +2111,7 @@ void NimBLEPlatform::freeConnHandle(uint16_t handle) {
 void NimBLEPlatform::updateConnectionMTU(uint16_t conn_handle, uint16_t mtu) {
     auto it = _connections.find(conn_handle);
     if (it != _connections.end()) {
-        it->second.mtu = mtu;
+        it->second.mtu = mtu - MTU::ATT_OVERHEAD;
     }
 }
 
