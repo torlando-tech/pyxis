@@ -16,10 +16,14 @@
 #include "QRScreen.h"
 #include "SettingsScreen.h"
 #include "PropagationNodesScreen.h"
+#include "CallScreen.h"
 #include "LXMF/LXMRouter.h"
 #include "LXMF/PropagationNodeManager.h"
 #include "LXMF/MessageStore.h"
 #include "Reticulum.h"
+#include "Link.h"
+
+class LXSTAudio;
 
 namespace UI {
 namespace LXMF {
@@ -28,16 +32,18 @@ namespace LXMF {
  * UI Manager
  *
  * Manages all LXMF UI screens and coordinates between:
- * - UI screens (ConversationList, Chat, Compose)
+ * - UI screens (ConversationList, Chat, Compose, Call)
  * - LXMF router (message sending/receiving)
  * - Message store (persistence)
  * - Reticulum (network layer)
+ * - LXST voice calls (audio pipeline + Reticulum Links)
  *
  * Responsibilities:
  * - Screen navigation
  * - Message delivery callbacks
  * - UI updates on message events
  * - Integration with LXMF router
+ * - Voice call state machine
  */
 class UIManager {
 public:
@@ -62,7 +68,7 @@ public:
 
     /**
      * Update UI (call periodically from main loop)
-     * Processes pending LXMF messages and updates UI
+     * Processes pending LXMF messages, updates UI, pumps voice call
      */
     void update();
 
@@ -171,7 +177,8 @@ private:
         SCREEN_STATUS,
         SCREEN_QR,
         SCREEN_SETTINGS,
-        SCREEN_PROPAGATION_NODES
+        SCREEN_PROPAGATION_NODES,
+        SCREEN_CALL
     };
 
     RNS::Reticulum& _reticulum;
@@ -189,6 +196,7 @@ private:
     QRScreen* _qr_screen;
     SettingsScreen* _settings_screen;
     PropagationNodesScreen* _propagation_nodes_screen;
+    CallScreen* _call_screen;
 
     ::LXMF::PropagationNodeManager* _propagation_manager;
     RNS::Interface* _ble_interface;
@@ -200,6 +208,7 @@ private:
     void on_new_message();
     void on_back_to_conversation_list();
     void on_send_message_from_chat(const String& content);
+    void on_call_from_chat();
     void on_send_message_from_compose(const RNS::Bytes& dest_hash, const String& message);
     void on_cancel_compose();
     void on_announce_selected(const RNS::Bytes& dest_hash);
@@ -218,6 +227,64 @@ private:
 
     // UI updates
     void refresh_current_screen();
+
+    // ── LXST Voice Call ──
+
+    // LXST signalling byte constants (matches Python LXST / LXST-kt)
+    static constexpr uint8_t LXST_STATUS_BUSY        = 0x00;
+    static constexpr uint8_t LXST_STATUS_REJECTED     = 0x01;
+    static constexpr uint8_t LXST_STATUS_CALLING      = 0x02;
+    static constexpr uint8_t LXST_STATUS_AVAILABLE    = 0x03;
+    static constexpr uint8_t LXST_STATUS_RINGING      = 0x04;
+    static constexpr uint8_t LXST_STATUS_CONNECTING   = 0x05;
+    static constexpr uint8_t LXST_STATUS_ESTABLISHED  = 0x06;
+
+    // LXST codec header byte
+    static constexpr uint8_t LXST_CODEC_CODEC2 = 0x02;
+
+    enum class CallState {
+        IDLE,
+        LINK_ESTABLISHING,  // Outgoing: waiting for Link to come up
+        WAIT_AVAILABLE,     // Outgoing: link up, waiting for STATUS_AVAILABLE
+        WAIT_RINGING,       // Outgoing: sent identify, waiting for STATUS_RINGING
+        RINGING,            // Outgoing: remote is ringing
+        CONNECTING,         // Both: opening audio pipelines
+        ACTIVE,             // Both: voice flowing
+    };
+
+    CallState _call_state;
+    RNS::Bytes _call_peer_hash;
+    RNS::Link _call_link;
+    LXSTAudio* _lxst_audio;
+    uint32_t _call_start_ms;       // millis() when call became ACTIVE
+    uint32_t _call_timeout_ms;     // millis() deadline for current wait state
+    bool _call_muted;
+
+    // Singleton instance pointer for static Link callbacks
+    static UIManager* s_call_instance;
+
+    // Voice call methods
+    void call_initiate(const RNS::Bytes& peer_hash);
+    void call_hangup();
+    void call_set_mute(bool muted);
+    void call_update();  // Called from update() — pumps audio packets + state machine
+
+    // Send a signalling byte over the call link
+    void call_send_signal(uint8_t signal);
+
+    // Send encoded audio packet over the call link
+    void call_send_audio(const uint8_t* data, int length);
+
+    // Handle received packet on call link (signalling or audio)
+    void call_on_packet(const RNS::Bytes& data);
+
+    // Transition to call ended and schedule return to chat
+    void call_ended();
+
+    // Static Link callbacks (delegate to s_call_instance)
+    static void on_call_link_established(RNS::Link& link);
+    static void on_call_link_closed(RNS::Link& link);
+    static void on_call_link_packet(const RNS::Bytes& plaintext, const RNS::Packet& packet);
 };
 
 } // namespace LXMF

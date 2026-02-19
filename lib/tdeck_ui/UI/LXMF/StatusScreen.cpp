@@ -18,7 +18,8 @@ namespace LXMF {
 
 StatusScreen::StatusScreen(lv_obj_t* parent)
     : _screen(nullptr), _header(nullptr), _content(nullptr), _btn_back(nullptr),
-      _btn_share(nullptr), _label_identity_value(nullptr), _label_lxmf_value(nullptr),
+      _btn_share(nullptr), _label_uptime(nullptr),
+      _label_identity_value(nullptr), _label_lxmf_value(nullptr),
       _label_wifi_status(nullptr), _label_wifi_ip(nullptr), _label_wifi_rssi(nullptr),
       _label_rns_status(nullptr), _label_ble_header(nullptr),
       _rns_connected(false), _ble_peer_count(0) {
@@ -116,6 +117,12 @@ void StatusScreen::create_content() {
     lv_obj_set_flex_align(_content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_scroll_dir(_content, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(_content, LV_SCROLLBAR_MODE_AUTO);
+
+    // Uptime section
+    _label_uptime = lv_label_create(_content);
+    lv_label_set_text(_label_uptime, "Uptime: 0s");
+    lv_obj_set_style_text_color(_label_uptime, Theme::textPrimary(), 0);
+    lv_obj_set_style_pad_bottom(_label_uptime, 8, 0);
 
     // Identity section
     lv_obj_t* label_identity = lv_label_create(_content);
@@ -216,6 +223,28 @@ void StatusScreen::refresh() {
 }
 
 void StatusScreen::update_labels() {
+    // Update uptime
+    {
+        unsigned long ms = millis();
+        unsigned long total_secs = ms / 1000;
+        unsigned long days = total_secs / 86400;
+        unsigned long hours = (total_secs % 86400) / 3600;
+        unsigned long mins = (total_secs % 3600) / 60;
+        unsigned long secs = total_secs % 60;
+
+        char uptime_text[40];
+        if (days > 0) {
+            snprintf(uptime_text, sizeof(uptime_text), "Uptime: %lud %luh %lum %lus", days, hours, mins, secs);
+        } else if (hours > 0) {
+            snprintf(uptime_text, sizeof(uptime_text), "Uptime: %luh %lum %lus", hours, mins, secs);
+        } else if (mins > 0) {
+            snprintf(uptime_text, sizeof(uptime_text), "Uptime: %lum %lus", mins, secs);
+        } else {
+            snprintf(uptime_text, sizeof(uptime_text), "Uptime: %lus", secs);
+        }
+        lv_label_set_text(_label_uptime, uptime_text);
+    }
+
     // Update identity - use stack buffer to avoid String fragmentation
     if (_identity_hash.size() > 0) {
         lv_label_set_text(_label_identity_value, _identity_hash.toHex().c_str());

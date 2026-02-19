@@ -61,6 +61,7 @@ public:
      */
     using BackCallback = std::function<void()>;
     using SendMessageCallback = std::function<void(const String& content)>;
+    using CallCallback = std::function<void()>;
 
     /**
      * Create chat screen
@@ -112,6 +113,12 @@ public:
     void set_send_message_callback(SendMessageCallback callback);
 
     /**
+     * Set callback for voice call button
+     * @param callback Function to call when call button is pressed
+     */
+    void set_call_callback(CallCallback callback);
+
+    /**
      * Show the screen
      */
     void show();
@@ -135,6 +142,7 @@ private:
     lv_obj_t* _text_area;
     lv_obj_t* _btn_send;
     lv_obj_t* _btn_back;
+    lv_obj_t* _btn_call;
 
     RNS::Bytes _peer_hash;
     ::LXMF::MessageStore* _message_store;
@@ -145,6 +153,7 @@ private:
 
     BackCallback _back_callback;
     SendMessageCallback _send_message_callback;
+    CallCallback _call_callback;
 
     // UI construction
     void create_header();
@@ -154,6 +163,7 @@ private:
 
     // Event handlers
     static void on_back_clicked(lv_event_t* event);
+    static void on_call_clicked(lv_event_t* event);
     static void on_send_clicked(lv_event_t* event);
     static void on_message_long_pressed(lv_event_t* event);
     static void on_copy_dialog_action(lv_event_t* event);

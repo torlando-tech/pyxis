@@ -133,6 +133,7 @@ private:
     lv_obj_t* _btn_share;
 
     // Labels for dynamic content
+    lv_obj_t* _label_uptime;
     lv_obj_t* _label_identity_value;
     lv_obj_t* _label_lxmf_value;
     lv_obj_t* _label_wifi_status;
