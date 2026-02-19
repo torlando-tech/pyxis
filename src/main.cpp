@@ -127,6 +127,7 @@ void start_tcp_interface();
 // Screen timeout
 bool screen_off = false;
 uint8_t saved_brightness = 180;  // Save brightness before turning off
+uint32_t screen_off_time = 0;    // millis() when screen was turned off
 
 // Keyboard backlight timeout (5 seconds)
 static const uint32_t KB_LIGHT_TIMEOUT_MS = 5000;
@@ -1051,6 +1052,26 @@ void setup() {
     INFO("╚══════════════════════════════════════╝");
     INFO("");
 
+    // Check for LXST crash breadcrumb from previous boot
+    {
+        Preferences _dbg;
+        _dbg.begin("lxst_dbg", true);
+        uint8_t step = _dbg.getUChar("step", 0);
+        if (step > 0) {
+            uint32_t heap = _dbg.getUInt("heap", 0);
+            uint32_t stack = _dbg.getUInt("stack", 0);
+            char buf[80];
+            snprintf(buf, sizeof(buf), "LXST CRASH: last step=%u heap=%u stack=%u", step, heap, stack);
+            WARNING(buf);
+        }
+        _dbg.end();
+        // Clear breadcrumb
+        Preferences _dbg2;
+        _dbg2.begin("lxst_dbg", false);
+        _dbg2.putUChar("step", 0);
+        _dbg2.end();
+    }
+
     // Initialize hardware
     BOOT_PROFILE_START("hardware");
     setup_hardware();
@@ -1247,6 +1268,9 @@ void loop() {
         ui_manager->update();
     }
 
+    // Process deferred memory monitor logging (flag set by timer callback)
+    MEMORY_MONITOR_POLL();
+
     // Periodic announce (using interval from settings)
     if (app_settings.announce_interval > 0) {  // 0 = disabled
         uint32_t announce_interval_ms = app_settings.announce_interval * 1000;
@@ -1376,10 +1400,11 @@ void loop() {
             saved_brightness = app_settings.brightness;
             ledcWrite(0, 0);  // Turn off backlight (channel 0)
             screen_off = true;
+            screen_off_time = millis();
             DEBUG("Screen timeout - backlight off");
         }
-        else if (screen_off && inactive_ms < 1000) {
-            // Activity detected - turn screen back on
+        else if (screen_off && inactive_ms < (millis() - screen_off_time)) {
+            // Activity detected since screen turned off - wake immediately
             ledcWrite(0, saved_brightness);
             screen_off = false;
             DEBUG("Activity detected - backlight on");
