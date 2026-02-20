@@ -12,6 +12,8 @@
 #include "../LVGL/LVGLLock.h"
 #include "lxst_audio.h"
 #include "Packet.h"
+#include "Transport.h"
+#include "Destination.h"
 
 using namespace RNS;
 
@@ -25,6 +27,17 @@ namespace LXMF {
 
 // Static singleton for Link callbacks
 UIManager* UIManager::s_call_instance = nullptr;
+
+// LXST announce handler — tracks peers that support voice calls
+class LXSTAnnounceHandler : public AnnounceHandler {
+public:
+    LXSTAnnounceHandler() : AnnounceHandler("lxst.telephony") {}
+    void received_announce(const Bytes& dest_hash, const Identity& identity, const Bytes& app_data) override {
+        std::string hash_hex = dest_hash.toHex().substr(0, 16);
+        INFO(("LXST: Voice announce from " + hash_hex + "...").c_str());
+    }
+};
+static std::shared_ptr<LXSTAnnounceHandler> s_lxst_announce_handler;
 
 UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::MessageStore& store)
     : _reticulum(reticulum), _router(router), _store(store),
@@ -45,7 +58,10 @@ UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::Me
       _lxst_audio(nullptr),
       _call_start_ms(0),
       _call_timeout_ms(0),
-      _call_muted(false) {
+      _call_muted(false),
+      _call_answer_pending(false),
+      _call_link_closed_pending(false),
+      _call_signal_pending(0xFF) {
 }
 
 UIManager::~UIManager() {
@@ -220,9 +236,28 @@ bool UIManager::init() {
         [this](::LXMF::LXMessage& message) { on_message_received(message); }
     );
 
+    // Set up answer callback for incoming calls (deferred to main loop)
+    _call_screen->set_answer_callback(
+        [this]() { _call_answer_pending = true; }
+    );
+
     // Load conversations and show conversation list
     _conversation_list_screen->load_conversations(_store);
     show_conversation_list();
+
+    // Create LXST IN destination for incoming voice calls
+    _lxst_destination = Destination(_router.identity(), Type::Destination::IN,
+                                     Type::Destination::SINGLE, "lxst", "telephony");
+    _lxst_destination.set_proof_strategy(Type::Destination::PROVE_NONE);
+    _lxst_destination.set_link_established_callback(on_lxst_link_established);
+    s_call_instance = this;
+
+    // Register LXST announce handler
+    s_lxst_announce_handler = std::make_shared<LXSTAnnounceHandler>();
+    Transport::register_announce_handler(HAnnounceHandler(s_lxst_announce_handler));
+
+    std::string lxst_hash = _lxst_destination.hash().toHex();
+    INFO(("LXST: Listening on " + lxst_hash).c_str());
 
     _initialized = true;
     INFO("UIManager initialized");
@@ -695,6 +730,10 @@ static void lxst_breadcrumb(uint8_t step, uint32_t heap) {
 }
 
 void UIManager::call_initiate(const Bytes& peer_hash) {
+    {
+        std::string h = peer_hash.toHex().substr(0, 16);
+        INFO(("LXST: Initiating call to " + h + "...").c_str());
+    }
     lxst_breadcrumb(1, ESP.getFreeHeap());
 
     // Check heap before attempting — Link establishment needs ~10KB for crypto
@@ -738,13 +777,29 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
 
     lxst_breadcrumb(5, ESP.getFreeHeap());
 
+    {
+        std::string dh = peer_dest.hash().toHex().substr(0, 16);
+        bool has_path = Transport::has_path(peer_dest.hash());
+        char buf[80];
+        snprintf(buf, sizeof(buf), "LXST: Dest hash=%s path=%s", dh.c_str(), has_path ? "yes" : "no");
+        INFO(buf);
+    }
+
+    // Request path if not cached
+    if (!Transport::has_path(peer_dest.hash())) {
+        INFO("LXST: No path to destination, requesting...");
+        Transport::request_path(peer_dest.hash());
+    }
+
     // Establish Reticulum Link to peer's LXST destination
+    INFO("LXST: Creating link...");
     _call_link = Link(peer_dest, on_call_link_established, on_call_link_closed);
 
     lxst_breadcrumb(6, ESP.getFreeHeap());
 
     _call_state = CallState::LINK_ESTABLISHING;
     _call_timeout_ms = millis() + 30000;
+    INFO("LXST: Link establishing, 30s timeout");
 
     lxst_breadcrumb(7, ESP.getFreeHeap());
 }
@@ -790,7 +845,9 @@ void UIManager::call_set_mute(bool muted) {
 void UIManager::call_send_signal(uint8_t signal) {
     if (!_call_link || _call_link.status() != Type::Link::ACTIVE) return;
 
-    Bytes signal_data(&signal, 1);
+    // Msgpack: {0x00: [signal]} = fixmap(1) + key(0) + fixarray(1) + signal
+    uint8_t msgpack_buf[4] = { 0x81, 0x00, 0x91, signal };
+    Bytes signal_data(msgpack_buf, 4);
     Packet packet(_call_link, signal_data);
     packet.send();
 
@@ -802,131 +859,183 @@ void UIManager::call_send_signal(uint8_t signal) {
 void UIManager::call_send_audio(const uint8_t* data, int length) {
     if (!_call_link || _call_link.status() != Type::Link::ACTIVE) return;
 
-    // Prepend codec header byte: 0x02 = Codec2
+    // Msgpack: {0x01: bin8(codec_header + frame_data)}
     uint8_t packet_buf[256];
-    if (length + 1 > (int)sizeof(packet_buf)) return;
+    int total_len = 1 + length;  // codec header + frame data
+    if (total_len > 250 || total_len < 1) return;
 
-    packet_buf[0] = LXST_CODEC_CODEC2;
-    memcpy(packet_buf + 1, data, length);
+    packet_buf[0] = 0x81;                  // fixmap(1)
+    packet_buf[1] = 0x01;                  // key: FIELD_FRAMES
+    packet_buf[2] = 0xC4;                  // bin8
+    packet_buf[3] = (uint8_t)total_len;    // length
+    packet_buf[4] = LXST_CODEC_CODEC2;     // codec header
+    memcpy(packet_buf + 5, data, length);
 
-    Bytes audio_data(packet_buf, length + 1);
+    Bytes audio_data(packet_buf, 5 + length);
     Packet packet(_call_link, audio_data);
     packet.send();
 }
 
 void UIManager::call_on_packet(const Bytes& data) {
-    if (data.size() == 0) return;
+    // NOTE: This runs on the Reticulum transport thread (during reticulum->loop()),
+    // NOT under the LVGL lock. Do NOT touch LVGL objects here.
+    // Signals are queued and processed in call_update() under the LVGL lock.
+    if (data.size() < 4) return;
 
-    uint8_t first_byte = data.data()[0];
+    const uint8_t* buf = data.data();
 
-    // Single-byte packets are signalling messages
-    if (data.size() == 1) {
-        char buf[48];
-        snprintf(buf, sizeof(buf), "LXST: Received signal 0x%02X", first_byte);
-        DEBUG(buf);
+    // Expect msgpack fixmap(1): 0x81
+    if (buf[0] != 0x81) {
+        char dbg[64];
+        snprintf(dbg, sizeof(dbg), "LXST: Invalid packet (0x%02X, expected fixmap)", buf[0]);
+        DEBUG(dbg);
+        return;
+    }
 
-        switch (_call_state) {
-            case CallState::WAIT_AVAILABLE:
-                if (first_byte == LXST_STATUS_AVAILABLE) {
-                    INFO("LXST: Remote is available, identifying...");
-                    _call_link.identify(_router.identity());
-                    _call_state = CallState::WAIT_RINGING;
-                    _call_timeout_ms = millis() + 15000;
-                } else if (first_byte == LXST_STATUS_BUSY) {
-                    INFO("LXST: Remote is busy");
-                    call_ended();
+    uint8_t field = buf[1];
+
+    if (field == 0x00) {
+        // Signalling: {0x00: [signal]} = 81 00 91 XX
+        if (buf[2] != 0x91) return;
+        uint8_t signal = buf[3];
+
+        char dbg[48];
+        snprintf(dbg, sizeof(dbg), "LXST: Received signal 0x%02X (queued)", signal);
+        DEBUG(dbg);
+
+        // Queue for processing in call_update() under LVGL lock
+        _call_signal_pending = signal;
+
+    } else if (field == 0x01) {
+        // Audio: {0x01: bin8/bin16(codec_header + frame_data)}
+        // Audio buffer writes don't touch LVGL — safe to process here
+        size_t frame_offset;
+        size_t frame_len;
+
+        if (buf[2] == 0xC4) {
+            // bin8
+            if (data.size() < 5) return;
+            frame_len = buf[3];
+            frame_offset = 4;
+        } else if (buf[2] == 0xC5) {
+            // bin16
+            if (data.size() < 6) return;
+            frame_len = ((size_t)buf[3] << 8) | buf[4];
+            frame_offset = 5;
+        } else {
+            return;
+        }
+
+        if (data.size() < frame_offset + frame_len || frame_len < 2) return;
+
+        uint8_t codec = buf[frame_offset];
+        const uint8_t* frame_data = buf + frame_offset + 1;
+        size_t frame_data_len = frame_len - 1;
+
+        if ((_call_state == CallState::ACTIVE || _call_state == CallState::CONNECTING)
+            && codec == LXST_CODEC_CODEC2 && _lxst_audio) {
+            if (_lxst_audio->state() == LXSTAudio::State::PLAYING) {
+                _lxst_audio->writeEncodedPacket(frame_data, frame_data_len);
+            }
+        }
+    }
+}
+
+// Process received signal — runs under LVGL lock from call_update()
+void UIManager::call_process_signal(uint8_t signal) {
+    char dbg[48];
+    snprintf(dbg, sizeof(dbg), "LXST: Processing signal 0x%02X (state=%d)", signal, (int)_call_state);
+    DEBUG(dbg);
+
+    switch (_call_state) {
+        case CallState::WAIT_AVAILABLE:
+            if (signal == LXST_STATUS_AVAILABLE) {
+                INFO("LXST: Remote is available, identifying...");
+                _call_link.identify(_router.identity());
+                _call_state = CallState::WAIT_RINGING;
+                _call_timeout_ms = millis() + 15000;
+            } else if (signal == LXST_STATUS_BUSY) {
+                INFO("LXST: Remote is busy");
+                call_ended();
+            }
+            break;
+
+        case CallState::WAIT_RINGING:
+            if (signal == LXST_STATUS_RINGING) {
+                INFO("LXST: Remote is ringing");
+                _call_state = CallState::RINGING;
+                _call_timeout_ms = millis() + 60000;
+                _call_screen->set_state(CallScreen::CallState::RINGING);
+            } else if (signal == LXST_STATUS_BUSY || signal == LXST_STATUS_REJECTED) {
+                INFO("LXST: Call rejected or busy");
+                call_ended();
+            }
+            break;
+
+        case CallState::RINGING:
+            if (signal == LXST_STATUS_CONNECTING) {
+                INFO("LXST: Remote is connecting audio...");
+                _call_state = CallState::CONNECTING;
+
+                if (!_lxst_audio) {
+                    _lxst_audio = new LXSTAudio();
                 }
-                break;
-
-            case CallState::WAIT_RINGING:
-                if (first_byte == LXST_STATUS_RINGING) {
-                    INFO("LXST: Remote is ringing");
-                    _call_state = CallState::RINGING;
-                    _call_timeout_ms = millis() + 60000;  // 60s ring timeout
-                    _call_screen->set_state(CallScreen::CallState::RINGING);
-                } else if (first_byte == LXST_STATUS_BUSY || first_byte == LXST_STATUS_REJECTED) {
-                    INFO("LXST: Call rejected or busy");
+                if (!_lxst_audio->init(CODEC2_MODE_1600)) {
+                    WARNING("LXST: Audio init failed");
                     call_ended();
+                    return;
                 }
-                break;
+                // Start playback (RX) so we can hear the remote
+                if (!_lxst_audio->startPlayback()) {
+                    WARNING("LXST: Playback start failed");
+                }
 
-            case CallState::RINGING:
-                if (first_byte == LXST_STATUS_CONNECTING) {
-                    INFO("LXST: Remote is connecting audio...");
-                    _call_state = CallState::CONNECTING;
+            } else if (signal == LXST_STATUS_ESTABLISHED) {
+                INFO("LXST: Call established!");
+                _call_state = CallState::ACTIVE;
+                _call_start_ms = millis();
+                _call_screen->set_state(CallScreen::CallState::ACTIVE);
 
-                    // Initialize audio pipeline
-                    if (!_lxst_audio) {
-                        _lxst_audio = new LXSTAudio();
-                    }
+                if (!_lxst_audio) {
+                    _lxst_audio = new LXSTAudio();
                     if (!_lxst_audio->init(CODEC2_MODE_1600)) {
                         WARNING("LXST: Audio init failed");
                         call_ended();
                         return;
                     }
-                    // Start capture (TX) — we're the caller, start talking
-                    _lxst_audio->startCapture();
-                    _lxst_audio->setCaptureMute(_call_muted);
-
-                } else if (first_byte == LXST_STATUS_ESTABLISHED) {
-                    INFO("LXST: Call established!");
-                    _call_state = CallState::ACTIVE;
-                    _call_start_ms = millis();
-                    _call_screen->set_state(CallScreen::CallState::ACTIVE);
-
-                    // Ensure audio is running
-                    if (!_lxst_audio) {
-                        _lxst_audio = new LXSTAudio();
-                        if (!_lxst_audio->init(CODEC2_MODE_1600)) {
-                            WARNING("LXST: Audio init failed");
-                            call_ended();
-                            return;
-                        }
+                }
+                if (_lxst_audio->state() != LXSTAudio::State::PLAYING) {
+                    if (!_lxst_audio->startPlayback()) {
+                        WARNING("LXST: Playback start failed");
                     }
-                    // Start capture if not already capturing
-                    if (_lxst_audio->state() != LXSTAudio::State::CAPTURING) {
-                        _lxst_audio->startCapture();
-                        _lxst_audio->setCaptureMute(_call_muted);
-                    }
-
-                } else if (first_byte == LXST_STATUS_REJECTED) {
-                    INFO("LXST: Call rejected");
-                    call_ended();
                 }
-                break;
+                INFO("LXST: Call active (caller, RX mode)");
 
-            case CallState::CONNECTING:
-                if (first_byte == LXST_STATUS_ESTABLISHED) {
-                    INFO("LXST: Call established!");
-                    _call_state = CallState::ACTIVE;
-                    _call_start_ms = millis();
-                    _call_screen->set_state(CallScreen::CallState::ACTIVE);
-                }
-                break;
-
-            default:
-                break;
-        }
-        return;
-    }
-
-    // Multi-byte packets are audio frames: [codec_header] + [encoded_data]
-    if (_call_state == CallState::ACTIVE || _call_state == CallState::CONNECTING) {
-        if (first_byte == LXST_CODEC_CODEC2 && data.size() > 1) {
-            // Switch to playback mode if we're capturing and receive audio
-            // (half-duplex: for now just write to playback buffer)
-            if (_lxst_audio) {
-                // If not yet playing, start playback (switches from capture)
-                if (_lxst_audio->state() == LXSTAudio::State::CAPTURING) {
-                    // For half-duplex PTT: stay in capture mode, don't switch
-                    // The remote is transmitting, we buffer but don't play yet
-                    // TODO: For full-duplex, start playback here
-                }
-                if (_lxst_audio->state() == LXSTAudio::State::PLAYING) {
-                    _lxst_audio->writeEncodedPacket(data.data() + 1, data.size() - 1);
-                }
+            } else if (signal == LXST_STATUS_REJECTED) {
+                INFO("LXST: Call rejected");
+                call_ended();
             }
-        }
+            break;
+
+        case CallState::CONNECTING:
+            if (signal == LXST_STATUS_ESTABLISHED) {
+                INFO("LXST: Call established!");
+                _call_state = CallState::ACTIVE;
+                _call_start_ms = millis();
+                _call_screen->set_state(CallScreen::CallState::ACTIVE);
+
+                // Ensure playback is running
+                if (_lxst_audio && _lxst_audio->state() != LXSTAudio::State::PLAYING) {
+                    if (!_lxst_audio->startPlayback()) {
+                        WARNING("LXST: Playback start failed");
+                    }
+                }
+                INFO("LXST: Call active (RX mode)");
+            }
+            break;
+
+        default:
+            break;
     }
 }
 
@@ -961,6 +1070,44 @@ void UIManager::call_ended() {
 void UIManager::call_update() {
     uint32_t now = millis();
 
+    // Process deferred link closed (set by Reticulum callback, consumed here under LVGL lock)
+    if (_call_link_closed_pending) {
+        _call_link_closed_pending = false;
+        call_ended();
+        return;
+    }
+
+    // Process deferred signal (set by Reticulum packet callback, consumed here under LVGL lock)
+    uint8_t pending_sig = _call_signal_pending;
+    if (pending_sig != 0xFF) {
+        _call_signal_pending = 0xFF;
+        call_process_signal(pending_sig);
+        if (_call_state == CallState::IDLE) return;  // Signal caused call to end
+    }
+
+    // Process deferred answer (set by LVGL task, consumed here on main thread)
+    if (_call_answer_pending) {
+        _call_answer_pending = false;
+        call_answer();
+    }
+
+    // Show incoming call UI (deferred from link callback to LVGL-safe context)
+    if (_call_state == CallState::INCOMING_RINGING && _current_screen != SCREEN_CALL) {
+        _call_screen->set_peer(_call_peer_hash);
+        _call_screen->set_state(CallScreen::CallState::INCOMING_RINGING);
+        _call_screen->set_muted(false);
+        _call_screen->show();
+        _current_screen = SCREEN_CALL;
+
+        // Play notification tone
+        if (_settings_screen) {
+            const auto& settings = _settings_screen->get_settings();
+            if (settings.notification_sound) {
+                Notification::tone_play(800, 200, settings.notification_volume);
+            }
+        }
+    }
+
     // Check timeouts
     if (_call_timeout_ms > 0 && now > _call_timeout_ms) {
         switch (_call_state) {
@@ -975,6 +1122,10 @@ void UIManager::call_update() {
                 return;
             case CallState::RINGING:
                 WARNING("LXST: Ring timed out (no answer)");
+                call_ended();
+                return;
+            case CallState::INCOMING_RINGING:
+                WARNING("LXST: Incoming call timed out (no answer)");
                 call_ended();
                 return;
             default:
@@ -1015,28 +1166,141 @@ void UIManager::call_update() {
 
 void UIManager::on_call_link_established(Link& link) {
     if (!s_call_instance) return;
-    INFO("LXST: Link established");
 
-    // Register packet callback on the link
-    link.set_packet_callback(on_call_link_packet);
+    char buf[80];
+    snprintf(buf, sizeof(buf), "LXST: Outgoing link established (status=%d)", (int)link.status());
+    INFO(buf);
+
+    // Update stored link with the established reference and register callbacks
+    s_call_instance->_call_link = link;
+    s_call_instance->_call_link.set_packet_callback(on_call_link_packet);
+    s_call_instance->_call_link.set_link_closed_callback(on_call_link_closed);
 
     // Transition to waiting for STATUS_AVAILABLE
     s_call_instance->_call_state = CallState::WAIT_AVAILABLE;
     s_call_instance->_call_timeout_ms = millis() + 10000;  // 10s timeout
+    INFO("LXST: Waiting for STATUS_AVAILABLE (10s timeout)");
 }
 
 void UIManager::on_call_link_closed(Link& link) {
     if (!s_call_instance) return;
-    WARNING("LXST: Link closed");
+    WARNING("LXST: Link closed (deferred)");
 
+    // Don't call call_ended() here — runs on Reticulum thread without LVGL lock.
+    // Defer to call_update() which runs under LVGL lock.
     if (s_call_instance->_call_state != CallState::IDLE) {
-        s_call_instance->call_ended();
+        s_call_instance->_call_link_closed_pending = true;
     }
 }
 
 void UIManager::on_call_link_packet(const Bytes& plaintext, const Packet& packet) {
     if (!s_call_instance) return;
     s_call_instance->call_on_packet(plaintext);
+}
+
+// ── LXST Incoming Call Callbacks ──
+
+void UIManager::on_lxst_link_established(Link& link) {
+    if (!s_call_instance) return;
+    auto* self = s_call_instance;
+    lxst_breadcrumb(10, ESP.getFreeHeap());
+    INFO("LXST: Incoming link established");
+
+    if (self->_call_state != CallState::IDLE) {
+        // Already in a call — send busy directly on the new link
+        INFO("LXST: Busy, rejecting incoming link");
+        uint8_t busy_buf[4] = { 0x81, 0x00, 0x91, LXST_STATUS_BUSY };
+        Bytes busy_data(busy_buf, 4);
+        Packet pkt(link, busy_data);
+        pkt.send();
+        link.teardown();
+        return;
+    }
+
+    // Accept the incoming link
+    lxst_breadcrumb(11, ESP.getFreeHeap());
+    self->_call_link = link;
+    self->_call_muted = false;
+
+    // Send STATUS_AVAILABLE
+    lxst_breadcrumb(12, ESP.getFreeHeap());
+    self->call_send_signal(LXST_STATUS_AVAILABLE);
+
+    // Wait for caller to identify themselves
+    lxst_breadcrumb(13, ESP.getFreeHeap());
+    link.set_remote_identified_callback(on_lxst_caller_identified);
+    link.set_link_closed_callback(on_call_link_closed);
+    lxst_breadcrumb(14, ESP.getFreeHeap());
+}
+
+void UIManager::on_lxst_caller_identified(const Link& link, const Identity& identity) {
+    if (!s_call_instance) return;
+    auto* self = s_call_instance;
+    lxst_breadcrumb(15, ESP.getFreeHeap());
+
+    std::string hash_hex = identity.hash().toHex().substr(0, 16);
+    INFO(("LXST: Caller identified: " + hash_hex + "...").c_str());
+
+    // Store peer info
+    self->_call_peer_hash = identity.hash();
+
+    // Set packet callback for signalling + audio on this link
+    self->_call_link.set_packet_callback(on_call_link_packet);
+
+    // Send STATUS_RINGING
+    self->call_send_signal(LXST_STATUS_RINGING);
+
+    // Transition to incoming ringing — UI will be shown in call_update()
+    self->_call_state = CallState::INCOMING_RINGING;
+    self->_call_timeout_ms = millis() + 60000;  // 60s ring timeout
+    lxst_breadcrumb(16, ESP.getFreeHeap());
+}
+
+void UIManager::call_answer() {
+    if (_call_state != CallState::INCOMING_RINGING) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "LXST: call_answer() skipped, state=%d", (int)_call_state);
+        WARNING(buf);
+        return;
+    }
+    INFO("LXST: Answering incoming call");
+
+    // Update screen FIRST (before audio init which may block briefly)
+    _call_state = CallState::CONNECTING;
+    _call_screen->set_state(CallScreen::CallState::ACTIVE);
+    _call_screen->set_muted(_call_muted);
+
+    // Send STATUS_CONNECTING
+    call_send_signal(LXST_STATUS_CONNECTING);
+
+    // Initialize audio pipeline
+    if (!_lxst_audio) {
+        _lxst_audio = new LXSTAudio();
+    }
+    if (!_lxst_audio->init(CODEC2_MODE_1600)) {
+        WARNING("LXST: Audio init failed");
+        call_ended();
+        return;
+    }
+
+    // Start playback (RX) so we can hear the caller
+    if (!_lxst_audio->startPlayback()) {
+        WARNING("LXST: Playback start failed");
+    }
+
+    // Send STATUS_ESTABLISHED
+    call_send_signal(LXST_STATUS_ESTABLISHED);
+
+    // Transition to active call
+    _call_state = CallState::ACTIVE;
+    _call_start_ms = millis();
+    INFO("LXST: Call active (answerer, RX mode)");
+}
+
+void UIManager::announce_lxst() {
+    if (_lxst_destination) {
+        _lxst_destination.announce();
+    }
 }
 
 } // namespace LXMF

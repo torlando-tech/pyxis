@@ -150,6 +150,12 @@ public:
     void set_rns_status(bool connected, const String& server_name = "");
 
     /**
+     * Announce LXST voice call destination
+     * Called periodically from main loop
+     */
+    void announce_lxst();
+
+    /**
      * Handle incoming LXMF message
      * Called by LXMF router delivery callback
      * @param message Received message
@@ -184,6 +190,7 @@ private:
     RNS::Reticulum& _reticulum;
     ::LXMF::LXMRouter& _router;
     ::LXMF::MessageStore& _store;
+    RNS::Destination _lxst_destination;
 
     Screen _current_screen;
     RNS::Bytes _current_peer_hash;
@@ -248,6 +255,7 @@ private:
         WAIT_AVAILABLE,     // Outgoing: link up, waiting for STATUS_AVAILABLE
         WAIT_RINGING,       // Outgoing: sent identify, waiting for STATUS_RINGING
         RINGING,            // Outgoing: remote is ringing
+        INCOMING_RINGING,   // Incoming: waiting for user to answer/reject
         CONNECTING,         // Both: opening audio pipelines
         ACTIVE,             // Both: voice flowing
     };
@@ -259,6 +267,9 @@ private:
     uint32_t _call_start_ms;       // millis() when call became ACTIVE
     uint32_t _call_timeout_ms;     // millis() deadline for current wait state
     bool _call_muted;
+    volatile bool _call_answer_pending;  // Set by LVGL task, consumed by main loop
+    volatile bool _call_link_closed_pending;  // Set by link callback, consumed by call_update
+    volatile uint8_t _call_signal_pending;    // 0xFF = none; set by packet callback
 
     // Singleton instance pointer for static Link callbacks
     static UIManager* s_call_instance;
@@ -269,17 +280,25 @@ private:
     void call_set_mute(bool muted);
     void call_update();  // Called from update() — pumps audio packets + state machine
 
+    // Process a received signalling byte (runs under LVGL lock in call_update)
+    void call_process_signal(uint8_t signal);
+
     // Send a signalling byte over the call link
     void call_send_signal(uint8_t signal);
 
     // Send encoded audio packet over the call link
     void call_send_audio(const uint8_t* data, int length);
 
-    // Handle received packet on call link (signalling or audio)
+    // Handle received packet on call link (queues signals for call_update)
     void call_on_packet(const RNS::Bytes& data);
 
     // Transition to call ended and schedule return to chat
     void call_ended();
+
+    // Incoming call callbacks (LXST IN destination)
+    static void on_lxst_link_established(RNS::Link& link);
+    static void on_lxst_caller_identified(const RNS::Link& link, const RNS::Identity& identity);
+    void call_answer();
 
     // Static Link callbacks (delegate to s_call_instance)
     static void on_call_link_established(RNS::Link& link);

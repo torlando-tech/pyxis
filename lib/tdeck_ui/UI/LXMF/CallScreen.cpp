@@ -111,10 +111,27 @@ void CallScreen::set_state(CallState state) {
         case CallState::RINGING:
             lv_label_set_text(_label_state, "Ringing...");
             break;
-        case CallState::ACTIVE:
+        case CallState::INCOMING_RINGING: {
+            lv_label_set_text(_label_state, LV_SYMBOL_CALL " Incoming Call");
+            lv_label_set_text(_label_duration, "");
+            // Repurpose mute button as Answer
+            lv_label_set_text(_label_mute, LV_SYMBOL_OK " Answer");
+            lv_obj_set_style_bg_color(_btn_mute, lv_color_hex(0x2E7D32), 0);  // Green
+            // Change hangup label to Reject
+            lv_obj_t* hangup_label = lv_obj_get_child(_btn_hangup, 0);
+            if (hangup_label) lv_label_set_text(hangup_label, LV_SYMBOL_CLOSE " Reject");
+            break;
+        }
+        case CallState::ACTIVE: {
             lv_label_set_text(_label_state, LV_SYMBOL_CALL " In Call");
             lv_obj_set_style_text_color(_label_state, Theme::success(), 0);
+            // Restore button labels (may have been Answer/Reject for incoming)
+            lv_label_set_text(_label_mute, _muted ? LV_SYMBOL_MUTE " Muted" : LV_SYMBOL_AUDIO " Mute");
+            lv_obj_set_style_bg_color(_btn_mute, _muted ? Theme::warning() : Theme::btnSecondary(), 0);
+            lv_obj_t* hangup_label = lv_obj_get_child(_btn_hangup, 0);
+            if (hangup_label) lv_label_set_text(hangup_label, LV_SYMBOL_CLOSE " End");
             break;
+        }
         case CallState::ENDED:
             lv_label_set_text(_label_state, "Call Ended");
             lv_obj_set_style_text_color(_label_state, Theme::textSecondary(), 0);
@@ -132,6 +149,8 @@ void CallScreen::set_duration(uint32_t seconds) {
 
 void CallScreen::set_muted(bool muted) {
     _muted = muted;
+    // Don't change button appearance during incoming call (button shows "Answer")
+    if (_state == CallState::INCOMING_RINGING) return;
     if (muted) {
         lv_label_set_text(_label_mute, LV_SYMBOL_MUTE " Muted");
         lv_obj_set_style_bg_color(_btn_mute, Theme::warning(), 0);
@@ -149,6 +168,10 @@ void CallScreen::set_mute_callback(MuteCallback callback) {
     _mute_callback = callback;
 }
 
+void CallScreen::set_answer_callback(AnswerCallback callback) {
+    _answer_callback = callback;
+}
+
 void CallScreen::show() {
     lv_obj_clear_flag(_screen, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(_screen);
@@ -157,7 +180,12 @@ void CallScreen::show() {
     if (group) {
         if (_btn_mute) lv_group_add_obj(group, _btn_mute);
         if (_btn_hangup) lv_group_add_obj(group, _btn_hangup);
-        lv_group_focus_obj(_btn_hangup);
+        // Focus answer button for incoming calls, hangup for outgoing
+        if (_state == CallState::INCOMING_RINGING && _btn_mute) {
+            lv_group_focus_obj(_btn_mute);
+        } else {
+            lv_group_focus_obj(_btn_hangup);
+        }
     }
 }
 
@@ -184,7 +212,13 @@ void CallScreen::on_hangup_clicked(lv_event_t* event) {
 
 void CallScreen::on_mute_clicked(lv_event_t* event) {
     auto* self = static_cast<CallScreen*>(lv_event_get_user_data(event));
-    if (self && self->_mute_callback) {
+    if (!self) return;
+    // In incoming call state, this button acts as "Answer"
+    if (self->_state == CallState::INCOMING_RINGING && self->_answer_callback) {
+        self->_answer_callback();
+        return;
+    }
+    if (self->_mute_callback) {
         self->_muted = !self->_muted;
         self->set_muted(self->_muted);
         self->_mute_callback(self->_muted);

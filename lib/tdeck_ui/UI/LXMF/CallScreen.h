@@ -37,14 +37,16 @@ namespace LXMF {
 class CallScreen {
 public:
     enum class CallState {
-        CONNECTING,   // Link being established
-        RINGING,      // Waiting for remote to answer
-        ACTIVE,       // Voice flowing
-        ENDED         // Call ended (brief display before returning)
+        CONNECTING,        // Link being established (outgoing)
+        RINGING,           // Waiting for remote to answer (outgoing)
+        INCOMING_RINGING,  // Incoming call, waiting for user to answer
+        ACTIVE,            // Voice flowing
+        ENDED              // Call ended (brief display before returning)
     };
 
     using HangupCallback = std::function<void()>;
     using MuteCallback = std::function<void(bool muted)>;
+    using AnswerCallback = std::function<void()>;
 
     CallScreen(lv_obj_t* parent = nullptr);
     ~CallScreen();
@@ -63,6 +65,7 @@ public:
 
     void set_hangup_callback(HangupCallback callback);
     void set_mute_callback(MuteCallback callback);
+    void set_answer_callback(AnswerCallback callback);
 
     void show();
     void hide();
@@ -82,6 +85,7 @@ private:
 
     HangupCallback _hangup_callback;
     MuteCallback _mute_callback;
+    AnswerCallback _answer_callback;
 
     void create_ui();
 

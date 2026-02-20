@@ -1130,6 +1130,11 @@ void setup() {
     setup_ui_manager();
     BOOT_PROFILE_END("ui_manager");
 
+    // Send initial LXST voice destination announce
+    if (ui_manager) {
+        ui_manager->announce_lxst();
+    }
+
     // Register delivered callback to update message status in storage and UI
     router->register_delivered_callback([](LXMF::LXMessage& msg) {
         INFO(">>> APP DELIVERED CALLBACK ENTRY");
@@ -1281,6 +1286,9 @@ void loop() {
                                         (ble_interface && ble_interface->online());
             if (router && has_online_interface) {
                 router->announce();
+                if (ui_manager) {
+                    ui_manager->announce_lxst();
+                }
                 last_announce = millis();
                 INFO("Periodic announce sent (interval: " + std::to_string(app_settings.announce_interval) + "s)");
             }
