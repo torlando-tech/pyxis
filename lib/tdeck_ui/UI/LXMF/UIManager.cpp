@@ -888,22 +888,44 @@ void UIManager::call_send_signal(int signal) {
     DEBUG(buf);
 }
 
-void UIManager::call_send_audio(const uint8_t* data, int length) {
-    if (!_call_link || _call_link.status() != Type::Link::ACTIVE) return;
+void UIManager::call_send_audio_batch(const uint8_t* batch_data, int batch_len, int frame_count) {
+    if (!_call_link || _call_link.status() != Type::Link::ACTIVE) {
+        if (_call_audio_tx_count == 0) {
+            char dbg[64];
+            snprintf(dbg, sizeof(dbg), "LXST: TX drop: link=%p status=%d",
+                     (void*)&_call_link, _call_link ? (int)_call_link.status() : -99);
+            WARNING(dbg);
+        }
+        return;
+    }
 
-    // Msgpack: {0x01: bin8(codec_header + frame_data)}
+    // Msgpack: {0x01: bin8(codec_header + mode_header + raw_frames...)}
+    // batch_data = [mode_header] + [raw_frame1] + [raw_frame2] + ... (headers stripped)
     uint8_t packet_buf[256];
-    int total_len = 1 + length;  // codec header + frame data
+    int total_len = 1 + batch_len;  // codec_header + batch_data
     if (total_len > 250 || total_len < 1) return;
 
     packet_buf[0] = 0x81;                  // fixmap(1)
     packet_buf[1] = 0x01;                  // key: FIELD_FRAMES
     packet_buf[2] = 0xC4;                  // bin8
     packet_buf[3] = (uint8_t)total_len;    // length
-    packet_buf[4] = LXST_CODEC_CODEC2;     // codec header
-    memcpy(packet_buf + 5, data, length);
+    packet_buf[4] = LXST_CODEC_CODEC2;     // codec header (0x02)
+    memcpy(packet_buf + 5, batch_data, batch_len);
 
-    Bytes audio_data(packet_buf, 5 + length);
+    // Hex dump first TX packet for wire format verification
+    if (_call_audio_tx_count < 2) {
+        int pkt_len = 5 + batch_len;
+        char hex[128];
+        int pos = 0;
+        for (int i = 0; i < pkt_len && i < 20 && pos < 120; i++) {
+            pos += snprintf(hex + pos, 128 - pos, "%02X ", packet_buf[i]);
+        }
+        char dbg[196];
+        snprintf(dbg, sizeof(dbg), "LXST: TX wire[%d] %d frames: %s", pkt_len, frame_count, hex);
+        INFO(dbg);
+    }
+
+    Bytes audio_data(packet_buf, 5 + batch_len);
     Packet packet(_call_link, audio_data);
     packet.send();
 }
@@ -1301,41 +1323,82 @@ void UIManager::call_update() {
             uint32_t duration_secs = (now - _call_start_ms) / 1000;
             _call_screen->set_duration(duration_secs);
 
-            // Periodic audio stats (every 5 seconds)
-            if (duration_secs > 0 && duration_secs % 5 == 0 &&
+            // Periodic audio stats (every 2 seconds)
+            if (duration_secs > 0 && duration_secs % 2 == 0 &&
                 now - _call_start_ms > duration_secs * 1000 - 500) {
                 static uint32_t last_stats_sec = 0;
                 if (duration_secs != last_stats_sec) {
                     last_stats_sec = duration_secs;
-                    char dbg[96];
-                    snprintf(dbg, sizeof(dbg), "LXST: Audio stats: TX=%lu RX=%lu playBuf=%d capAvail=%d state=%d",
+                    char dbg[128];
+                    snprintf(dbg, sizeof(dbg), "LXST: Audio stats: TX=%lu RX=%lu playBuf=%d capAvail=%d state=%d link=%d",
                              (unsigned long)_call_audio_tx_count,
                              (unsigned long)_call_audio_rx_count,
                              _lxst_audio ? _lxst_audio->playbackFramesBuffered() : -1,
                              _lxst_audio ? _lxst_audio->capturePacketsAvailable() : -1,
-                             _lxst_audio ? (int)_lxst_audio->state() : -1);
+                             _lxst_audio ? (int)_lxst_audio->state() : -1,
+                             _call_link ? (int)_call_link.status() : -99);
                     INFO(dbg);
                 }
             }
         }
 
-        // Pump TX: read encoded packets from capture and send over link
+        // Pump TX: batch multiple codec frames into one packet to reduce overhead.
+        // Each encoded frame from ring buffer = [mode_header(1)] + [raw_codec2(8)] = 9 bytes.
+        // We batch up to 8 frames per packet: [mode_header] + [8 * raw_codec2] = 65 bytes.
+        // This matches Columba's batching (~320ms of audio per packet).
+        static constexpr int TX_BATCH_SIZE = 8;  // frames per packet
         if (_lxst_audio && _lxst_audio->isCapturing()) {
-            uint8_t encoded_buf[64];
-            int encoded_len = 0;
-            for (int i = 0; i < 8; i++) {
-                if (_lxst_audio->readEncodedPacket(encoded_buf, sizeof(encoded_buf), &encoded_len)) {
-                    call_send_audio(encoded_buf, encoded_len);
+            // Send up to 3 batched packets per call_update() cycle
+            for (int batch = 0; batch < 3; batch++) {
+                uint8_t batch_buf[128];  // [mode_header] + [N * raw_codec2_data]
+                int batch_len = 0;
+                int frame_count = 0;
+                uint8_t encoded_buf[64];
+                int encoded_len = 0;
+
+                for (int i = 0; i < TX_BATCH_SIZE; i++) {
+                    if (!_lxst_audio->readEncodedPacket(encoded_buf, sizeof(encoded_buf), &encoded_len)) {
+                        break;
+                    }
+                    if (encoded_len < 2) continue;  // need at least mode_header + 1 byte
+
+                    if (frame_count == 0) {
+                        // First frame: keep mode header + data
+                        memcpy(batch_buf, encoded_buf, encoded_len);
+                        batch_len = encoded_len;
+                    } else {
+                        // Subsequent frames: strip mode header, append raw data only
+                        int raw_len = encoded_len - 1;
+                        if (batch_len + raw_len > (int)sizeof(batch_buf)) break;
+                        memcpy(batch_buf + batch_len, encoded_buf + 1, raw_len);
+                        batch_len += raw_len;
+                    }
+                    frame_count++;
                     _call_audio_tx_count++;
-                    if (_call_audio_tx_count <= 3) {
-                        char dbg[64];
-                        snprintf(dbg, sizeof(dbg), "LXST: TX audio #%lu len=%d",
-                                 (unsigned long)_call_audio_tx_count, encoded_len);
+                }
+
+                if (frame_count > 0) {
+                    call_send_audio_batch(batch_buf, batch_len, frame_count);
+                    if (_call_audio_tx_count <= 16) {
+                        char dbg[80];
+                        snprintf(dbg, sizeof(dbg), "LXST: TX batch %d frames, %d bytes, total=%lu",
+                                 frame_count, batch_len, (unsigned long)_call_audio_tx_count);
                         INFO(dbg);
                     }
                 } else {
-                    break;
+                    break;  // no more data
                 }
+            }
+        } else if (_call_audio_tx_count == 0) {
+            // Log once why TX is not running
+            static uint32_t last_tx_warn = 0;
+            if (now - last_tx_warn > 2000) {
+                last_tx_warn = now;
+                char dbg[96];
+                snprintf(dbg, sizeof(dbg), "LXST: TX pump idle: audio=%p capturing=%d state=%d",
+                         _lxst_audio, _lxst_audio ? (int)_lxst_audio->isCapturing() : -1,
+                         _lxst_audio ? (int)_lxst_audio->state() : -1);
+                WARNING(dbg);
             }
         }
     }

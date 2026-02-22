@@ -294,8 +294,8 @@ private:
     // Send a signalling byte over the call link
     void call_send_signal(int signal);
 
-    // Send encoded audio packet over the call link
-    void call_send_audio(const uint8_t* data, int length);
+    // Send batched encoded audio frames over the call link
+    void call_send_audio_batch(const uint8_t* batch_data, int batch_len, int frame_count);
 
     // Process a single received audio frame (codec_header + data)
     void call_rx_audio_frame(const uint8_t* frame, size_t frame_len);
