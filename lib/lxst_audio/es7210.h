@@ -1,93 +1,97 @@
-// Copyright (c) 2024 LXST contributors
-// SPDX-License-Identifier: MPL-2.0
+// ES7210 driver — LilyGO library + thin wrapper for LXST
+// Original: Xinyuan-LilyGO/T-Deck lib/es7210/src/es7210.h (Espressif MIT License)
 
-#pragma once
+#ifndef _ES7210_H
+#define _ES7210_H
 
-#include <cstdint>
+#include "audio_hal.h"
+#include <Wire.h>
 
-/**
- * ES7210 four-channel audio ADC I2C driver for T-Deck Plus.
- *
- * Adapted from ESPHome es7210 component and Espressif ESP-BSP driver.
- * Handles only I2C configuration registers — audio data flows over I2S.
- *
- * After init(), the ES7210 outputs 8kHz 16-bit audio on its I2S SDOUT1
- * pin (mics 1&2). The caller is responsible for I2S port setup.
- */
-namespace ES7210 {
+typedef enum {
+    ES7210_AD1_AD0_00 = 0x40,
+    ES7210_AD1_AD0_01 = 0x41,
+    ES7210_AD1_AD0_10 = 0x42,
+    ES7210_AD1_AD0_11 = 0x43,
+} es7210_address_t;
 
-// ES7210 register addresses
-static constexpr uint8_t REG_RESET         = 0x00;
-static constexpr uint8_t REG_CLOCK_OFF     = 0x01;
-static constexpr uint8_t REG_MAINCLK       = 0x02;
-static constexpr uint8_t REG_MASTER_CLK    = 0x03;
-static constexpr uint8_t REG_LRCK_DIVH     = 0x04;
-static constexpr uint8_t REG_LRCK_DIVL     = 0x05;
-static constexpr uint8_t REG_POWER_DOWN    = 0x06;
-static constexpr uint8_t REG_OSR           = 0x07;
-static constexpr uint8_t REG_MODE_CONFIG   = 0x08;
-static constexpr uint8_t REG_TIME_CTRL0    = 0x09;
-static constexpr uint8_t REG_TIME_CTRL1    = 0x0A;
-static constexpr uint8_t REG_SDP_IFACE1    = 0x11;
-static constexpr uint8_t REG_SDP_IFACE2    = 0x12;
-static constexpr uint8_t REG_ADC_AUTOMUTE  = 0x13;
-static constexpr uint8_t REG_ADC34_HPF2    = 0x20;
-static constexpr uint8_t REG_ADC34_HPF1    = 0x21;
-static constexpr uint8_t REG_ADC12_HPF1    = 0x22;
-static constexpr uint8_t REG_ADC12_HPF2    = 0x23;
-static constexpr uint8_t REG_ANALOG        = 0x40;
-static constexpr uint8_t REG_MIC12_BIAS    = 0x41;
-static constexpr uint8_t REG_MIC34_BIAS    = 0x42;
-static constexpr uint8_t REG_MIC1_GAIN     = 0x43;
-static constexpr uint8_t REG_MIC2_GAIN     = 0x44;
-static constexpr uint8_t REG_MIC3_GAIN     = 0x45;
-static constexpr uint8_t REG_MIC4_GAIN     = 0x46;
-static constexpr uint8_t REG_MIC1_POWER    = 0x47;
-static constexpr uint8_t REG_MIC2_POWER    = 0x48;
-static constexpr uint8_t REG_MIC3_POWER    = 0x49;
-static constexpr uint8_t REG_MIC4_POWER    = 0x4A;
-static constexpr uint8_t REG_MIC12_POWER   = 0x4B;
-static constexpr uint8_t REG_MIC34_POWER   = 0x4C;
+#ifdef ES7210_ADDR
+#undef ES7210_ADDR
+#endif
+#define ES7210_ADDR  ES7210_AD1_AD0_00
 
-// Mic gain in dB (0 to 37.5 in 3dB steps)
-enum MicGain : uint8_t {
-    GAIN_0DB   = 0,
-    GAIN_3DB   = 1,
-    GAIN_6DB   = 2,
-    GAIN_9DB   = 3,
-    GAIN_12DB  = 4,
-    GAIN_15DB  = 5,
-    GAIN_18DB  = 6,
-    GAIN_21DB  = 7,
-    GAIN_24DB  = 8,
-    GAIN_27DB  = 9,
-    GAIN_30DB  = 10,
-    GAIN_33DB  = 11,
-    GAIN_34_5DB = 12,
-    GAIN_36DB  = 13,
-    GAIN_37_5DB = 14,
-};
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-/**
- * Initialize the ES7210 for 8kHz 16-bit I2S capture.
- *
- * Uses the shared Wire bus (must already be initialized).
- * Configures mic1 channel with specified gain.
- *
- * @param i2cAddr  I2C address (default 0x40)
- * @param gain     Microphone gain setting (default 24dB)
- * @return true if all I2C writes succeeded
- */
-bool init(uint8_t i2cAddr = 0x40, MicGain gain = GAIN_24DB);
+#define  ES7210_RESET_REG00                 0x00
+#define  ES7210_CLOCK_OFF_REG01             0x01
+#define  ES7210_MAINCLK_REG02               0x02
+#define  ES7210_MASTER_CLK_REG03            0x03
+#define  ES7210_LRCK_DIVH_REG04             0x04
+#define  ES7210_LRCK_DIVL_REG05             0x05
+#define  ES7210_POWER_DOWN_REG06            0x06
+#define  ES7210_OSR_REG07                   0x07
+#define  ES7210_MODE_CONFIG_REG08           0x08
+#define  ES7210_TIME_CONTROL0_REG09         0x09
+#define  ES7210_TIME_CONTROL1_REG0A         0x0A
+#define  ES7210_SDP_INTERFACE1_REG11        0x11
+#define  ES7210_SDP_INTERFACE2_REG12        0x12
+#define  ES7210_ADC_AUTOMUTE_REG13          0x13
+#define  ES7210_ADC34_HPF2_REG20            0x20
+#define  ES7210_ADC34_HPF1_REG21            0x21
+#define  ES7210_ADC12_HPF1_REG22            0x22
+#define  ES7210_ADC12_HPF2_REG23            0x23
+#define  ES7210_ANALOG_REG40                0x40
+#define  ES7210_MIC12_BIAS_REG41            0x41
+#define  ES7210_MIC34_BIAS_REG42            0x42
+#define  ES7210_MIC1_GAIN_REG43             0x43
+#define  ES7210_MIC2_GAIN_REG44             0x44
+#define  ES7210_MIC3_GAIN_REG45             0x45
+#define  ES7210_MIC4_GAIN_REG46             0x46
+#define  ES7210_MIC1_POWER_REG47            0x47
+#define  ES7210_MIC2_POWER_REG48            0x48
+#define  ES7210_MIC3_POWER_REG49            0x49
+#define  ES7210_MIC4_POWER_REG4A            0x4A
+#define  ES7210_MIC12_POWER_REG4B           0x4B
+#define  ES7210_MIC34_POWER_REG4C           0x4C
 
-/**
- * Set microphone gain for all channels.
- * Can be called after init() to adjust gain dynamically.
- *
- * @param i2cAddr  I2C address
- * @param gain     New gain setting
- * @return true on success
- */
-bool setGain(uint8_t i2cAddr, MicGain gain);
+typedef enum {
+    ES7210_INPUT_MIC1 = 0x01,
+    ES7210_INPUT_MIC2 = 0x02,
+    ES7210_INPUT_MIC3 = 0x04,
+    ES7210_INPUT_MIC4 = 0x08
+} es7210_input_mics_t;
 
-} // namespace ES7210
+typedef enum gain_value {
+    GAIN_0DB = 0,
+    GAIN_3DB,
+    GAIN_6DB,
+    GAIN_9DB,
+    GAIN_12DB,
+    GAIN_15DB,
+    GAIN_18DB,
+    GAIN_21DB,
+    GAIN_24DB,
+    GAIN_27DB,
+    GAIN_30DB,
+    GAIN_33DB,
+    GAIN_34_5DB,
+    GAIN_36DB,
+    GAIN_37_5DB,
+} es7210_gain_value_t;
+
+esp_err_t es7210_adc_init(TwoWire *tw, audio_hal_codec_config_t *codec_cfg);
+esp_err_t es7210_adc_deinit(void);
+esp_err_t es7210_adc_config_i2s(audio_hal_codec_mode_t mode, audio_hal_codec_i2s_iface_t *iface);
+esp_err_t es7210_adc_ctrl_state(audio_hal_codec_mode_t mode, audio_hal_ctrl_t ctrl_state);
+esp_err_t es7210_adc_set_gain(es7210_input_mics_t mic_mask, es7210_gain_value_t gain);
+esp_err_t es7210_adc_set_gain_all(es7210_gain_value_t gain);
+esp_err_t es7210_mic_select(es7210_input_mics_t mic);
+int es7210_read_reg(uint8_t reg_addr);
+void es7210_read_all(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* _ES7210_H_ */

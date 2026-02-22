@@ -40,6 +40,13 @@ bool Codec2Wrapper::create(int libraryMode) {
 
     LOGI("Codec2 created: libMode=%d header=0x%02x samples/frame=%d bytes/frame=%d",
          libraryMode, modeHeader_, samplesPerFrame_, bytesPerFrame_);
+
+#ifdef ARDUINO
+    if (!mutex_) {
+        mutex_ = xSemaphoreCreateMutex();
+    }
+#endif
+
     return true;
 }
 
@@ -48,6 +55,12 @@ void Codec2Wrapper::destroy() {
         codec2_destroy(codec2_);
         codec2_ = nullptr;
     }
+#ifdef ARDUINO
+    if (mutex_) {
+        vSemaphoreDelete(mutex_);
+        mutex_ = nullptr;
+    }
+#endif
     samplesPerFrame_ = 0;
     bytesPerFrame_ = 0;
     modeHeader_ = 0;
@@ -57,6 +70,10 @@ void Codec2Wrapper::destroy() {
 int Codec2Wrapper::decode(const uint8_t* encoded, int encodedBytes,
                           int16_t* output, int maxOutputSamples) {
     if (!codec2_ || encodedBytes < 1) return -1;
+
+#ifdef ARDUINO
+    if (mutex_) xSemaphoreTake(mutex_, portMAX_DELAY);
+#endif
 
     // First byte is mode header -- check if mode changed
     uint8_t header = encoded[0];
@@ -68,6 +85,9 @@ int Codec2Wrapper::decode(const uint8_t* encoded, int encodedBytes,
             codec2_ = codec2_create(newMode);
             if (!codec2_) {
                 LOGE("Codec2 mode switch failed");
+#ifdef ARDUINO
+                if (mutex_) xSemaphoreGive(mutex_);
+#endif
                 return -1;
             }
             libraryMode_ = newMode;
@@ -76,6 +96,9 @@ int Codec2Wrapper::decode(const uint8_t* encoded, int encodedBytes,
             modeHeader_ = header;
         } else {
             LOGW("Unknown Codec2 header: 0x%02x", header);
+#ifdef ARDUINO
+            if (mutex_) xSemaphoreGive(mutex_);
+#endif
             return -1;
         }
     }
@@ -89,6 +112,9 @@ int Codec2Wrapper::decode(const uint8_t* encoded, int encodedBytes,
     if (totalSamples > maxOutputSamples) {
         LOGW("Codec2 decode: output buffer too small (%d > %d)",
              totalSamples, maxOutputSamples);
+#ifdef ARDUINO
+        if (mutex_) xSemaphoreGive(mutex_);
+#endif
         return -1;
     }
 
@@ -98,6 +124,9 @@ int Codec2Wrapper::decode(const uint8_t* encoded, int encodedBytes,
                       data + i * bytesPerFrame_);
     }
 
+#ifdef ARDUINO
+    if (mutex_) xSemaphoreGive(mutex_);
+#endif
     return totalSamples;
 }
 
@@ -114,6 +143,10 @@ int Codec2Wrapper::encode(const int16_t* pcm, int pcmSamples,
         return -1;
     }
 
+#ifdef ARDUINO
+    if (mutex_) xSemaphoreTake(mutex_, portMAX_DELAY);
+#endif
+
     // Prepend mode header byte
     output[0] = modeHeader_;
 
@@ -123,6 +156,9 @@ int Codec2Wrapper::encode(const int16_t* pcm, int pcmSamples,
                       const_cast<int16_t*>(pcm + i * samplesPerFrame_));
     }
 
+#ifdef ARDUINO
+    if (mutex_) xSemaphoreGive(mutex_);
+#endif
     return encodedSize;
 }
 

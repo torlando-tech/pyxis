@@ -6,7 +6,6 @@
 #include <cstdint>
 #include <atomic>
 
-class PacketRingBuffer;
 class EncodedRingBuffer;
 class VoiceFilterChain;
 class Codec2Wrapper;
@@ -39,11 +38,11 @@ public:
 
     /**
      * Configure the encoder. Must be called before start().
-     * @param codec2Mode Codec2 library mode (0=3200, 2=1600, 8=700C)
+     * @param codec Shared Codec2Wrapper (not owned — caller manages lifecycle)
      * @param enableFilters Whether to apply HPF+LPF+AGC filter chain
      * @return true on success
      */
-    bool configureEncoder(int codec2Mode, bool enableFilters = true);
+    bool configureEncoder(Codec2Wrapper* codec, bool enableFilters = true);
 
     /** Start the capture task. Returns immediately. */
     bool start();
@@ -72,8 +71,8 @@ public:
     /** Number of encoded packets waiting in the ring buffer. */
     int availablePackets() const;
 
-    /** Destroy the encoder and release codec resources. */
-    void destroyEncoder();
+    /** Release capture buffers (does NOT destroy the shared codec). */
+    void releaseBuffers();
 
 private:
     static void captureTask(void* param);
@@ -84,8 +83,8 @@ private:
     std::atomic<bool> muted_{false};
     void* taskHandle_ = nullptr;
 
-    // Audio pipeline components (owned)
-    Codec2Wrapper* encoder_ = nullptr;
+    // Audio pipeline components
+    Codec2Wrapper* codec_ = nullptr;  // Shared, not owned
     VoiceFilterChain* filterChain_ = nullptr;
     EncodedRingBuffer* encodedRing_ = nullptr;
 
@@ -102,10 +101,11 @@ private:
 
     bool filtersEnabled_ = true;
 
-    static constexpr int SAMPLE_RATE = 8000;
+    static constexpr int I2S_SAMPLE_RATE = 16000;  // I2S runs at 16kHz (matches T-Deck Plus reference)
+    static constexpr int CODEC_SAMPLE_RATE = 8000; // Codec2 expects 8kHz — we downsample 2:1
     static constexpr int ENCODED_RING_SLOTS = 32;
     static constexpr int ENCODED_RING_MAX_BYTES = 256;
-    static constexpr int CAPTURE_TASK_STACK = 4096;
+    static constexpr int CAPTURE_TASK_STACK = 16384;
     static constexpr int CAPTURE_TASK_PRIORITY = 5;
     static constexpr int CAPTURE_TASK_CORE = 0;
 };

@@ -61,7 +61,9 @@ UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::Me
       _call_muted(false),
       _call_answer_pending(false),
       _call_link_closed_pending(false),
-      _call_signal_pending(0xFF) {
+      _call_signal_pending(0xFF),
+      _call_audio_rx_count(0),
+      _call_audio_tx_count(0) {
 }
 
 UIManager::~UIManager() {
@@ -777,6 +779,12 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
 
     lxst_breadcrumb(5, ESP.getFreeHeap());
 
+    _call_dest_hash = peer_dest.hash();
+    _call_audio_rx_count = 0;
+    _call_audio_tx_count = 0;
+    _call_link_closed_pending = false;
+    _call_signal_pending = 0xFF;
+
     {
         std::string dh = peer_dest.hash().toHex().substr(0, 16);
         bool has_path = Transport::has_path(peer_dest.hash());
@@ -785,21 +793,20 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
         INFO(buf);
     }
 
-    // Request path if not cached
-    if (!Transport::has_path(peer_dest.hash())) {
-        INFO("LXST: No path to destination, requesting...");
+    if (Transport::has_path(peer_dest.hash())) {
+        // Path known — create link immediately
+        INFO("LXST: Creating link...");
+        _call_link = Link(peer_dest, on_call_link_established, on_call_link_closed);
+        _call_state = CallState::LINK_ESTABLISHING;
+        _call_timeout_ms = millis() + 30000;
+        INFO("LXST: Link establishing, 30s timeout");
+    } else {
+        // Path unknown — request and wait for it in call_update()
+        INFO("LXST: No path, requesting (10s timeout)...");
         Transport::request_path(peer_dest.hash());
+        _call_state = CallState::PATH_REQUESTING;
+        _call_timeout_ms = millis() + 10000;
     }
-
-    // Establish Reticulum Link to peer's LXST destination
-    INFO("LXST: Creating link...");
-    _call_link = Link(peer_dest, on_call_link_established, on_call_link_closed);
-
-    lxst_breadcrumb(6, ESP.getFreeHeap());
-
-    _call_state = CallState::LINK_ESTABLISHING;
-    _call_timeout_ms = millis() + 30000;
-    INFO("LXST: Link establishing, 30s timeout");
 
     lxst_breadcrumb(7, ESP.getFreeHeap());
 }
@@ -840,19 +847,44 @@ void UIManager::call_set_mute(bool muted) {
     if (_lxst_audio) {
         _lxst_audio->setCaptureMute(muted);
     }
+    INFO(muted ? "LXST: Mic muted" : "LXST: Mic unmuted");
 }
 
-void UIManager::call_send_signal(uint8_t signal) {
+void UIManager::call_send_signal(int signal) {
     if (!_call_link || _call_link.status() != Type::Link::ACTIVE) return;
 
-    // Msgpack: {0x00: [signal]} = fixmap(1) + key(0) + fixarray(1) + signal
-    uint8_t msgpack_buf[4] = { 0x81, 0x00, 0x91, signal };
-    Bytes signal_data(msgpack_buf, 4);
+    // Msgpack: {0x00: [signal]}
+    // fixmap(1) + key(0) + fixarray(1) + msgpack-encoded integer
+    uint8_t msgpack_buf[7];
+    int len;
+
+    msgpack_buf[0] = 0x81;  // fixmap(1)
+    msgpack_buf[1] = 0x00;  // key: FIELD_SIGNAL
+    msgpack_buf[2] = 0x91;  // fixarray(1)
+
+    if (signal <= 0x7F) {
+        // fixint: single byte
+        msgpack_buf[3] = (uint8_t)signal;
+        len = 4;
+    } else if (signal <= 0xFF) {
+        // uint8: 0xCC + byte
+        msgpack_buf[3] = 0xCC;
+        msgpack_buf[4] = (uint8_t)signal;
+        len = 5;
+    } else {
+        // uint16: 0xCD + big-endian 2 bytes
+        msgpack_buf[3] = 0xCD;
+        msgpack_buf[4] = (uint8_t)(signal >> 8);
+        msgpack_buf[5] = (uint8_t)(signal & 0xFF);
+        len = 6;
+    }
+
+    Bytes signal_data(msgpack_buf, len);
     Packet packet(_call_link, signal_data);
     packet.send();
 
     char buf[48];
-    snprintf(buf, sizeof(buf), "LXST: Sent signal 0x%02X", signal);
+    snprintf(buf, sizeof(buf), "LXST: Sent signal 0x%03X", signal);
     DEBUG(buf);
 }
 
@@ -876,10 +908,45 @@ void UIManager::call_send_audio(const uint8_t* data, int length) {
     packet.send();
 }
 
+void UIManager::call_rx_audio_frame(const uint8_t* frame, size_t frame_len) {
+    // frame = [codec_header_byte, frame_data...]
+    uint8_t codec = frame[0];
+    const uint8_t* frame_data = frame + 1;
+    size_t frame_data_len = frame_len - 1;
+
+    if (codec != LXST_CODEC_CODEC2) {
+        if (_call_audio_rx_count == 0) {
+            char dbg[64];
+            snprintf(dbg, sizeof(dbg), "LXST: RX audio codec=0x%02X (expected 0x%02X), len=%d",
+                     codec, LXST_CODEC_CODEC2, (int)frame_data_len);
+            WARNING(dbg);
+        }
+    }
+
+    if (_lxst_audio && _lxst_audio->isPlaying()) {
+        _lxst_audio->writeEncodedPacket(frame_data, frame_data_len);
+        _call_audio_rx_count++;
+        if (_call_audio_rx_count <= 3) {
+            char dbg[80];
+            snprintf(dbg, sizeof(dbg), "LXST: RX audio #%lu codec=0x%02X len=%d first=0x%02X",
+                     (unsigned long)_call_audio_rx_count, codec,
+                     (int)frame_data_len, frame_data_len > 0 ? frame_data[0] : 0);
+            INFO(dbg);
+        }
+    } else if (_call_audio_rx_count == 0) {
+        WARNING("LXST: RX audio dropped (playback not active)");
+    }
+}
+
 void UIManager::call_on_packet(const Bytes& data) {
     // NOTE: This runs on the Reticulum transport thread (during reticulum->loop()),
     // NOT under the LVGL lock. Do NOT touch LVGL objects here.
     // Signals are queued and processed in call_update() under the LVGL lock.
+    {
+        char dbg[64];
+        snprintf(dbg, sizeof(dbg), "LXST: call_on_packet len=%d state=%d", (int)data.size(), (int)_call_state);
+        DEBUG(dbg);
+    }
     if (data.size() < 4) return;
 
     const uint8_t* buf = data.data();
@@ -895,48 +962,103 @@ void UIManager::call_on_packet(const Bytes& data) {
     uint8_t field = buf[1];
 
     if (field == 0x00) {
-        // Signalling: {0x00: [signal]} = 81 00 91 XX
+        // Signalling: {0x00: [signal]}
+        // fixarray(1) = 0x91, then signal is a msgpack integer:
+        //   0x00-0x7F = fixint (1 byte)
+        //   0xCC XX   = uint8  (2 bytes)
+        //   0xCD XX XX = uint16 (3 bytes)
         if (buf[2] != 0x91) return;
-        uint8_t signal = buf[3];
+
+        int signal = -1;
+        if (buf[3] <= 0x7F) {
+            // fixint: value is the byte itself
+            signal = buf[3];
+        } else if (buf[3] == 0xCC && data.size() >= 5) {
+            // uint8
+            signal = buf[4];
+        } else if (buf[3] == 0xCD && data.size() >= 6) {
+            // uint16 (big-endian)
+            signal = ((int)buf[4] << 8) | buf[5];
+        }
+
+        if (signal < 0) {
+            char dbg[64];
+            snprintf(dbg, sizeof(dbg), "LXST: Unparseable signal (0x%02X), %d bytes", buf[3], (int)data.size());
+            WARNING(dbg);
+            return;
+        }
+
+        // Ignore PREFERRED_PROFILE signals (0xFF+) — profile negotiation not supported
+        if (signal >= 0xFF) {
+            char dbg[48];
+            snprintf(dbg, sizeof(dbg), "LXST: Ignoring profile signal 0x%03X", signal);
+            DEBUG(dbg);
+            return;
+        }
 
         char dbg[48];
         snprintf(dbg, sizeof(dbg), "LXST: Received signal 0x%02X (queued)", signal);
         DEBUG(dbg);
 
         // Queue for processing in call_update() under LVGL lock
-        _call_signal_pending = signal;
+        _call_signal_pending = (uint8_t)signal;
 
     } else if (field == 0x01) {
-        // Audio: {0x01: bin8/bin16(codec_header + frame_data)}
+        // Audio: {0x01: value} where value is either:
+        //   - bin8/bin16: single frame (codec_header + frame_data)
+        //   - fixarray: batched frames [bin8(...), bin8(...), ...]
         // Audio buffer writes don't touch LVGL — safe to process here
-        size_t frame_offset;
-        size_t frame_len;
 
-        if (buf[2] == 0xC4) {
-            // bin8
-            if (data.size() < 5) return;
-            frame_len = buf[3];
-            frame_offset = 4;
-        } else if (buf[2] == 0xC5) {
-            // bin16
-            if (data.size() < 6) return;
-            frame_len = ((size_t)buf[3] << 8) | buf[4];
-            frame_offset = 5;
-        } else {
+        if ((_call_state != CallState::ACTIVE && _call_state != CallState::CONNECTING)
+            || !_lxst_audio) {
             return;
         }
 
-        if (data.size() < frame_offset + frame_len || frame_len < 2) return;
+        uint8_t fmt = buf[2];
 
-        uint8_t codec = buf[frame_offset];
-        const uint8_t* frame_data = buf + frame_offset + 1;
-        size_t frame_data_len = frame_len - 1;
+        if ((fmt & 0xF0) == 0x90) {
+            // fixarray: batched frames — Columba sends up to 3 per packet
+            int array_len = fmt & 0x0F;
+            size_t pos = 3;  // start after fixarray byte
 
-        if ((_call_state == CallState::ACTIVE || _call_state == CallState::CONNECTING)
-            && codec == LXST_CODEC_CODEC2 && _lxst_audio) {
-            if (_lxst_audio->state() == LXSTAudio::State::PLAYING) {
-                _lxst_audio->writeEncodedPacket(frame_data, frame_data_len);
+            for (int i = 0; i < array_len; i++) {
+                if (pos >= data.size()) break;
+
+                size_t frame_len;
+                size_t frame_start;
+
+                if (buf[pos] == 0xC4) {
+                    // bin8
+                    if (pos + 1 >= data.size()) break;
+                    frame_len = buf[pos + 1];
+                    frame_start = pos + 2;
+                } else if (buf[pos] == 0xC5) {
+                    // bin16
+                    if (pos + 2 >= data.size()) break;
+                    frame_len = ((size_t)buf[pos + 1] << 8) | buf[pos + 2];
+                    frame_start = pos + 3;
+                } else {
+                    // Unknown format in array — skip rest
+                    break;
+                }
+
+                if (frame_start + frame_len > data.size() || frame_len < 2) break;
+
+                call_rx_audio_frame(buf + frame_start, frame_len);
+                pos = frame_start + frame_len;
             }
+        } else if (fmt == 0xC4) {
+            // bin8: single frame
+            if (data.size() < 5) return;
+            size_t frame_len = buf[3];
+            if (data.size() < 4 + frame_len || frame_len < 2) return;
+            call_rx_audio_frame(buf + 4, frame_len);
+        } else if (fmt == 0xC5) {
+            // bin16: single frame
+            if (data.size() < 6) return;
+            size_t frame_len = ((size_t)buf[3] << 8) | buf[4];
+            if (data.size() < 5 + frame_len || frame_len < 2) return;
+            call_rx_audio_frame(buf + 5, frame_len);
         }
     }
 }
@@ -966,6 +1088,8 @@ void UIManager::call_process_signal(uint8_t signal) {
                 _call_state = CallState::RINGING;
                 _call_timeout_ms = millis() + 60000;
                 _call_screen->set_state(CallScreen::CallState::RINGING);
+                // Send profile preference: VLBW (Codec2 1600bps)
+                call_send_signal(LXST_PREFERRED_PROFILE + LXST_PROFILE_VLBW);
             } else if (signal == LXST_STATUS_BUSY || signal == LXST_STATUS_REJECTED) {
                 INFO("LXST: Call rejected or busy");
                 call_ended();
@@ -976,25 +1100,30 @@ void UIManager::call_process_signal(uint8_t signal) {
             if (signal == LXST_STATUS_CONNECTING) {
                 INFO("LXST: Remote is connecting audio...");
                 _call_state = CallState::CONNECTING;
+                lxst_breadcrumb(20, ESP.getFreeHeap());
 
                 if (!_lxst_audio) {
                     _lxst_audio = new LXSTAudio();
                 }
+                lxst_breadcrumb(21, ESP.getFreeHeap());
                 if (!_lxst_audio->init(CODEC2_MODE_1600)) {
                     WARNING("LXST: Audio init failed");
                     call_ended();
                     return;
                 }
-                // Start playback (RX) so we can hear the remote
-                if (!_lxst_audio->startPlayback()) {
-                    WARNING("LXST: Playback start failed");
+                lxst_breadcrumb(22, ESP.getFreeHeap());
+                // Start full-duplex audio (mic + speaker)
+                if (!_lxst_audio->startFullDuplex()) {
+                    WARNING("LXST: Full-duplex start failed");
                 }
+                lxst_breadcrumb(23, ESP.getFreeHeap());
 
             } else if (signal == LXST_STATUS_ESTABLISHED) {
                 INFO("LXST: Call established!");
                 _call_state = CallState::ACTIVE;
                 _call_start_ms = millis();
                 _call_screen->set_state(CallScreen::CallState::ACTIVE);
+                lxst_breadcrumb(24, ESP.getFreeHeap());
 
                 if (!_lxst_audio) {
                     _lxst_audio = new LXSTAudio();
@@ -1004,12 +1133,14 @@ void UIManager::call_process_signal(uint8_t signal) {
                         return;
                     }
                 }
-                if (_lxst_audio->state() != LXSTAudio::State::PLAYING) {
-                    if (!_lxst_audio->startPlayback()) {
-                        WARNING("LXST: Playback start failed");
+                lxst_breadcrumb(25, ESP.getFreeHeap());
+                if (!_lxst_audio->isPlaying()) {
+                    if (!_lxst_audio->startFullDuplex()) {
+                        WARNING("LXST: Full-duplex start failed");
                     }
                 }
-                INFO("LXST: Call active (caller, RX mode)");
+                lxst_breadcrumb(26, ESP.getFreeHeap());
+                INFO("LXST: Call active (caller, full-duplex)");
 
             } else if (signal == LXST_STATUS_REJECTED) {
                 INFO("LXST: Call rejected");
@@ -1024,13 +1155,13 @@ void UIManager::call_process_signal(uint8_t signal) {
                 _call_start_ms = millis();
                 _call_screen->set_state(CallScreen::CallState::ACTIVE);
 
-                // Ensure playback is running
-                if (_lxst_audio && _lxst_audio->state() != LXSTAudio::State::PLAYING) {
-                    if (!_lxst_audio->startPlayback()) {
-                        WARNING("LXST: Playback start failed");
+                // Ensure full-duplex is running
+                if (_lxst_audio && !_lxst_audio->isPlaying()) {
+                    if (!_lxst_audio->startFullDuplex()) {
+                        WARNING("LXST: Full-duplex start failed");
                     }
                 }
-                INFO("LXST: Call active (RX mode)");
+                INFO("LXST: Call active (full-duplex)");
             }
             break;
 
@@ -1108,9 +1239,32 @@ void UIManager::call_update() {
         }
     }
 
+    // Poll for path resolution (PATH_REQUESTING state)
+    if (_call_state == CallState::PATH_REQUESTING) {
+        if (Transport::has_path(_call_dest_hash)) {
+            INFO("LXST: Path resolved, creating link...");
+            Identity peer_identity = Identity::recall(_call_peer_hash);
+            if (!peer_identity) {
+                WARNING("LXST: Peer identity lost during path request");
+                call_ended();
+                return;
+            }
+            Destination peer_dest(peer_identity, Type::Destination::OUT,
+                                  Type::Destination::SINGLE, "lxst", "telephony");
+            _call_link = Link(peer_dest, on_call_link_established, on_call_link_closed);
+            _call_state = CallState::LINK_ESTABLISHING;
+            _call_timeout_ms = millis() + 30000;
+            INFO("LXST: Link establishing, 30s timeout");
+        }
+    }
+
     // Check timeouts
     if (_call_timeout_ms > 0 && now > _call_timeout_ms) {
         switch (_call_state) {
+            case CallState::PATH_REQUESTING:
+                WARNING("LXST: Path request timed out");
+                call_ended();
+                return;
             case CallState::LINK_ESTABLISHING:
                 WARNING("LXST: Link establishment timed out");
                 call_ended();
@@ -1134,26 +1288,51 @@ void UIManager::call_update() {
         }
     }
 
-    // Check link health during active call
-    if (_call_state == CallState::ACTIVE) {
+    // Check link health during active/connecting call
+    if (_call_state == CallState::ACTIVE || _call_state == CallState::CONNECTING) {
         if (!_call_link || _call_link.status() == Type::Link::CLOSED) {
-            WARNING("LXST: Link closed during active call");
+            WARNING("LXST: Link closed during call");
             call_ended();
             return;
         }
 
-        // Update duration display
-        uint32_t duration_secs = (now - _call_start_ms) / 1000;
-        _call_screen->set_duration(duration_secs);
+        // Update duration display (ACTIVE only)
+        if (_call_state == CallState::ACTIVE) {
+            uint32_t duration_secs = (now - _call_start_ms) / 1000;
+            _call_screen->set_duration(duration_secs);
+
+            // Periodic audio stats (every 5 seconds)
+            if (duration_secs > 0 && duration_secs % 5 == 0 &&
+                now - _call_start_ms > duration_secs * 1000 - 500) {
+                static uint32_t last_stats_sec = 0;
+                if (duration_secs != last_stats_sec) {
+                    last_stats_sec = duration_secs;
+                    char dbg[96];
+                    snprintf(dbg, sizeof(dbg), "LXST: Audio stats: TX=%lu RX=%lu playBuf=%d capAvail=%d state=%d",
+                             (unsigned long)_call_audio_tx_count,
+                             (unsigned long)_call_audio_rx_count,
+                             _lxst_audio ? _lxst_audio->playbackFramesBuffered() : -1,
+                             _lxst_audio ? _lxst_audio->capturePacketsAvailable() : -1,
+                             _lxst_audio ? (int)_lxst_audio->state() : -1);
+                    INFO(dbg);
+                }
+            }
+        }
 
         // Pump TX: read encoded packets from capture and send over link
-        if (_lxst_audio && _lxst_audio->state() == LXSTAudio::State::CAPTURING) {
+        if (_lxst_audio && _lxst_audio->isCapturing()) {
             uint8_t encoded_buf[64];
             int encoded_len = 0;
-            // Send up to a few packets per update cycle
-            for (int i = 0; i < 4; i++) {
+            for (int i = 0; i < 8; i++) {
                 if (_lxst_audio->readEncodedPacket(encoded_buf, sizeof(encoded_buf), &encoded_len)) {
                     call_send_audio(encoded_buf, encoded_len);
+                    _call_audio_tx_count++;
+                    if (_call_audio_tx_count <= 3) {
+                        char dbg[64];
+                        snprintf(dbg, sizeof(dbg), "LXST: TX audio #%lu len=%d",
+                                 (unsigned long)_call_audio_tx_count, encoded_len);
+                        INFO(dbg);
+                    }
                 } else {
                     break;
                 }
@@ -1175,6 +1354,7 @@ void UIManager::on_call_link_established(Link& link) {
     s_call_instance->_call_link = link;
     s_call_instance->_call_link.set_packet_callback(on_call_link_packet);
     s_call_instance->_call_link.set_link_closed_callback(on_call_link_closed);
+    INFO("LXST: Packet callback registered on outgoing link");
 
     // Transition to waiting for STATUS_AVAILABLE
     s_call_instance->_call_state = CallState::WAIT_AVAILABLE;
@@ -1184,6 +1364,13 @@ void UIManager::on_call_link_established(Link& link) {
 
 void UIManager::on_call_link_closed(Link& link) {
     if (!s_call_instance) return;
+
+    // Ignore stale link closures (e.g. old link teardown completing after new call started)
+    if (s_call_instance->_call_link && link != s_call_instance->_call_link) {
+        WARNING("LXST: Stale link closed (ignoring)");
+        return;
+    }
+
     WARNING("LXST: Link closed (deferred)");
 
     // Don't call call_ended() here — runs on Reticulum thread without LVGL lock.
@@ -1264,6 +1451,8 @@ void UIManager::call_answer() {
         return;
     }
     INFO("LXST: Answering incoming call");
+    _call_audio_rx_count = 0;
+    _call_audio_tx_count = 0;
 
     // Update screen FIRST (before audio init which may block briefly)
     _call_state = CallState::CONNECTING;
@@ -1274,19 +1463,26 @@ void UIManager::call_answer() {
     call_send_signal(LXST_STATUS_CONNECTING);
 
     // Initialize audio pipeline
+    lxst_breadcrumb(30, ESP.getFreeHeap());
     if (!_lxst_audio) {
         _lxst_audio = new LXSTAudio();
     }
+    lxst_breadcrumb(31, ESP.getFreeHeap());
     if (!_lxst_audio->init(CODEC2_MODE_1600)) {
         WARNING("LXST: Audio init failed");
         call_ended();
         return;
     }
+    lxst_breadcrumb(32, ESP.getFreeHeap());
 
-    // Start playback (RX) so we can hear the caller
-    if (!_lxst_audio->startPlayback()) {
-        WARNING("LXST: Playback start failed");
+    // Start full-duplex audio (mic + speaker)
+    if (!_lxst_audio->startFullDuplex()) {
+        WARNING("LXST: Full-duplex start failed");
     }
+    lxst_breadcrumb(33, ESP.getFreeHeap());
+
+    // Send profile preference: VLBW (Codec2 1600bps) — answerer sends last and "wins"
+    call_send_signal(LXST_PREFERRED_PROFILE + LXST_PROFILE_VLBW);
 
     // Send STATUS_ESTABLISHED
     call_send_signal(LXST_STATUS_ESTABLISHED);
@@ -1294,7 +1490,7 @@ void UIManager::call_answer() {
     // Transition to active call
     _call_state = CallState::ACTIVE;
     _call_start_ms = millis();
-    INFO("LXST: Call active (answerer, RX mode)");
+    INFO("LXST: Call active (answerer, full-duplex)");
 }
 
 void UIManager::announce_lxst() {

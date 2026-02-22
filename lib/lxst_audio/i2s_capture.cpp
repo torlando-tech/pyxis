@@ -12,6 +12,7 @@
 #include "codec_wrapper.h"
 #include "audio_filters.h"
 #include "encoded_ring_buffer.h"
+#include <Arduino.h>
 
 using namespace Hardware::TDeck;
 
@@ -21,27 +22,39 @@ I2SCapture::I2SCapture() = default;
 
 I2SCapture::~I2SCapture() {
     stop();
-    destroyEncoder();
+    // Ensure I2S driver is released even if stop() skipped (not capturing)
+    if (i2sInitialized_) {
+        i2s_stop(I2S_NUM_1);
+        i2s_driver_uninstall(I2S_NUM_1);
+        i2sInitialized_ = false;
+    }
+    releaseBuffers();
 }
 
 bool I2SCapture::init() {
     if (i2sInitialized_) return true;
 
+    // Defensively uninstall in case a previous session leaked the driver
+    i2s_driver_uninstall(I2S_NUM_1);
+
     // Configure I2S_NUM_1 for mic capture from ES7210
+    // Settings match official LilyGO T-Deck Plus Microphone example
     i2s_config_t i2s_config = {};
     i2s_config.mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_RX);
-    i2s_config.sample_rate = SAMPLE_RATE;
+    i2s_config.sample_rate = I2S_SAMPLE_RATE;  // 16kHz — downsample to 8kHz for Codec2
     i2s_config.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
-    // ES7210 in normal mode outputs stereo (mic1=L, mic2=R) on SDOUT1
-    // We capture both channels and extract mic1 (left channel only)
-    i2s_config.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
+    i2s_config.channel_format = I2S_CHANNEL_FMT_ALL_LEFT;
     i2s_config.communication_format = I2S_COMM_FORMAT_STAND_I2S;
     i2s_config.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
-    i2s_config.dma_buf_count = 4;
-    i2s_config.dma_buf_len = 128;
+    i2s_config.dma_buf_count = 8;
+    i2s_config.dma_buf_len = 64;
     i2s_config.use_apll = false;
-    i2s_config.tx_desc_auto_clear = false;
-    i2s_config.fixed_mclk = 4096000;  // 4.096MHz MCLK for ES7210 at 8kHz
+    i2s_config.tx_desc_auto_clear = true;
+    i2s_config.fixed_mclk = 0;
+    i2s_config.mclk_multiple = I2S_MCLK_MULTIPLE_256;  // MCLK = 16kHz * 256 = 4.096MHz
+    i2s_config.bits_per_chan = I2S_BITS_PER_CHAN_16BIT;
+    // TDM channel mask — required for ES7210 on T-Deck Plus
+    i2s_config.chan_mask = static_cast<i2s_channel_t>(I2S_TDM_ACTIVE_CH0 | I2S_TDM_ACTIVE_CH1);
 
     esp_err_t err = i2s_driver_install(I2S_NUM_1, &i2s_config, 0, NULL);
     if (err != ESP_OK) {
@@ -63,23 +76,24 @@ bool I2SCapture::init() {
         return false;
     }
 
+    i2s_zero_dma_buffer(I2S_NUM_1);
+
     i2sInitialized_ = true;
-    ESP_LOGI(TAG, "I2S capture initialized: %dHz 16-bit mono, MCLK=4.096MHz", SAMPLE_RATE);
+
+    ESP_LOGI(TAG, "I2S capture initialized: %dHz 16-bit mono, MCLK=4.096MHz", I2S_SAMPLE_RATE);
     return true;
 }
 
-bool I2SCapture::configureEncoder(int codec2Mode, bool enableFilters) {
-    destroyEncoder();
+bool I2SCapture::configureEncoder(Codec2Wrapper* codec, bool enableFilters) {
+    releaseBuffers();
 
-    encoder_ = new Codec2Wrapper();
-    if (!encoder_->create(codec2Mode)) {
-        ESP_LOGE(TAG, "Failed to create Codec2 encoder mode %d", codec2Mode);
-        delete encoder_;
-        encoder_ = nullptr;
+    if (!codec || !codec->isCreated()) {
+        ESP_LOGE(TAG, "Invalid codec pointer");
         return false;
     }
+    codec_ = codec;
 
-    frameSamples_ = encoder_->samplesPerFrame();
+    frameSamples_ = codec_->samplesPerFrame();
     filtersEnabled_ = enableFilters;
 
     // Allocate ring buffer in PSRAM
@@ -100,12 +114,12 @@ bool I2SCapture::configureEncoder(int codec2Mode, bool enableFilters) {
     }
 
     ESP_LOGI(TAG, "Encoder configured: Codec2 mode %d, %d samples/frame, %d bytes/frame, filters=%d",
-             codec2Mode, frameSamples_, encoder_->bytesPerFrame(), enableFilters);
+             codec_->libraryMode(), frameSamples_, codec_->bytesPerFrame(), enableFilters);
     return true;
 }
 
 bool I2SCapture::start() {
-    if (!i2sInitialized_ || !encoder_ || capturing_.load()) return false;
+    if (!i2sInitialized_ || !codec_ || capturing_.load()) return false;
 
     // Set capturing BEFORE starting task to avoid race (same pattern as LXST-kt)
     capturing_.store(true, std::memory_order_relaxed);
@@ -145,9 +159,8 @@ void I2SCapture::stop() {
     ESP_LOGI(TAG, "Capture stopped");
 }
 
-void I2SCapture::destroyEncoder() {
-    delete encoder_;
-    encoder_ = nullptr;
+void I2SCapture::releaseBuffers() {
+    codec_ = nullptr;  // Not owned — don't delete
     delete filterChain_;
     filterChain_ = nullptr;
     delete encodedRing_;
@@ -166,29 +179,39 @@ void I2SCapture::captureTask(void* param) {
 }
 
 void I2SCapture::captureLoop() {
-    // I2S read buffer: read in chunks smaller than a codec frame
+    // I2S read buffer: read in chunks (at 16kHz I2S rate)
     static constexpr int READ_SAMPLES = 128;
     int16_t readBuf[READ_SAMPLES];
+    // Downsample buffer: 16kHz -> 8kHz (take every other sample)
+    int16_t dsBuf[READ_SAMPLES / 2];
     size_t bytesRead = 0;
 
-    ESP_LOGI(TAG, "Capture task running on core %d", xPortGetCoreID());
+    Serial.printf("[CAP] Capture task on core %d, I2S=%dHz, codec=%dHz\n",
+                  xPortGetCoreID(), I2S_SAMPLE_RATE, CODEC_SAMPLE_RATE);
+    uint32_t framesEncoded = 0;
 
     while (capturing_.load(std::memory_order_relaxed)) {
-        // Read samples from I2S DMA
+        // Read samples from I2S DMA (at 16kHz)
         esp_err_t err = i2s_read(I2S_NUM_1, readBuf, sizeof(readBuf), &bytesRead,
                                  pdMS_TO_TICKS(100));
         if (err != ESP_OK || bytesRead == 0) continue;
 
         int samplesRead = bytesRead / sizeof(int16_t);
 
-        // Accumulate into frame-sized buffer
+        // Downsample 16kHz -> 8kHz: take every other sample
+        int dsCount = samplesRead / 2;
+        for (int i = 0; i < dsCount; i++) {
+            dsBuf[i] = readBuf[i * 2];
+        }
+
+        // Accumulate downsampled samples into frame-sized buffer
         int offset = 0;
-        while (offset < samplesRead && capturing_.load(std::memory_order_relaxed)) {
+        while (offset < dsCount && capturing_.load(std::memory_order_relaxed)) {
             int needed = frameSamples_ - accumCount_;
-            int available = samplesRead - offset;
+            int available = dsCount - offset;
             int toCopy = (available < needed) ? available : needed;
 
-            memcpy(accumBuffer_ + accumCount_, readBuf + offset, toCopy * sizeof(int16_t));
+            memcpy(accumBuffer_ + accumCount_, dsBuf + offset, toCopy * sizeof(int16_t));
             accumCount_ += toCopy;
             offset += toCopy;
 
@@ -199,12 +222,31 @@ void I2SCapture::captureLoop() {
 
                 // Apply voice filters
                 if (filtersEnabled_ && filterChain_ && !muted_.load(std::memory_order_relaxed)) {
-                    filterChain_->process(frameData, frameSamples_, SAMPLE_RATE);
+                    filterChain_->process(frameData, frameSamples_, CODEC_SAMPLE_RATE);
+                }
+
+                // Log PCM levels for first few frames (pre-filter)
+                if (framesEncoded < 5 || (framesEncoded % 500 == 0)) {
+                    int16_t maxVal = 0;
+                    for (int s = 0; s < frameSamples_; s++) {
+                        int16_t v = accumBuffer_[s] < 0 ? -accumBuffer_[s] : accumBuffer_[s];
+                        if (v > maxVal) maxVal = v;
+                    }
+                    Serial.printf("[CAP] PCM peak=%d (first=%d,%d,%d,%d)\n",
+                                  maxVal, accumBuffer_[0], accumBuffer_[1],
+                                  accumBuffer_[2], accumBuffer_[3]);
                 }
 
                 // Encode
-                int encodedLen = encoder_->encode(frameData, frameSamples_,
-                                                  encodeBuf_, sizeof(encodeBuf_));
+                int encodedLen = codec_->encode(frameData, frameSamples_,
+                                                encodeBuf_, sizeof(encodeBuf_));
+                if (encodedLen > 0) {
+                    framesEncoded++;
+                    if (framesEncoded <= 3 || (framesEncoded % 500 == 0)) {
+                        Serial.printf("[CAP] Encoded #%lu: %d bytes\n",
+                                      (unsigned long)framesEncoded, encodedLen);
+                    }
+                }
                 if (encodedLen > 0 && encodedRing_) {
                     if (!encodedRing_->write(encodeBuf_, encodedLen)) {
                         // Ring full — drop oldest, then write

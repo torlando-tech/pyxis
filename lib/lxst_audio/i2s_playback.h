@@ -9,6 +9,7 @@
 class PacketRingBuffer;
 class Codec2Wrapper;
 
+
 /**
  * ESP32 I2S speaker playback engine for LXST voice streaming.
  *
@@ -30,11 +31,11 @@ public:
     I2SPlayback& operator=(const I2SPlayback&) = delete;
 
     /**
-     * Configure the decoder for a specific Codec2 mode.
-     * @param codec2Mode Codec2 library mode (0=3200, 2=1600, 8=700C)
+     * Configure the decoder with a shared Codec2 instance.
+     * @param codec Shared Codec2Wrapper (not owned — caller manages lifecycle)
      * @return true on success
      */
-    bool configureDecoder(int codec2Mode);
+    bool configureDecoder(Codec2Wrapper* codec);
 
     /**
      * Start voice playback. Takes over I2S_NUM_0.
@@ -65,8 +66,8 @@ public:
     /** Number of decoded PCM frames buffered. */
     int bufferedFrames() const;
 
-    /** Destroy the decoder and release codec resources. */
-    void destroyDecoder();
+    /** Release playback buffers (does NOT destroy the shared codec). */
+    void releaseBuffers();
 
 private:
     static void playbackTask(void* param);
@@ -77,7 +78,7 @@ private:
     std::atomic<bool> muted_{false};
     void* taskHandle_ = nullptr;
 
-    Codec2Wrapper* decoder_ = nullptr;
+    Codec2Wrapper* codec_ = nullptr;  // Shared, not owned
     PacketRingBuffer* pcmRing_ = nullptr;
 
     // Decode buffer for incoming encoded packets
@@ -91,7 +92,7 @@ private:
     static constexpr int SAMPLE_RATE = 8000;
     static constexpr int PCM_RING_FRAMES = 16;
     static constexpr int PREBUFFER_FRAMES = 3;
-    static constexpr int PLAYBACK_TASK_STACK = 4096;
+    static constexpr int PLAYBACK_TASK_STACK = 8192;
     static constexpr int PLAYBACK_TASK_PRIORITY = 5;
     static constexpr int PLAYBACK_TASK_CORE = 0;
 };

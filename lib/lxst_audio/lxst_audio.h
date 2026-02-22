@@ -8,6 +8,7 @@
 
 class I2SCapture;
 class I2SPlayback;
+class Codec2Wrapper;
 
 /**
  * LXST Audio Pipeline Controller for ESP32-S3 T-Deck Plus.
@@ -19,27 +20,21 @@ class I2SPlayback;
  *   - Codec2 codec lifecycle
  *   - Tone.cpp coexistence (releases I2S_NUM_0 for tones when idle)
  *
- * Currently half-duplex (push-to-talk): only capture OR playback active
- * at once. Full-duplex can be added once memory profile is validated.
+ * Supports half-duplex (push-to-talk) and full-duplex modes.
+ * I2S_NUM_0 (speaker) and I2S_NUM_1 (mic) are independent peripherals.
  *
- * Usage:
+ * Usage (full-duplex voice call):
  *   LXSTAudio audio;
  *   audio.init(CODEC2_MODE_1600);
+ *   audio.startFullDuplex();   // Both mic + speaker active
  *
- *   // To transmit (push-to-talk):
- *   audio.startCapture();
- *   while (transmitting) {
- *       if (audio.readEncodedPacket(buf, sizeof(buf), &len)) {
- *           // Send over Reticulum link
- *       }
- *   }
- *   audio.stopCapture();
+ *   // TX: read encoded mic data and send over network
+ *   if (audio.readEncodedPacket(buf, sizeof(buf), &len)) { ... }
  *
- *   // To receive:
- *   audio.startPlayback();
- *   // When encoded packet arrives from network:
+ *   // RX: write received encoded data for speaker playback
  *   audio.writeEncodedPacket(data, len);
- *   // When call ends:
+ *
+ *   audio.stopCapture();
  *   audio.stopPlayback();
  */
 
@@ -54,9 +49,10 @@ class I2SPlayback;
 class LXSTAudio {
 public:
     enum class State {
-        IDLE,       // No audio activity
-        CAPTURING,  // Microphone active, encoding
-        PLAYING,    // Speaker active, decoding
+        IDLE,         // No audio activity
+        CAPTURING,    // Microphone active, encoding
+        PLAYING,      // Speaker active, decoding
+        FULL_DUPLEX,  // Both mic + speaker active
     };
 
     LXSTAudio();
@@ -80,8 +76,8 @@ public:
     void deinit();
 
     /**
-     * Start microphone capture (push-to-talk TX).
-     * Stops playback if active.
+     * Start microphone capture only (TX).
+     * In half-duplex mode, stops playback if active.
      * @return true on success
      */
     bool startCapture();
@@ -90,8 +86,8 @@ public:
     void stopCapture();
 
     /**
-     * Start speaker playback (RX mode).
-     * Stops capture if active.
+     * Start speaker playback only (RX).
+     * In half-duplex mode, stops capture if active.
      * Tone.cpp must not be playing.
      * @return true on success
      */
@@ -99,6 +95,13 @@ public:
 
     /** Stop speaker playback. Releases I2S_NUM_0 for tone generator. */
     void stopPlayback();
+
+    /**
+     * Start full-duplex audio (both mic capture + speaker playback).
+     * Uses I2S_NUM_1 for mic and I2S_NUM_0 for speaker simultaneously.
+     * @return true on success
+     */
+    bool startFullDuplex();
 
     /**
      * Read the next encoded packet from the capture pipeline.
@@ -130,6 +133,12 @@ public:
     /** Current pipeline state. */
     State state() const { return state_; }
 
+    /** Whether capture is active (CAPTURING or FULL_DUPLEX). */
+    bool isCapturing() const { return state_ == State::CAPTURING || state_ == State::FULL_DUPLEX; }
+
+    /** Whether playback is active (PLAYING or FULL_DUPLEX). */
+    bool isPlaying() const { return state_ == State::PLAYING || state_ == State::FULL_DUPLEX; }
+
     /** Whether init() has been called successfully. */
     bool isInitialized() const { return initialized_; }
 
@@ -142,6 +151,7 @@ public:
 private:
     I2SCapture* capture_ = nullptr;
     I2SPlayback* playback_ = nullptr;
+    Codec2Wrapper* codec_ = nullptr;  // Single shared codec instance
     State state_ = State::IDLE;
     bool initialized_ = false;
     int codec2Mode_ = CODEC2_MODE_1600;

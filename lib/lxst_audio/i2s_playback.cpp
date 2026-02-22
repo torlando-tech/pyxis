@@ -10,6 +10,7 @@
 #include <Hardware/TDeck/Config.h>
 #include "codec_wrapper.h"
 #include "packet_ring_buffer.h"
+#include <Arduino.h>
 
 using namespace Hardware::TDeck;
 
@@ -19,27 +20,25 @@ I2SPlayback::I2SPlayback() = default;
 
 I2SPlayback::~I2SPlayback() {
     stop();
-    destroyDecoder();
+    releaseBuffers();
 }
 
-bool I2SPlayback::configureDecoder(int codec2Mode) {
-    destroyDecoder();
+bool I2SPlayback::configureDecoder(Codec2Wrapper* codec) {
+    releaseBuffers();
 
-    decoder_ = new Codec2Wrapper();
-    if (!decoder_->create(codec2Mode)) {
-        ESP_LOGE(TAG, "Failed to create Codec2 decoder mode %d", codec2Mode);
-        delete decoder_;
-        decoder_ = nullptr;
+    if (!codec || !codec->isCreated()) {
+        ESP_LOGE(TAG, "Invalid codec pointer");
         return false;
     }
+    codec_ = codec;
 
-    frameSamples_ = decoder_->samplesPerFrame();
+    frameSamples_ = codec_->samplesPerFrame();
 
     // PCM ring buffer in PSRAM
     pcmRing_ = new PacketRingBuffer(PCM_RING_FRAMES, frameSamples_);
 
-    // Decode buffer in PSRAM
-    decodeBufSize_ = frameSamples_ * 2;  // Extra room for mode switches
+    // Decode buffer in PSRAM — sized for batched frames (Columba sends up to 8 sub-frames)
+    decodeBufSize_ = frameSamples_ * 16;
     decodeBuf_ = static_cast<int16_t*>(
         heap_caps_malloc(sizeof(int16_t) * decodeBufSize_, MALLOC_CAP_SPIRAM));
 
@@ -48,12 +47,12 @@ bool I2SPlayback::configureDecoder(int codec2Mode) {
         heap_caps_malloc(sizeof(int16_t) * frameSamples_, MALLOC_CAP_SPIRAM));
 
     ESP_LOGI(TAG, "Decoder configured: Codec2 mode %d, %d samples/frame",
-             codec2Mode, frameSamples_);
+             codec_->libraryMode(), frameSamples_);
     return true;
 }
 
 bool I2SPlayback::start() {
-    if (!decoder_ || playing_.load()) return false;
+    if (!codec_ || playing_.load()) return false;
 
     // Caller (LXSTAudio) is responsible for calling tone_deinit() first.
     // Defensively uninstall in case it wasn't done.
@@ -144,9 +143,8 @@ void I2SPlayback::stop() {
     ESP_LOGI(TAG, "Playback stopped");
 }
 
-void I2SPlayback::destroyDecoder() {
-    delete decoder_;
-    decoder_ = nullptr;
+void I2SPlayback::releaseBuffers() {
+    codec_ = nullptr;  // Not owned — don't delete
     delete pcmRing_;
     pcmRing_ = nullptr;
     free(decodeBuf_);
@@ -158,18 +156,26 @@ void I2SPlayback::destroyDecoder() {
 }
 
 bool I2SPlayback::writeEncodedPacket(const uint8_t* data, int length) {
-    if (!decoder_ || !pcmRing_ || !decodeBuf_) return false;
+    if (!codec_ || !pcmRing_ || !decodeBuf_ || !frameSamples_) return false;
 
-    int decodedSamples = decoder_->decode(data, length, decodeBuf_, decodeBufSize_);
-    if (decodedSamples <= 0) return false;
+    int decodedSamples = codec_->decode(data, length, decodeBuf_, decodeBufSize_);
+    if (decodedSamples <= 0) {
+        Serial.printf("[PLAY] Decode FAIL: in=%d buf=%d\n", length, decodeBufSize_);
+        return false;
+    }
 
-    // Write decoded PCM to ring buffer
-    if (!pcmRing_->write(decodeBuf_, decodedSamples)) {
-        // Ring full — drop oldest frame, then write
-        if (dropBuf_) {
-            pcmRing_->read(dropBuf_, decodedSamples);
+    // Write decoded PCM to ring buffer one frame at a time
+    // (ring buffer only accepts exactly frameSamples_ per write)
+    int numFrames = decodedSamples / frameSamples_;
+    for (int i = 0; i < numFrames; i++) {
+        int16_t* framePtr = decodeBuf_ + i * frameSamples_;
+        if (!pcmRing_->write(framePtr, frameSamples_)) {
+            // Ring full — drop oldest frame, then write
+            if (dropBuf_) {
+                pcmRing_->read(dropBuf_, frameSamples_);
+            }
+            pcmRing_->write(framePtr, frameSamples_);
         }
-        pcmRing_->write(decodeBuf_, decodedSamples);
     }
 
     return true;
@@ -204,12 +210,15 @@ void I2SPlayback::playbackLoop() {
     int16_t* silenceFrame = static_cast<int16_t*>(
         heap_caps_calloc(frameSamples_, sizeof(int16_t), MALLOC_CAP_SPIRAM));
 
+    uint32_t framesPlayed = 0;
+
     while (playing_.load(std::memory_order_relaxed)) {
         // Prebuffer: wait until we have enough frames before starting playback
         if (!prebuffered) {
             if (pcmRing_ && pcmRing_->availableFrames() >= PREBUFFER_FRAMES) {
                 prebuffered = true;
-                ESP_LOGI(TAG, "Prebuffer complete, starting playback");
+                Serial.printf("[PLAY] Prebuffer complete (%d frames)\n",
+                              pcmRing_->availableFrames());
             } else {
                 vTaskDelay(pdMS_TO_TICKS(5));
                 continue;
@@ -218,6 +227,13 @@ void I2SPlayback::playbackLoop() {
 
         // Read a frame from the ring buffer
         bool hasFrame = pcmRing_ && pcmRing_->read(frameBuf, frameSamples_);
+        if (hasFrame) {
+            framesPlayed++;
+            if (framesPlayed <= 3 || (framesPlayed % 500 == 0)) {
+                Serial.printf("[PLAY] Frame #%lu (buf=%d)\n",
+                              (unsigned long)framesPlayed, pcmRing_->availableFrames());
+            }
+        }
 
         int16_t* outputData;
         if (!hasFrame) {

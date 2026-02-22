@@ -4,6 +4,10 @@
 #pragma once
 
 #include <cstdint>
+#ifdef ARDUINO
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#endif
 
 struct CODEC2;
 
@@ -80,6 +84,10 @@ private:
     int bytesPerFrame_ = 0;
     uint8_t modeHeader_ = 0;
     int libraryMode_ = 0;
+
+#ifdef ARDUINO
+    SemaphoreHandle_t mutex_ = nullptr;
+#endif
 
     static int headerToLibraryMode(uint8_t header);
     static uint8_t libraryModeToHeader(int libraryMode);

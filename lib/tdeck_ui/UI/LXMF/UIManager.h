@@ -249,8 +249,13 @@ private:
     // LXST codec header byte
     static constexpr uint8_t LXST_CODEC_CODEC2 = 0x02;
 
+    // LXST profile negotiation
+    static constexpr int LXST_PREFERRED_PROFILE = 0xFF;
+    static constexpr int LXST_PROFILE_VLBW      = 0x20;  // Codec2 1600bps
+
     enum class CallState {
         IDLE,
+        PATH_REQUESTING,    // Outgoing: waiting for path to resolve
         LINK_ESTABLISHING,  // Outgoing: waiting for Link to come up
         WAIT_AVAILABLE,     // Outgoing: link up, waiting for STATUS_AVAILABLE
         WAIT_RINGING,       // Outgoing: sent identify, waiting for STATUS_RINGING
@@ -262,6 +267,7 @@ private:
 
     CallState _call_state;
     RNS::Bytes _call_peer_hash;
+    RNS::Bytes _call_dest_hash;   // LXST destination hash (for deferred link creation)
     RNS::Link _call_link;
     LXSTAudio* _lxst_audio;
     uint32_t _call_start_ms;       // millis() when call became ACTIVE
@@ -270,6 +276,8 @@ private:
     volatile bool _call_answer_pending;  // Set by LVGL task, consumed by main loop
     volatile bool _call_link_closed_pending;  // Set by link callback, consumed by call_update
     volatile uint8_t _call_signal_pending;    // 0xFF = none; set by packet callback
+    uint32_t _call_audio_rx_count;    // Count of received audio frames (for diagnostics)
+    uint32_t _call_audio_tx_count;    // Count of sent audio frames (for diagnostics)
 
     // Singleton instance pointer for static Link callbacks
     static UIManager* s_call_instance;
@@ -284,10 +292,13 @@ private:
     void call_process_signal(uint8_t signal);
 
     // Send a signalling byte over the call link
-    void call_send_signal(uint8_t signal);
+    void call_send_signal(int signal);
 
     // Send encoded audio packet over the call link
     void call_send_audio(const uint8_t* data, int length);
+
+    // Process a single received audio frame (codec_header + data)
+    void call_rx_audio_frame(const uint8_t* frame, size_t frame_len);
 
     // Handle received packet on call link (queues signals for call_update)
     void call_on_packet(const RNS::Bytes& data);
