@@ -249,11 +249,9 @@ void I2SCapture::captureLoop() {
                 }
                 if (encodedLen > 0 && encodedRing_) {
                     if (!encodedRing_->write(encodeBuf_, encodedLen)) {
-                        // Ring full — drop oldest, then write
-                        uint8_t discard[256];
-                        int discardLen;
-                        encodedRing_->read(discard, sizeof(discard), &discardLen);
-                        encodedRing_->write(encodeBuf_, encodedLen);
+                        // Ring full — drop this frame (TX pump will drain)
+                        // NOTE: Do NOT call read() here — this is SPSC and
+                        // the TX pump is the sole consumer on another core.
                     }
                 }
 

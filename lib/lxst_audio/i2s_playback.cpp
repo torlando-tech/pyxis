@@ -170,11 +170,10 @@ bool I2SPlayback::writeEncodedPacket(const uint8_t* data, int length) {
     for (int i = 0; i < numFrames; i++) {
         int16_t* framePtr = decodeBuf_ + i * frameSamples_;
         if (!pcmRing_->write(framePtr, frameSamples_)) {
-            // Ring full — drop oldest frame, then write
-            if (dropBuf_) {
-                pcmRing_->read(dropBuf_, frameSamples_);
-            }
-            pcmRing_->write(framePtr, frameSamples_);
+            // Ring full — drop this frame (playback task will drain)
+            // NOTE: Do NOT call read() here — this is SPSC and
+            // the playback task is the sole consumer on another core.
+            break;
         }
     }
 
