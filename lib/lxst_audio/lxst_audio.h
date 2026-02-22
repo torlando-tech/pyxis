@@ -151,7 +151,8 @@ public:
 private:
     I2SCapture* capture_ = nullptr;
     I2SPlayback* playback_ = nullptr;
-    Codec2Wrapper* codec_ = nullptr;  // Single shared codec instance
+    Codec2Wrapper* encodeCodec_ = nullptr;  // Encoder codec (capture task)
+    Codec2Wrapper* decodeCodec_ = nullptr;  // Decoder codec (main thread)
     State state_ = State::IDLE;
     bool initialized_ = false;
     int codec2Mode_ = CODEC2_MODE_1600;

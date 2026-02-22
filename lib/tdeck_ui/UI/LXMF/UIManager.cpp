@@ -1342,14 +1342,20 @@ void UIManager::call_update() {
             }
         }
 
-        // Pump TX: batch multiple codec frames into one packet to reduce overhead.
+        // Pump TX: batch exactly 8 codec frames into one packet.
         // Each encoded frame from ring buffer = [mode_header(1)] + [raw_codec2(8)] = 9 bytes.
-        // We batch up to 8 frames per packet: [mode_header] + [8 * raw_codec2] = 65 bytes.
-        // This matches Columba's batching (~320ms of audio per packet).
-        static constexpr int TX_BATCH_SIZE = 8;  // frames per packet
+        // We send exactly 8 frames per packet: [mode_header] + [8 * raw_codec2] = 65 bytes.
+        // MUST be exactly 8: Columba's native ring buffer (frameSamples=2560) rejects
+        // partial writes (count != frameSamples), so 8*320=2560 samples is required.
+        static constexpr int TX_BATCH_SIZE = 8;  // frames per packet — MUST match Columba's frameSamples/320
         if (_lxst_audio && _lxst_audio->isCapturing()) {
             // Send up to 3 batched packets per call_update() cycle
             for (int batch = 0; batch < 3; batch++) {
+                // Check if we have enough frames before starting to read
+                if (_lxst_audio->capturePacketsAvailable() < TX_BATCH_SIZE) {
+                    break;  // Wait until we have a full batch
+                }
+
                 uint8_t batch_buf[128];  // [mode_header] + [N * raw_codec2_data]
                 int batch_len = 0;
                 int frame_count = 0;
@@ -1377,7 +1383,7 @@ void UIManager::call_update() {
                     _call_audio_tx_count++;
                 }
 
-                if (frame_count > 0) {
+                if (frame_count == TX_BATCH_SIZE) {
                     call_send_audio_batch(batch_buf, batch_len, frame_count);
                     if (_call_audio_tx_count <= 16) {
                         char dbg[80];
@@ -1386,7 +1392,7 @@ void UIManager::call_update() {
                         INFO(dbg);
                     }
                 } else {
-                    break;  // no more data
+                    break;  // couldn't fill batch (shouldn't happen after availablePackets check)
                 }
             }
         } else if (_call_audio_tx_count == 0) {

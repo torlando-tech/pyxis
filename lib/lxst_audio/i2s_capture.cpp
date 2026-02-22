@@ -179,16 +179,20 @@ void I2SCapture::captureTask(void* param) {
 }
 
 void I2SCapture::captureLoop() {
-    // I2S read buffer: read in chunks (at 16kHz I2S rate)
-    static constexpr int READ_SAMPLES = 128;
+    // I2S read buffer: read in chunks (TDM interleaved, 2 channels at 16kHz each)
+    static constexpr int READ_SAMPLES = 256;  // Larger buffer → more 8kHz samples per read
     int16_t readBuf[READ_SAMPLES];
-    // Downsample buffer: 16kHz -> 8kHz (take every other sample)
-    int16_t dsBuf[READ_SAMPLES / 2];
+    // After TDM deinterleave (÷2) + downsample 16kHz→8kHz (÷2) = stride 4
+    int16_t dsBuf[READ_SAMPLES / 4];
     size_t bytesRead = 0;
 
     Serial.printf("[CAP] Capture task on core %d, I2S=%dHz, codec=%dHz\n",
                   xPortGetCoreID(), I2S_SAMPLE_RATE, CODEC_SAMPLE_RATE);
     uint32_t framesEncoded = 0;
+    uint32_t totalDsSamples = 0;    // Total mono samples after deinterleave
+    uint32_t rateCheckMs = millis(); // For sample rate measurement
+    int16_t runningPeakDs = 0;      // Peak of deinterleaved samples per interval
+    int16_t runningPeakRaw = 0;     // Peak of raw I2S samples per interval
 
     while (capturing_.load(std::memory_order_relaxed)) {
         // Read samples from I2S DMA (at 16kHz)
@@ -198,10 +202,54 @@ void I2SCapture::captureLoop() {
 
         int samplesRead = bytesRead / sizeof(int16_t);
 
-        // Downsample 16kHz -> 8kHz: take every other sample
-        int dsCount = samplesRead / 2;
+        // One-time dump of first raw I2S samples to see TDM channel layout
+        if (framesEncoded == 0 && samplesRead >= 16) {
+            static bool dumped = false;
+            if (!dumped) {
+                dumped = true;
+                Serial.printf("[CAP] Raw I2S first 16 samples (%d total): ", samplesRead);
+                for (int d = 0; d < 16; d++) Serial.printf("%d ", readBuf[d]);
+                Serial.println();
+            }
+        }
+
+        // Track raw I2S peak (all channels)
+        for (int i = 0; i < samplesRead; i++) {
+            int16_t v = readBuf[i] < 0 ? -readBuf[i] : readBuf[i];
+            if (v > runningPeakRaw) runningPeakRaw = v;
+        }
+
+        // TDM deinterleave + downsample: readBuf is [CH0,CH1,CH0,CH1,...] at 16kHz/ch.
+        // Stride 4 = deinterleave (÷2) + 16kHz→8kHz downsample (÷2).
+        // Anti-aliasing: average adjacent CH0 samples to attenuate >4kHz before decimation.
+        static constexpr int16_t LIMITER_THRESHOLD = 16000;
+        int dsCount = samplesRead / 4;
         for (int i = 0; i < dsCount; i++) {
-            dsBuf[i] = readBuf[i * 2];
+            // CH0 samples are at even indices: 0, 2, 4, 6, ...
+            // Average readBuf[i*4] (CH0 sample N) and readBuf[i*4+2] (CH0 sample N+1)
+            int32_t sum = (int32_t)readBuf[i * 4] + (int32_t)readBuf[i * 4 + 2];
+            int16_t s = (int16_t)(sum / 2);
+            // Hard limiter: clamp to ±LIMITER_THRESHOLD to prevent ADC clipping artifacts
+            if (s > LIMITER_THRESHOLD) s = LIMITER_THRESHOLD;
+            else if (s < -LIMITER_THRESHOLD) s = -LIMITER_THRESHOLD;
+            dsBuf[i] = s;
+            int16_t v = s < 0 ? -s : s;
+            if (v > runningPeakDs) runningPeakDs = v;
+        }
+
+        // Measure actual sample rate: count deinterleaved samples per second
+        totalDsSamples += dsCount;
+        uint32_t now = millis();
+        uint32_t elapsed = now - rateCheckMs;
+        if (elapsed >= 2000) {
+            uint32_t rate = (totalDsSamples * 1000) / elapsed;
+            Serial.printf("[CAP] rate=%luHz frames=%lu rawPeak=%d dsPeak=%d\n",
+                          (unsigned long)rate, (unsigned long)framesEncoded,
+                          runningPeakRaw, runningPeakDs);
+            totalDsSamples = 0;
+            rateCheckMs = now;
+            runningPeakRaw = 0;
+            runningPeakDs = 0;
         }
 
         // Accumulate downsampled samples into frame-sized buffer
@@ -243,8 +291,12 @@ void I2SCapture::captureLoop() {
                 if (encodedLen > 0) {
                     framesEncoded++;
                     if (framesEncoded <= 3 || (framesEncoded % 500 == 0)) {
-                        Serial.printf("[CAP] Encoded #%lu: %d bytes\n",
-                                      (unsigned long)framesEncoded, encodedLen);
+                        char hex[64];
+                        int hpos = 0;
+                        for (int h = 0; h < encodedLen && h < 20 && hpos < 60; h++)
+                            hpos += snprintf(hex + hpos, 64 - hpos, "%02X ", encodeBuf_[h]);
+                        Serial.printf("[CAP] Encoded #%lu: %d bytes: %s\n",
+                                      (unsigned long)framesEncoded, encodedLen, hex);
                     }
                 }
                 if (encodedLen > 0 && encodedRing_) {

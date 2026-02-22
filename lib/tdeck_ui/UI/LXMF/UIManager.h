@@ -252,6 +252,7 @@ private:
     // LXST profile negotiation
     static constexpr int LXST_PREFERRED_PROFILE = 0xFF;
     static constexpr int LXST_PROFILE_VLBW      = 0x20;  // Codec2 1600bps
+    static constexpr int LXST_PROFILE_LBW       = 0x30;  // Codec2 3200bps
 
     enum class CallState {
         IDLE,
