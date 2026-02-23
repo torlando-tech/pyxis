@@ -685,11 +685,12 @@ bool NimBLEPlatform::startScan(uint16_t duration_ms) {
                     std::to_string(SCAN_FAIL_RECOVERY_THRESHOLD) + ")");
 
             // Only reboot after prolonged desync — brief desyncs self-recover.
-            // With active connections, data still flows over BLE mesh — we just
-            // can't discover new peers. Extend tolerance to 5 minutes.
+            // With active connections, give a bit more time (90s vs 60s) but
+            // don't wait too long — a desynced host can't actually communicate
+            // over those connections, so they're effectively zombie connections.
             unsigned long reboot_threshold = HOST_DESYNC_REBOOT_MS;  // 60s base
             if (getConnectionCount() > 0) {
-                reboot_threshold = 300000;  // 5 min with active connections
+                reboot_threshold = 90000;  // 90s with connections (they're likely dead anyway)
             }
             if (desync_duration >= reboot_threshold) {
                 ERROR("NimBLEPlatform: Host desynced for " +
