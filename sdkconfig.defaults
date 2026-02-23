@@ -84,3 +84,12 @@ CONFIG_ESP_TASK_WDT_EN=y
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=y
+
+# ============================================================================
+# Core Dump — writes CPU state + backtrace to flash on crash
+# Read with: espcoredump.py info_corefile -t raw -c 0x7F0000 -s 0x10000 <port>
+# ============================================================================
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+CONFIG_ESP_COREDUMP_CHECKSUM_SHA256=y
+CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=64
