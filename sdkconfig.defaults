@@ -77,8 +77,10 @@ CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096
 # ============================================================================
 # Task Watchdog Timer (TWDT)
 # Detects task starvation and deadlock conditions
+# 30s timeout accommodates SPIFFS flash I/O during identity persistence
+# (writing 40-50 destinations to flash takes 5-15s with GC/erase)
 # ============================================================================
 CONFIG_ESP_TASK_WDT_EN=y
-CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=y

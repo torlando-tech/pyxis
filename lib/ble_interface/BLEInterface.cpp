@@ -412,14 +412,19 @@ bool BLEInterface::sendToPeer(const Bytes& peer_identity, const Bytes& data) {
 //=============================================================================
 
 size_t BLEInterface::peerCount() const {
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
-    return _peer_manager.connectedCount();
+    // Non-blocking: return 0 if BLE task is busy (avoids main loop WDT)
+    if (!_mutex.try_lock()) return 0;
+    size_t count = _peer_manager.connectedCount();
+    _mutex.unlock();
+    return count;
 }
 
 size_t BLEInterface::getConnectedPeerSummaries(PeerSummary* out, size_t max_count) const {
     if (!out || max_count == 0) return 0;
 
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    // Non-blocking: return 0 if BLE task is busy (avoids main loop WDT)
+    if (!_mutex.try_lock()) return 0;
+    std::lock_guard<std::recursive_mutex> lock(_mutex, std::adopt_lock);
 
     // Cast away const for read-only access to non-const getConnectedPeers()
     auto& mutable_peer_manager = const_cast<BLE::BLEPeerManager&>(_peer_manager);
@@ -465,7 +470,9 @@ std::map<std::string, float> BLEInterface::get_stats() const {
     stats["peripheral_connections"] = 0.0f;
 
     try {
-        std::lock_guard<std::recursive_mutex> lock(_mutex);
+        // Non-blocking: return defaults if BLE task is busy (avoids main loop WDT)
+        if (!_mutex.try_lock()) return stats;
+        std::lock_guard<std::recursive_mutex> lock(_mutex, std::adopt_lock);
 
         // Count central vs peripheral connections
         int central_count = 0;
@@ -594,30 +601,33 @@ void BLEInterface::onScanResult(const ScanResult& result) {
 }
 
 void BLEInterface::onConnected(const ConnectionHandle& conn) {
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    {
+        std::lock_guard<std::recursive_mutex> lock(_mutex);
 
-    Bytes mac = conn.peer_address.toBytes();
+        Bytes mac = conn.peer_address.toBytes();
 
-    // Update peer state
-    _peer_manager.setPeerState(mac, PeerState::HANDSHAKING);
-    _peer_manager.setPeerHandle(mac, conn.handle);
+        // Update peer state
+        _peer_manager.setPeerState(mac, PeerState::HANDSHAKING);
+        _peer_manager.setPeerHandle(mac, conn.handle);
 
-    // Set MTU from connection (onMTUChange only fires for peripheral connections)
-    if (conn.mtu > 0) {
-        _peer_manager.setPeerMTU(mac, conn.mtu);
-    }
+        // Set MTU from connection (onMTUChange only fires for peripheral connections)
+        if (conn.mtu > 0) {
+            _peer_manager.setPeerMTU(mac, conn.mtu);
+        }
 
-    // Mark as central connection (we initiated the connection)
-    PeerInfo* peer = _peer_manager.getPeerByMac(mac);
-    if (peer) {
-        peer->is_central = true;  // We ARE central in this connection
-    }
+        // Mark as central connection (we initiated the connection)
+        PeerInfo* peer = _peer_manager.getPeerByMac(mac);
+        if (peer) {
+            peer->is_central = true;  // We ARE central in this connection
+        }
 
-    INFO("BLE: Connected to " + conn.peer_address.toString() +
-          " handle=" + std::to_string(conn.handle) +
-          " mtu=" + std::to_string(conn.mtu) + " (we are central)");
+        INFO("BLE: Connected to " + conn.peer_address.toString() +
+              " handle=" + std::to_string(conn.handle) +
+              " mtu=" + std::to_string(conn.mtu) + " (we are central)");
+    }  // _mutex released BEFORE blocking GATT service discovery
 
-    // Discover services
+    // Discover services — this does blocking GATT reads (3-15s) and must NOT
+    // hold _mutex, otherwise the NimBLE host task and main loop both block.
     _platform->discoverServices(conn.handle);
 }
 
@@ -672,15 +682,15 @@ void BLEInterface::onMTUChanged(const ConnectionHandle& conn, uint16_t mtu) {
 }
 
 void BLEInterface::onServicesDiscovered(const ConnectionHandle& conn, bool success) {
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
-
     if (!success) {
         WARNING("BLEInterface: Service discovery failed for " + conn.peer_address.toString());
 
-        // Clean up peer state - NimBLE may have already disconnected internally,
-        // so onDisconnected callback might not fire. Manually reset peer state.
-        Bytes mac = conn.peer_address.toBytes();
-        _peer_manager.connectionFailed(mac);
+        // Clean up peer state under brief lock
+        {
+            std::lock_guard<std::recursive_mutex> lock(_mutex);
+            Bytes mac = conn.peer_address.toBytes();
+            _peer_manager.connectionFailed(mac);
+        }
 
         // Try to disconnect (may be no-op if already disconnected)
         _platform->disconnect(conn.handle);
@@ -688,6 +698,11 @@ void BLEInterface::onServicesDiscovered(const ConnectionHandle& conn, bool succe
     }
 
     INFO("BLE: Services discovered for " + conn.peer_address.toString());
+
+    // All operations below are blocking GATT ops — do NOT hold _mutex.
+    // Holding _mutex during these blocks the NimBLE host task (which needs
+    // _mutex for its own callbacks), causing "BLE stack stuck" detection,
+    // and blocks the main loop's peer status queries, causing WDT triggers.
 
     // Enable notifications on TX characteristic
     _platform->enableNotifications(conn.handle, true);
@@ -1094,8 +1109,8 @@ void BLEInterface::initiateHandshake(const ConnectionHandle& conn) {
     Bytes handshake = _identity_manager.initiateHandshake(mac);
 
     if (handshake.size() > 0) {
-        // Write our identity to peer's RX characteristic
-        _platform->write(conn.handle, handshake, true);
+        // Write our identity to peer's RX characteristic (no-response to avoid blocking)
+        _platform->write(conn.handle, handshake, false);
 
         DEBUG("BLEInterface: Sent identity handshake to " + conn.peer_address.toString());
     }

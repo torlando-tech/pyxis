@@ -49,7 +49,7 @@ public:
     static constexpr double SCAN_INTERVAL = 5.0;        // Seconds between scans
     static constexpr double KEEPALIVE_INTERVAL = 15.0;  // Seconds between keepalives
     static constexpr double MAINTENANCE_INTERVAL = 1.0; // Seconds between maintenance
-    static constexpr double CONNECTION_COOLDOWN = 3.0;  // Seconds to wait after connection failure
+    static constexpr double CONNECTION_COOLDOWN = 10.0;  // Seconds between connection attempts (reduces 574 risk)
 
 public:
     /**

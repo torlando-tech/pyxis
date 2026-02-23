@@ -586,24 +586,25 @@ void NimBLEPlatform::enterErrorRecovery() {
     _slave_paused_for_master = false;
 
     // Wait for host to sync after any reset operation
-    // This is critical - the host needs time to fully reset and resync with controller
+    // Give the host up to 5s — NimBLE typically re-syncs within 1-3s
     if (!ble_hs_synced()) {
-        WARNING("NimBLEPlatform: Host not synced, waiting...");
+        WARNING("NimBLEPlatform: Host not synced, waiting up to 5s...");
         uint32_t sync_start = millis();
-        while (!ble_hs_synced() && (millis() - sync_start) < 3000) {
+        while (!ble_hs_synced() && (millis() - sync_start) < 5000) {
             delay(50);
-            esp_task_wdt_reset();
         }
         if (ble_hs_synced()) {
             INFO("NimBLEPlatform: Host sync restored after " +
                  std::to_string(millis() - sync_start) + "ms");
         } else {
-            ERROR("NimBLEPlatform: Host sync failed - escalating to full stack reset");
-            // The host is stuck in reset. enterErrorRecovery can't fix this.
-            // Must do a full deinit/reinit cycle to recover the BLE radio.
+            // Don't immediately reboot — track desync time and let startScan()
+            // handle the reboot decision based on prolonged desync (30s).
+            WARNING("NimBLEPlatform: Host not synced after 5s, will retry on next scan cycle");
+            if (_host_desync_since == 0) {
+                _host_desync_since = millis();
+            }
             in_recovery = false;
-            recoverBLEStack();
-            return;  // recoverBLEStack handles state reset and advertising restart
+            return;
         }
     }
 
@@ -662,26 +663,51 @@ bool NimBLEPlatform::startScan(uint16_t duration_ms) {
         return true;
     }
 
-    // Wait for host sync before trying to scan (host may be resetting after connection failure)
+    // Wait for host sync before trying to scan (host may be resetting after connection failure).
+    // NimBLE host self-recovers from most desyncs within 1-5s. Only reboot after prolonged desync.
     if (!ble_hs_synced()) {
+        // Track when desync started
+        if (_host_desync_since == 0) {
+            _host_desync_since = millis();
+        }
+
         DEBUG("NimBLEPlatform: Host not synced, waiting before scan...");
         uint32_t sync_wait = millis();
-        while (!ble_hs_synced() && (millis() - sync_wait) < 2000) {
+        while (!ble_hs_synced() && (millis() - sync_wait) < 3000) {
             delay(50);
-            esp_task_wdt_reset();
         }
         if (!ble_hs_synced()) {
+            unsigned long desync_duration = millis() - _host_desync_since;
             _scan_fail_count++;
-            WARNING("NimBLEPlatform: Host still not synced after 2s, scan aborted (fail " +
+            WARNING("NimBLEPlatform: Host not synced, desync " +
+                    std::to_string(desync_duration / 1000) + "s (fail " +
                     std::to_string(_scan_fail_count) + "/" +
                     std::to_string(SCAN_FAIL_RECOVERY_THRESHOLD) + ")");
-            if (_scan_fail_count >= SCAN_FAIL_RECOVERY_THRESHOLD) {
-                WARNING("NimBLEPlatform: Host stuck, triggering full stack recovery");
+
+            // Only reboot after prolonged desync — brief desyncs self-recover.
+            // With active connections, data still flows over BLE mesh — we just
+            // can't discover new peers. Extend tolerance to 5 minutes.
+            unsigned long reboot_threshold = HOST_DESYNC_REBOOT_MS;  // 60s base
+            if (getConnectionCount() > 0) {
+                reboot_threshold = 300000;  // 5 min with active connections
+            }
+            if (desync_duration >= reboot_threshold) {
+                ERROR("NimBLEPlatform: Host desynced for " +
+                      std::to_string(desync_duration / 1000) + "s (conns=" +
+                      std::to_string(getConnectionCount()) + "), rebooting");
                 _scan_fail_count = 0;
+                _host_desync_since = 0;
                 recoverBLEStack();
             }
             return false;
         }
+    }
+
+    // Host is synced — clear desync tracking
+    if (_host_desync_since != 0) {
+        unsigned long recovery_time = millis() - _host_desync_since;
+        INFO("NimBLEPlatform: Host re-synced after " + std::to_string(recovery_time) + "ms");
+        _host_desync_since = 0;
     }
 
     // Log GAP hardware state before checking
@@ -1027,18 +1053,14 @@ int NimBLEPlatform::nativeGapEventHandler(struct ble_gap_event* event, void* arg
                 platform->_native_connect_success = false;
                 platform->_native_connect_pending = false;
 
-                // Track connection establishment failures (574 = BLE_ERR_CONN_ESTABLISHMENT)
+                // Track connection establishment failures (574 = BLE_ERR_CONN_ESTABLISHMENT).
+                // These commonly cause brief host desyncs that self-recover.
+                // Don't escalate to enterErrorRecovery here — let the time-based
+                // desync tracking in startScan() handle reboot decisions.
                 if (disc_reason == 574) {
                     platform->_conn_establish_fail_count++;
                     WARNING("NimBLEPlatform: Connection establishment failed (574), count=" +
                             std::to_string(platform->_conn_establish_fail_count));
-
-                    // If too many consecutive failures, trigger recovery
-                    if (platform->_conn_establish_fail_count >= CONN_ESTABLISH_FAIL_THRESHOLD) {
-                        WARNING("NimBLEPlatform: Too many connection establishment failures, entering recovery");
-                        platform->_conn_establish_fail_count = 0;
-                        platform->enterErrorRecovery();
-                    }
                 }
             }
 

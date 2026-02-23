@@ -1194,11 +1194,15 @@ void setup() {
     INFO("╚══════════════════════════════════════╝");
     INFO("");
 
-    // Subscribe main loop to Task Watchdog — detects hangs/deadlocks
-    // If loop() blocks for >10s (CONFIG_ESP_TASK_WDT_TIMEOUT_S), WDT fires
-    // with a backtrace showing exactly where the hang is
-    esp_task_wdt_add(NULL);  // NULL = current task (loopTask)
-    INFO("Task Watchdog: loopTask subscribed");
+    // Reconfigure Task Watchdog with 30s timeout (default 10s is too tight
+    // for SPIFFS flash I/O — identity persistence writes 40-50 entries and
+    // can take 5-15s with sector erases and garbage collection)
+    esp_task_wdt_init(30, true);  // 30s timeout, panic on trigger
+    esp_task_wdt_add(NULL);       // Subscribe loopTask
+    INFO("Task Watchdog: loopTask subscribed (30s timeout)");
+
+    // Feed WDT during long Identity persistence (71+ entries to SPIFFS can take >30s)
+    Identity::set_persist_yield_callback([]() { esp_task_wdt_reset(); });
 
     // Show startup message
     INFO("Press any key to start messaging");
@@ -1275,10 +1279,15 @@ void loop() {
     reticulum->loop();
 
     // Periodically persist identity/transport data (display names, paths, etc.)
+    // NOTE: Identity persistence writes 40-50 entries to SPIFFS flash, which
+    // involves sector erases (100ms each) and can take 5-15s total.
+    // WDT feeds between calls prevent timeout during heavy flash I/O.
     LOOP_STEP(5);  // persist data
     reticulum->should_persist_data();
+    esp_task_wdt_reset();
     // Fast-persist known destinations (5s after dirty) to survive crashes
     Identity::should_persist_data();
+    esp_task_wdt_reset();
 
     // Process TCP interface
     LOOP_STEP(6);  // TCP loop
