@@ -54,6 +54,10 @@ struct PeerInfo {
     uint8_t consecutive_failures = 0;
     double blacklisted_until = 0.0;
 
+    // Keepalive failure tracking
+    uint8_t consecutive_keepalive_failures = 0;
+    static constexpr uint8_t MAX_KEEPALIVE_FAILURES = 3;
+
     // BLE connection handle (platform-specific)
     uint16_t conn_handle = 0xFFFF;
 

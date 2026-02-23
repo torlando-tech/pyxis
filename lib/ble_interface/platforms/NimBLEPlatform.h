@@ -118,6 +118,8 @@ public:
 
     // GATT Operations
     bool write(uint16_t conn_handle, const Bytes& data, bool response = true) override;
+    bool writeCharacteristic(uint16_t conn_handle, uint16_t char_handle,
+                              const Bytes& data, bool response = true) override;
     bool read(uint16_t conn_handle, uint16_t char_handle,
               std::function<void(OperationResult, const Bytes&)> callback) override;
     bool enableNotifications(uint16_t conn_handle, bool enable) override;
@@ -246,6 +248,7 @@ private:
     PlatformConfig _config;
     bool _initialized = false;
     bool _running = false;
+    volatile bool _shutting_down = false;
     Bytes _identity_data;
     unsigned long _scan_stop_time = 0;  // millis() when to stop continuous scan
 

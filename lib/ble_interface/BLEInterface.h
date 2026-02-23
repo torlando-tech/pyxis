@@ -19,12 +19,12 @@
 #include "Interface.h"
 #include "Bytes.h"
 #include "Type.h"
-#include "BLE/BLETypes.h"
-#include "BLE/BLEPlatform.h"
-#include "BLE/BLEFragmenter.h"
-#include "BLE/BLEReassembler.h"
-#include "BLE/BLEPeerManager.h"
-#include "BLE/BLEIdentityManager.h"
+#include "BLETypes.h"
+#include "BLEPlatform.h"
+#include "BLEFragmenter.h"
+#include "BLEReassembler.h"
+#include "BLEPeerManager.h"
+#include "BLEIdentityManager.h"
 
 #include <mutex>
 

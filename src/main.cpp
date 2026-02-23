@@ -1253,6 +1253,9 @@ void loop() {
     // Process Reticulum
     reticulum->loop();
 
+    // Periodically persist identity/transport data (display names, paths, etc.)
+    reticulum->should_persist_data();
+
     // Process TCP interface
     if (tcp_interface) {
         tcp_interface->loop();

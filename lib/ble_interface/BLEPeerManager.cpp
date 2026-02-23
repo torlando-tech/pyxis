@@ -399,10 +399,18 @@ void BLEPeerManager::setPeerState(const Bytes& identifier, PeerState state) {
 }
 
 void BLEPeerManager::setPeerHandle(const Bytes& identifier, uint16_t conn_handle) {
+    // Validate handle is in range (ESP32 NimBLE uses small handles)
+    if (conn_handle != 0xFFFF && conn_handle >= MAX_CONN_HANDLES) {
+        WARNING("BLEPeerManager: Rejecting invalid conn_handle=" +
+                std::to_string(conn_handle) + " (max=" +
+                std::to_string(MAX_CONN_HANDLES - 1) + ")");
+        return;
+    }
+
     PeerInfo* peer = findPeer(identifier);
     if (peer) {
         // Remove old handle mapping if exists
-        if (peer->conn_handle != 0xFFFF) {
+        if (peer->conn_handle != 0xFFFF && peer->conn_handle < MAX_CONN_HANDLES) {
             clearHandleToPeer(peer->conn_handle);
         }
         peer->conn_handle = conn_handle;
@@ -673,11 +681,23 @@ void BLEPeerManager::promoteToIdentityKeyed(const Bytes& mac_address, const Byte
         return;
     }
 
-    // Find an empty slot in identity pool
-    PeerByIdentitySlot* identity_slot = findEmptyPeerByIdentitySlot();
-    if (!identity_slot) {
-        WARNING("BLEPeerManager: Identity pool is full, cannot promote peer");
-        return;
+    // Check if there's already an identity-keyed entry for this peer
+    // (e.g. from a previous connection that was disconnected but not cleared)
+    PeerByIdentitySlot* identity_slot = findPeerByIdentitySlot(identity);
+    if (identity_slot) {
+        // Reuse existing slot — clear old handle mapping first
+        if (identity_slot->peer.conn_handle != 0xFFFF &&
+            identity_slot->peer.conn_handle < MAX_CONN_HANDLES) {
+            clearHandleToPeer(identity_slot->peer.conn_handle);
+        }
+        DEBUG("BLEPeerManager: Reusing existing identity slot for peer");
+    } else {
+        // Find an empty slot in identity pool
+        identity_slot = findEmptyPeerByIdentitySlot();
+        if (!identity_slot) {
+            WARNING("BLEPeerManager: Identity pool is full, cannot promote peer");
+            return;
+        }
     }
 
     // Copy peer info to identity pool
@@ -686,9 +706,15 @@ void BLEPeerManager::promoteToIdentityKeyed(const Bytes& mac_address, const Byte
     identity_slot->peer = mac_slot->peer;
     identity_slot->peer.identity = identity;
 
-    // Update handle mapping to point to new location
+    // Validate and update handle mapping to point to new location
     if (identity_slot->peer.conn_handle != 0xFFFF) {
-        setHandleToPeer(identity_slot->peer.conn_handle, &identity_slot->peer);
+        if (identity_slot->peer.conn_handle < MAX_CONN_HANDLES) {
+            setHandleToPeer(identity_slot->peer.conn_handle, &identity_slot->peer);
+        } else {
+            WARNING("BLEPeerManager: Promoted peer has invalid conn_handle=" +
+                    std::to_string(identity_slot->peer.conn_handle) + ", clearing");
+            identity_slot->peer.conn_handle = 0xFFFF;
+        }
     }
 
     // Add MAC-to-identity mapping

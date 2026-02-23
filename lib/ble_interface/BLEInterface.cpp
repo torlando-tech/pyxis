@@ -157,6 +157,20 @@ void BLEInterface::loop() {
             DEBUG("BLEInterface: Processing deferred handshake for " +
                   pending.identity.toHex().substr(0, 8) + "...");
 
+            // Check for duplicate identity — only keep one connection per identity
+            PeerInfo* existing = _peer_manager.getPeerByIdentity(pending.identity);
+            if (existing && existing->isConnected() && existing->mac_address != pending.mac) {
+                INFO("BLEInterface: Duplicate identity " + pending.identity.toHex().substr(0, 8) +
+                     " - disconnecting new connection");
+                // Disconnect the new (duplicate) connection
+                PeerInfo* new_peer = _peer_manager.getPeerByMac(pending.mac);
+                if (new_peer && new_peer->conn_handle != 0xFFFF) {
+                    _platform->disconnect(new_peer->conn_handle);
+                }
+                _peer_manager.connectionFailed(pending.mac);
+                continue;
+            }
+
             // Update peer manager with identity
             _peer_manager.setPeerIdentity(pending.mac, pending.identity);
             _peer_manager.connectionSucceeded(pending.identity);
@@ -572,16 +586,20 @@ void BLEInterface::onConnected(const ConnectionHandle& conn) {
     _peer_manager.setPeerState(mac, PeerState::HANDSHAKING);
     _peer_manager.setPeerHandle(mac, conn.handle);
 
+    // Set MTU from connection (onMTUChange only fires for peripheral connections)
+    if (conn.mtu > 0) {
+        _peer_manager.setPeerMTU(mac, conn.mtu);
+    }
+
     // Mark as central connection (we initiated the connection)
     PeerInfo* peer = _peer_manager.getPeerByMac(mac);
     if (peer) {
         peer->is_central = true;  // We ARE central in this connection
-        INFO("BLEInterface: Stored conn_handle=" + std::to_string(conn.handle) +
-             " for peer " + conn.peer_address.toString());
     }
 
     INFO("BLE: Connected to " + conn.peer_address.toString() +
-          " (we are central)");
+          " handle=" + std::to_string(conn.handle) +
+          " mtu=" + std::to_string(conn.mtu) + " (we are central)");
 
     // Discover services
     _platform->discoverServices(conn.handle);
@@ -602,6 +620,7 @@ void BLEInterface::onDisconnected(const ConnectionHandle& conn, uint8_t reason) 
             }
         }
         _reassembler.clearForPeer(identity);
+        _peer_manager.setPeerHandle(identity, 0xFFFF);
         _peer_manager.setPeerState(identity, PeerState::DISCOVERED);
     } else {
         // Peer might still be in CONNECTING state (no identity yet)
@@ -672,11 +691,16 @@ void BLEInterface::onServicesDiscovered(const ConnectionHandle& conn, bool succe
                     // Store the peer's identity - handshake complete for receiving direction
                     _identity_manager.completeHandshake(mac, identity, true);
 
-                    // Now send our identity directly (don't use initiateHandshake which
-                    // creates a session that would time out since we already have the mapping)
+                    // Send our identity to the peer's IDENTITY_CHAR.
+                    // Use Write Without Response (false) to avoid blocking —
+                    // the handshake is already complete from our side.
                     if (_identity_manager.hasLocalIdentity()) {
-                        _platform->write(handle, _identity_manager.getLocalIdentity(), true);
-                        DEBUG("BLEInterface: Sent identity handshake to peer");
+                        ConnectionHandle c = _platform->getConnection(handle);
+                        if (c.identity_handle != 0) {
+                            _platform->writeCharacteristic(handle, c.identity_handle,
+                                _identity_manager.getLocalIdentity(), false);
+                        }
+                        DEBUG("BLEInterface: Sent identity to peer");
                     }
                 } else {
                     WARNING("BLEInterface: Failed to read peer identity, trying write-based handshake");
@@ -715,8 +739,8 @@ void BLEInterface::onCentralConnected(const ConnectionHandle& conn) {
         peer->is_central = false;  // We are NOT central in this connection
     }
 
-    DEBUG("BLEInterface: Central connected: " + conn.peer_address.toString() +
-          " (we are peripheral)");
+    INFO("BLEInterface: Central connected: " + conn.peer_address.toString() +
+          " handle=" + std::to_string(conn.handle) + " (we are peripheral)");
 }
 
 void BLEInterface::onCentralDisconnected(const ConnectionHandle& conn) {
@@ -846,6 +870,11 @@ void BLEInterface::processDiscoveredPeers() {
         INFO("BLE: Peers=" + std::to_string(all_peers.size()) +
              " localMAC=" + _peer_manager.getLocalMac().toString());
         for (PeerInfo* peer : all_peers) {
+            if (peer->mac_address.size() < Limits::MAC_SIZE) {
+                WARNING("BLE: Peer with empty MAC, state=" +
+                        std::to_string(static_cast<int>(peer->state)));
+                continue;
+            }
             bool should_initiate = _peer_manager.shouldInitiateConnection(peer->mac_address);
             INFO("BLE: Peer " + BLEAddress(peer->mac_address.data()).toString() +
                  " state=" + std::to_string(static_cast<int>(peer->state)) +
@@ -855,7 +884,7 @@ void BLEInterface::processDiscoveredPeers() {
         last_peer_log = now;
     }
 
-    if (candidate) {
+    if (candidate && candidate->mac_address.size() >= Limits::MAC_SIZE) {
         INFO("BLE: Connection candidate: " + BLEAddress(candidate->mac_address.data()).toString() +
               " type=" + std::to_string(candidate->address_type) +
               " canAccept=" + std::string(_peer_manager.canAcceptConnection() ? "yes" : "no"));
@@ -889,6 +918,25 @@ void BLEInterface::sendKeepalives() {
     auto connected = _peer_manager.getConnectedPeers();
     for (PeerInfo* peer : connected) {
         if (peer->hasIdentity()) {
+            // Verify connection handle is valid before sending
+            if (peer->conn_handle == 0xFFFF) {
+                WARNING("BLEInterface: Peer " + peer->identity.toHex().substr(0, 8) +
+                        " state=CONNECTED but conn_handle=INVALID, resetting");
+                _peer_manager.setPeerState(peer->identity, PeerState::DISCOVERED);
+                continue;
+            }
+
+            // Cross-check with platform connection table
+            ConnectionHandle platformConn = _platform->getConnection(peer->conn_handle);
+            if (!platformConn.isValid()) {
+                WARNING("BLEInterface: Peer " + peer->identity.toHex().substr(0, 8) +
+                        " has stale conn_handle=" + std::to_string(peer->conn_handle) +
+                        ", resetting");
+                _peer_manager.setPeerHandle(peer->identity, 0xFFFF);
+                _peer_manager.setPeerState(peer->identity, PeerState::DISCOVERED);
+                continue;
+            }
+
             bool sent = false;
             if (peer->is_central) {
                 sent = _platform->write(peer->conn_handle, keepalive, false);
@@ -905,6 +953,14 @@ void BLEInterface::sendKeepalives() {
                             std::to_string(peer->consecutive_keepalive_failures) +
                             " times, disconnecting " + peer->identity.toHex().substr(0, 8));
                     _platform->disconnect(peer->conn_handle);
+
+                    // Force-remove peer if disconnect keeps failing
+                    if (peer->consecutive_keepalive_failures >= PeerInfo::MAX_KEEPALIVE_FAILURES * 2) {
+                        WARNING("BLEInterface: Force-removing unresponsive peer " +
+                                peer->identity.toHex().substr(0, 8));
+                        _identity_manager.removeMapping(peer->mac_address);
+                        _peer_manager.removePeer(peer->identity);
+                    }
                 }
             }
         }
