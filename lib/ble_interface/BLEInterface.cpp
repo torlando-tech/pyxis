@@ -137,7 +137,22 @@ void BLEInterface::stop() {
 void BLEInterface::loop() {
     static double last_loop_log = 0;
     static bool local_mac_set = false;
+    static uint32_t loop_count = 0;
     double now = Utilities::OS::time();
+
+    loop_count++;
+    // Direct serial heartbeat every 10s
+    static uint32_t last_hb = 0;
+    uint32_t now_ms = millis();
+    if (now_ms - last_hb >= 10000) {
+        last_hb = now_ms;
+        Serial.printf("[BLE] loops=%u online=%d scanning=%d connected=%d peers=%d heap=%u\n",
+            loop_count, (int)_online,
+            (int)(_platform && _platform->isScanning()),
+            (int)_peer_manager.connectedCount(),
+            (int)_peer_manager.getAllPeers().size(),
+            ESP.getFreeHeap());
+    }
 
     // Lazy init: set local MAC once NimBLE has a valid random address
     if (!local_mac_set && _platform) {
@@ -220,10 +235,11 @@ void BLEInterface::loop() {
 
     // Debug: log loop status every 10 seconds
     if (now - last_loop_log >= 10.0) {
-        DEBUG("BLEInterface::loop() platform=" + std::string(_platform ? "yes" : "no") +
-              " running=" + std::string(_platform && _platform->isRunning() ? "yes" : "no") +
-              " scanning=" + std::string(_platform && _platform->isScanning() ? "yes" : "no") +
-              " connected=" + std::to_string(_peer_manager.connectedCount()));
+        INFO("BLE: running=" + std::string(_platform && _platform->isRunning() ? "yes" : "no") +
+             " scanning=" + std::string(_platform && _platform->isScanning() ? "yes" : "no") +
+             " connected=" + std::to_string(_peer_manager.connectedCount()) +
+             " peers=" + std::to_string(_peer_manager.getAllPeers().size()) +
+             " heap=" + std::to_string(ESP.getFreeHeap()));
         last_loop_log = now;
     }
 
@@ -579,7 +595,7 @@ void BLEInterface::onConnected(const ConnectionHandle& conn) {
              " for peer " + conn.peer_address.toString());
     }
 
-    DEBUG("BLEInterface: Connected to " + conn.peer_address.toString() +
+    INFO("BLE: Connected to " + conn.peer_address.toString() +
           " (we are central)");
 
     // Discover services
@@ -610,7 +626,7 @@ void BLEInterface::onDisconnected(const ConnectionHandle& conn, uint8_t reason) 
 
     _identity_manager.removeMapping(mac);
 
-    DEBUG("BLEInterface: Disconnected from " + conn.peer_address.toString() +
+    INFO("BLE: Disconnected from " + conn.peer_address.toString() +
           " reason: " + std::to_string(reason));
 }
 
@@ -651,7 +667,7 @@ void BLEInterface::onServicesDiscovered(const ConnectionHandle& conn, bool succe
         return;
     }
 
-    DEBUG("BLEInterface: Services discovered for " + conn.peer_address.toString());
+    INFO("BLE: Services discovered for " + conn.peer_address.toString());
 
     // Enable notifications on TX characteristic
     _platform->enableNotifications(conn.handle, true);
@@ -842,20 +858,20 @@ void BLEInterface::processDiscoveredPeers() {
     static double last_peer_log = 0;
     if (now - last_peer_log >= 10.0) {
         auto all_peers = _peer_manager.getAllPeers();
-        DEBUG("BLEInterface: Peer count=" + std::to_string(all_peers.size()) +
-              " localMAC=" + _peer_manager.getLocalMac().toString());
+        INFO("BLE: Peers=" + std::to_string(all_peers.size()) +
+             " localMAC=" + _peer_manager.getLocalMac().toString());
         for (PeerInfo* peer : all_peers) {
             bool should_initiate = _peer_manager.shouldInitiateConnection(peer->mac_address);
-            DEBUG("BLEInterface: Peer " + BLEAddress(peer->mac_address.data()).toString() +
-                  " state=" + std::to_string(static_cast<int>(peer->state)) +
-                  " shouldInitiate=" + std::string(should_initiate ? "yes" : "no") +
-                  " score=" + std::to_string(peer->score));
+            INFO("BLE: Peer " + BLEAddress(peer->mac_address.data()).toString() +
+                 " state=" + std::to_string(static_cast<int>(peer->state)) +
+                 " shouldInit=" + std::string(should_initiate ? "yes" : "no") +
+                 " score=" + std::to_string(peer->score));
         }
         last_peer_log = now;
     }
 
     if (candidate) {
-        DEBUG("BLEInterface: Connection candidate: " + BLEAddress(candidate->mac_address.data()).toString() +
+        INFO("BLE: Connection candidate: " + BLEAddress(candidate->mac_address.data()).toString() +
               " type=" + std::to_string(candidate->address_type) +
               " canAccept=" + std::string(_peer_manager.canAcceptConnection() ? "yes" : "no"));
     }
