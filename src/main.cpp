@@ -1255,6 +1255,8 @@ void loop() {
 
     // Periodically persist identity/transport data (display names, paths, etc.)
     reticulum->should_persist_data();
+    // Fast-persist known destinations (5s after dirty) to survive crashes
+    Identity::should_persist_data();
 
     // Process TCP interface
     if (tcp_interface) {

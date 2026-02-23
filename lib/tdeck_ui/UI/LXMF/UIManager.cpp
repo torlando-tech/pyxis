@@ -159,8 +159,13 @@ bool UIManager::init() {
 
     _announce_list_screen->set_send_announce_callback(
         [this]() {
-            INFO("Sending LXMF announce");
-            _router.announce();
+            INFO("Sending LXMF announce...");
+            try {
+                _router.announce();
+                INFO("LXMF announce sent successfully");
+            } catch (const std::exception& e) {
+                ERRORF("LXMF announce failed: %s", e.what());
+            }
         }
     );
 
