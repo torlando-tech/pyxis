@@ -1110,8 +1110,8 @@ void UIManager::call_process_signal(uint8_t signal) {
                 _call_state = CallState::RINGING;
                 _call_timeout_ms = millis() + 60000;
                 _call_screen->set_state(CallScreen::CallState::RINGING);
-                // Send profile preference: VLBW (Codec2 1600bps)
-                call_send_signal(LXST_PREFERRED_PROFILE + LXST_PROFILE_VLBW);
+                // Send profile preference: LBW (Codec2 3200bps)
+                call_send_signal(LXST_PREFERRED_PROFILE + LXST_PROFILE_LBW);
             } else if (signal == LXST_STATUS_BUSY || signal == LXST_STATUS_REJECTED) {
                 INFO("LXST: Call rejected or busy");
                 call_ended();
@@ -1128,7 +1128,7 @@ void UIManager::call_process_signal(uint8_t signal) {
                     _lxst_audio = new LXSTAudio();
                 }
                 lxst_breadcrumb(21, ESP.getFreeHeap());
-                if (!_lxst_audio->init(CODEC2_MODE_1600)) {
+                if (!_lxst_audio->init(CODEC2_MODE_3200)) {
                     WARNING("LXST: Audio init failed");
                     call_ended();
                     return;
@@ -1149,7 +1149,7 @@ void UIManager::call_process_signal(uint8_t signal) {
 
                 if (!_lxst_audio) {
                     _lxst_audio = new LXSTAudio();
-                    if (!_lxst_audio->init(CODEC2_MODE_1600)) {
+                    if (!_lxst_audio->init(CODEC2_MODE_3200)) {
                         WARNING("LXST: Audio init failed");
                         call_ended();
                         return;
@@ -1347,7 +1347,7 @@ void UIManager::call_update() {
         // We send exactly 8 frames per packet: [mode_header] + [8 * raw_codec2] = 65 bytes.
         // MUST be exactly 8: Columba's native ring buffer (frameSamples=2560) rejects
         // partial writes (count != frameSamples), so 8*320=2560 samples is required.
-        static constexpr int TX_BATCH_SIZE = 8;  // frames per packet — MUST match Columba's frameSamples/320
+        static constexpr int TX_BATCH_SIZE = 10;  // frames per packet — MUST match Columba's frameSamples/160 (LBW 3200)
         if (_lxst_audio && _lxst_audio->isCapturing()) {
             // Send up to 3 batched packets per call_update() cycle
             for (int batch = 0; batch < 3; batch++) {
@@ -1537,7 +1537,7 @@ void UIManager::call_answer() {
         _lxst_audio = new LXSTAudio();
     }
     lxst_breadcrumb(31, ESP.getFreeHeap());
-    if (!_lxst_audio->init(CODEC2_MODE_1600)) {
+    if (!_lxst_audio->init(CODEC2_MODE_3200)) {
         WARNING("LXST: Audio init failed");
         call_ended();
         return;
@@ -1550,8 +1550,8 @@ void UIManager::call_answer() {
     }
     lxst_breadcrumb(33, ESP.getFreeHeap());
 
-    // Send profile preference: VLBW (Codec2 1600bps) — answerer sends last and "wins"
-    call_send_signal(LXST_PREFERRED_PROFILE + LXST_PROFILE_VLBW);
+    // Send profile preference: LBW (Codec2 3200bps) — answerer sends last and "wins"
+    call_send_signal(LXST_PREFERRED_PROFILE + LXST_PROFILE_LBW);
 
     // Send STATUS_ESTABLISHED
     call_send_signal(LXST_STATUS_ESTABLISHED);
