@@ -137,22 +137,7 @@ void BLEInterface::stop() {
 void BLEInterface::loop() {
     static double last_loop_log = 0;
     static bool local_mac_set = false;
-    static uint32_t loop_count = 0;
     double now = Utilities::OS::time();
-
-    loop_count++;
-    // Direct serial heartbeat every 10s
-    static uint32_t last_hb = 0;
-    uint32_t now_ms = millis();
-    if (now_ms - last_hb >= 10000) {
-        last_hb = now_ms;
-        Serial.printf("[BLE] loops=%u online=%d scanning=%d connected=%d peers=%d heap=%u\n",
-            loop_count, (int)_online,
-            (int)(_platform && _platform->isScanning()),
-            (int)_peer_manager.connectedCount(),
-            (int)_peer_manager.getAllPeers().size(),
-            ESP.getFreeHeap());
-    }
 
     // Lazy init: set local MAC once NimBLE has a valid random address
     if (!local_mac_set && _platform) {
