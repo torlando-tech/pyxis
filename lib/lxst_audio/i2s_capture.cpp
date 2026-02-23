@@ -182,16 +182,41 @@ void I2SCapture::captureLoop() {
     // I2S read buffer: read in chunks (TDM interleaved, 2 channels at 16kHz each)
     static constexpr int READ_SAMPLES = 256;  // Larger buffer → more 8kHz samples per read
     int16_t readBuf[READ_SAMPLES];
-    // After TDM deinterleave (÷2) + downsample 16kHz→8kHz (÷2) = stride 4
+    // CH0 at 16kHz after TDM deinterleave (÷2)
+    int16_t ch0Buf[READ_SAMPLES / 2];
+    // After FIR decimation 16kHz→8kHz (÷2)
     int16_t dsBuf[READ_SAMPLES / 4];
     size_t bytesRead = 0;
 
-    Serial.printf("[CAP] Capture task on core %d, I2S=%dHz, codec=%dHz\n",
-                  xPortGetCoreID(), I2S_SAMPLE_RATE, CODEC_SAMPLE_RATE);
+    // 15-tap half-band FIR filter for anti-aliased decimation by 2.
+    // Designed for Fs=16kHz, cutoff=4kHz (Nyquist of 8kHz output).
+    // Kaiser window beta=6, ~60dB stopband attenuation.
+    // Half-band property: every other coefficient is zero, so only 5 unique
+    // multiply-accumulate ops per output sample (symmetric coefficients).
+    //
+    // Float coefficients (symmetric, sum=1.0):
+    //   h[0,14] = -0.000676  h[2,12] = +0.012712  h[4,10] = -0.062710
+    //   h[6,8]  = +0.300794  h[7]    = +0.499759 (center)
+    //   h[1,3,5,9,11,13] = 0 (half-band zeros)
+    //
+    // Q15 fixed-point (scaled by 32768):
+    static constexpr int FIR_TAPS = 15;
+    static const int16_t FIR_Q15[FIR_TAPS] = {
+        -22, 0, 417, 0, -2055, 0, 9856, 16376, 9856, 0, -2055, 0, 417, 0, -22
+    };
+    static constexpr int FIR_SHIFT = 15;  // Q15 format: divide accumulator by 32768
+
+    // FIR delay line (persists across I2S reads)
+    int16_t firDelay[FIR_TAPS] = {0};
+
+    static constexpr int16_t LIMITER_THRESHOLD = 16000;
+
+    Serial.printf("[CAP] Capture task on core %d, I2S=%dHz, codec=%dHz, FIR=%d-tap\n",
+                  xPortGetCoreID(), I2S_SAMPLE_RATE, CODEC_SAMPLE_RATE, FIR_TAPS);
     uint32_t framesEncoded = 0;
-    uint32_t totalDsSamples = 0;    // Total mono samples after deinterleave
+    uint32_t totalDsSamples = 0;    // Total mono samples after decimation
     uint32_t rateCheckMs = millis(); // For sample rate measurement
-    int16_t runningPeakDs = 0;      // Peak of deinterleaved samples per interval
+    int16_t runningPeakDs = 0;      // Peak of decimated samples per interval
     int16_t runningPeakRaw = 0;     // Peak of raw I2S samples per interval
 
     while (capturing_.load(std::memory_order_relaxed)) {
@@ -219,16 +244,39 @@ void I2SCapture::captureLoop() {
             if (v > runningPeakRaw) runningPeakRaw = v;
         }
 
-        // TDM deinterleave + downsample: readBuf is [CH0,CH1,CH0,CH1,...] at 16kHz/ch.
-        // Stride 4 = deinterleave (÷2) + 16kHz→8kHz downsample (÷2).
-        // Anti-aliasing: average adjacent CH0 samples to attenuate >4kHz before decimation.
-        static constexpr int16_t LIMITER_THRESHOLD = 16000;
-        int dsCount = samplesRead / 4;
+        // Step 1: TDM deinterleave — extract CH0 at 16kHz.
+        // readBuf is [CH0,CH1,CH0,CH1,...], so CH0 samples at even indices.
+        int ch0Count = samplesRead / 2;
+        for (int i = 0; i < ch0Count; i++) {
+            ch0Buf[i] = readBuf[i * 2];
+        }
+
+        // Step 2: 15-tap half-band FIR decimation by 2 (16kHz → 8kHz).
+        // For each output sample, push 2 input samples through the FIR delay
+        // line and compute the convolution sum.  Half-band zeros mean only
+        // taps 0,2,4,6,7,8,10,12,14 are non-zero — exploited below.
+        int dsCount = ch0Count / 2;
         for (int i = 0; i < dsCount; i++) {
-            // CH0 samples are at even indices: 0, 2, 4, 6, ...
-            // Average readBuf[i*4] (CH0 sample N) and readBuf[i*4+2] (CH0 sample N+1)
-            int32_t sum = (int32_t)readBuf[i * 4] + (int32_t)readBuf[i * 4 + 2];
-            int16_t s = (int16_t)(sum / 2);
+            // Push 2 input samples into the delay line (decimation by 2)
+            for (int k = 0; k < 2; k++) {
+                // Shift delay line right by 1
+                for (int d = FIR_TAPS - 1; d > 0; d--)
+                    firDelay[d] = firDelay[d - 1];
+                firDelay[0] = ch0Buf[i * 2 + k];
+            }
+
+            // Compute FIR output — exploit symmetry and half-band zeros.
+            // Non-zero taps: 0,2,4,6,7,8,10,12,14
+            // Symmetric pairs: (0,14), (2,12), (4,10), (6,8), center=7
+            int32_t acc = 0;
+            acc += (int32_t)FIR_Q15[0]  * ((int32_t)firDelay[0]  + firDelay[14]);
+            acc += (int32_t)FIR_Q15[2]  * ((int32_t)firDelay[2]  + firDelay[12]);
+            acc += (int32_t)FIR_Q15[4]  * ((int32_t)firDelay[4]  + firDelay[10]);
+            acc += (int32_t)FIR_Q15[6]  * ((int32_t)firDelay[6]  + firDelay[8]);
+            acc += (int32_t)FIR_Q15[7]  * (int32_t)firDelay[7];  // center tap
+
+            int16_t s = (int16_t)(acc >> FIR_SHIFT);
+
             // Hard limiter: clamp to ±LIMITER_THRESHOLD to prevent ADC clipping artifacts
             if (s > LIMITER_THRESHOLD) s = LIMITER_THRESHOLD;
             else if (s < -LIMITER_THRESHOLD) s = -LIMITER_THRESHOLD;

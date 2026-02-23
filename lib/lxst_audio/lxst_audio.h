@@ -70,7 +70,7 @@ public:
      * @param micGain     ES7210 mic gain (0-14, default 8 = 24dB)
      * @return true on success
      */
-    bool init(int codec2Mode = CODEC2_MODE_1600, uint8_t micGain = 8);
+    bool init(int codec2Mode = CODEC2_MODE_1600, uint8_t micGain = 5);
 
     /** Tear down everything and release all resources. */
     void deinit();
