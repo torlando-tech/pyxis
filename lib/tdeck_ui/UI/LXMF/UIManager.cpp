@@ -593,6 +593,9 @@ void UIManager::send_message(const Bytes& dest_hash, const String& content) {
     std::string msg = "Sending message to " + hash_hex + "...";
     INFO(msg.c_str());
 
+    // Mark recipient as a persistent contact (survives reboot)
+    Identity::mark_persistent(dest_hash);
+
     // Get our source destination (needed for signing)
     Destination source = _router.delivery_destination();
 
@@ -644,6 +647,9 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
     std::string source_hex = message.source_hash().toHex().substr(0, 8);
     std::string msg = "Message received from " + source_hex + "...";
     INFO(msg.c_str());
+
+    // Mark sender as a persistent contact (survives reboot)
+    RNS::Identity::mark_persistent(message.source_hash());
 
     // Save to store
     _store.save_message(message);
