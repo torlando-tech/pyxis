@@ -66,6 +66,12 @@
 // SD Card logging for crash debugging
 #include <Hardware/TDeck/SDLogger.h>
 
+// OTA flashing
+#include <ArduinoOTA.h>
+
+// UDP log broadcasting
+#include <WiFiUdp.h>
+
 // Memory instrumentation
 #ifdef MEMORY_INSTRUMENTATION_ENABLED
 #include <Instrumentation/MemoryMonitor.h>
@@ -123,6 +129,23 @@ bool last_wifi_connected = false;
 volatile bool wifi_reconnect_pending = false;
 String pending_wifi_ssid;
 String pending_wifi_password;
+
+// UDP log broadcasting (multicast avoids duplicate delivery on multi-homed hosts)
+static WiFiUDP udp_log;
+static const IPAddress UDP_LOG_GROUP(239, 0, 99, 99);
+static bool udp_log_ready = false;
+
+// Helper: send a string via UDP broadcast (for Serial.printf diagnostics)
+// Guards against sending during WiFi transitions and reentrant calls
+static volatile bool udp_sending = false;
+static void udp_send(const char* msg, size_t len) {
+    if (!udp_log_ready || udp_sending || WiFi.status() != WL_CONNECTED) return;
+    udp_sending = true;
+    udp_log.beginPacket(UDP_LOG_GROUP, 9999);
+    udp_log.write((const uint8_t*)msg, len);
+    udp_log.endPacket();
+    udp_sending = false;
+}
 
 // Forward declarations
 void start_tcp_interface();
@@ -479,6 +502,36 @@ void setup_wifi() {
         } else {
             INFO("Time already synced via GPS");
         }
+
+        // Initialize ArduinoOTA for wireless flashing
+        ArduinoOTA.setHostname("pyxis-tdeck");
+        ArduinoOTA.onStart([]() { INFO("OTA: Update starting..."); });
+        ArduinoOTA.onEnd([]() { INFO("OTA: Update complete, rebooting"); });
+        ArduinoOTA.onError([](ota_error_t error) { ERROR("OTA: Error"); });
+        ArduinoOTA.begin();
+        INFO("OTA: Ready");
+
+        // Initialize UDP log broadcasting (multicast group 239.0.99.99:9999)
+        udp_log_ready = true;
+        RNS::setLogCallback([](const char* msg, RNS::LogLevel level) {
+            // Serial (preserve wired debugging)
+            Serial.print(RNS::getTimeString());
+            Serial.print(" [");
+            Serial.print(RNS::getLevelName(level));
+            Serial.print("] ");
+            Serial.println(msg);
+            Serial.flush();
+            // UDP broadcast
+            if (udp_log_ready) {
+                char buf[512];
+                int len = snprintf(buf, sizeof(buf), "%s [%s] %s",
+                    RNS::getTimeString(), RNS::getLevelName(level), msg);
+                if (len > 0) {
+                    udp_send(buf, (size_t)len);
+                }
+            }
+        });
+        INFO("UDP log broadcasting on port 9999");
     } else {
         ERROR("WiFi connection failed!");
     }
@@ -849,6 +902,7 @@ void setup_ui_manager() {
             // Handle WiFi credential changes - auto reconnect
             if (wifi_settings_changed && new_settings.wifi_ssid.length() > 0) {
                 INFO(("WiFi credentials changed, reconnecting to: " + new_settings.wifi_ssid).c_str());
+                udp_log_ready = false;  // Suspend UDP logging during WiFi transition
                 WiFi.disconnect();
                 delay(100);
                 WiFi.begin(new_settings.wifi_ssid.c_str(), new_settings.wifi_password.c_str());
@@ -860,6 +914,7 @@ void setup_ui_manager() {
                 }
 
                 if (WiFi.status() == WL_CONNECTED) {
+                    udp_log_ready = true;  // Resume UDP logging
                     INFO(("WiFi connected! IP: " + WiFi.localIP().toString()).c_str());
                 } else {
                     WARNING("WiFi connection failed");
@@ -1221,6 +1276,9 @@ static volatile uint8_t loop_step = 0;
 void loop() {
     esp_task_wdt_reset();
 
+    // Handle OTA updates (must be called frequently)
+    ArduinoOTA.handle();
+
     // Handle serial commands for web flasher detection
     while (Serial.available()) {
         char c = Serial.read();
@@ -1255,6 +1313,7 @@ void loop() {
     if (wifi_reconnect_pending) {
         wifi_reconnect_pending = false;
         INFO(("Reconnecting WiFi to: " + pending_wifi_ssid).c_str());
+        udp_log_ready = false;  // Suspend UDP logging during WiFi transition
         WiFi.disconnect();
         delay(100);
         WiFi.begin(pending_wifi_ssid.c_str(), pending_wifi_password.c_str());
@@ -1266,6 +1325,7 @@ void loop() {
         }
 
         if (WiFi.status() == WL_CONNECTED) {
+            udp_log_ready = true;  // Resume UDP logging
             INFO(("WiFi connected! IP: " + WiFi.localIP().toString()).c_str());
         } else {
             WARNING("WiFi reconnection failed");
@@ -1506,53 +1566,88 @@ void loop() {
         int32_t delta = (last_free_heap > 0) ? ((int32_t)free_heap - (int32_t)last_free_heap) : 0;
         UBaseType_t stack_hwm = uxTaskGetStackHighWaterMark(NULL);
 
-        Serial.printf("[HEAP] free=%u min=%u max_block=%u delta=%+d stack_hwm=%u step=%u\n",
-            free_heap, min_heap, max_block, delta, stack_hwm, (unsigned)loop_step);
+        {
+            char diag[192];
+            int n = snprintf(diag, sizeof(diag),
+                "[HEAP] free=%u min=%u max_block=%u delta=%+d stack_hwm=%u step=%u",
+                free_heap, min_heap, max_block, delta, stack_hwm, (unsigned)loop_step);
+            Serial.println(diag);
+            udp_send(diag, n);
+        }
         // PSRAM diagnostics
         uint32_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
         uint32_t psram_total = ESP.getPsramSize();
         uint32_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
         uint32_t internal_max_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
-        Serial.printf("[PSRAM] free=%u/%u  [INTERNAL] free=%u max_block=%u\n",
-            psram_free, psram_total, internal_free, internal_max_block);
+        {
+            char diag[128];
+            int n = snprintf(diag, sizeof(diag),
+                "[PSRAM] free=%u/%u  [INTERNAL] free=%u max_block=%u",
+                psram_free, psram_total, internal_free, internal_max_block);
+            Serial.println(diag);
+            udp_send(diag, n);
+        }
         Serial.flush();
 
         // Threshold warnings
         if (free_heap < 20000) {
-            Serial.println("[HEAP] CRITICAL: Free heap below 20KB!");
+            {
+                const char* crit = "[HEAP] CRITICAL: Free heap below 20KB!";
+                Serial.println(crit);
+                udp_send(crit, strlen(crit));
+            }
             // Print Transport table sizes for debugging
-            Serial.printf("[TABLES] ann=%zu dest=%zu rev=%zu link=%zu held=%zu rate=%zu path=%zu\n",
-                RNS::Transport::announce_table_count(),
-                RNS::Transport::destination_table_count(),
-                RNS::Transport::reverse_table_count(),
-                RNS::Transport::link_table_count(),
-                RNS::Transport::held_announces_count(),
-                RNS::Transport::announce_rate_table_count(),
-                RNS::Transport::path_requests_count());
-            Serial.printf("[TABLES] pend_link=%zu act_link=%zu rcpt=%zu pkt_hash=%zu iface=%zu dest_pool=%zu\n",
-                RNS::Transport::pending_links_count(),
-                RNS::Transport::active_links_count(),
-                RNS::Transport::receipts_count(),
-                RNS::Transport::packet_hashlist_count(),
-                RNS::Transport::interfaces_count(),
-                RNS::Transport::destinations_count());
-            Serial.printf("[IDENTITY] known_dest=%zu known_ratch=%zu\n",
-                RNS::Identity::known_destinations_count(),
-                RNS::Identity::known_ratchets_count());
+            {
+                char tbl[192];
+                int n = snprintf(tbl, sizeof(tbl),
+                    "[TABLES] ann=%zu dest=%zu rev=%zu link=%zu held=%zu rate=%zu path=%zu",
+                    RNS::Transport::announce_table_count(),
+                    RNS::Transport::destination_table_count(),
+                    RNS::Transport::reverse_table_count(),
+                    RNS::Transport::link_table_count(),
+                    RNS::Transport::held_announces_count(),
+                    RNS::Transport::announce_rate_table_count(),
+                    RNS::Transport::path_requests_count());
+                Serial.println(tbl);
+                udp_send(tbl, n);
+                n = snprintf(tbl, sizeof(tbl),
+                    "[TABLES] pend_link=%zu act_link=%zu rcpt=%zu pkt_hash=%zu iface=%zu dest_pool=%zu",
+                    RNS::Transport::pending_links_count(),
+                    RNS::Transport::active_links_count(),
+                    RNS::Transport::receipts_count(),
+                    RNS::Transport::packet_hashlist_count(),
+                    RNS::Transport::interfaces_count(),
+                    RNS::Transport::destinations_count());
+                Serial.println(tbl);
+                udp_send(tbl, n);
+                n = snprintf(tbl, sizeof(tbl), "[IDENTITY] known_dest=%zu known_ratch=%zu",
+                    RNS::Identity::known_destinations_count(),
+                    RNS::Identity::known_ratchets_count());
+                Serial.println(tbl);
+                udp_send(tbl, n);
+            }
         } else if (free_heap < 50000) {
-            Serial.println("[HEAP] WARNING: Free heap below 50KB");
+            const char* warn = "[HEAP] WARNING: Free heap below 50KB";
+            Serial.println(warn);
+            udp_send(warn, strlen(warn));
         }
 
         // Fragmentation warning (large gap between free heap and max allocatable block)
         if (max_block < free_heap / 2) {
-            Serial.printf("[HEAP] WARNING: Fragmentation detected (max_block=%u, free=%u)\n",
+            char frag[96];
+            int n = snprintf(frag, sizeof(frag),
+                "[HEAP] WARNING: Fragmentation detected (max_block=%u, free=%u)",
                 max_block, free_heap);
+            Serial.println(frag);
+            udp_send(frag, n);
         }
 
         // Periodic table diagnostics (every 30 seconds)
         if (millis() - last_table_check > 30000) {
             last_table_check = millis();
-            Serial.printf("[DIAG] ikd=%zu ikr=%zu ann=%zu dest=%zu pkt=%zu held=%zu rev=%zu link=%zu\n",
+            char diag[192];
+            int n = snprintf(diag, sizeof(diag),
+                "[DIAG] ikd=%zu ikr=%zu ann=%zu dest=%zu pkt=%zu held=%zu rev=%zu link=%zu",
                 RNS::Identity::known_destinations_count(),
                 RNS::Identity::known_ratchets_count(),
                 RNS::Transport::announce_table_count(),
@@ -1561,6 +1656,8 @@ void loop() {
                 RNS::Transport::held_announces_count(),
                 RNS::Transport::reverse_table_count(),
                 RNS::Transport::link_table_count());
+            Serial.println(diag);
+            udp_send(diag, n);
         }
 
         last_free_heap = free_heap;
