@@ -1,52 +1,78 @@
 """
-PlatformIO pre-build script: Patch NimBLE ble_hs.c assert(0) in timer expiry handler.
+PlatformIO pre-build script: Patch NimBLE stability issues.
 
-NimBLE's ble_hs_timer_exp() asserts when a timer fires during BLE_HS_SYNC_STATE_BRINGUP.
-This is a race condition (timer scheduled before host reset wasn't cancelled), not a fatal
-error. The assert kills the ESP32, corrupting any file writes in progress.
+Patch 1 — ble_hs.c: Remove assert(0) in BLE_HS_SYNC_STATE_BRINGUP timer handler.
+  Timer can fire during host re-sync due to a race condition. Harmless — just ignore it.
 
-Fix: Replace assert(0) with break — the timer is harmless during bringup; the sync
-process will reschedule timers when transitioning to GOOD state.
+Patch 2 — NimBLEClient.cpp: Add null checks in PHY update event handler.
+  If a client is deleted while events are queued, the callback arg becomes a dangling
+  pointer. Guard against null pClient and null m_pClientCallbacks.
 """
 Import("env")
 import os
 
-def patch_nimble_ble_hs(env):
-    ble_hs_path = os.path.join(
-        env.get("PROJECT_DIR", "."),
-        ".pio", "libdeps", "tdeck",
-        "NimBLE-Arduino", "src", "nimble", "nimble", "host", "src", "ble_hs.c"
-    )
+NIMBLE_BASE = os.path.join(
+    env.get("PROJECT_DIR", "."),
+    ".pio", "libdeps", "tdeck", "NimBLE-Arduino", "src"
+)
 
-    if not os.path.exists(ble_hs_path):
-        print("PATCH: NimBLE ble_hs.c not found, skipping patch")
+def apply_patch(filepath, old, new, label):
+    if not os.path.exists(filepath):
+        print(f"PATCH: {os.path.basename(filepath)} not found, skipping {label}")
         return
-
-    with open(ble_hs_path, "r") as f:
+    with open(filepath, "r") as f:
         content = f.read()
+    if old in content:
+        content = content.replace(old, new)
+        with open(filepath, "w") as f:
+            f.write(content)
+        print(f"PATCH: {label}")
+    elif new in content:
+        print(f"PATCH: {label} (already applied)")
+    else:
+        print(f"PATCH: WARNING -- {label}: expected code not found")
 
-    # Only patch if the assert is still there (idempotent)
-    old = """    case BLE_HS_SYNC_STATE_BRINGUP:
+# Patch 1: ble_hs.c timer assert
+apply_patch(
+    os.path.join(NIMBLE_BASE, "nimble", "nimble", "host", "src", "ble_hs.c"),
+    """    case BLE_HS_SYNC_STATE_BRINGUP:
     default:
         /* The timer should not be set in this state. */
         assert(0);
-        break;"""
-
-    new = """    case BLE_HS_SYNC_STATE_BRINGUP:
+        break;""",
+    """    case BLE_HS_SYNC_STATE_BRINGUP:
     default:
         /* Timer can fire during bringup due to race with host reset.
          * This is harmless — bringup will reschedule when ready. */
-        break;"""
+        break;""",
+    "ble_hs.c: removed assert(0) in BRINGUP timer handler"
+)
 
-    if old in content:
-        content = content.replace(old, new)
-        with open(ble_hs_path, "w") as f:
-            f.write(content)
-        print("PATCH: Patched NimBLE ble_hs.c -- removed assert(0) in BRINGUP timer handler")
-    elif new in content:
-        print("PATCH: NimBLE ble_hs.c already patched")
-    else:
-        print("PATCH: WARNING -- Could not find expected code in ble_hs.c, manual review needed")
+# Patch 2: NimBLEClient.cpp PHY update null guard
+apply_patch(
+    os.path.join(NIMBLE_BASE, "NimBLEClient.cpp"),
+    """        case BLE_GAP_EVENT_PHY_UPDATE_COMPLETE: {
+            NimBLEConnInfo peerInfo;
+            rc = ble_gap_conn_find(event->phy_updated.conn_handle, &peerInfo.m_desc);
+            if (rc != 0) {
+                return BLE_ATT_ERR_INVALID_HANDLE;
+            }
 
-# Run the patch immediately during script evaluation (before any build targets)
-patch_nimble_ble_hs(env)
+            pClient->m_pClientCallbacks->onPhyUpdate(pClient, event->phy_updated.tx_phy, event->phy_updated.rx_phy);
+            return 0;
+        } // BLE_GAP_EVENT_PHY_UPDATE_COMPLETE""",
+    """        case BLE_GAP_EVENT_PHY_UPDATE_COMPLETE: {
+            if (pClient == nullptr || pClient->m_pClientCallbacks == nullptr) {
+                return 0;
+            }
+            NimBLEConnInfo peerInfo;
+            rc = ble_gap_conn_find(event->phy_updated.conn_handle, &peerInfo.m_desc);
+            if (rc != 0) {
+                return BLE_ATT_ERR_INVALID_HANDLE;
+            }
+
+            pClient->m_pClientCallbacks->onPhyUpdate(pClient, event->phy_updated.tx_phy, event->phy_updated.rx_phy);
+            return 0;
+        } // BLE_GAP_EVENT_PHY_UPDATE_COMPLETE""",
+    "NimBLEClient.cpp: added null guard in PHY update handler"
+)

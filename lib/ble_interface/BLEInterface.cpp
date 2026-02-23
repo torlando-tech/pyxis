@@ -10,6 +10,7 @@
 #ifdef ARDUINO
 #include <Arduino.h>
 #include <esp_heap_caps.h>
+#include <esp_task_wdt.h>
 #endif
 
 using namespace RNS;
@@ -279,6 +280,12 @@ void BLEInterface::loop() {
         performMaintenance();
         _last_maintenance = now;
     }
+
+    // Process discovered peers (connect attempts) — called OUTSIDE performMaintenance()
+    // to avoid holding _mutex during the blocking _platform->connect() call.
+    // The main loop's send_outgoing() acquires _mutex for packet sends — if we held
+    // _mutex during a 3-6s connect, it would starve the main loop and trigger the WDT.
+    processDiscoveredPeers();
 }
 
 //=============================================================================
@@ -290,7 +297,14 @@ void BLEInterface::send_outgoing(const Bytes& data) {
         return;
     }
 
-    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    // Non-blocking lock: if BLE task holds _mutex (maintenance, connect, etc.),
+    // skip this send rather than blocking the main loop. Reticulum handles
+    // retransmission at the transport layer.
+    if (!_mutex.try_lock()) {
+        TRACE("BLEInterface: send_outgoing skipped - BLE task busy");
+        return;
+    }
+    std::lock_guard<std::recursive_mutex> lock(_mutex, std::adopt_lock);
 
     // Get all connected peers
     auto connected_peers = _peer_manager.getConnectedPeers();
@@ -367,8 +381,10 @@ bool BLEInterface::sendToPeer(const Bytes& peer_identity, const Bytes& data) {
         bool sent = false;
 
         if (peer->is_central) {
-            // We are central - write to peripheral (with response for debugging)
-            sent = _platform->write(peer->conn_handle, fragment, true);
+            // We are central - write to peripheral (no response = non-blocking)
+            // Reticulum handles retransmission, so BLE-level ACK is unnecessary
+            // and write-with-response blocks until peer acknowledges or disconnects
+            sent = _platform->write(peer->conn_handle, fragment, false);
         } else {
             // We are peripheral - notify central
             sent = _platform->notify(peer->conn_handle, fragment);
@@ -860,52 +876,64 @@ void BLEInterface::processDiscoveredPeers() {
         return;  // Still in cooldown period
     }
 
-    // Find best connection candidate
-    PeerInfo* candidate = _peer_manager.getBestConnectionCandidate();
+    // Prepare connection candidate under short-lived lock — DO NOT hold _mutex
+    // during the blocking _platform->connect() call. The main loop calls
+    // send_outgoing() which acquires _mutex, and a 3-6s connect would starve it.
+    BLEAddress addr;
+    Bytes candidate_mac;
+    bool should_connect = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(_mutex);
 
-    // Debug: log all peers and why they may not be candidates
-    static double last_peer_log = 0;
-    if (now - last_peer_log >= 10.0) {
-        auto all_peers = _peer_manager.getAllPeers();
-        INFO("BLE: Peers=" + std::to_string(all_peers.size()) +
-             " localMAC=" + _peer_manager.getLocalMac().toString());
-        for (PeerInfo* peer : all_peers) {
-            if (peer->mac_address.size() < Limits::MAC_SIZE) {
-                WARNING("BLE: Peer with empty MAC, state=" +
-                        std::to_string(static_cast<int>(peer->state)));
-                continue;
+        PeerInfo* candidate = _peer_manager.getBestConnectionCandidate();
+
+        // Debug: log all peers and why they may not be candidates
+        static double last_peer_log = 0;
+        if (now - last_peer_log >= 10.0) {
+            auto all_peers = _peer_manager.getAllPeers();
+            INFO("BLE: Peers=" + std::to_string(all_peers.size()) +
+                 " localMAC=" + _peer_manager.getLocalMac().toString());
+            for (PeerInfo* peer : all_peers) {
+                if (peer->mac_address.size() < Limits::MAC_SIZE) {
+                    WARNING("BLE: Peer with empty MAC, state=" +
+                            std::to_string(static_cast<int>(peer->state)));
+                    continue;
+                }
+                bool should_initiate = _peer_manager.shouldInitiateConnection(peer->mac_address);
+                INFO("BLE: Peer " + BLEAddress(peer->mac_address.data()).toString() +
+                     " state=" + std::to_string(static_cast<int>(peer->state)) +
+                     " shouldInit=" + std::string(should_initiate ? "yes" : "no") +
+                     " score=" + std::to_string(peer->score));
             }
-            bool should_initiate = _peer_manager.shouldInitiateConnection(peer->mac_address);
-            INFO("BLE: Peer " + BLEAddress(peer->mac_address.data()).toString() +
-                 " state=" + std::to_string(static_cast<int>(peer->state)) +
-                 " shouldInit=" + std::string(should_initiate ? "yes" : "no") +
-                 " score=" + std::to_string(peer->score));
+            last_peer_log = now;
         }
-        last_peer_log = now;
-    }
 
-    if (candidate && candidate->mac_address.size() >= Limits::MAC_SIZE) {
-        INFO("BLE: Connection candidate: " + BLEAddress(candidate->mac_address.data()).toString() +
-              " type=" + std::to_string(candidate->address_type) +
-              " canAccept=" + std::string(_peer_manager.canAcceptConnection() ? "yes" : "no"));
-    }
+        if (candidate && candidate->mac_address.size() >= Limits::MAC_SIZE) {
+            INFO("BLE: Connection candidate: " + BLEAddress(candidate->mac_address.data()).toString() +
+                  " type=" + std::to_string(candidate->address_type) +
+                  " canAccept=" + std::string(_peer_manager.canAcceptConnection() ? "yes" : "no"));
+        }
 
-    if (candidate && _peer_manager.canAcceptConnection()) {
-        _peer_manager.setPeerState(candidate->mac_address, PeerState::CONNECTING);
-        candidate->connection_attempts++;
+        if (candidate && _peer_manager.canAcceptConnection()) {
+            _peer_manager.setPeerState(candidate->mac_address, PeerState::CONNECTING);
+            candidate->connection_attempts++;
 
-        // Use stored address type for correct connection
-        BLEAddress addr(candidate->mac_address.data(), candidate->address_type);
-        INFO("BLEInterface: Connecting to " + addr.toString() + " type=" + std::to_string(candidate->address_type));
+            // Copy address data before releasing lock
+            addr = BLEAddress(candidate->mac_address.data(), candidate->address_type);
+            candidate_mac = candidate->mac_address;
+            should_connect = true;
 
-        // Mark connection attempt time for cooldown
-        _last_connection_attempt = now;
+            INFO("BLEInterface: Connecting to " + addr.toString() + " type=" + std::to_string(candidate->address_type));
+            _last_connection_attempt = now;
+        }
+    }  // _mutex released here — before the blocking connect
 
-        // Handle immediate connection failure (resets state for retry)
-        // Reduced timeout from 10s to 3s to avoid long UI freezes
+    if (should_connect) {
+        // Blocking connect (3-6s) — _mutex NOT held, main loop can send packets
         if (!_platform->connect(addr, 3000)) {
             WARNING("BLEInterface: Connection attempt failed immediately");
-            _peer_manager.connectionFailed(candidate->mac_address);
+            std::lock_guard<std::recursive_mutex> lock(_mutex);
+            _peer_manager.connectionFailed(candidate_mac);
         }
     }
 }
@@ -1009,8 +1037,10 @@ void BLEInterface::performMaintenance() {
         }
     }
 
-    // Process discovered peers (try to connect)
-    processDiscoveredPeers();
+    // NOTE: processDiscoveredPeers() is called separately from loop() to avoid
+    // holding _mutex during blocking connect operations (3-6 seconds). If held
+    // here, the main loop's send_outgoing() would block on _mutex, triggering
+    // the Task Watchdog.
 }
 
 void BLEInterface::handleIncomingData(const ConnectionHandle& conn, const Bytes& data) {
@@ -1081,7 +1111,12 @@ void BLEInterface::ble_task(void* param) {
     BLEInterface* self = static_cast<BLEInterface*>(param);
     Serial.printf("BLE task started on core %d\n", xPortGetCoreID());
 
+    // Subscribe BLE task to Task Watchdog — detects BLE deadlocks
+    esp_task_wdt_add(NULL);
+
     while (true) {
+        esp_task_wdt_reset();
+
         // Run the BLE loop (already has internal mutex protection)
         self->loop();
 

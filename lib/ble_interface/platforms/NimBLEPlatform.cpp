@@ -8,8 +8,10 @@
 #if defined(ESP32) && (defined(USE_NIMBLE) || defined(CONFIG_BT_NIMBLE_ENABLED))
 
 #include "Log.h"
+#include "Identity.h"
 #include <algorithm>
 #include <esp_mac.h>
+#include <esp_task_wdt.h>
 
 // WiFi coexistence: Check if WiFi is available and connected
 // This is used to add extra delays before BLE connection attempts
@@ -284,6 +286,7 @@ void NimBLEPlatform::shutdown() {
               " active write operation(s)");
         // DELAY RATIONALE: Shutdown wait polling - check every 100ms for write completion
         delay(100);
+        esp_task_wdt_reset();
     }
 
     // Check if we timed out
@@ -356,58 +359,18 @@ bool NimBLEPlatform::isRunning() const {
 //=============================================================================
 
 bool NimBLEPlatform::recoverBLEStack() {
-    // CONC-M4: Enhanced soft reset with graceful shutdown
-    INFO("NimBLEPlatform: Soft reset requested");
+    // NimBLEDevice::deinit() frees memory that the NimBLE host task may have
+    // corrupted during sync failures, causing CORRUPT HEAP panics. The only
+    // safe recovery is a full reboot. With atomic file persistence, data
+    // survives reboots reliably.
+    ERROR("NimBLEPlatform: BLE stack stuck - persisting data and rebooting");
 
-    // Track consecutive recovery attempts using existing member variable
-    _lightweight_reset_fails++;
-    WARNING("NimBLEPlatform: Performing soft BLE reset (attempt " +
-            std::to_string(_lightweight_reset_fails) + ")...");
+    // Persist any dirty data before reboot
+    RNS::Identity::persist_data();
 
-    // If we've had too many consecutive recovery attempts without success,
-    // the BLE stack is truly stuck. Reboot is the only reliable fix.
-    if (_lightweight_reset_fails >= 5) {
-        ERROR("NimBLEPlatform: BLE stack unrecoverable after " +
-              std::to_string(_lightweight_reset_fails) + " attempts - rebooting device");
-        // DELAY RATIONALE: Stack init settling - allow log message to flush before reboot
-        delay(100);
-        ESP.restart();
-        return false;  // Won't reach here
-    }
-
-    // CONC-M4: Use graceful shutdown to wait for active operations
-    // This ensures write operations complete before we reset state
-    // Save config before shutdown clears it
-    PlatformConfig saved_config = _config;
-
-    // Perform graceful shutdown (waits for writes, cleans up properly)
-    shutdown();
-
-    // Brief delay for NimBLE host task to process shutdown
-    // DELAY RATIONALE: Soft reset processing - allow stack to fully quiesce after deinit
     delay(100);
-
-    // Reinitialize with saved config
-    if (!initialize(saved_config)) {
-        WARNING("NimBLEPlatform: Soft reset reinitialization failed");
-        // Log detailed state for debugging
-        ERROR("NimBLEPlatform: Soft reset failed - stack may need hard recovery (ESP.restart)");
-        // Return false - caller can decide to trigger ESP.restart() if needed
-        return false;
-    }
-
-    // Restart the platform
-    if (!start()) {
-        WARNING("NimBLEPlatform: Soft reset start failed");
-        return false;
-    }
-
-    // Reset failure counters on successful reset
-    _lightweight_reset_fails = 0;
-    _scan_fail_count = 0;
-
-    INFO("NimBLEPlatform: Soft reset complete");
-    return true;
+    ESP.restart();
+    return false;  // Won't reach here
 }
 
 //=============================================================================
@@ -523,6 +486,7 @@ bool NimBLEPlatform::pauseSlaveForMaster() {
         while (ble_gap_adv_active() && millis() - start < 2000) {
             // DELAY RATIONALE: Advertising stop polling - check completion every NimBLE scheduler tick (~10ms)
             delay(10);
+            esp_task_wdt_reset();  // Feed WDT during blocking wait
         }
 
         if (ble_gap_adv_active()) {
@@ -557,6 +521,7 @@ bool NimBLEPlatform::pauseSlaveForMaster() {
         }
         // DELAY RATIONALE: Slave state polling - check completion every NimBLE scheduler tick (~10ms)
         delay(10);
+        esp_task_wdt_reset();
     }
 
     WARNING("NimBLEPlatform: Timed out waiting for slave to become idle");
@@ -627,6 +592,7 @@ void NimBLEPlatform::enterErrorRecovery() {
         uint32_t sync_start = millis();
         while (!ble_hs_synced() && (millis() - sync_start) < 3000) {
             delay(50);
+            esp_task_wdt_reset();
         }
         if (ble_hs_synced()) {
             INFO("NimBLEPlatform: Host sync restored after " +
@@ -702,6 +668,7 @@ bool NimBLEPlatform::startScan(uint16_t duration_ms) {
         uint32_t sync_wait = millis();
         while (!ble_hs_synced() && (millis() - sync_wait) < 2000) {
             delay(50);
+            esp_task_wdt_reset();
         }
         if (!ble_hs_synced()) {
             _scan_fail_count++;
@@ -828,6 +795,7 @@ void NimBLEPlatform::stopScan() {
     while (ble_gap_disc_active() && millis() - start < 1000) {
         // DELAY RATIONALE: Scan stop polling - check completion every NimBLE scheduler tick (~10ms)
         delay(10);
+        esp_task_wdt_reset();
     }
 
     // Transition to IDLE
@@ -942,6 +910,7 @@ bool NimBLEPlatform::connect(const BLEAddress& address, uint16_t timeout_ms) {
         while (ble_gap_conn_active() && millis() - start < 1000) {
             // DELAY RATIONALE: Service discovery polling - check completion per scheduler tick
             delay(10);
+            esp_task_wdt_reset();
         }
         if (ble_gap_conn_active()) {
             ERROR("NimBLEPlatform: GAP connection still active after timeout");
@@ -1161,9 +1130,14 @@ bool NimBLEPlatform::connectNative(const BLEAddress& address, uint16_t timeout_m
     // discovery) that would deadlock the host task.
     _native_connect_pending = true;
 
+    // Feed WDT before blocking connect — NimBLE connect can take several seconds
+    // with WiFi coexistence, and the BLE task is subscribed to the 10s WDT
+    esp_task_wdt_reset();
+
     // Connect (blocking) — NimBLE handles GAP event management internally
     bool connected = client->connect(nimAddr, false);  // deleteAttributes=false
 
+    esp_task_wdt_reset();  // Feed WDT after connect returns
     _native_connect_pending = false;
 
     if (!connected) {
@@ -1334,6 +1308,7 @@ bool NimBLEPlatform::startAdvertising() {
         uint32_t sync_wait = millis();
         while (!ble_hs_synced() && (millis() - sync_wait) < 1000) {
             delay(50);
+            esp_task_wdt_reset();
         }
         if (!ble_hs_synced()) {
             DEBUG("NimBLEPlatform: Host not synced, cannot start advertising");
@@ -1404,6 +1379,7 @@ void NimBLEPlatform::stopAdvertising() {
     while (ble_gap_adv_active() && millis() - start < 1000) {
         // DELAY RATIONALE: Loop iteration throttle - prevent tight loop CPU consumption
         delay(10);
+        esp_task_wdt_reset();
     }
 
     // Transition to IDLE

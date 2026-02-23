@@ -9,6 +9,7 @@
 #include <sys/time.h>
 #include <esp_system.h>
 #include <esp_heap_caps.h>
+#include <esp_task_wdt.h>
 #include <new>  // placement new
 #include <soc/rtc_cntl_reg.h>
 
@@ -1193,6 +1194,12 @@ void setup() {
     INFO("╚══════════════════════════════════════╝");
     INFO("");
 
+    // Subscribe main loop to Task Watchdog — detects hangs/deadlocks
+    // If loop() blocks for >10s (CONFIG_ESP_TASK_WDT_TIMEOUT_S), WDT fires
+    // with a backtrace showing exactly where the hang is
+    esp_task_wdt_add(NULL);  // NULL = current task (loopTask)
+    INFO("Task Watchdog: loopTask subscribed");
+
     // Show startup message
     INFO("Press any key to start messaging");
 }
@@ -1200,7 +1207,16 @@ void setup() {
 // Serial command buffer for web flasher detection
 static String serial_cmd_buffer = "";
 
+// Loop step tracker — helps identify which call blocks when device hangs
+// Written every loop iteration, printed in 5s heap diagnostic
+static volatile uint8_t loop_step = 0;
+
+// Feed WDT and advance loop step tracker
+#define LOOP_STEP(n) do { loop_step = (n); esp_task_wdt_reset(); } while(0)
+
 void loop() {
+    esp_task_wdt_reset();
+
     // Handle serial commands for web flasher detection
     while (Serial.available()) {
         char c = Serial.read();
@@ -1222,13 +1238,16 @@ void loop() {
         }
     }
 
+    LOOP_STEP(1);  // LVGL task_handler
     // Handle LVGL rendering (must be called frequently for smooth UI)
     UI::LVGL::LVGLInit::task_handler();
 
+    LOOP_STEP(2);  // Display health
     // Monitor display health
     Hardware::TDeck::Display::log_health();
 
     // Handle deferred WiFi reconnect (from LVGL task)
+    LOOP_STEP(3);  // WiFi reconnect check
     if (wifi_reconnect_pending) {
         wifi_reconnect_pending = false;
         INFO(("Reconnecting WiFi to: " + pending_wifi_ssid).c_str());
@@ -1238,6 +1257,7 @@ void loop() {
 
         uint32_t start = millis();
         while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
+            esp_task_wdt_reset();
             delay(100);
         }
 
@@ -1251,43 +1271,52 @@ void loop() {
     }
 
     // Process Reticulum
+    LOOP_STEP(4);  // reticulum->loop()
     reticulum->loop();
 
     // Periodically persist identity/transport data (display names, paths, etc.)
+    LOOP_STEP(5);  // persist data
     reticulum->should_persist_data();
     // Fast-persist known destinations (5s after dirty) to survive crashes
     Identity::should_persist_data();
 
     // Process TCP interface
+    LOOP_STEP(6);  // TCP loop
     if (tcp_interface) {
         tcp_interface->loop();
     }
 
     // Process LoRa interface
+    LOOP_STEP(7);  // LoRa loop
     if (lora_interface) {
         lora_interface->loop();
     }
 
     // Process BLE interface (skip if running on its own task)
+    LOOP_STEP(8);  // BLE loop
     if (ble_interface && ble_interface_impl && !ble_interface_impl->is_task_running()) {
         ble_interface->loop();
     }
 
     // Process LXMF router queues
+    LOOP_STEP(9);  // Router processing
     if (router) {
         router->process_outbound();
         router->process_inbound();
     }
 
     // Update UI manager (processes LXMF messages)
+    LOOP_STEP(10);  // UI manager update
     if (ui_manager) {
         ui_manager->update();
     }
 
+    LOOP_STEP(11);  // Memory monitor
     // Process deferred memory monitor logging (flag set by timer callback)
     MEMORY_MONITOR_POLL();
 
     // Periodic announce (using interval from settings)
+    LOOP_STEP(12);  // Periodic tasks
     if (app_settings.announce_interval > 0) {  // 0 = disabled
         uint32_t announce_interval_ms = app_settings.announce_interval * 1000;
         if (millis() - last_announce > announce_interval_ms) {
@@ -1406,6 +1435,7 @@ void loop() {
     }
 
     // Screen timeout handling
+    LOOP_STEP(13);  // Screen timeout
     if (app_settings.screen_timeout > 0) {  // 0 = never timeout
         uint32_t inactive_ms;
         {
@@ -1467,8 +1497,8 @@ void loop() {
         int32_t delta = (last_free_heap > 0) ? ((int32_t)free_heap - (int32_t)last_free_heap) : 0;
         UBaseType_t stack_hwm = uxTaskGetStackHighWaterMark(NULL);
 
-        Serial.printf("[HEAP] free=%u min=%u max_block=%u delta=%+d stack_hwm=%u\n",
-            free_heap, min_heap, max_block, delta, stack_hwm);
+        Serial.printf("[HEAP] free=%u min=%u max_block=%u delta=%+d stack_hwm=%u step=%u\n",
+            free_heap, min_heap, max_block, delta, stack_hwm, (unsigned)loop_step);
         // PSRAM diagnostics
         uint32_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
         uint32_t psram_total = ESP.getPsramSize();
