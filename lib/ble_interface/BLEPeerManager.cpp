@@ -14,7 +14,7 @@
 namespace RNS { namespace BLE {
 
 BLEPeerManager::BLEPeerManager() {
-    _local_mac = Bytes(6);  // Initialize to zeros
+    memset(_local_mac_addr.addr, 0, 6);  // Initialize to zeros
 
     // Initialize all pools to empty state
     for (size_t i = 0; i < PEERS_POOL_SIZE; i++) {
@@ -31,7 +31,8 @@ BLEPeerManager::BLEPeerManager() {
 
 void BLEPeerManager::setLocalMac(const Bytes& mac) {
     if (mac.size() >= Limits::MAC_SIZE) {
-        _local_mac = Bytes(mac.data(), Limits::MAC_SIZE);
+        memcpy(_local_mac_addr.addr, mac.data(), Limits::MAC_SIZE);
+        DEBUG("BLEPeerManager: Local MAC set to " + _local_mac_addr.toString());
     }
 }
 
@@ -321,7 +322,8 @@ PeerInfo* BLEPeerManager::getBestConnectionCandidate() {
 }
 
 bool BLEPeerManager::shouldInitiateConnection(const Bytes& peer_mac) const {
-    return shouldInitiateConnection(_local_mac, peer_mac);
+    Bytes our_mac(_local_mac_addr.addr, Limits::MAC_SIZE);
+    return shouldInitiateConnection(our_mac, peer_mac);
 }
 
 bool BLEPeerManager::shouldInitiateConnection(const Bytes& our_mac, const Bytes& peer_mac) {

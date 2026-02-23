@@ -8,6 +8,8 @@
 #include <time.h>
 #include <sys/time.h>
 #include <esp_system.h>
+#include <esp_heap_caps.h>
+#include <new>  // placement new
 #include <soc/rtc_cntl_reg.h>
 
 // Reticulum
@@ -650,7 +652,10 @@ void setup_reticulum() {
     if (app_settings.ble_enabled) {
         INFO("Initializing BLE Mesh interface...");
 
-        ble_interface_impl = new BLEInterface("BLE");
+        // Allocate BLEInterface in PSRAM to save ~22KB internal heap
+        // Use calloc to zero-initialize — prevents stale PSRAM data from appearing as valid
+        void* ble_mem = heap_caps_calloc(1, sizeof(BLEInterface), MALLOC_CAP_SPIRAM);
+        ble_interface_impl = new (ble_mem) BLEInterface("BLE");
         // Testing: DUAL mode with WiFi radio completely disabled
         ble_interface_impl->setRole(RNS::BLE::Role::DUAL);
         ble_interface_impl->setLocalIdentity(identity->get_public_key().left(16));
@@ -960,7 +965,8 @@ void setup_ui_manager() {
                     // Create interface if it doesn't exist yet
                     if (!ble_interface_impl) {
                         INFO("Creating new BLE interface...");
-                        ble_interface_impl = new BLEInterface("BLE");
+                        void* ble_mem = heap_caps_calloc(1, sizeof(BLEInterface), MALLOC_CAP_SPIRAM);
+                        ble_interface_impl = new (ble_mem) BLEInterface("BLE");
                         // Testing: DUAL mode with WiFi radio completely disabled
                         ble_interface_impl->setRole(RNS::BLE::Role::DUAL);
                         ble_interface_impl->setLocalIdentity(identity->get_public_key().left(16));

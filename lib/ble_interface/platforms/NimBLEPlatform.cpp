@@ -9,6 +9,7 @@
 
 #include "Log.h"
 #include <algorithm>
+#include <esp_mac.h>
 
 // WiFi coexistence: Check if WiFi is available and connected
 // This is used to add extra delays before BLE connection attempts
@@ -208,6 +209,40 @@ void NimBLEPlatform::loop() {
 
         if (_on_scan_complete) {
             _on_scan_complete();
+        }
+    }
+
+    // Stuck-state safety net: if GAP hardware is idle but our state machine
+    // thinks we're busy, reset state machine. This recovers from missed callbacks
+    // (e.g., service discovery disconnect not properly cleaning up state).
+    static uint32_t last_stuck_check = 0;
+    uint32_t now_ms = millis();
+    if (now_ms - last_stuck_check >= 5000) {  // Check every 5 seconds
+        last_stuck_check = now_ms;
+
+        portENTER_CRITICAL(&_state_mux);
+        GAPState gs = _gap_state;
+        MasterState ms2 = _master_state;
+        SlaveState ss = _slave_state;
+        portEXIT_CRITICAL(&_state_mux);
+
+        bool gap_idle = !ble_gap_disc_active() && !ble_gap_adv_active() && !ble_gap_conn_active();
+
+        if (gap_idle && (gs != GAPState::READY || ms2 != MasterState::IDLE || ss != SlaveState::IDLE)) {
+            WARNING(std::string("NimBLEPlatform: Stuck state detected - GAP idle but state=") +
+                    gapStateName(gs) + " master=" + masterStateName(ms2) +
+                    " slave=" + slaveStateName(ss) + ". Resetting.");
+            portENTER_CRITICAL(&_state_mux);
+            _gap_state = GAPState::READY;
+            _master_state = MasterState::IDLE;
+            _slave_state = SlaveState::IDLE;
+            _slave_paused_for_master = false;
+            portEXIT_CRITICAL(&_state_mux);
+
+            // Restart advertising in dual/peripheral mode
+            if (_config.role == Role::PERIPHERAL || _config.role == Role::DUAL) {
+                startAdvertising();
+            }
         }
     }
 
@@ -1601,8 +1636,8 @@ bool NimBLEPlatform::isConnectedTo(const BLEAddress& address) const {
 }
 
 bool NimBLEPlatform::isDeviceConnected(const std::string& addrKey) const {
-    for (const auto& [handle, conn] : _connections) {
-        if (conn.peer_address.toString() == addrKey) {
+    for (const auto& kv : _connections) {
+        if (kv.second.peer_address.toString() == addrKey) {
             return true;
         }
     }
@@ -1662,7 +1697,40 @@ void NimBLEPlatform::setOnReadRequested(Callbacks::OnReadRequested callback) {
 }
 
 BLEAddress NimBLEPlatform::getLocalAddress() const {
-    return fromNimBLE(NimBLEDevice::getAddress());
+    // Try NimBLE's address first (uses configured own_addr_type)
+    BLEAddress addr = fromNimBLE(NimBLEDevice::getAddress());
+    if (!addr.isZero()) {
+        return addr;
+    }
+
+    // Fallback: try ble_hs_id_copy_addr directly with RANDOM type
+    uint8_t nimble_addr[6] = {};
+    int rc = ble_hs_id_copy_addr(BLE_OWN_ADDR_RANDOM, nimble_addr, nullptr);
+    if (rc == 0) {
+        // NimBLE stores in little-endian: val[0]=LSB, val[5]=MSB
+        BLEAddress result;
+        for (int i = 0; i < 6; i++) {
+            result.addr[i] = nimble_addr[5 - i];
+        }
+        if (!result.isZero()) return result;
+    }
+
+    // Fallback: read BT MAC directly from ESP-IDF efuse
+    uint8_t mac[6] = {};
+    esp_err_t err = esp_read_mac(mac, ESP_MAC_BT);
+    if (err == ESP_OK) {
+        // esp_read_mac returns in standard order: mac[0]=MSB (OUI), mac[5]=LSB
+        // Our BLEAddress also stores MSB first, so direct copy
+        BLEAddress result;
+        memcpy(result.addr, mac, 6);
+        if (!result.isZero()) return result;
+    }
+
+    WARNING(std::string("NimBLEPlatform::getLocalAddress: all methods failed") +
+            " nimble_addr=" + addr.toString() +
+            " ble_hs_id_copy_addr_rc=" + std::to_string(rc) +
+            " esp_read_mac_rc=" + std::to_string(static_cast<int>(err)));
+    return addr;
 }
 
 //=============================================================================

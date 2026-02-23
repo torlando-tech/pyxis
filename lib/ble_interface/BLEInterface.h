@@ -242,7 +242,7 @@ private:
         RNS::BLE::BLEFragmenter fragmenter;
         void clear() { in_use = false; identity.clear(); fragmenter = RNS::BLE::BLEFragmenter(); }
     };
-    static constexpr size_t MAX_FRAGMENTERS = 8;
+    static constexpr size_t MAX_FRAGMENTERS = 4;
     FragmenterSlot _fragmenter_pool[MAX_FRAGMENTERS];
 
     //=========================================================================
@@ -256,7 +256,7 @@ private:
     double _last_advertising_refresh = 0;
 
     // Pending handshake completions (deferred from callback to loop for stack safety)
-    static constexpr size_t MAX_PENDING_HANDSHAKES = 32;
+    static constexpr size_t MAX_PENDING_HANDSHAKES = 4;
     struct PendingHandshake {
         RNS::Bytes mac;
         RNS::Bytes identity;
@@ -266,7 +266,7 @@ private:
     size_t _pending_handshake_count = 0;
 
     // Pending data fragments (deferred from callback to loop for stack safety)
-    static constexpr size_t MAX_PENDING_DATA = 64;
+    static constexpr size_t MAX_PENDING_DATA = 8;
     struct PendingData {
         RNS::Bytes identity;
         RNS::Bytes data;

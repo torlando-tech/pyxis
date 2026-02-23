@@ -90,15 +90,20 @@ bool BLEInterface::start() {
     // Set identity data for peripheral mode
     _platform->setIdentityData(_local_identity);
 
-    // Set local MAC in peer manager
-    _peer_manager.setLocalMac(_platform->getLocalAddress().toBytes());
-
     // Start platform
     if (!_platform->start()) {
         ERROR("BLEInterface: Failed to start BLE platform");
         _platform.reset();
         return false;
     }
+
+    // Set local MAC in peer manager (must be after start() when NimBLE has a valid address)
+    auto local_addr = _platform->getLocalAddress();
+    auto local_mac_bytes = local_addr.toBytes();
+    INFO("BLEInterface: Local address from platform: " + local_addr.toString() +
+         " bytes_size=" + std::to_string(local_mac_bytes.size()) +
+         " isZero=" + std::to_string(local_addr.isZero()));
+    _peer_manager.setLocalMac(local_mac_bytes);
 
     _online = true;
     _last_scan = 0;  // Trigger immediate scan
@@ -131,7 +136,18 @@ void BLEInterface::stop() {
 
 void BLEInterface::loop() {
     static double last_loop_log = 0;
+    static bool local_mac_set = false;
     double now = Utilities::OS::time();
+
+    // Lazy init: set local MAC once NimBLE has a valid random address
+    if (!local_mac_set && _platform) {
+        auto addr = _platform->getLocalAddress();
+        if (!addr.isZero()) {
+            _peer_manager.setLocalMac(addr.toBytes());
+            local_mac_set = true;
+            INFO("BLEInterface: Local MAC resolved: " + addr.toString());
+        }
+    }
 
     // Process any pending handshakes (deferred from callback for stack safety)
     if (_pending_handshake_count > 0) {
@@ -827,7 +843,7 @@ void BLEInterface::processDiscoveredPeers() {
     if (now - last_peer_log >= 10.0) {
         auto all_peers = _peer_manager.getAllPeers();
         DEBUG("BLEInterface: Peer count=" + std::to_string(all_peers.size()) +
-              " localMAC=" + _peer_manager.getLocalMac().toHex());
+              " localMAC=" + _peer_manager.getLocalMac().toString());
         for (PeerInfo* peer : all_peers) {
             bool should_initiate = _peer_manager.shouldInitiateConnection(peer->mac_address);
             DEBUG("BLEInterface: Peer " + BLEAddress(peer->mac_address.data()).toString() +
@@ -1026,7 +1042,7 @@ bool BLEInterface::start_task(int priority, int core) {
     BaseType_t result = xTaskCreatePinnedToCore(
         ble_task,
         "ble",
-        8192,           // 8KB stack
+        12288,          // 12KB stack (string ops in debug logs need headroom)
         this,
         priority,
         &_task_handle,

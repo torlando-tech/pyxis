@@ -143,9 +143,9 @@ public:
     void setLocalMac(const Bytes& mac);
 
     /**
-     * @brief Get our local MAC address
+     * @brief Get our local MAC address as BLEAddress (no heap allocation)
      */
-    const Bytes& getLocalMac() const { return _local_mac; }
+    BLEAddress getLocalMac() const { return _local_mac_addr; }
 
     //=========================================================================
     // Peer Discovery
@@ -476,8 +476,8 @@ private:
     // nullptr means no mapping for that handle
     PeerInfo* _handle_to_peer[MAX_CONN_HANDLES];
 
-    // Our own MAC address
-    Bytes _local_mac;
+    // Our own MAC address (stored as plain struct to avoid Bytes heap corruption in PSRAM)
+    BLEAddress _local_mac_addr;
 };
 
 }} // namespace RNS::BLE
