@@ -90,8 +90,8 @@ private:
     int16_t* dropBuf_ = nullptr;
 
     static constexpr int SAMPLE_RATE = 8000;
-    static constexpr int PCM_RING_FRAMES = 16;
-    static constexpr int PREBUFFER_FRAMES = 3;
+    static constexpr int PCM_RING_FRAMES = 50;
+    static constexpr int PREBUFFER_FRAMES = 15;
     static constexpr int PLAYBACK_TASK_STACK = 8192;
     static constexpr int PLAYBACK_TASK_PRIORITY = 5;
     static constexpr int PLAYBACK_TASK_CORE = 0;
