@@ -103,9 +103,9 @@ private:
 
     static constexpr int I2S_SAMPLE_RATE = 16000;  // I2S runs at 16kHz (matches T-Deck Plus reference)
     static constexpr int CODEC_SAMPLE_RATE = 8000; // Codec2 expects 8kHz — we downsample 2:1
-    static constexpr int ENCODED_RING_SLOTS = 32;
+    static constexpr int ENCODED_RING_SLOTS = 128;
     static constexpr int ENCODED_RING_MAX_BYTES = 256;
-    static constexpr int CAPTURE_TASK_STACK = 16384;
+    static constexpr int CAPTURE_TASK_STACK = 24576;  // 24KB — pyxis_log→sendto uses ~4KB lwIP stack
     static constexpr int CAPTURE_TASK_PRIORITY = 5;
     static constexpr int CAPTURE_TASK_CORE = 0;
 };

@@ -60,6 +60,27 @@ bool LXSTAudio::init(int codec2Mode, uint8_t micGain) {
             Serial.printf("[AUDIO] ES7210 init warning: ret=%lu\n", (unsigned long)ret_val);
         }
     }
+    // Verify ES7210 configuration by reading back key registers
+    {
+        int reg00 = es7210_read_reg(ES7210_RESET_REG00);
+        int reg01 = es7210_read_reg(ES7210_CLOCK_OFF_REG01);
+        int reg06 = es7210_read_reg(ES7210_POWER_DOWN_REG06);
+        int reg08 = es7210_read_reg(ES7210_MODE_CONFIG_REG08);
+        int reg43 = es7210_read_reg(ES7210_MIC1_GAIN_REG43);
+        int reg47 = es7210_read_reg(ES7210_MIC1_POWER_REG47);
+        int reg4b = es7210_read_reg(ES7210_MIC12_POWER_REG4B);
+        Serial.printf("[AUDIO] ES7210 regs: R00=0x%02X R01=0x%02X R06=0x%02X R08=0x%02X "
+                      "GAIN1=0x%02X PWR1=0x%02X PWR12=0x%02X\n",
+                      reg00, reg01, reg06, reg08, reg43, reg47, reg4b);
+        // Expected: R00=0x41 (normal), R06=0x00 (powered up), R08=0x00 (slave mode)
+        // PWR1=0x00, PWR12=0x00 (mics powered on)
+        if (reg06 != 0x00) {
+            Serial.printf("[AUDIO] WARNING: ES7210 POWER_DOWN=0x%02X (expected 0x00)\n", reg06);
+        }
+        if (reg47 != 0x00 || reg4b != 0x00) {
+            Serial.printf("[AUDIO] WARNING: ES7210 mic power not active! R47=0x%02X R4B=0x%02X\n", reg47, reg4b);
+        }
+    }
     Serial.println("[AUDIO] ES7210 initialized OK");
 
     // I2S capture init
@@ -71,6 +92,17 @@ bool LXSTAudio::init(int codec2Mode, uint8_t micGain) {
         return false;
     }
     Serial.println("[AUDIO] I2S capture initialized (MCLK now running)");
+
+    // Re-issue ES7210 start with clocks now running.
+    // In slave mode, the ES7210 needs MCLK/BCLK/LRCK from the ESP32 I2S master
+    // to properly start its ADC — the initial start above ran before clocks were
+    // available.  This second call ensures the ADC powers up correctly.
+    {
+        audio_hal_codec_config_t cfg2 = {};
+        cfg2.codec_mode = AUDIO_HAL_CODEC_MODE_ENCODE;
+        es7210_adc_ctrl_state(cfg2.codec_mode, AUDIO_HAL_CTRL_START);
+        Serial.println("[AUDIO] ES7210 re-started with I2S clocks active");
+    }
 
     // Create separate Codec2 instances for encode and decode to avoid mutex
     // contention during full-duplex calls (capture task + main thread decode)

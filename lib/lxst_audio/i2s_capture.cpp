@@ -18,6 +18,9 @@ using namespace Hardware::TDeck;
 
 static const char* TAG = "LXST:Capture";
 
+// Defined in main.cpp — sends to both Serial and UDP
+extern "C" void pyxis_log(const char* msg);
+
 I2SCapture::I2SCapture() = default;
 
 I2SCapture::~I2SCapture() {
@@ -211,13 +214,18 @@ void I2SCapture::captureLoop() {
 
     static constexpr int16_t LIMITER_THRESHOLD = 16000;
 
-    Serial.printf("[CAP] Capture task on core %d, I2S=%dHz, codec=%dHz, FIR=%d-tap\n",
-                  xPortGetCoreID(), I2S_SAMPLE_RATE, CODEC_SAMPLE_RATE, FIR_TAPS);
+    {
+        char logbuf[96];
+        snprintf(logbuf, sizeof(logbuf), "[CAP] Capture task on core %d, I2S=%dHz, codec=%dHz, FIR=%d-tap, stack=%d",
+                 xPortGetCoreID(), I2S_SAMPLE_RATE, CODEC_SAMPLE_RATE, FIR_TAPS, CAPTURE_TASK_STACK);
+        pyxis_log(logbuf);
+    }
     uint32_t framesEncoded = 0;
     uint32_t totalDsSamples = 0;    // Total mono samples after decimation
     uint32_t rateCheckMs = millis(); // For sample rate measurement
     int16_t runningPeakDs = 0;      // Peak of decimated samples per interval
     int16_t runningPeakRaw = 0;     // Peak of raw I2S samples per interval
+    uint32_t ringDrops = 0;         // Ring buffer overflow counter
 
     while (capturing_.load(std::memory_order_relaxed)) {
         // Read samples from I2S DMA (at 16kHz)
@@ -227,15 +235,15 @@ void I2SCapture::captureLoop() {
 
         int samplesRead = bytesRead / sizeof(int16_t);
 
-        // One-time dump of first raw I2S samples to see TDM channel layout
-        if (framesEncoded == 0 && samplesRead >= 16) {
-            static bool dumped = false;
-            if (!dumped) {
-                dumped = true;
-                Serial.printf("[CAP] Raw I2S first 16 samples (%d total): ", samplesRead);
-                for (int d = 0; d < 16; d++) Serial.printf("%d ", readBuf[d]);
-                Serial.println();
-            }
+        // Dump first raw I2S samples on each capture start to see TDM channel layout
+        // Resets per capture start (not per boot) since framesEncoded resets to 0
+        if (framesEncoded == 0 && samplesRead >= 16 && totalDsSamples == 0) {
+            char rawdump[192];
+            int pos = snprintf(rawdump, sizeof(rawdump),
+                "[CAP] Raw I2S (%d read, %zu bytes): ", samplesRead, bytesRead);
+            for (int d = 0; d < 16 && pos < 180; d++)
+                pos += snprintf(rawdump + pos, sizeof(rawdump) - pos, "%d ", readBuf[d]);
+            pyxis_log(rawdump);
         }
 
         // Track raw I2S peak (all channels)
@@ -291,9 +299,13 @@ void I2SCapture::captureLoop() {
         uint32_t elapsed = now - rateCheckMs;
         if (elapsed >= 2000) {
             uint32_t rate = (totalDsSamples * 1000) / elapsed;
-            Serial.printf("[CAP] rate=%luHz frames=%lu rawPeak=%d dsPeak=%d\n",
-                          (unsigned long)rate, (unsigned long)framesEncoded,
-                          runningPeakRaw, runningPeakDs);
+            {
+                char logbuf[128];
+                snprintf(logbuf, sizeof(logbuf), "[CAP] rate=%luHz frames=%lu rawPeak=%d dsPeak=%d ringDrops=%lu",
+                         (unsigned long)rate, (unsigned long)framesEncoded,
+                         runningPeakRaw, runningPeakDs, (unsigned long)ringDrops);
+                pyxis_log(logbuf);
+            }
             totalDsSamples = 0;
             rateCheckMs = now;
             runningPeakRaw = 0;
@@ -321,16 +333,18 @@ void I2SCapture::captureLoop() {
                     filterChain_->process(frameData, frameSamples_, CODEC_SAMPLE_RATE);
                 }
 
-                // Log PCM levels for first few frames (pre-filter)
+                // Log PCM levels for first few frames and periodically
                 if (framesEncoded < 5 || (framesEncoded % 500 == 0)) {
                     int16_t maxVal = 0;
                     for (int s = 0; s < frameSamples_; s++) {
                         int16_t v = accumBuffer_[s] < 0 ? -accumBuffer_[s] : accumBuffer_[s];
                         if (v > maxVal) maxVal = v;
                     }
-                    Serial.printf("[CAP] PCM peak=%d (first=%d,%d,%d,%d)\n",
-                                  maxVal, accumBuffer_[0], accumBuffer_[1],
-                                  accumBuffer_[2], accumBuffer_[3]);
+                    char logbuf[96];
+                    snprintf(logbuf, sizeof(logbuf), "[CAP] PCM peak=%d (first=%d,%d,%d,%d)",
+                             maxVal, accumBuffer_[0], accumBuffer_[1],
+                             accumBuffer_[2], accumBuffer_[3]);
+                    pyxis_log(logbuf);
                 }
 
                 // Encode
@@ -339,19 +353,19 @@ void I2SCapture::captureLoop() {
                 if (encodedLen > 0) {
                     framesEncoded++;
                     if (framesEncoded <= 3 || (framesEncoded % 500 == 0)) {
+                        char logbuf[128];
                         char hex[64];
                         int hpos = 0;
                         for (int h = 0; h < encodedLen && h < 20 && hpos < 60; h++)
                             hpos += snprintf(hex + hpos, 64 - hpos, "%02X ", encodeBuf_[h]);
-                        Serial.printf("[CAP] Encoded #%lu: %d bytes: %s\n",
-                                      (unsigned long)framesEncoded, encodedLen, hex);
+                        snprintf(logbuf, sizeof(logbuf), "[CAP] Encoded #%lu: %d bytes: %s",
+                                 (unsigned long)framesEncoded, encodedLen, hex);
+                        pyxis_log(logbuf);
                     }
                 }
                 if (encodedLen > 0 && encodedRing_) {
                     if (!encodedRing_->write(encodeBuf_, encodedLen)) {
-                        // Ring full — drop this frame (TX pump will drain)
-                        // NOTE: Do NOT call read() here — this is SPSC and
-                        // the TX pump is the sole consumer on another core.
+                        ringDrops++;
                     }
                 }
 

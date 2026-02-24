@@ -899,7 +899,8 @@ void UIManager::call_send_signal(int signal) {
     DEBUG(buf);
 }
 
-void UIManager::call_send_audio_batch(const uint8_t* batch_data, int batch_len, int frame_count) {
+void UIManager::call_send_audio_batch(const uint8_t* batch_data, int batch_len,
+                                      int batch_count, int total_frames) {
     if (!_call_link || _call_link.status() != Type::Link::ACTIVE) {
         if (_call_audio_tx_count == 0) {
             char dbg[64];
@@ -910,60 +911,81 @@ void UIManager::call_send_audio_batch(const uint8_t* batch_data, int batch_len, 
         return;
     }
 
-    // Msgpack: {0x01: bin8(codec_header + mode_header + raw_frames...)}
-    // batch_data = [mode_header] + [raw_frame1] + [raw_frame2] + ... (headers stripped)
-    uint8_t packet_buf[256];
-    int total_len = 1 + batch_len;  // codec_header + batch_data
-    if (total_len > 250 || total_len < 1) return;
+    // Match LXST-kt (Columba) wire format exactly:
+    //   {0x01: bin8(batch)} for single batch, or
+    //   {0x01: fixarray(N)[bin8(b1), bin8(b2), ...]} for multiple batches.
+    // Each batch = [codec_type(0x02)] + [mode_header] + [10 * raw_codec2].
+    // Columba's native ring buffer expects exactly frameSamples (1600) decoded
+    // samples per writeEncodedPacket call.  For Codec2 3200: 10 * 160 = 1600.
+    // batch_data contains batch_count concatenated batches of 82 bytes each.
+    static constexpr int BATCH_BYTES = 82;  // codec_type(1) + mode(1) + 10*8
 
-    packet_buf[0] = 0x81;                  // fixmap(1)
-    packet_buf[1] = 0x01;                  // key: FIELD_FRAMES
-    packet_buf[2] = 0xC4;                  // bin8
-    packet_buf[3] = (uint8_t)total_len;    // length
-    packet_buf[4] = LXST_CODEC_CODEC2;     // codec header (0x02)
-    memcpy(packet_buf + 5, batch_data, batch_len);
+    uint8_t packet_buf[256];
+    int pos = 0;
+
+    packet_buf[pos++] = 0x81;  // fixmap(1)
+    packet_buf[pos++] = 0x01;  // key: FIELD_FRAMES
+
+    if (batch_count == 1) {
+        // Single batch: bare bin8
+        packet_buf[pos++] = 0xC4;               // bin8
+        packet_buf[pos++] = (uint8_t)BATCH_BYTES;
+        memcpy(packet_buf + pos, batch_data, BATCH_BYTES);
+        pos += BATCH_BYTES;
+    } else {
+        // Multiple batches: fixarray(N) of bin8 entries
+        packet_buf[pos++] = 0x90 | (uint8_t)batch_count;  // fixarray(N), N≤15
+        for (int b = 0; b < batch_count; b++) {
+            packet_buf[pos++] = 0xC4;               // bin8
+            packet_buf[pos++] = (uint8_t)BATCH_BYTES;
+            memcpy(packet_buf + pos, batch_data + b * BATCH_BYTES, BATCH_BYTES);
+            pos += BATCH_BYTES;
+        }
+    }
 
     // Hex dump first TX packet for wire format verification
     if (_call_audio_tx_count < 2) {
-        int pkt_len = 5 + batch_len;
         char hex[128];
-        int pos = 0;
-        for (int i = 0; i < pkt_len && i < 20 && pos < 120; i++) {
-            pos += snprintf(hex + pos, 128 - pos, "%02X ", packet_buf[i]);
+        int hpos = 0;
+        for (int i = 0; i < pos && i < 24 && hpos < 120; i++) {
+            hpos += snprintf(hex + hpos, 128 - hpos, "%02X ", packet_buf[i]);
         }
         char dbg[196];
-        snprintf(dbg, sizeof(dbg), "LXST: TX wire[%d] %d frames: %s", pkt_len, frame_count, hex);
+        snprintf(dbg, sizeof(dbg), "LXST: TX wire[%d] %d batches %d frames: %s",
+                 pos, batch_count, total_frames, hex);
         INFO(dbg);
     }
 
-    Bytes audio_data(packet_buf, 5 + batch_len);
+    Bytes audio_data(packet_buf, pos);
     Packet packet(_call_link, audio_data);
     packet.send();
 }
 
 void UIManager::call_rx_audio_frame(const uint8_t* frame, size_t frame_len) {
-    // frame = [codec_header_byte, frame_data...]
-    uint8_t codec = frame[0];
-    const uint8_t* frame_data = frame + 1;
-    size_t frame_data_len = frame_len - 1;
+    // Wire format: [codec_type_byte] + [mode_header + codec2_subframes...]
+    // codec_type: 0x00=Raw, 0x01=Opus, 0x02=Codec2 (matches LXST Codecs/__init__.py)
+    // For Codec2: mode_header (0x00-0x06) + raw sub-frames
+    uint8_t codec_type = frame[0];
+    const uint8_t* codec_data = frame + 1;
+    size_t codec_data_len = frame_len - 1;
 
-    if (codec != LXST_CODEC_CODEC2) {
+    if (codec_type != LXST_CODEC_CODEC2) {
         if (_call_audio_rx_count == 0) {
             char dbg[64];
-            snprintf(dbg, sizeof(dbg), "LXST: RX audio codec=0x%02X (expected 0x%02X), len=%d",
-                     codec, LXST_CODEC_CODEC2, (int)frame_data_len);
+            snprintf(dbg, sizeof(dbg), "LXST: RX codec=0x%02X (need 0x02=Codec2), dropping",
+                     codec_type);
             WARNING(dbg);
         }
+        return;  // Can't decode Opus (0x01) or Raw (0x00) — only Codec2
     }
 
     if (_lxst_audio && _lxst_audio->isPlaying()) {
-        _lxst_audio->writeEncodedPacket(frame_data, frame_data_len);
+        _lxst_audio->writeEncodedPacket(codec_data, codec_data_len);
         _call_audio_rx_count++;
         if (_call_audio_rx_count <= 3) {
             char dbg[80];
-            snprintf(dbg, sizeof(dbg), "LXST: RX audio #%lu codec=0x%02X len=%d first=0x%02X",
-                     (unsigned long)_call_audio_rx_count, codec,
-                     (int)frame_data_len, frame_data_len > 0 ? frame_data[0] : 0);
+            snprintf(dbg, sizeof(dbg), "LXST: RX audio #%lu mode=0x%02X len=%d",
+                     (unsigned long)_call_audio_rx_count, codec_data[0], (int)codec_data_len);
             INFO(dbg);
         }
     } else if (_call_audio_rx_count == 0) {
@@ -1021,11 +1043,17 @@ void UIManager::call_on_packet(const Bytes& data) {
             return;
         }
 
-        // Ignore PREFERRED_PROFILE signals (0xFF+) — profile negotiation not supported
-        if (signal >= 0xFF) {
-            char dbg[48];
-            snprintf(dbg, sizeof(dbg), "LXST: Ignoring profile signal 0x%03X", signal);
-            DEBUG(dbg);
+        // Handle PREFERRED_PROFILE signals (0xFF+)
+        // Remote sends PREFERRED_PROFILE + profile_id to request a codec profile.
+        // Pyxis only supports Codec2, so respond with LBW (Codec2 3200bps).
+        if (signal >= LXST_PREFERRED_PROFILE) {
+            int remote_profile = signal - LXST_PREFERRED_PROFILE;
+            char dbg[64];
+            snprintf(dbg, sizeof(dbg), "LXST: Remote prefers profile 0x%02X, responding LBW (Codec2)",
+                     remote_profile);
+            INFO(dbg);
+            // Send our preferred profile (LBW = Codec2 3200bps)
+            call_send_signal(LXST_PREFERRED_PROFILE + LXST_PROFILE_LBW);
             return;
         }
 
@@ -1118,11 +1146,11 @@ void UIManager::call_process_signal(uint8_t signal) {
         case CallState::WAIT_RINGING:
             if (signal == LXST_STATUS_RINGING) {
                 INFO("LXST: Remote is ringing");
+                // Tell remote we need Codec2 (LBW = 3200bps)
+                call_send_signal(LXST_PREFERRED_PROFILE + LXST_PROFILE_LBW);
                 _call_state = CallState::RINGING;
                 _call_timeout_ms = millis() + 60000;
                 _call_screen->set_state(CallScreen::CallState::RINGING);
-                // Send profile preference: LBW (Codec2 3200bps)
-                call_send_signal(LXST_PREFERRED_PROFILE + LXST_PROFILE_LBW);
             } else if (signal == LXST_STATUS_BUSY || signal == LXST_STATUS_REJECTED) {
                 INFO("LXST: Call rejected or busy");
                 call_ended();
@@ -1353,57 +1381,79 @@ void UIManager::call_update() {
             }
         }
 
-        // Pump TX: batch exactly 8 codec frames into one packet.
+        // Pump TX: batch codec frames to match Columba's expected ring buffer slot size.
+        // Columba's native OboePlaybackEngine expects exactly frameSamples (1600 for 3200
+        // mode) decoded samples per writeEncodedPacket call = 10 sub-frames.
         // Each encoded frame from ring buffer = [mode_header(1)] + [raw_codec2(8)] = 9 bytes.
-        // We send exactly 8 frames per packet: [mode_header] + [8 * raw_codec2] = 65 bytes.
-        // MUST be exactly 8: Columba's native ring buffer (frameSamples=2560) rejects
-        // partial writes (count != frameSamples), so 8*320=2560 samples is required.
-        static constexpr int TX_BATCH_SIZE = 10;  // frames per packet — MUST match Columba's frameSamples/160 (LBW 3200)
+        // We pack 10 frames per batch: [codec_type(1)] + [mode(1)] + [10*raw(80)] = 82 bytes.
+        // Multiple batches go into a fixarray, matching Columba's wire format exactly.
+        static constexpr int FRAMES_PER_BATCH = 10;  // 10 * 160 = 1600 = Columba's frameSamples
+        static constexpr int MAX_BATCHES = 2;         // Up to 2 batches per packet (like Columba)
+        static constexpr int TX_MAX_FRAMES = FRAMES_PER_BATCH * MAX_BATCHES;
+        static constexpr uint32_t TX_INTERVAL_MS = 200;  // Match LXST-kt LBW frame time
+        static uint32_t last_tx_ms = 0;
         if (_lxst_audio && _lxst_audio->isCapturing()) {
-            // Send up to 3 batched packets per call_update() cycle
-            for (int batch = 0; batch < 3; batch++) {
-                // Check if we have enough frames before starting to read
-                if (_lxst_audio->capturePacketsAvailable() < TX_BATCH_SIZE) {
-                    break;  // Wait until we have a full batch
-                }
+            int available = _lxst_audio->capturePacketsAvailable();
+            bool time_to_send = (now - last_tx_ms) >= TX_INTERVAL_MS;
+            // Send if: enough time has passed AND we have frames,
+            // OR ring is getting full (>60 frames = 1.2s buffered)
+            if ((time_to_send && available >= FRAMES_PER_BATCH) || available > 60) {
+                int to_send = available < TX_MAX_FRAMES ? available : TX_MAX_FRAMES;
 
-                uint8_t batch_buf[128];  // [mode_header] + [N * raw_codec2_data]
-                int batch_len = 0;
-                int frame_count = 0;
-                uint8_t encoded_buf[64];
-                int encoded_len = 0;
+                // Read frames and pack into batches of 10.
+                // batch_data: concatenated batches, each 82 bytes:
+                //   [codec_type(0x02)] + [mode_header] + [10 * 8 raw bytes]
+                uint8_t batch_data[MAX_BATCHES * 82];
+                int batch_count = 0;
+                int total_frames = 0;
+                uint8_t encoded_buf[16];
 
-                for (int i = 0; i < TX_BATCH_SIZE; i++) {
-                    if (!_lxst_audio->readEncodedPacket(encoded_buf, sizeof(encoded_buf), &encoded_len)) {
+                while (batch_count < MAX_BATCHES && to_send >= FRAMES_PER_BATCH) {
+                    uint8_t* bp = batch_data + batch_count * 82;
+                    bp[0] = LXST_CODEC_CODEC2;  // codec_type = 0x02
+                    int frames_in_batch = 0;
+
+                    for (int i = 0; i < FRAMES_PER_BATCH; i++) {
+                        int encoded_len = 0;
+                        if (!_lxst_audio->readEncodedPacket(encoded_buf, sizeof(encoded_buf), &encoded_len)) {
+                            break;
+                        }
+                        if (encoded_len < 2) continue;
+
+                        if (frames_in_batch == 0) {
+                            // First frame: keep mode_header + raw
+                            memcpy(bp + 1, encoded_buf, encoded_len);
+                        } else {
+                            // Subsequent: append raw only (strip mode_header)
+                            memcpy(bp + 1 + 1 + frames_in_batch * 8, encoded_buf + 1, encoded_len - 1);
+                        }
+                        frames_in_batch++;
+                        _call_audio_tx_count++;
+                        to_send--;
+                    }
+
+                    if (frames_in_batch == FRAMES_PER_BATCH) {
+                        batch_count++;
+                        total_frames += frames_in_batch;
+                    } else {
+                        // Incomplete batch — put back? Can't, so just count what we got
+                        total_frames += frames_in_batch;
+                        if (frames_in_batch > 0) batch_count++;
                         break;
                     }
-                    if (encoded_len < 2) continue;  // need at least mode_header + 1 byte
-
-                    if (frame_count == 0) {
-                        // First frame: keep mode header + data
-                        memcpy(batch_buf, encoded_buf, encoded_len);
-                        batch_len = encoded_len;
-                    } else {
-                        // Subsequent frames: strip mode header, append raw data only
-                        int raw_len = encoded_len - 1;
-                        if (batch_len + raw_len > (int)sizeof(batch_buf)) break;
-                        memcpy(batch_buf + batch_len, encoded_buf + 1, raw_len);
-                        batch_len += raw_len;
-                    }
-                    frame_count++;
-                    _call_audio_tx_count++;
                 }
 
-                if (frame_count == TX_BATCH_SIZE) {
-                    call_send_audio_batch(batch_buf, batch_len, frame_count);
-                    if (_call_audio_tx_count <= 16) {
-                        char dbg[80];
-                        snprintf(dbg, sizeof(dbg), "LXST: TX batch %d frames, %d bytes, total=%lu",
-                                 frame_count, batch_len, (unsigned long)_call_audio_tx_count);
+                if (batch_count > 0) {
+                    call_send_audio_batch(batch_data, 82 * batch_count,
+                                          batch_count, total_frames);
+                    last_tx_ms = now;
+                    if (_call_audio_tx_count <= 50) {
+                        char dbg[96];
+                        snprintf(dbg, sizeof(dbg), "LXST: TX %d batches %d frames (%d avail), total=%lu",
+                                 batch_count, total_frames, available,
+                                 (unsigned long)_call_audio_tx_count);
                         INFO(dbg);
                     }
-                } else {
-                    break;  // couldn't fill batch (shouldn't happen after availablePackets check)
                 }
             }
         } else if (_call_audio_tx_count == 0) {

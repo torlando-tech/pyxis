@@ -246,7 +246,7 @@ private:
     static constexpr uint8_t LXST_STATUS_CONNECTING   = 0x05;
     static constexpr uint8_t LXST_STATUS_ESTABLISHED  = 0x06;
 
-    // LXST codec header byte
+    // LXST codec type bytes (match LXST Codecs/__init__.py)
     static constexpr uint8_t LXST_CODEC_CODEC2 = 0x02;
 
     // LXST profile negotiation
@@ -295,8 +295,8 @@ private:
     // Send a signalling byte over the call link
     void call_send_signal(int signal);
 
-    // Send batched encoded audio frames over the call link
-    void call_send_audio_batch(const uint8_t* batch_data, int batch_len, int frame_count);
+    // Send batched audio frames over the call link (10 sub-frames per batch)
+    void call_send_audio_batch(const uint8_t* batch_data, int batch_len, int batch_count, int total_frames);
 
     // Process a single received audio frame (codec_header + data)
     void call_rx_audio_frame(const uint8_t* frame, size_t frame_len);
