@@ -1,3 +1,4 @@
 .pio/
 .vscode/
 *.pyc
+docs/flasher/firmware/
