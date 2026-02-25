@@ -19,14 +19,13 @@
 #include "Interface.h"
 #include "Bytes.h"
 #include "Type.h"
-#include "BLE/BLETypes.h"
-#include "BLE/BLEPlatform.h"
-#include "BLE/BLEFragmenter.h"
-#include "BLE/BLEReassembler.h"
-#include "BLE/BLEPeerManager.h"
-#include "BLE/BLEIdentityManager.h"
+#include "BLETypes.h"
+#include "BLEPlatform.h"
+#include "BLEFragmenter.h"
+#include "BLEReassembler.h"
+#include "BLEPeerManager.h"
+#include "BLEIdentityManager.h"
 
-#include <map>
 #include <mutex>
 
 #ifdef ARDUINO
@@ -50,7 +49,7 @@ public:
     static constexpr double SCAN_INTERVAL = 5.0;        // Seconds between scans
     static constexpr double KEEPALIVE_INTERVAL = 15.0;  // Seconds between keepalives
     static constexpr double MAINTENANCE_INTERVAL = 1.0; // Seconds between maintenance
-    static constexpr double CONNECTION_COOLDOWN = 3.0;  // Seconds to wait after connection failure
+    static constexpr double CONNECTION_COOLDOWN = 10.0;  // Seconds between connection attempts (reduces 574 risk)
 
 public:
     /**
@@ -236,8 +235,15 @@ private:
     RNS::BLE::BLEIdentityManager _identity_manager;
     RNS::BLE::BLEReassembler _reassembler;
 
-    // Per-peer fragmenters (keyed by identity)
-    std::map<RNS::Bytes, RNS::BLE::BLEFragmenter> _fragmenters;
+    // Per-peer fragmenters (fixed-size pool, keyed by identity)
+    struct FragmenterSlot {
+        bool in_use = false;
+        RNS::Bytes identity;
+        RNS::BLE::BLEFragmenter fragmenter;
+        void clear() { in_use = false; identity.clear(); fragmenter = RNS::BLE::BLEFragmenter(); }
+    };
+    static constexpr size_t MAX_FRAGMENTERS = 4;
+    FragmenterSlot _fragmenter_pool[MAX_FRAGMENTERS];
 
     //=========================================================================
     // State
@@ -247,23 +253,26 @@ private:
     double _last_keepalive = 0;
     double _last_maintenance = 0;
     double _last_connection_attempt = 0;  // Cooldown after connection failures
+    double _last_advertising_refresh = 0;
 
     // Pending handshake completions (deferred from callback to loop for stack safety)
-    static constexpr size_t MAX_PENDING_HANDSHAKES = 32;
+    static constexpr size_t MAX_PENDING_HANDSHAKES = 4;
     struct PendingHandshake {
         RNS::Bytes mac;
         RNS::Bytes identity;
-        bool is_central;
+        bool is_central = false;
     };
-    std::vector<PendingHandshake> _pending_handshakes;
+    PendingHandshake _pending_handshake_pool[MAX_PENDING_HANDSHAKES];
+    size_t _pending_handshake_count = 0;
 
     // Pending data fragments (deferred from callback to loop for stack safety)
-    static constexpr size_t MAX_PENDING_DATA = 64;
+    static constexpr size_t MAX_PENDING_DATA = 8;
     struct PendingData {
         RNS::Bytes identity;
         RNS::Bytes data;
     };
-    std::vector<PendingData> _pending_data;
+    PendingData _pending_data_pool[MAX_PENDING_DATA];
+    size_t _pending_data_count = 0;
 
     // Thread safety for callbacks from BLE stack
     // Using recursive_mutex because handleIncomingData holds the lock while

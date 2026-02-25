@@ -118,6 +118,8 @@ public:
 
     // GATT Operations
     bool write(uint16_t conn_handle, const Bytes& data, bool response = true) override;
+    bool writeCharacteristic(uint16_t conn_handle, uint16_t char_handle,
+                              const Bytes& data, bool response = true) override;
     bool read(uint16_t conn_handle, uint16_t char_handle,
               std::function<void(OperationResult, const Bytes&)> callback) override;
     bool enableNotifications(uint16_t conn_handle, bool enable) override;
@@ -246,19 +248,26 @@ private:
     PlatformConfig _config;
     bool _initialized = false;
     bool _running = false;
+    volatile bool _shutting_down = false;
     Bytes _identity_data;
     unsigned long _scan_stop_time = 0;  // millis() when to stop continuous scan
 
-    // BLE stack recovery
+    // BLE stack recovery — time-based desync tracking
+    // The NimBLE host self-recovers from most desyncs within 1-5s.
+    // We only reboot after prolonged desync (HOST_DESYNC_REBOOT_MS).
     uint8_t _scan_fail_count = 0;
     uint8_t _lightweight_reset_fails = 0;
     uint8_t _conn_establish_fail_count = 0;  // rc=574 connection establishment failures
     unsigned long _last_full_recovery_time = 0;
-    static constexpr uint8_t SCAN_FAIL_RECOVERY_THRESHOLD = 5;
+    unsigned long _host_desync_since = 0;    // millis() when host first lost sync (0 = synced)
+    uint8_t _host_reset_attempts = 0;       // ble_hs_sched_reset attempts since last sync
+    static constexpr uint8_t SCAN_FAIL_RECOVERY_THRESHOLD = 10;
     static constexpr uint8_t LIGHTWEIGHT_RESET_MAX_FAILS = 3;
-    static constexpr uint8_t CONN_ESTABLISH_FAIL_THRESHOLD = 3;  // Threshold for rc=574
+    static constexpr uint8_t CONN_ESTABLISH_FAIL_THRESHOLD = 5;
     static constexpr unsigned long FULL_RECOVERY_COOLDOWN_MS = 60000;  // 60 seconds
+    static constexpr unsigned long HOST_DESYNC_REBOOT_MS = 60000;      // Reboot after 60s desync (no connections)
     bool recoverBLEStack();
+    bool attemptHostReset();
 
     // NimBLE objects
     NimBLEServer* _server = nullptr;

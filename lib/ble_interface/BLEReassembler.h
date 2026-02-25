@@ -26,8 +26,8 @@
 namespace RNS { namespace BLE {
 
 // Pool sizing constants for fixed-size allocations
-static constexpr size_t MAX_PENDING_REASSEMBLIES = 8;
-static constexpr size_t MAX_FRAGMENTS_PER_REASSEMBLY = 32;
+static constexpr size_t MAX_PENDING_REASSEMBLIES = 4;
+static constexpr size_t MAX_FRAGMENTS_PER_REASSEMBLY = 8;
 static constexpr size_t MAX_FRAGMENT_PAYLOAD_SIZE = 512;
 
 class BLEReassembler {

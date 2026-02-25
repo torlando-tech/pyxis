@@ -20,7 +20,7 @@ namespace LXMF {
 
 ChatScreen::ChatScreen(lv_obj_t* parent)
     : _screen(nullptr), _header(nullptr), _message_list(nullptr), _input_area(nullptr),
-      _text_area(nullptr), _btn_send(nullptr), _btn_back(nullptr),
+      _text_area(nullptr), _btn_send(nullptr), _btn_back(nullptr), _btn_call(nullptr),
       _message_store(nullptr), _display_start_idx(0), _loading_more(false) {
     LVGL_LOCK();
 
@@ -85,7 +85,21 @@ void ChatScreen::create_header() {
     lv_obj_align(label_peer, LV_ALIGN_LEFT_MID, 60, 0);
     lv_obj_set_style_text_color(label_peer, Theme::textPrimary(), 0);
     lv_obj_set_style_text_font(label_peer, &lv_font_montserrat_16, 0);
+    lv_obj_set_width(label_peer, 195);
+    lv_label_set_long_mode(label_peer, LV_LABEL_LONG_DOT);
 
+    // Voice call button (right side of header)
+    _btn_call = lv_btn_create(_header);
+    lv_obj_set_size(_btn_call, 50, 28);
+    lv_obj_align(_btn_call, LV_ALIGN_RIGHT_MID, -2, 0);
+    lv_obj_set_style_bg_color(_btn_call, Theme::successDark(), 0);
+    lv_obj_set_style_bg_color(_btn_call, Theme::successPressed(), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(_btn_call, on_call_clicked, LV_EVENT_CLICKED, this);
+
+    lv_obj_t* label_call = lv_label_create(_btn_call);
+    lv_label_set_text(label_call, LV_SYMBOL_CALL);
+    lv_obj_center(label_call);
+    lv_obj_set_style_text_color(label_call, Theme::textPrimary(), 0);
 }
 
 void ChatScreen::create_message_list() {
@@ -472,6 +486,10 @@ void ChatScreen::set_send_message_callback(SendMessageCallback callback) {
     _send_message_callback = callback;
 }
 
+void ChatScreen::set_call_callback(CallCallback callback) {
+    _call_callback = callback;
+}
+
 void ChatScreen::show() {
     LVGL_LOCK();
     lv_obj_clear_flag(_screen, LV_OBJ_FLAG_HIDDEN);
@@ -482,6 +500,7 @@ void ChatScreen::show() {
     lv_group_t* group = LVGL::LVGLInit::get_default_group();
     if (group) {
         if (_btn_back) lv_group_add_obj(group, _btn_back);
+        if (_btn_call) lv_group_add_obj(group, _btn_call);
         if (_btn_send) lv_group_add_obj(group, _btn_send);
 
         // Focus on back button
@@ -497,6 +516,7 @@ void ChatScreen::hide() {
     lv_group_t* group = LVGL::LVGLInit::get_default_group();
     if (group) {
         if (_btn_back) lv_group_remove_obj(_btn_back);
+        if (_btn_call) lv_group_remove_obj(_btn_call);
         if (_btn_send) lv_group_remove_obj(_btn_send);
     }
 
@@ -512,6 +532,14 @@ void ChatScreen::on_back_clicked(lv_event_t* event) {
 
     if (screen->_back_callback) {
         screen->_back_callback();
+    }
+}
+
+void ChatScreen::on_call_clicked(lv_event_t* event) {
+    ChatScreen* screen = (ChatScreen*)lv_event_get_user_data(event);
+
+    if (screen->_call_callback) {
+        screen->_call_callback();
     }
 }
 

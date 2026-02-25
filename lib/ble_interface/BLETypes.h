@@ -54,8 +54,8 @@ namespace UUID {
 namespace MTU {
     static constexpr uint16_t REQUESTED = 517;      // Request maximum MTU (BLE 5.0)
     static constexpr uint16_t MINIMUM = 23;         // BLE 4.0 minimum MTU
-    static constexpr uint16_t INITIAL = 185;        // Conservative default (BLE 4.2)
     static constexpr uint16_t ATT_OVERHEAD = 3;     // ATT protocol header overhead
+    static constexpr uint16_t INITIAL = 185 - ATT_OVERHEAD;  // Conservative default (BLE 4.2), minus ATT overhead
 }
 
 //=============================================================================
@@ -66,11 +66,13 @@ namespace Timing {
     static constexpr double KEEPALIVE_INTERVAL = 15.0;        // Seconds between keepalives
     static constexpr double REASSEMBLY_TIMEOUT = 30.0;        // Seconds to complete reassembly
     static constexpr double CONNECTION_TIMEOUT = 30.0;        // Seconds to establish connection
-    static constexpr double HANDSHAKE_TIMEOUT = 10.0;         // Seconds for identity exchange
+    static constexpr double HANDSHAKE_TIMEOUT = 30.0;         // Seconds for identity exchange (match Columba)
     static constexpr double SCAN_INTERVAL = 5.0;              // Seconds between scans
     static constexpr double PEER_TIMEOUT = 30.0;              // Seconds before peer removal
     static constexpr double POST_MTU_DELAY = 0.15;            // Seconds after MTU negotiation
     static constexpr double BLACKLIST_BASE_BACKOFF = 60.0;    // Base backoff seconds
+    static constexpr double ZOMBIE_TIMEOUT = 45.0;             // Seconds with no activity before force-disconnect
+    static constexpr double ADVERTISING_REFRESH_INTERVAL = 60.0;  // Seconds between advertising refreshes
 }
 
 //=============================================================================
@@ -111,9 +113,10 @@ namespace Fragment {
     static constexpr size_t HEADER_SIZE = 5;
 
     enum Type : uint8_t {
+        LONE     = 0x00,    // Single fragment (complete message)
         START    = 0x01,    // First fragment of multi-fragment message
         CONTINUE = 0x02,    // Middle fragment
-        END      = 0x03     // Last fragment (or single fragment)
+        END      = 0x03     // Last fragment
     };
 }
 

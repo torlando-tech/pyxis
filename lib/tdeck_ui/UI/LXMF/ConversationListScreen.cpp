@@ -73,7 +73,7 @@ void ConversationListScreen::create_header() {
 
     // Title
     lv_obj_t* title = lv_label_create(_header);
-    lv_label_set_text(title, "LXMF");
+    lv_label_set_text(title, "PYXIS");
     lv_obj_align(title, LV_ALIGN_LEFT_MID, 8, 0);
     lv_obj_set_style_text_color(title, Theme::textPrimary(), 0);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);

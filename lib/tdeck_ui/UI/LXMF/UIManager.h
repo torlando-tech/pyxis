@@ -16,10 +16,14 @@
 #include "QRScreen.h"
 #include "SettingsScreen.h"
 #include "PropagationNodesScreen.h"
+#include "CallScreen.h"
 #include "LXMF/LXMRouter.h"
 #include "LXMF/PropagationNodeManager.h"
 #include "LXMF/MessageStore.h"
 #include "Reticulum.h"
+#include "Link.h"
+
+class LXSTAudio;
 
 namespace UI {
 namespace LXMF {
@@ -28,16 +32,18 @@ namespace LXMF {
  * UI Manager
  *
  * Manages all LXMF UI screens and coordinates between:
- * - UI screens (ConversationList, Chat, Compose)
+ * - UI screens (ConversationList, Chat, Compose, Call)
  * - LXMF router (message sending/receiving)
  * - Message store (persistence)
  * - Reticulum (network layer)
+ * - LXST voice calls (audio pipeline + Reticulum Links)
  *
  * Responsibilities:
  * - Screen navigation
  * - Message delivery callbacks
  * - UI updates on message events
  * - Integration with LXMF router
+ * - Voice call state machine
  */
 class UIManager {
 public:
@@ -62,9 +68,15 @@ public:
 
     /**
      * Update UI (call periodically from main loop)
-     * Processes pending LXMF messages and updates UI
+     * Processes pending LXMF messages, updates UI, pumps voice call
      */
     void update();
+
+    /**
+     * Pump TX audio without LVGL lock — call from main loop for low-latency TX.
+     * Safe to call on every loop iteration; no-ops when not in a call.
+     */
+    void pump_call_tx();
 
     /**
      * Show conversation list screen
@@ -144,6 +156,12 @@ public:
     void set_rns_status(bool connected, const String& server_name = "");
 
     /**
+     * Announce LXST voice call destination
+     * Called periodically from main loop
+     */
+    void announce_lxst();
+
+    /**
      * Handle incoming LXMF message
      * Called by LXMF router delivery callback
      * @param message Received message
@@ -171,12 +189,14 @@ private:
         SCREEN_STATUS,
         SCREEN_QR,
         SCREEN_SETTINGS,
-        SCREEN_PROPAGATION_NODES
+        SCREEN_PROPAGATION_NODES,
+        SCREEN_CALL
     };
 
     RNS::Reticulum& _reticulum;
     ::LXMF::LXMRouter& _router;
     ::LXMF::MessageStore& _store;
+    RNS::Destination _lxst_destination;
 
     Screen _current_screen;
     RNS::Bytes _current_peer_hash;
@@ -189,6 +209,7 @@ private:
     QRScreen* _qr_screen;
     SettingsScreen* _settings_screen;
     PropagationNodesScreen* _propagation_nodes_screen;
+    CallScreen* _call_screen;
 
     ::LXMF::PropagationNodeManager* _propagation_manager;
     RNS::Interface* _ble_interface;
@@ -200,6 +221,7 @@ private:
     void on_new_message();
     void on_back_to_conversation_list();
     void on_send_message_from_chat(const String& content);
+    void on_call_from_chat();
     void on_send_message_from_compose(const RNS::Bytes& dest_hash, const String& message);
     void on_cancel_compose();
     void on_announce_selected(const RNS::Bytes& dest_hash);
@@ -218,6 +240,92 @@ private:
 
     // UI updates
     void refresh_current_screen();
+
+    // ── LXST Voice Call ──
+
+    // LXST signalling byte constants (matches Python LXST / LXST-kt)
+    static constexpr uint8_t LXST_STATUS_BUSY        = 0x00;
+    static constexpr uint8_t LXST_STATUS_REJECTED     = 0x01;
+    static constexpr uint8_t LXST_STATUS_CALLING      = 0x02;
+    static constexpr uint8_t LXST_STATUS_AVAILABLE    = 0x03;
+    static constexpr uint8_t LXST_STATUS_RINGING      = 0x04;
+    static constexpr uint8_t LXST_STATUS_CONNECTING   = 0x05;
+    static constexpr uint8_t LXST_STATUS_ESTABLISHED  = 0x06;
+
+    // LXST codec type bytes (match LXST Codecs/__init__.py)
+    static constexpr uint8_t LXST_CODEC_CODEC2 = 0x02;
+
+    // LXST profile negotiation
+    static constexpr int LXST_PREFERRED_PROFILE = 0xFF;
+    static constexpr int LXST_PROFILE_VLBW      = 0x20;  // Codec2 1600bps
+    static constexpr int LXST_PROFILE_LBW       = 0x30;  // Codec2 3200bps
+
+    enum class CallState {
+        IDLE,
+        PATH_REQUESTING,    // Outgoing: waiting for path to resolve
+        LINK_ESTABLISHING,  // Outgoing: waiting for Link to come up
+        WAIT_AVAILABLE,     // Outgoing: link up, waiting for STATUS_AVAILABLE
+        WAIT_RINGING,       // Outgoing: sent identify, waiting for STATUS_RINGING
+        RINGING,            // Outgoing: remote is ringing
+        INCOMING_RINGING,   // Incoming: waiting for user to answer/reject
+        CONNECTING,         // Both: opening audio pipelines
+        ACTIVE,             // Both: voice flowing
+    };
+
+    CallState _call_state;
+    RNS::Bytes _call_peer_hash;
+    RNS::Bytes _call_dest_hash;   // LXST destination hash (for deferred link creation)
+    RNS::Link _call_link;
+    LXSTAudio* _lxst_audio;
+    uint32_t _call_start_ms;       // millis() when call became ACTIVE
+    uint32_t _call_timeout_ms;     // millis() deadline for current wait state
+    bool _call_muted;
+    volatile bool _call_answer_pending;  // Set by LVGL task, consumed by main loop
+    volatile bool _call_link_closed_pending;  // Set by link callback, consumed by call_update
+    // Signal queue: written by Reticulum thread, consumed by call_update under LVGL lock
+    static constexpr int SIGNAL_QUEUE_SIZE = 8;
+    volatile uint8_t _call_signal_queue[SIGNAL_QUEUE_SIZE];
+    volatile uint8_t _call_signal_write;  // Next write index (Reticulum thread)
+    volatile uint8_t _call_signal_read;   // Next read index (main thread)
+    uint32_t _call_audio_rx_count;    // Count of received audio frames (for diagnostics)
+    uint32_t _call_audio_tx_count;    // Count of sent audio frames (for diagnostics)
+
+    // Singleton instance pointer for static Link callbacks
+    static UIManager* s_call_instance;
+
+    // Voice call methods
+    void call_initiate(const RNS::Bytes& peer_hash);
+    void call_hangup();
+    void call_set_mute(bool muted);
+    void call_update();  // Called from update() — pumps audio packets + state machine
+
+    // Process a received signalling byte (runs under LVGL lock in call_update)
+    void call_process_signal(uint8_t signal);
+
+    // Send a signalling byte over the call link
+    void call_send_signal(int signal);
+
+    // Send batched audio frames over the call link (10 sub-frames per batch)
+    void call_send_audio_batch(const uint8_t* batch_data, int batch_len, int batch_count, int total_frames);
+
+    // Process a single received audio frame (codec_header + data)
+    void call_rx_audio_frame(const uint8_t* frame, size_t frame_len);
+
+    // Handle received packet on call link (queues signals for call_update)
+    void call_on_packet(const RNS::Bytes& data);
+
+    // Transition to call ended and schedule return to chat
+    void call_ended();
+
+    // Incoming call callbacks (LXST IN destination)
+    static void on_lxst_link_established(RNS::Link& link);
+    static void on_lxst_caller_identified(const RNS::Link& link, const RNS::Identity& identity);
+    void call_answer();
+
+    // Static Link callbacks (delegate to s_call_instance)
+    static void on_call_link_established(RNS::Link& link);
+    static void on_call_link_closed(RNS::Link& link);
+    static void on_call_link_packet(const RNS::Bytes& plaintext, const RNS::Packet& packet);
 };
 
 } // namespace LXMF

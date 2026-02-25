@@ -8,6 +8,9 @@
 #include <time.h>
 #include <sys/time.h>
 #include <esp_system.h>
+#include <esp_heap_caps.h>
+#include <esp_task_wdt.h>
+#include <new>  // placement new
 #include <soc/rtc_cntl_reg.h>
 
 // Reticulum
@@ -63,6 +66,15 @@
 // SD Card logging for crash debugging
 #include <Hardware/TDeck/SDLogger.h>
 
+// OTA flashing
+#include <ArduinoOTA.h>
+
+// UDP log broadcasting (POSIX socket — avoids WiFiUDP's per-packet heap allocation)
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+
 // Memory instrumentation
 #ifdef MEMORY_INSTRUMENTATION_ENABLED
 #include <Instrumentation/MemoryMonitor.h>
@@ -116,12 +128,67 @@ bool last_tcp_online = false;
 bool last_lora_online = false;
 bool last_wifi_connected = false;
 
+// Pending WiFi reconnect (deferred from LVGL task to main loop)
+volatile bool wifi_reconnect_pending = false;
+String pending_wifi_ssid;
+String pending_wifi_password;
+
+// UDP log broadcasting (POSIX socket — no per-packet heap allocation)
+// WiFiUDP::beginPacket() does new char[1460] on every call, causing severe
+// heap fragmentation over time. A raw POSIX socket with sendto() avoids this.
+static int udp_log_sock = -1;
+static struct sockaddr_in udp_log_dest;
+static bool udp_log_ready = false;
+
+static void udp_log_init() {
+    if (udp_log_sock >= 0) close(udp_log_sock);  // Re-init safe
+    udp_log_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (udp_log_sock < 0) return;
+
+    // Non-blocking so sendto() never stalls the log path
+    int flags = fcntl(udp_log_sock, F_GETFL, 0);
+    fcntl(udp_log_sock, F_SETFL, flags | O_NONBLOCK);
+
+    // Multicast TTL = 1 (local network only)
+    uint8_t ttl = 1;
+    setsockopt(udp_log_sock, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
+
+    // Bind multicast output to the WiFi station interface — without this,
+    // lwIP doesn't know which interface to send multicast packets on.
+    struct in_addr iface;
+    iface.s_addr = (uint32_t)WiFi.localIP();
+    setsockopt(udp_log_sock, IPPROTO_IP, IP_MULTICAST_IF, &iface, sizeof(iface));
+
+    memset(&udp_log_dest, 0, sizeof(udp_log_dest));
+    udp_log_dest.sin_family = AF_INET;
+    udp_log_dest.sin_port = htons(9999);
+    udp_log_dest.sin_addr.s_addr = inet_addr("239.0.99.99");
+}
+
+// UDP send — no locking needed.  sendto() is non-blocking (O_NONBLOCK) and
+// lwIP's internal TCPIP core lock serializes concurrent calls.  Worst case
+// on contention: EAGAIN/ENOMEM and the packet is dropped (acceptable for logs).
+static void udp_send(const char* msg, size_t len) {
+    if (udp_log_sock < 0 || !udp_log_ready || WiFi.status() != WL_CONNECTED) return;
+    sendto(udp_log_sock, msg, len, 0,
+           (struct sockaddr*)&udp_log_dest, sizeof(udp_log_dest));
+}
+
+// Global log function callable from any module (sends to UDP + Serial)
+extern "C" void pyxis_log(const char* msg) {
+    Serial.println(msg);
+    if (udp_log_ready) {
+        udp_send(msg, strlen(msg));
+    }
+}
+
 // Forward declarations
 void start_tcp_interface();
 
 // Screen timeout
 bool screen_off = false;
 uint8_t saved_brightness = 180;  // Save brightness before turning off
+uint32_t screen_off_time = 0;    // millis() when screen was turned off
 
 // Keyboard backlight timeout (5 seconds)
 static const uint32_t KB_LIGHT_TIMEOUT_MS = 5000;
@@ -387,7 +454,7 @@ void load_app_settings() {
     app_settings.ble_enabled = prefs.getBool("ble_en", false);
 
     // Advanced
-    app_settings.announce_interval = prefs.getULong("announce", 60);
+    app_settings.announce_interval = prefs.getULong("announce", 3600);
     app_settings.sync_interval = prefs.getULong("sync_int", 3600);  // Default 60 minutes
     app_settings.gps_time_sync = prefs.getBool("gps_sync", true);
 
@@ -470,6 +537,79 @@ void setup_wifi() {
         } else {
             INFO("Time already synced via GPS");
         }
+
+        // Initialize ArduinoOTA for wireless flashing
+        ArduinoOTA.setHostname("pyxis-tdeck");
+        ArduinoOTA.onStart([]() {
+            INFO("OTA: Update starting — suspending BLE for clean WiFi");
+            // Pause BLE to free the shared 2.4GHz radio for WiFi transfer
+            if (ble_interface_impl) {
+                ble_interface_impl->stop();
+                INFO("OTA: BLE stopped");
+            }
+            // Disconnect TCP to reduce WiFi contention
+            if (tcp_interface_impl) {
+                tcp_interface_impl->stop();
+                INFO("OTA: TCP stopped");
+            }
+        });
+        ArduinoOTA.onEnd([]() { INFO("OTA: Update complete, rebooting"); });
+        ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+            // Tight OTA service loop: feed WDT and yield to OTA networking
+            // without returning to the heavy main loop
+            esp_task_wdt_reset();
+            static unsigned int last_pct = 999;
+            unsigned int pct = progress * 100 / total;
+            if (pct != last_pct && pct % 10 == 0) {
+                last_pct = pct;
+                Serial.printf("OTA: %u%%\n", pct);
+            }
+        });
+        ArduinoOTA.onError([](ota_error_t error) { ERROR("OTA: Error"); });
+        ArduinoOTA.begin();
+        INFO("OTA: Ready");
+
+        // Initialize UDP log broadcasting (multicast group 239.0.99.99:9999)
+        udp_log_init();
+        udp_log_ready = true;
+        RNS::setLogCallback([](const char* msg, RNS::LogLevel level) {
+            // Suppress noisy per-packet LoRa/transport trace lines on UDP
+            // (still send to Serial for wired debugging)
+            bool suppress_udp = false;
+            if (level <= RNS::LOG_DEBUG) {
+                // Quick prefix checks for the noisiest log sources
+                if (strncmp(msg, "SX1262", 6) == 0 ||
+                    strncmp(msg, "Transport::inbound", 18) == 0 ||
+                    strncmp(msg, "AutoInterface:", 14) == 0 ||
+                    strncmp(msg, "Packet::", 8) == 0 ||
+                    strncmp(msg, "Creating packet", 15) == 0 ||
+                    strncmp(msg, "Checking to see", 15) == 0 ||
+                    strncmp(msg, "Caching packet", 14) == 0 ||
+                    strncmp(msg, "Adding destination", 18) == 0 ||
+                    strncmp(msg, "InterfaceImpl", 13) == 0 ||
+                    strncmp(msg, "Identity::", 10) == 0 ||
+                    strncmp(msg, "Dropped", 7) == 0) {
+                    suppress_udp = true;
+                }
+            }
+            // Serial (preserve wired debugging)
+            Serial.print(RNS::getTimeString());
+            Serial.print(" [");
+            Serial.print(RNS::getLevelName(level));
+            Serial.print("] ");
+            Serial.println(msg);
+            Serial.flush();
+            // UDP broadcast (filtered)
+            if (udp_log_ready && !suppress_udp) {
+                char buf[512];
+                int len = snprintf(buf, sizeof(buf), "%s [%s] %s",
+                    RNS::getTimeString(), RNS::getLevelName(level), msg);
+                if (len > 0) {
+                    udp_send(buf, (size_t)len);
+                }
+            }
+        });
+        INFO("UDP log broadcasting on port 9999");
     } else {
         ERROR("WiFi connection failed!");
     }
@@ -547,6 +687,10 @@ void setup_reticulum() {
 
     // Create Reticulum instance (no auto-init)
     reticulum = new Reticulum();
+
+    // Reduce transport log verbosity — LOG_TRACE floods serial with
+    // token/link/announce details that drown out audio diagnostics.
+    RNS::loglevel(RNS::LOG_INFO);
 
     // Load or create identity using NVS (Non-Volatile Storage)
     // NVS is preserved across flashes unlike SPIFFS
@@ -644,7 +788,10 @@ void setup_reticulum() {
     if (app_settings.ble_enabled) {
         INFO("Initializing BLE Mesh interface...");
 
-        ble_interface_impl = new BLEInterface("BLE");
+        // Allocate BLEInterface in PSRAM to save ~22KB internal heap
+        // Use calloc to zero-initialize — prevents stale PSRAM data from appearing as valid
+        void* ble_mem = heap_caps_calloc(1, sizeof(BLEInterface), MALLOC_CAP_SPIRAM);
+        ble_interface_impl = new (ble_mem) BLEInterface("BLE");
         // Testing: DUAL mode with WiFi radio completely disabled
         ble_interface_impl->setRole(RNS::BLE::Role::DUAL);
         ble_interface_impl->setLocalIdentity(identity->get_public_key().left(16));
@@ -803,24 +950,16 @@ void setup_ui_manager() {
             INFO(("Brightness changed to " + String(brightness)).c_str());
         });
 
-        // Set WiFi reconnect callback
+        // Set WiFi reconnect callback (deferred to main loop to avoid blocking LVGL task)
         settings->set_wifi_reconnect_callback([](const String& ssid, const String& password) {
-            INFO(("Reconnecting WiFi to: " + ssid).c_str());
-            WiFi.disconnect();
-            delay(100);
-            WiFi.begin(ssid.c_str(), password.c_str());
-
-            // Wait for connection (with timeout)
-            uint32_t start = millis();
-            while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
-                delay(100);
+            if (ssid.isEmpty()) {
+                WARNING("WiFi reconnect skipped: SSID is empty");
+                return;
             }
-
-            if (WiFi.status() == WL_CONNECTED) {
-                INFO(("WiFi connected! IP: " + WiFi.localIP().toString()).c_str());
-            } else {
-                WARNING("WiFi reconnection failed");
-            }
+            pending_wifi_ssid = ssid;
+            pending_wifi_password = password;
+            wifi_reconnect_pending = true;
+            INFO(("WiFi reconnect queued for: " + ssid).c_str());
         });
 
         // Set save callback (update app_settings and apply)
@@ -845,6 +984,7 @@ void setup_ui_manager() {
             // Handle WiFi credential changes - auto reconnect
             if (wifi_settings_changed && new_settings.wifi_ssid.length() > 0) {
                 INFO(("WiFi credentials changed, reconnecting to: " + new_settings.wifi_ssid).c_str());
+                udp_log_ready = false;  // Suspend UDP logging during WiFi transition
                 WiFi.disconnect();
                 delay(100);
                 WiFi.begin(new_settings.wifi_ssid.c_str(), new_settings.wifi_password.c_str());
@@ -856,6 +996,8 @@ void setup_ui_manager() {
                 }
 
                 if (WiFi.status() == WL_CONNECTED) {
+                    udp_log_init();  // Rebind to new WiFi interface IP
+                    udp_log_ready = true;  // Resume UDP logging
                     INFO(("WiFi connected! IP: " + WiFi.localIP().toString()).c_str());
                 } else {
                     WARNING("WiFi connection failed");
@@ -962,7 +1104,8 @@ void setup_ui_manager() {
                     // Create interface if it doesn't exist yet
                     if (!ble_interface_impl) {
                         INFO("Creating new BLE interface...");
-                        ble_interface_impl = new BLEInterface("BLE");
+                        void* ble_mem = heap_caps_calloc(1, sizeof(BLEInterface), MALLOC_CAP_SPIRAM);
+                        ble_interface_impl = new (ble_mem) BLEInterface("BLE");
                         // Testing: DUAL mode with WiFi radio completely disabled
                         ble_interface_impl->setRole(RNS::BLE::Role::DUAL);
                         ble_interface_impl->setLocalIdentity(identity->get_public_key().left(16));
@@ -1054,6 +1197,26 @@ void setup() {
     INFO("╚══════════════════════════════════════╝");
     INFO("");
 
+    // Check for LXST crash breadcrumb from previous boot
+    {
+        Preferences _dbg;
+        _dbg.begin("lxst_dbg", true);
+        uint8_t step = _dbg.getUChar("step", 0);
+        if (step > 0) {
+            uint32_t heap = _dbg.getUInt("heap", 0);
+            uint32_t stack = _dbg.getUInt("stack", 0);
+            char buf[80];
+            snprintf(buf, sizeof(buf), "LXST CRASH: last step=%u heap=%u stack=%u", step, heap, stack);
+            WARNING(buf);
+        }
+        _dbg.end();
+        // Clear breadcrumb
+        Preferences _dbg2;
+        _dbg2.begin("lxst_dbg", false);
+        _dbg2.putUChar("step", 0);
+        _dbg2.end();
+    }
+
     // Initialize hardware
     BOOT_PROFILE_START("hardware");
     setup_hardware();
@@ -1112,6 +1275,11 @@ void setup() {
     setup_ui_manager();
     BOOT_PROFILE_END("ui_manager");
 
+    // Send initial LXST voice destination announce
+    if (ui_manager) {
+        ui_manager->announce_lxst();
+    }
+
     // Register delivered callback to update message status in storage and UI
     router->register_delivered_callback([](LXMF::LXMessage& msg) {
         INFO(">>> APP DELIVERED CALLBACK ENTRY");
@@ -1164,6 +1332,16 @@ void setup() {
     INFO("╚══════════════════════════════════════╝");
     INFO("");
 
+    // Reconfigure Task Watchdog with 30s timeout (default 10s is too tight
+    // for SPIFFS flash I/O — identity persistence writes 40-50 entries and
+    // can take 5-15s with sector erases and garbage collection)
+    esp_task_wdt_init(30, true);  // 30s timeout, panic on trigger
+    esp_task_wdt_add(NULL);       // Subscribe loopTask
+    INFO("Task Watchdog: loopTask subscribed (30s timeout)");
+
+    // Feed WDT during long Identity persistence (71+ entries to SPIFFS can take >30s)
+    Identity::set_persist_yield_callback([]() { esp_task_wdt_reset(); });
+
     // Show startup message
     INFO("Press any key to start messaging");
 }
@@ -1171,7 +1349,19 @@ void setup() {
 // Serial command buffer for web flasher detection
 static String serial_cmd_buffer = "";
 
+// Loop step tracker — helps identify which call blocks when device hangs
+// Written every loop iteration, printed in 5s heap diagnostic
+static volatile uint8_t loop_step = 0;
+
+// Feed WDT and advance loop step tracker
+#define LOOP_STEP(n) do { loop_step = (n); esp_task_wdt_reset(); } while(0)
+
 void loop() {
+    esp_task_wdt_reset();
+
+    // Handle OTA updates (must be called frequently)
+    ArduinoOTA.handle();
+
     // Handle serial commands for web flasher detection
     while (Serial.available()) {
         char c = Serial.read();
@@ -1193,39 +1383,99 @@ void loop() {
         }
     }
 
+    LOOP_STEP(1);  // LVGL task_handler
     // Handle LVGL rendering (must be called frequently for smooth UI)
     UI::LVGL::LVGLInit::task_handler();
 
+    LOOP_STEP(2);  // Display health
+    // Monitor display health
+    Hardware::TDeck::Display::log_health();
+
+    // Handle deferred WiFi reconnect (from LVGL task)
+    LOOP_STEP(3);  // WiFi reconnect check
+    if (wifi_reconnect_pending) {
+        wifi_reconnect_pending = false;
+        INFO(("Reconnecting WiFi to: " + pending_wifi_ssid).c_str());
+        udp_log_ready = false;  // Suspend UDP logging during WiFi transition
+        WiFi.disconnect();
+        delay(100);
+        WiFi.begin(pending_wifi_ssid.c_str(), pending_wifi_password.c_str());
+
+        uint32_t start = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
+            esp_task_wdt_reset();
+            delay(100);
+        }
+
+        if (WiFi.status() == WL_CONNECTED) {
+            udp_log_init();  // Rebind to new WiFi interface IP
+            udp_log_ready = true;  // Resume UDP logging
+            INFO(("WiFi connected! IP: " + WiFi.localIP().toString()).c_str());
+        } else {
+            WARNING("WiFi reconnection failed");
+        }
+        pending_wifi_ssid = "";
+        pending_wifi_password = "";
+    }
+
     // Process Reticulum
+    LOOP_STEP(4);  // reticulum->loop()
     reticulum->loop();
 
+    // Pump TX audio immediately after Reticulum — low-latency path that
+    // bypasses LVGL lock and all other loop steps.  No-ops when not in a call.
+    if (ui_manager) {
+        ui_manager->pump_call_tx();
+    }
+
+    // Periodically persist identity/transport data (display names, paths, etc.)
+    // NOTE: Identity persistence writes 40-50 entries to SPIFFS flash, which
+    // involves sector erases (100ms each) and can take 5-15s total.
+    // WDT feeds between calls prevent timeout during heavy flash I/O.
+    LOOP_STEP(5);  // persist data
+    reticulum->should_persist_data();
+    esp_task_wdt_reset();
+    // Fast-persist known destinations (5s after dirty) to survive crashes
+    Identity::should_persist_data();
+    esp_task_wdt_reset();
+
     // Process TCP interface
+    LOOP_STEP(6);  // TCP loop
     if (tcp_interface) {
         tcp_interface->loop();
     }
 
     // Process LoRa interface
+    LOOP_STEP(7);  // LoRa loop
     if (lora_interface) {
         lora_interface->loop();
     }
 
     // Process BLE interface (skip if running on its own task)
+    LOOP_STEP(8);  // BLE loop
     if (ble_interface && ble_interface_impl && !ble_interface_impl->is_task_running()) {
         ble_interface->loop();
     }
 
     // Process LXMF router queues
+    LOOP_STEP(9);  // Router processing
     if (router) {
         router->process_outbound();
         router->process_inbound();
     }
 
     // Update UI manager (processes LXMF messages)
+    LOOP_STEP(10);  // UI manager update
     if (ui_manager) {
         ui_manager->update();
     }
 
+    LOOP_STEP(11);  // Memory monitor
+    // Process deferred memory monitor logging (flag set by timer callback)
+    MEMORY_MONITOR_POLL();
+
     // Periodic announce (using interval from settings)
+    LOOP_STEP(12);  // Periodic tasks
     if (app_settings.announce_interval > 0) {  // 0 = disabled
         uint32_t announce_interval_ms = app_settings.announce_interval * 1000;
         if (millis() - last_announce > announce_interval_ms) {
@@ -1235,6 +1485,9 @@ void loop() {
                                         (ble_interface && ble_interface->online());
             if (router && has_online_interface) {
                 router->announce();
+                if (ui_manager) {
+                    ui_manager->announce_lxst();
+                }
                 last_announce = millis();
                 INFO("Periodic announce sent (interval: " + std::to_string(app_settings.announce_interval) + "s)");
             }
@@ -1341,6 +1594,7 @@ void loop() {
     }
 
     // Screen timeout handling
+    LOOP_STEP(13);  // Screen timeout
     if (app_settings.screen_timeout > 0) {  // 0 = never timeout
         uint32_t inactive_ms;
         {
@@ -1354,10 +1608,11 @@ void loop() {
             saved_brightness = app_settings.brightness;
             ledcWrite(0, 0);  // Turn off backlight (channel 0)
             screen_off = true;
+            screen_off_time = millis();
             DEBUG("Screen timeout - backlight off");
         }
-        else if (screen_off && inactive_ms < 1000) {
-            // Activity detected - turn screen back on
+        else if (screen_off && inactive_ms < (millis() - screen_off_time)) {
+            // Activity detected since screen turned off - wake immediately
             ledcWrite(0, saved_brightness);
             screen_off = false;
             DEBUG("Activity detected - backlight on");
@@ -1401,53 +1656,88 @@ void loop() {
         int32_t delta = (last_free_heap > 0) ? ((int32_t)free_heap - (int32_t)last_free_heap) : 0;
         UBaseType_t stack_hwm = uxTaskGetStackHighWaterMark(NULL);
 
-        Serial.printf("[HEAP] free=%u min=%u max_block=%u delta=%+d stack_hwm=%u\n",
-            free_heap, min_heap, max_block, delta, stack_hwm);
+        {
+            char diag[192];
+            int n = snprintf(diag, sizeof(diag),
+                "[HEAP] free=%u min=%u max_block=%u delta=%+d stack_hwm=%u step=%u",
+                free_heap, min_heap, max_block, delta, stack_hwm, (unsigned)loop_step);
+            Serial.println(diag);
+            udp_send(diag, n);
+        }
         // PSRAM diagnostics
         uint32_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
         uint32_t psram_total = ESP.getPsramSize();
         uint32_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
         uint32_t internal_max_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
-        Serial.printf("[PSRAM] free=%u/%u  [INTERNAL] free=%u max_block=%u\n",
-            psram_free, psram_total, internal_free, internal_max_block);
+        {
+            char diag[128];
+            int n = snprintf(diag, sizeof(diag),
+                "[PSRAM] free=%u/%u  [INTERNAL] free=%u max_block=%u",
+                psram_free, psram_total, internal_free, internal_max_block);
+            Serial.println(diag);
+            udp_send(diag, n);
+        }
         Serial.flush();
 
         // Threshold warnings
         if (free_heap < 20000) {
-            Serial.println("[HEAP] CRITICAL: Free heap below 20KB!");
+            {
+                const char* crit = "[HEAP] CRITICAL: Free heap below 20KB!";
+                Serial.println(crit);
+                udp_send(crit, strlen(crit));
+            }
             // Print Transport table sizes for debugging
-            Serial.printf("[TABLES] ann=%zu dest=%zu rev=%zu link=%zu held=%zu rate=%zu path=%zu\n",
-                RNS::Transport::announce_table_count(),
-                RNS::Transport::destination_table_count(),
-                RNS::Transport::reverse_table_count(),
-                RNS::Transport::link_table_count(),
-                RNS::Transport::held_announces_count(),
-                RNS::Transport::announce_rate_table_count(),
-                RNS::Transport::path_requests_count());
-            Serial.printf("[TABLES] pend_link=%zu act_link=%zu rcpt=%zu pkt_hash=%zu iface=%zu dest_pool=%zu\n",
-                RNS::Transport::pending_links_count(),
-                RNS::Transport::active_links_count(),
-                RNS::Transport::receipts_count(),
-                RNS::Transport::packet_hashlist_count(),
-                RNS::Transport::interfaces_count(),
-                RNS::Transport::destinations_count());
-            Serial.printf("[IDENTITY] known_dest=%zu known_ratch=%zu\n",
-                RNS::Identity::known_destinations_count(),
-                RNS::Identity::known_ratchets_count());
+            {
+                char tbl[192];
+                int n = snprintf(tbl, sizeof(tbl),
+                    "[TABLES] ann=%zu dest=%zu rev=%zu link=%zu held=%zu rate=%zu path=%zu",
+                    RNS::Transport::announce_table_count(),
+                    RNS::Transport::destination_table_count(),
+                    RNS::Transport::reverse_table_count(),
+                    RNS::Transport::link_table_count(),
+                    RNS::Transport::held_announces_count(),
+                    RNS::Transport::announce_rate_table_count(),
+                    RNS::Transport::path_requests_count());
+                Serial.println(tbl);
+                udp_send(tbl, n);
+                n = snprintf(tbl, sizeof(tbl),
+                    "[TABLES] pend_link=%zu act_link=%zu rcpt=%zu pkt_hash=%zu iface=%zu dest_pool=%zu",
+                    RNS::Transport::pending_links_count(),
+                    RNS::Transport::active_links_count(),
+                    RNS::Transport::receipts_count(),
+                    RNS::Transport::packet_hashlist_count(),
+                    RNS::Transport::interfaces_count(),
+                    RNS::Transport::destinations_count());
+                Serial.println(tbl);
+                udp_send(tbl, n);
+                n = snprintf(tbl, sizeof(tbl), "[IDENTITY] known_dest=%zu known_ratch=%zu",
+                    RNS::Identity::known_destinations_count(),
+                    RNS::Identity::known_ratchets_count());
+                Serial.println(tbl);
+                udp_send(tbl, n);
+            }
         } else if (free_heap < 50000) {
-            Serial.println("[HEAP] WARNING: Free heap below 50KB");
+            const char* warn = "[HEAP] WARNING: Free heap below 50KB";
+            Serial.println(warn);
+            udp_send(warn, strlen(warn));
         }
 
         // Fragmentation warning (large gap between free heap and max allocatable block)
         if (max_block < free_heap / 2) {
-            Serial.printf("[HEAP] WARNING: Fragmentation detected (max_block=%u, free=%u)\n",
+            char frag[96];
+            int n = snprintf(frag, sizeof(frag),
+                "[HEAP] WARNING: Fragmentation detected (max_block=%u, free=%u)",
                 max_block, free_heap);
+            Serial.println(frag);
+            udp_send(frag, n);
         }
 
         // Periodic table diagnostics (every 30 seconds)
         if (millis() - last_table_check > 30000) {
             last_table_check = millis();
-            Serial.printf("[DIAG] ikd=%zu ikr=%zu ann=%zu dest=%zu pkt=%zu held=%zu rev=%zu link=%zu\n",
+            char diag[192];
+            int n = snprintf(diag, sizeof(diag),
+                "[DIAG] ikd=%zu ikr=%zu ann=%zu dest=%zu pkt=%zu held=%zu rev=%zu link=%zu",
                 RNS::Identity::known_destinations_count(),
                 RNS::Identity::known_ratchets_count(),
                 RNS::Transport::announce_table_count(),
@@ -1456,6 +1746,8 @@ void loop() {
                 RNS::Transport::held_announces_count(),
                 RNS::Transport::reverse_table_count(),
                 RNS::Transport::link_table_count());
+            Serial.println(diag);
+            udp_send(diag, n);
         }
 
         last_free_heap = free_heap;

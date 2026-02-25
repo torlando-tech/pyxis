@@ -100,6 +100,7 @@ private:
     // Receive buffer
     RNS::Bytes _rx_buffer;
 
-    // Hardware MTU (matches existing LoRaInterface)
-    static constexpr uint16_t HW_MTU = 508;
+    // Hardware MTU: SX1262 max packet size is 255 bytes
+    // (RNode uses 508 because it fragments over serial HDLC, but we drive the radio directly)
+    static constexpr uint16_t HW_MTU = 255;
 };

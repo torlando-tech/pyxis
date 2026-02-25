@@ -191,6 +191,16 @@ public:
     virtual bool write(uint16_t conn_handle, const Bytes& data, bool response = true) = 0;
 
     /**
+     * @brief Write to a specific characteristic by handle
+     */
+    virtual bool writeCharacteristic(uint16_t conn_handle, uint16_t char_handle,
+                                      const Bytes& data, bool response = true) {
+        // Default: fall back to general write (subclass can override)
+        (void)char_handle;
+        return write(conn_handle, data, response);
+    }
+
+    /**
      * @brief Read from a characteristic
      *
      * @param conn_handle Connection handle

@@ -69,10 +69,27 @@ CONFIG_BOOTLOADER_LOG_LEVEL=2
 CONFIG_BOOT_ROM_LOG_ALWAYS_OFF=y
 
 # ============================================================================
+# FreeRTOS Timer Service Task
+# Default 2048 is too small when NimBLE/WiFi timer callbacks run
+# ============================================================================
+CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096
+
+# ============================================================================
 # Task Watchdog Timer (TWDT)
 # Detects task starvation and deadlock conditions
+# 30s timeout accommodates SPIFFS flash I/O during identity persistence
+# (writing 40-50 destinations to flash takes 5-15s with GC/erase)
 # ============================================================================
 CONFIG_ESP_TASK_WDT_EN=y
-CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=y
+
+# ============================================================================
+# Core Dump — writes CPU state + backtrace to flash on crash
+# Read with: espcoredump.py info_corefile -t raw -c 0x7F0000 -s 0x10000 <port>
+# ============================================================================
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+CONFIG_ESP_COREDUMP_CHECKSUM_SHA256=y
+CONFIG_ESP_COREDUMP_MAX_TASKS_NUM=64

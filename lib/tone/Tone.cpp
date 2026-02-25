@@ -124,6 +124,15 @@ void tone_stop() {
     i2s_write(I2S_PORT, silence, sizeof(silence), &bytes_written, pdMS_TO_TICKS(2000));
 }
 
+void tone_deinit() {
+    if (!_initialized) return;
+
+    tone_stop();
+    i2s_driver_uninstall(I2S_PORT);
+    _initialized = false;
+    Serial.println("[TONE] I2S deinitialized");
+}
+
 bool tone_is_playing() {
     return _playing;
 }
