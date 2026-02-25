@@ -102,6 +102,9 @@ jobs:
           tag_name: ${{ steps.version.outputs.VERSION }}
           name: ${{ steps.version.outputs.VERSION }}
           files: |
+            docs/flasher/firmware/bootloader.bin
+            docs/flasher/firmware/partitions.bin
+            docs/flasher/firmware/boot_app0.bin
             docs/flasher/firmware/firmware.bin
           generate_release_notes: true
           draft: true
