@@ -175,6 +175,44 @@
         }
         .warning strong { color: var(--warning); }
 
+        .version-select-group {
+            margin-bottom: 1.5rem;
+        }
+
+        .version-select-group label {
+            display: block;
+            color: var(--muted);
+            font-size: 0.875rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .version-select-group select {
+            width: 100%;
+            padding: 0.625rem 1rem;
+            background: rgba(0,0,0,0.3);
+            color: var(--text);
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 8px;
+            font-family: inherit;
+            font-size: 1rem;
+            cursor: pointer;
+            appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2394a3b8' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: right 1rem center;
+        }
+
+        .version-select-group select:focus {
+            outline: none;
+            border-color: var(--primary);
+        }
+
+        .version-note {
+            font-size: 0.8rem;
+            color: var(--warning);
+            margin-top: 0.5rem;
+        }
+
         footer {
             text-align: center;
             margin-top: 2rem;
@@ -200,6 +238,14 @@
                 <div class="value" id="device-status">
                     <span class="status-not-detected">Ready to flash</span>
                 </div>
+            </div>
+
+            <div class="version-select-group">
+                <label for="version-select">Firmware Version</label>
+                <select id="version-select">
+                    <option value="latest">Latest (loading...)</option>
+                </select>
+                <div id="version-note" class="version-note hidden"></div>
             </div>
 
             <div class="checkbox-group">
@@ -266,18 +312,29 @@
         const progressContainer = document.getElementById('progress-container');
         const progressFill = document.getElementById('progress-fill');
         const progressText = document.getElementById('progress-text');
+        const versionSelect = document.getElementById('version-select');
+        const versionNote = document.getElementById('version-note');
 
-        const FIRMWARE_FILES = {
-            full: [
-                { offset: 0x0, name: 'bootloader.bin', path: 'firmware/bootloader.bin' },
-                { offset: 0x8000, name: 'partitions.bin', path: 'firmware/partitions.bin' },
-                { offset: 0xe000, name: 'boot_app0.bin', path: 'firmware/boot_app0.bin' },
-                { offset: 0x10000, name: 'firmware.bin', path: 'firmware/firmware.bin' }
-            ],
-            update: [
-                { offset: 0x10000, name: 'firmware.bin', path: 'firmware/firmware.bin' }
-            ]
-        };
+        const REQUIRED_FULL_ASSETS = ['bootloader.bin', 'partitions.bin', 'boot_app0.bin', 'firmware.bin'];
+
+        // Current firmware path prefix — empty string for relative (latest), or a release download URL
+        let firmwarePathPrefix = '';
+        // Track whether the selected release has all assets for full install
+        let releaseHasFullAssets = true;
+
+        function makeFirmwareFiles(prefix) {
+            return {
+                full: [
+                    { offset: 0x0, name: 'bootloader.bin', path: prefix + 'bootloader.bin' },
+                    { offset: 0x8000, name: 'partitions.bin', path: prefix + 'partitions.bin' },
+                    { offset: 0xe000, name: 'boot_app0.bin', path: prefix + 'boot_app0.bin' },
+                    { offset: 0x10000, name: 'firmware.bin', path: prefix + 'firmware.bin' }
+                ],
+                update: [
+                    { offset: 0x10000, name: 'firmware.bin', path: prefix + 'firmware.bin' }
+                ]
+            };
+        }
 
         function log(message, type = 'info') {
             logDiv.classList.remove('hidden');
@@ -300,10 +357,72 @@
             progressText.textContent = text;
         }
 
-        // Identical to rnode-flasher's approach
+        // Version selector logic
+        let latestVersion = 'dev';
+
+        async function loadVersions() {
+            // Load deployed manifest version first
+            try {
+                const manifest = await fetch('manifest-install.json').then(r => r.json());
+                latestVersion = manifest.version;
+                document.getElementById('firmware-version').textContent = latestVersion;
+            } catch (e) {}
+
+            // Update the "Latest" option text
+            versionSelect.options[0].textContent = `Latest (${latestVersion})`;
+
+            // Fetch GitHub releases
+            try {
+                const resp = await fetch('https://api.github.com/repos/torlando-tech/pyxis/releases');
+                if (!resp.ok) return;
+                const releases = await resp.json();
+
+                for (const release of releases) {
+                    if (release.draft || release.prerelease) continue;
+                    const assetNames = release.assets.map(a => a.name);
+                    if (!assetNames.includes('firmware.bin')) continue;
+
+                    const option = document.createElement('option');
+                    const hasAll = REQUIRED_FULL_ASSETS.every(f => assetNames.includes(f));
+                    option.value = release.tag_name;
+                    option.textContent = release.tag_name + (release.name && release.name !== release.tag_name ? ` — ${release.name}` : '');
+                    option.dataset.downloadUrl = `https://github.com/torlando-tech/pyxis/releases/download/${release.tag_name}/`;
+                    option.dataset.hasFullAssets = hasAll ? 'true' : 'false';
+                    versionSelect.appendChild(option);
+                }
+            } catch (e) {
+                // API failures are non-critical — user can still flash latest
+            }
+        }
+
+        versionSelect.addEventListener('change', function() {
+            const selected = this.options[this.selectedIndex];
+            if (this.value === 'latest') {
+                firmwarePathPrefix = 'firmware/';
+                releaseHasFullAssets = true;
+                document.getElementById('firmware-version').textContent = latestVersion;
+            } else {
+                firmwarePathPrefix = selected.dataset.downloadUrl;
+                releaseHasFullAssets = selected.dataset.hasFullAssets === 'true';
+                document.getElementById('firmware-version').textContent = this.value;
+            }
+
+            // Handle full-install availability
+            if (!releaseHasFullAssets) {
+                eraseCheckbox.checked = false;
+                eraseCheckbox.disabled = true;
+                versionNote.textContent = 'Full install unavailable for this release (missing bootloader/partition assets)';
+                versionNote.classList.remove('hidden');
+            } else {
+                eraseCheckbox.disabled = false;
+                versionNote.classList.add('hidden');
+            }
+        });
+
         async function flash() {
             const useFullInstall = eraseCheckbox.checked;
-            const files = useFullInstall ? FIRMWARE_FILES.full : FIRMWARE_FILES.update;
+            const fw = makeFirmwareFiles(firmwarePathPrefix);
+            const files = useFullInstall ? fw.full : fw.update;
             let transport = null;
 
             flashBtn.disabled = true;
@@ -393,13 +512,9 @@
 
         flashBtn.addEventListener('click', flash);
 
-        // Load manifest version
-        fetch('manifest-install.json')
-            .then(r => r.json())
-            .then(data => {
-                document.getElementById('firmware-version').textContent = data.version;
-            })
-            .catch(() => {});
+        // Initialize: set default prefix and load versions
+        firmwarePathPrefix = 'firmware/';
+        loadVersions();
     </script>
 </body>
 </html>
