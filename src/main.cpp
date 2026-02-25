@@ -69,8 +69,11 @@
 // OTA flashing
 #include <ArduinoOTA.h>
 
-// UDP log broadcasting
-#include <WiFiUdp.h>
+// UDP log broadcasting (POSIX socket — avoids WiFiUDP's per-packet heap allocation)
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
 
 // Memory instrumentation
 #ifdef MEMORY_INSTRUMENTATION_ENABLED
@@ -130,21 +133,53 @@ volatile bool wifi_reconnect_pending = false;
 String pending_wifi_ssid;
 String pending_wifi_password;
 
-// UDP log broadcasting (multicast avoids duplicate delivery on multi-homed hosts)
-static WiFiUDP udp_log;
-static const IPAddress UDP_LOG_GROUP(239, 0, 99, 99);
+// UDP log broadcasting (POSIX socket — no per-packet heap allocation)
+// WiFiUDP::beginPacket() does new char[1460] on every call, causing severe
+// heap fragmentation over time. A raw POSIX socket with sendto() avoids this.
+static int udp_log_sock = -1;
+static struct sockaddr_in udp_log_dest;
 static bool udp_log_ready = false;
 
-// Helper: send a string via UDP broadcast (for Serial.printf diagnostics)
-// Guards against sending during WiFi transitions and reentrant calls
-static volatile bool udp_sending = false;
+static void udp_log_init() {
+    if (udp_log_sock >= 0) close(udp_log_sock);  // Re-init safe
+    udp_log_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (udp_log_sock < 0) return;
+
+    // Non-blocking so sendto() never stalls the log path
+    int flags = fcntl(udp_log_sock, F_GETFL, 0);
+    fcntl(udp_log_sock, F_SETFL, flags | O_NONBLOCK);
+
+    // Multicast TTL = 1 (local network only)
+    uint8_t ttl = 1;
+    setsockopt(udp_log_sock, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
+
+    // Bind multicast output to the WiFi station interface — without this,
+    // lwIP doesn't know which interface to send multicast packets on.
+    struct in_addr iface;
+    iface.s_addr = (uint32_t)WiFi.localIP();
+    setsockopt(udp_log_sock, IPPROTO_IP, IP_MULTICAST_IF, &iface, sizeof(iface));
+
+    memset(&udp_log_dest, 0, sizeof(udp_log_dest));
+    udp_log_dest.sin_family = AF_INET;
+    udp_log_dest.sin_port = htons(9999);
+    udp_log_dest.sin_addr.s_addr = inet_addr("239.0.99.99");
+}
+
+// UDP send — no locking needed.  sendto() is non-blocking (O_NONBLOCK) and
+// lwIP's internal TCPIP core lock serializes concurrent calls.  Worst case
+// on contention: EAGAIN/ENOMEM and the packet is dropped (acceptable for logs).
 static void udp_send(const char* msg, size_t len) {
-    if (!udp_log_ready || udp_sending || WiFi.status() != WL_CONNECTED) return;
-    udp_sending = true;
-    udp_log.beginPacket(UDP_LOG_GROUP, 9999);
-    udp_log.write((const uint8_t*)msg, len);
-    udp_log.endPacket();
-    udp_sending = false;
+    if (udp_log_sock < 0 || !udp_log_ready || WiFi.status() != WL_CONNECTED) return;
+    sendto(udp_log_sock, msg, len, 0,
+           (struct sockaddr*)&udp_log_dest, sizeof(udp_log_dest));
+}
+
+// Global log function callable from any module (sends to UDP + Serial)
+extern "C" void pyxis_log(const char* msg) {
+    Serial.println(msg);
+    if (udp_log_ready) {
+        udp_send(msg, strlen(msg));
+    }
 }
 
 // Forward declarations
@@ -419,7 +454,7 @@ void load_app_settings() {
     app_settings.ble_enabled = prefs.getBool("ble_en", false);
 
     // Advanced
-    app_settings.announce_interval = prefs.getULong("announce", 60);
+    app_settings.announce_interval = prefs.getULong("announce", 3600);
     app_settings.sync_interval = prefs.getULong("sync_int", 3600);  // Default 60 minutes
     app_settings.gps_time_sync = prefs.getBool("gps_sync", true);
 
@@ -505,15 +540,58 @@ void setup_wifi() {
 
         // Initialize ArduinoOTA for wireless flashing
         ArduinoOTA.setHostname("pyxis-tdeck");
-        ArduinoOTA.onStart([]() { INFO("OTA: Update starting..."); });
+        ArduinoOTA.onStart([]() {
+            INFO("OTA: Update starting — suspending BLE for clean WiFi");
+            // Pause BLE to free the shared 2.4GHz radio for WiFi transfer
+            if (ble_interface_impl) {
+                ble_interface_impl->stop();
+                INFO("OTA: BLE stopped");
+            }
+            // Disconnect TCP to reduce WiFi contention
+            if (tcp_interface_impl) {
+                tcp_interface_impl->stop();
+                INFO("OTA: TCP stopped");
+            }
+        });
         ArduinoOTA.onEnd([]() { INFO("OTA: Update complete, rebooting"); });
+        ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+            // Tight OTA service loop: feed WDT and yield to OTA networking
+            // without returning to the heavy main loop
+            esp_task_wdt_reset();
+            static unsigned int last_pct = 999;
+            unsigned int pct = progress * 100 / total;
+            if (pct != last_pct && pct % 10 == 0) {
+                last_pct = pct;
+                Serial.printf("OTA: %u%%\n", pct);
+            }
+        });
         ArduinoOTA.onError([](ota_error_t error) { ERROR("OTA: Error"); });
         ArduinoOTA.begin();
         INFO("OTA: Ready");
 
         // Initialize UDP log broadcasting (multicast group 239.0.99.99:9999)
+        udp_log_init();
         udp_log_ready = true;
         RNS::setLogCallback([](const char* msg, RNS::LogLevel level) {
+            // Suppress noisy per-packet LoRa/transport trace lines on UDP
+            // (still send to Serial for wired debugging)
+            bool suppress_udp = false;
+            if (level <= RNS::LOG_DEBUG) {
+                // Quick prefix checks for the noisiest log sources
+                if (strncmp(msg, "SX1262", 6) == 0 ||
+                    strncmp(msg, "Transport::inbound", 18) == 0 ||
+                    strncmp(msg, "AutoInterface:", 14) == 0 ||
+                    strncmp(msg, "Packet::", 8) == 0 ||
+                    strncmp(msg, "Creating packet", 15) == 0 ||
+                    strncmp(msg, "Checking to see", 15) == 0 ||
+                    strncmp(msg, "Caching packet", 14) == 0 ||
+                    strncmp(msg, "Adding destination", 18) == 0 ||
+                    strncmp(msg, "InterfaceImpl", 13) == 0 ||
+                    strncmp(msg, "Identity::", 10) == 0 ||
+                    strncmp(msg, "Dropped", 7) == 0) {
+                    suppress_udp = true;
+                }
+            }
             // Serial (preserve wired debugging)
             Serial.print(RNS::getTimeString());
             Serial.print(" [");
@@ -521,8 +599,8 @@ void setup_wifi() {
             Serial.print("] ");
             Serial.println(msg);
             Serial.flush();
-            // UDP broadcast
-            if (udp_log_ready) {
+            // UDP broadcast (filtered)
+            if (udp_log_ready && !suppress_udp) {
                 char buf[512];
                 int len = snprintf(buf, sizeof(buf), "%s [%s] %s",
                     RNS::getTimeString(), RNS::getLevelName(level), msg);
@@ -609,6 +687,10 @@ void setup_reticulum() {
 
     // Create Reticulum instance (no auto-init)
     reticulum = new Reticulum();
+
+    // Reduce transport log verbosity — LOG_TRACE floods serial with
+    // token/link/announce details that drown out audio diagnostics.
+    RNS::loglevel(RNS::LOG_INFO);
 
     // Load or create identity using NVS (Non-Volatile Storage)
     // NVS is preserved across flashes unlike SPIFFS
@@ -914,6 +996,7 @@ void setup_ui_manager() {
                 }
 
                 if (WiFi.status() == WL_CONNECTED) {
+                    udp_log_init();  // Rebind to new WiFi interface IP
                     udp_log_ready = true;  // Resume UDP logging
                     INFO(("WiFi connected! IP: " + WiFi.localIP().toString()).c_str());
                 } else {
@@ -1325,6 +1408,7 @@ void loop() {
         }
 
         if (WiFi.status() == WL_CONNECTED) {
+            udp_log_init();  // Rebind to new WiFi interface IP
             udp_log_ready = true;  // Resume UDP logging
             INFO(("WiFi connected! IP: " + WiFi.localIP().toString()).c_str());
         } else {
@@ -1337,6 +1421,12 @@ void loop() {
     // Process Reticulum
     LOOP_STEP(4);  // reticulum->loop()
     reticulum->loop();
+
+    // Pump TX audio immediately after Reticulum — low-latency path that
+    // bypasses LVGL lock and all other loop steps.  No-ops when not in a call.
+    if (ui_manager) {
+        ui_manager->pump_call_tx();
+    }
 
     // Periodically persist identity/transport data (display names, paths, etc.)
     // NOTE: Identity persistence writes 40-50 entries to SPIFFS flash, which

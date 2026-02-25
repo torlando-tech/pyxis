@@ -101,8 +101,12 @@ private:
 
     bool filtersEnabled_ = true;
 
-    static constexpr int I2S_SAMPLE_RATE = 16000;  // I2S runs at 16kHz (matches T-Deck Plus reference)
-    static constexpr int CODEC_SAMPLE_RATE = 8000; // Codec2 expects 8kHz — we downsample 2:1
+    static constexpr int I2S_SAMPLE_RATE = 8000;   // I2S runs at 8kHz — matches Codec2 directly, no resampling needed
+    static constexpr int CODEC_SAMPLE_RATE = 8000; // Codec2 expects 8kHz
+    // Accumulate this many codec frames before filter+encode.
+    // Matches Columba's 200ms batch (1600 samples for Codec2 3200).
+    // The AGC needs large blocks for stable gain tracking.
+    static constexpr int FRAMES_PER_BATCH = 10;
     static constexpr int ENCODED_RING_SLOTS = 128;
     static constexpr int ENCODED_RING_MAX_BYTES = 256;
     static constexpr int CAPTURE_TASK_STACK = 24576;  // 24KB — pyxis_log→sendto uses ~4KB lwIP stack

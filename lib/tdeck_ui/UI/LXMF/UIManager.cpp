@@ -61,9 +61,11 @@ UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::Me
       _call_muted(false),
       _call_answer_pending(false),
       _call_link_closed_pending(false),
-      _call_signal_pending(0xFF),
+      _call_signal_write(0),
+      _call_signal_read(0),
       _call_audio_rx_count(0),
       _call_audio_tx_count(0) {
+    memset((void*)_call_signal_queue, 0, sizeof(_call_signal_queue));
 }
 
 UIManager::~UIManager() {
@@ -794,7 +796,8 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
     _call_audio_rx_count = 0;
     _call_audio_tx_count = 0;
     _call_link_closed_pending = false;
-    _call_signal_pending = 0xFF;
+    _call_signal_write = 0;
+    _call_signal_read = 0;
 
     {
         std::string dh = peer_dest.hash().toHex().substr(0, 16);
@@ -825,6 +828,11 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
 void UIManager::call_hangup() {
     INFO("LXST: Hanging up");
 
+    // Set IDLE first — prevents pump_call_tx() (which runs without LVGL lock)
+    // from accessing _lxst_audio after we delete it.
+    _call_state = CallState::IDLE;
+    s_call_instance = nullptr;
+
     // Stop audio
     if (_lxst_audio) {
         _lxst_audio->stopCapture();
@@ -840,9 +848,7 @@ void UIManager::call_hangup() {
         _call_link = Link(Type::NONE);
     }
 
-    _call_state = CallState::IDLE;
     _call_peer_hash = Bytes();
-    s_call_instance = nullptr;
 
     // Return to chat screen
     if (_call_screen) {
@@ -890,13 +896,19 @@ void UIManager::call_send_signal(int signal) {
         len = 6;
     }
 
-    Bytes signal_data(msgpack_buf, len);
-    Packet packet(_call_link, signal_data);
-    packet.send();
+    try {
+        Bytes signal_data(msgpack_buf, len);
+        Packet packet(_call_link, signal_data);
+        packet.send();
 
-    char buf[48];
-    snprintf(buf, sizeof(buf), "LXST: Sent signal 0x%03X", signal);
-    DEBUG(buf);
+        char buf[48];
+        snprintf(buf, sizeof(buf), "LXST: Sent signal 0x%03X", signal);
+        DEBUG(buf);
+    } catch (const std::exception& e) {
+        char dbg[128];
+        snprintf(dbg, sizeof(dbg), "LXST: Signal send exception: %s", e.what());
+        WARNING(dbg);
+    }
 }
 
 void UIManager::call_send_audio_batch(const uint8_t* batch_data, int batch_len,
@@ -956,12 +968,21 @@ void UIManager::call_send_audio_batch(const uint8_t* batch_data, int batch_len,
         INFO(dbg);
     }
 
-    Bytes audio_data(packet_buf, pos);
-    Packet packet(_call_link, audio_data);
-    packet.send();
+    try {
+        Bytes audio_data(packet_buf, pos);
+        Packet packet(_call_link, audio_data);
+        packet.send();
+    } catch (const std::exception& e) {
+        char dbg[128];
+        snprintf(dbg, sizeof(dbg), "LXST: TX send exception: %s", e.what());
+        WARNING(dbg);
+    }
 }
 
 void UIManager::call_rx_audio_frame(const uint8_t* frame, size_t frame_len) {
+    // Guard: packets can arrive after hangup from the network pipeline
+    if (!_lxst_audio || _call_state == CallState::IDLE) return;
+
     // Wire format: [codec_type_byte] + [mode_header + codec2_subframes...]
     // codec_type: 0x00=Raw, 0x01=Opus, 0x02=Codec2 (matches LXST Codecs/__init__.py)
     // For Codec2: mode_header (0x00-0x06) + raw sub-frames
@@ -1057,12 +1078,21 @@ void UIManager::call_on_packet(const Bytes& data) {
             return;
         }
 
-        char dbg[48];
-        snprintf(dbg, sizeof(dbg), "LXST: Received signal 0x%02X (queued)", signal);
-        DEBUG(dbg);
+        {
+            char dbg[48];
+            snprintf(dbg, sizeof(dbg), "LXST: Received signal 0x%02X (queued)", signal);
+            INFO(dbg);
+        }
 
-        // Queue for processing in call_update() under LVGL lock
-        _call_signal_pending = (uint8_t)signal;
+        // Enqueue for processing in call_update() under LVGL lock
+        uint8_t w = _call_signal_write;
+        uint8_t next_w = (w + 1) % SIGNAL_QUEUE_SIZE;
+        if (next_w != _call_signal_read) {  // Not full
+            _call_signal_queue[w] = (uint8_t)signal;
+            _call_signal_write = next_w;
+        } else {
+            WARNING("LXST: Signal queue full, dropping signal!");
+        }
 
     } else if (field == 0x01) {
         // Audio: {0x01: value} where value is either:
@@ -1126,9 +1156,11 @@ void UIManager::call_on_packet(const Bytes& data) {
 
 // Process received signal — runs under LVGL lock from call_update()
 void UIManager::call_process_signal(uint8_t signal) {
-    char dbg[48];
-    snprintf(dbg, sizeof(dbg), "LXST: Processing signal 0x%02X (state=%d)", signal, (int)_call_state);
-    DEBUG(dbg);
+    {
+        char dbg[48];
+        snprintf(dbg, sizeof(dbg), "LXST: Processing signal 0x%02X (state=%d)", signal, (int)_call_state);
+        INFO(dbg);
+    }
 
     switch (_call_state) {
         case CallState::WAIT_AVAILABLE:
@@ -1234,6 +1266,11 @@ void UIManager::call_process_signal(uint8_t signal) {
 void UIManager::call_ended() {
     INFO("LXST: Call ended");
 
+    // Set IDLE first — prevents pump_call_tx() (which runs without LVGL lock)
+    // from accessing _lxst_audio after we delete it.
+    _call_state = CallState::IDLE;
+    s_call_instance = nullptr;
+
     // Stop audio
     if (_lxst_audio) {
         _lxst_audio->stopCapture();
@@ -1249,14 +1286,48 @@ void UIManager::call_ended() {
         _call_link = Link(Type::NONE);
     }
 
-    _call_state = CallState::IDLE;
     _call_peer_hash = Bytes();
-    s_call_instance = nullptr;
 
     _call_screen->set_state(CallScreen::CallState::ENDED);
 
     // Return to conversation list after brief display
     show_conversation_list();
+}
+
+void UIManager::pump_call_tx() {
+    if (_call_state == CallState::IDLE) return;
+    if (!_lxst_audio || !_lxst_audio->isCapturing()) return;
+    if (!_call_link || _call_link.status() != Type::Link::ACTIVE) return;
+
+    int available = _lxst_audio->capturePacketsAvailable();
+
+    // Drain all available batches — this runs on loopTask (core 1)
+    // and doesn't touch LVGL, so no lock needed.
+    while (available > 0) {
+        uint8_t encoded_buf[128];
+        int encoded_len = 0;
+        if (!_lxst_audio->readEncodedPacket(encoded_buf, sizeof(encoded_buf), &encoded_len)) {
+            break;
+        }
+        if (encoded_len < 2) { available--; continue; }
+
+        // Prepend codec type byte: [0x02] + [encoded: mode_header + 10*8 raw]
+        uint8_t batch_data[128];
+        batch_data[0] = LXST_CODEC_CODEC2;
+        memcpy(batch_data + 1, encoded_buf, encoded_len);
+        int batch_len = 1 + encoded_len;
+
+        call_send_audio_batch(batch_data, batch_len, 1, encoded_len / 8);
+        _call_audio_tx_count++;
+        available--;
+
+        if (_call_audio_tx_count <= 10 || (_call_audio_tx_count % 100 == 0)) {
+            char dbg[96];
+            snprintf(dbg, sizeof(dbg), "LXST: TX batch #%lu (%d bytes, avail=%d)",
+                     (unsigned long)_call_audio_tx_count, batch_len, available);
+            INFO(dbg);
+        }
+    }
 }
 
 void UIManager::call_update() {
@@ -1269,11 +1340,11 @@ void UIManager::call_update() {
         return;
     }
 
-    // Process deferred signal (set by Reticulum packet callback, consumed here under LVGL lock)
-    uint8_t pending_sig = _call_signal_pending;
-    if (pending_sig != 0xFF) {
-        _call_signal_pending = 0xFF;
-        call_process_signal(pending_sig);
+    // Process all queued signals (set by Reticulum packet callback, consumed here under LVGL lock)
+    while (_call_signal_read != _call_signal_write) {
+        uint8_t sig = _call_signal_queue[_call_signal_read];
+        _call_signal_read = (_call_signal_read + 1) % SIGNAL_QUEUE_SIZE;
+        call_process_signal(sig);
         if (_call_state == CallState::IDLE) return;  // Signal caused call to end
     }
 
@@ -1381,93 +1452,8 @@ void UIManager::call_update() {
             }
         }
 
-        // Pump TX: batch codec frames to match Columba's expected ring buffer slot size.
-        // Columba's native OboePlaybackEngine expects exactly frameSamples (1600 for 3200
-        // mode) decoded samples per writeEncodedPacket call = 10 sub-frames.
-        // Each encoded frame from ring buffer = [mode_header(1)] + [raw_codec2(8)] = 9 bytes.
-        // We pack 10 frames per batch: [codec_type(1)] + [mode(1)] + [10*raw(80)] = 82 bytes.
-        // Multiple batches go into a fixarray, matching Columba's wire format exactly.
-        static constexpr int FRAMES_PER_BATCH = 10;  // 10 * 160 = 1600 = Columba's frameSamples
-        static constexpr int MAX_BATCHES = 2;         // Up to 2 batches per packet (like Columba)
-        static constexpr int TX_MAX_FRAMES = FRAMES_PER_BATCH * MAX_BATCHES;
-        static constexpr uint32_t TX_INTERVAL_MS = 200;  // Match LXST-kt LBW frame time
-        static uint32_t last_tx_ms = 0;
-        if (_lxst_audio && _lxst_audio->isCapturing()) {
-            int available = _lxst_audio->capturePacketsAvailable();
-            bool time_to_send = (now - last_tx_ms) >= TX_INTERVAL_MS;
-            // Send if: enough time has passed AND we have frames,
-            // OR ring is getting full (>60 frames = 1.2s buffered)
-            if ((time_to_send && available >= FRAMES_PER_BATCH) || available > 60) {
-                int to_send = available < TX_MAX_FRAMES ? available : TX_MAX_FRAMES;
-
-                // Read frames and pack into batches of 10.
-                // batch_data: concatenated batches, each 82 bytes:
-                //   [codec_type(0x02)] + [mode_header] + [10 * 8 raw bytes]
-                uint8_t batch_data[MAX_BATCHES * 82];
-                int batch_count = 0;
-                int total_frames = 0;
-                uint8_t encoded_buf[16];
-
-                while (batch_count < MAX_BATCHES && to_send >= FRAMES_PER_BATCH) {
-                    uint8_t* bp = batch_data + batch_count * 82;
-                    bp[0] = LXST_CODEC_CODEC2;  // codec_type = 0x02
-                    int frames_in_batch = 0;
-
-                    for (int i = 0; i < FRAMES_PER_BATCH; i++) {
-                        int encoded_len = 0;
-                        if (!_lxst_audio->readEncodedPacket(encoded_buf, sizeof(encoded_buf), &encoded_len)) {
-                            break;
-                        }
-                        if (encoded_len < 2) continue;
-
-                        if (frames_in_batch == 0) {
-                            // First frame: keep mode_header + raw
-                            memcpy(bp + 1, encoded_buf, encoded_len);
-                        } else {
-                            // Subsequent: append raw only (strip mode_header)
-                            memcpy(bp + 1 + 1 + frames_in_batch * 8, encoded_buf + 1, encoded_len - 1);
-                        }
-                        frames_in_batch++;
-                        _call_audio_tx_count++;
-                        to_send--;
-                    }
-
-                    if (frames_in_batch == FRAMES_PER_BATCH) {
-                        batch_count++;
-                        total_frames += frames_in_batch;
-                    } else {
-                        // Incomplete batch — put back? Can't, so just count what we got
-                        total_frames += frames_in_batch;
-                        if (frames_in_batch > 0) batch_count++;
-                        break;
-                    }
-                }
-
-                if (batch_count > 0) {
-                    call_send_audio_batch(batch_data, 82 * batch_count,
-                                          batch_count, total_frames);
-                    last_tx_ms = now;
-                    if (_call_audio_tx_count <= 50) {
-                        char dbg[96];
-                        snprintf(dbg, sizeof(dbg), "LXST: TX %d batches %d frames (%d avail), total=%lu",
-                                 batch_count, total_frames, available,
-                                 (unsigned long)_call_audio_tx_count);
-                        INFO(dbg);
-                    }
-                }
-            }
-        } else if (_call_audio_tx_count == 0) {
-            // Log once why TX is not running
-            static uint32_t last_tx_warn = 0;
-            if (now - last_tx_warn > 2000) {
-                last_tx_warn = now;
-                char dbg[96];
-                snprintf(dbg, sizeof(dbg), "LXST: TX pump idle: audio=%p capturing=%d state=%d",
-                         _lxst_audio, _lxst_audio ? (int)_lxst_audio->isCapturing() : -1,
-                         _lxst_audio ? (int)_lxst_audio->state() : -1);
-                WARNING(dbg);
-            }
-        }
+        // TX pump — also called from main loop without LVGL lock for low latency
+        pump_call_tx();
     }
 }
 

@@ -10,7 +10,7 @@
 #include "es7210.h"
 
 #define I2S_DSP_MODE_A 0
-#define MCLK_DIV_FRE   256
+#define MCLK_DIV_FRE   512  // MCLK = sample_rate * 512 (4.096MHz at 8kHz)
 
 #define ES7210_MCLK_SOURCE            FROM_CLOCK_DOUBLE_PIN
 #define FROM_PAD_PIN                  0

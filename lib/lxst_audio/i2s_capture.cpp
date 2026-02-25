@@ -44,17 +44,19 @@ bool I2SCapture::init() {
     // Settings match official LilyGO T-Deck Plus Microphone example
     i2s_config_t i2s_config = {};
     i2s_config.mode = static_cast<i2s_mode_t>(I2S_MODE_MASTER | I2S_MODE_RX);
-    i2s_config.sample_rate = I2S_SAMPLE_RATE;  // 16kHz — downsample to 8kHz for Codec2
+    i2s_config.sample_rate = I2S_SAMPLE_RATE;  // 8kHz — matches Codec2 directly
     i2s_config.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
     i2s_config.channel_format = I2S_CHANNEL_FMT_ALL_LEFT;
     i2s_config.communication_format = I2S_COMM_FORMAT_STAND_I2S;
     i2s_config.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
-    i2s_config.dma_buf_count = 8;
+    // At 8kHz × 2 TDM channels = 16ksps. Filter+encode burst for 1600 samples
+    // takes ~20ms; 16 × 64 = 1024 samples = 64ms headroom prevents DMA overflow.
+    i2s_config.dma_buf_count = 16;
     i2s_config.dma_buf_len = 64;
-    i2s_config.use_apll = false;
+    i2s_config.use_apll = true;   // APLL gives accurate audio clocks (vs main PLL integer dividers)
     i2s_config.tx_desc_auto_clear = true;
-    i2s_config.fixed_mclk = 0;
-    i2s_config.mclk_multiple = I2S_MCLK_MULTIPLE_256;  // MCLK = 16kHz * 256 = 4.096MHz
+    i2s_config.fixed_mclk = 4096000;                    // Force 4.096MHz MCLK (matches ES7210 coeff table for 8kHz)
+    i2s_config.mclk_multiple = I2S_MCLK_MULTIPLE_256;   // Ignored when fixed_mclk is set
     i2s_config.bits_per_chan = I2S_BITS_PER_CHAN_16BIT;
     // TDM channel mask — required for ES7210 on T-Deck Plus
     i2s_config.chan_mask = static_cast<i2s_channel_t>(I2S_TDM_ACTIVE_CH0 | I2S_TDM_ACTIVE_CH1);
@@ -83,7 +85,7 @@ bool I2SCapture::init() {
 
     i2sInitialized_ = true;
 
-    ESP_LOGI(TAG, "I2S capture initialized: %dHz 16-bit mono, MCLK=4.096MHz", I2S_SAMPLE_RATE);
+    ESP_LOGI(TAG, "I2S capture initialized: %dHz 16-bit TDM, MCLK=4.096MHz", I2S_SAMPLE_RATE);
     return true;
 }
 
@@ -96,7 +98,11 @@ bool I2SCapture::configureEncoder(Codec2Wrapper* codec, bool enableFilters) {
     }
     codec_ = codec;
 
-    frameSamples_ = codec_->samplesPerFrame();
+    // Accumulate FRAMES_PER_BATCH codec frames before filter+encode.
+    // Columba uses 200ms (1600 samples for Codec2 3200) so the AGC operates
+    // on meaningful block sizes.  With only 160 samples (20ms) the AGC blocks
+    // are 16 samples and gain-pump, producing buzzy audio.
+    frameSamples_ = codec_->samplesPerFrame() * FRAMES_PER_BATCH;
     filtersEnabled_ = enableFilters;
 
     // Allocate ring buffer in PSRAM
@@ -111,13 +117,16 @@ bool I2SCapture::configureEncoder(Codec2Wrapper* codec, bool enableFilters) {
     silenceBuf_ = static_cast<int16_t*>(
         heap_caps_calloc(frameSamples_, sizeof(int16_t), MALLOC_CAP_SPIRAM));
 
-    // Filter chain: 1 channel (mono), voice band 300-3400Hz, AGC -12dB target, 12dB max
+    // Filter chain: 1 channel (mono), voice band 300-3400Hz, AGC -12dB target, 12dB max gain
+    // PGA gain is 21dB; loud speech peaks around -6dBFS, quiet around -20dBFS.
+    // AGC boosts quiet sections; 12dB max prevents noise pumping during silence.
     if (enableFilters) {
         filterChain_ = new VoiceFilterChain(1, 300.0f, 3400.0f, -12.0f, 12.0f);
     }
 
-    ESP_LOGI(TAG, "Encoder configured: Codec2 mode %d, %d samples/frame, %d bytes/frame, filters=%d",
-             codec_->libraryMode(), frameSamples_, codec_->bytesPerFrame(), enableFilters);
+    ESP_LOGI(TAG, "Encoder configured: Codec2 mode %d, %d samples/batch (%d x %d), %d bytes/frame, filters=%d",
+             codec_->libraryMode(), frameSamples_, FRAMES_PER_BATCH,
+             codec_->samplesPerFrame(), codec_->bytesPerFrame(), enableFilters);
     return true;
 }
 
@@ -182,62 +191,35 @@ void I2SCapture::captureTask(void* param) {
 }
 
 void I2SCapture::captureLoop() {
-    // I2S read buffer: read in chunks (TDM interleaved, 2 channels at 16kHz each)
-    static constexpr int READ_SAMPLES = 256;  // Larger buffer → more 8kHz samples per read
+    // I2S read buffer: TDM interleaved, 2 channels at 8kHz
+    static constexpr int READ_SAMPLES = 256;
     int16_t readBuf[READ_SAMPLES];
-    // CH0 at 16kHz after TDM deinterleave (÷2)
+    // CH0 mono after TDM deinterleave (÷2)
     int16_t ch0Buf[READ_SAMPLES / 2];
-    // After FIR decimation 16kHz→8kHz (÷2)
-    int16_t dsBuf[READ_SAMPLES / 4];
     size_t bytesRead = 0;
-
-    // 15-tap half-band FIR filter for anti-aliased decimation by 2.
-    // Designed for Fs=16kHz, cutoff=4kHz (Nyquist of 8kHz output).
-    // Kaiser window beta=6, ~60dB stopband attenuation.
-    // Half-band property: every other coefficient is zero, so only 5 unique
-    // multiply-accumulate ops per output sample (symmetric coefficients).
-    //
-    // Float coefficients (symmetric, sum=1.0):
-    //   h[0,14] = -0.000676  h[2,12] = +0.012712  h[4,10] = -0.062710
-    //   h[6,8]  = +0.300794  h[7]    = +0.499759 (center)
-    //   h[1,3,5,9,11,13] = 0 (half-band zeros)
-    //
-    // Q15 fixed-point (scaled by 32768):
-    static constexpr int FIR_TAPS = 15;
-    static const int16_t FIR_Q15[FIR_TAPS] = {
-        -22, 0, 417, 0, -2055, 0, 9856, 16376, 9856, 0, -2055, 0, 417, 0, -22
-    };
-    static constexpr int FIR_SHIFT = 15;  // Q15 format: divide accumulator by 32768
-
-    // FIR delay line (persists across I2S reads)
-    int16_t firDelay[FIR_TAPS] = {0};
-
-    static constexpr int16_t LIMITER_THRESHOLD = 16000;
 
     {
         char logbuf[96];
-        snprintf(logbuf, sizeof(logbuf), "[CAP] Capture task on core %d, I2S=%dHz, codec=%dHz, FIR=%d-tap, stack=%d",
-                 xPortGetCoreID(), I2S_SAMPLE_RATE, CODEC_SAMPLE_RATE, FIR_TAPS, CAPTURE_TASK_STACK);
+        snprintf(logbuf, sizeof(logbuf), "[CAP] Capture task on core %d, I2S=%dHz, codec=%dHz, stack=%d",
+                 xPortGetCoreID(), I2S_SAMPLE_RATE, CODEC_SAMPLE_RATE, CAPTURE_TASK_STACK);
         pyxis_log(logbuf);
     }
     uint32_t framesEncoded = 0;
-    uint32_t totalDsSamples = 0;    // Total mono samples after decimation
+    uint32_t totalSamples = 0;      // Total mono samples after deinterleave
     uint32_t rateCheckMs = millis(); // For sample rate measurement
-    int16_t runningPeakDs = 0;      // Peak of decimated samples per interval
-    int16_t runningPeakRaw = 0;     // Peak of raw I2S samples per interval
+    int16_t runningPeak = 0;        // Peak of mono samples per interval
     uint32_t ringDrops = 0;         // Ring buffer overflow counter
 
     while (capturing_.load(std::memory_order_relaxed)) {
-        // Read samples from I2S DMA (at 16kHz)
+        // Read samples from I2S DMA (at 8kHz, TDM 2-ch)
         esp_err_t err = i2s_read(I2S_NUM_1, readBuf, sizeof(readBuf), &bytesRead,
                                  pdMS_TO_TICKS(100));
         if (err != ESP_OK || bytesRead == 0) continue;
 
         int samplesRead = bytesRead / sizeof(int16_t);
 
-        // Dump first raw I2S samples on each capture start to see TDM channel layout
-        // Resets per capture start (not per boot) since framesEncoded resets to 0
-        if (framesEncoded == 0 && samplesRead >= 16 && totalDsSamples == 0) {
+        // Dump first raw I2S samples on each capture start
+        if (framesEncoded == 0 && samplesRead >= 16 && totalSamples == 0) {
             char rawdump[192];
             int pos = snprintf(rawdump, sizeof(rawdump),
                 "[CAP] Raw I2S (%d read, %zu bytes): ", samplesRead, bytesRead);
@@ -246,80 +228,41 @@ void I2SCapture::captureLoop() {
             pyxis_log(rawdump);
         }
 
-        // Track raw I2S peak (all channels)
-        for (int i = 0; i < samplesRead; i++) {
-            int16_t v = readBuf[i] < 0 ? -readBuf[i] : readBuf[i];
-            if (v > runningPeakRaw) runningPeakRaw = v;
-        }
-
-        // Step 1: TDM deinterleave — extract CH0 at 16kHz.
-        // readBuf is [CH0,CH1,CH0,CH1,...], so CH0 samples at even indices.
+        // TDM deinterleave — extract CH0 (mic) at 8kHz.
+        // readBuf is [CH0,CH1,CH0,CH1,...], CH0 at even indices.
         int ch0Count = samplesRead / 2;
         for (int i = 0; i < ch0Count; i++) {
             ch0Buf[i] = readBuf[i * 2];
+            int16_t v = ch0Buf[i] < 0 ? -ch0Buf[i] : ch0Buf[i];
+            if (v > runningPeak) runningPeak = v;
         }
 
-        // Step 2: 15-tap half-band FIR decimation by 2 (16kHz → 8kHz).
-        // For each output sample, push 2 input samples through the FIR delay
-        // line and compute the convolution sum.  Half-band zeros mean only
-        // taps 0,2,4,6,7,8,10,12,14 are non-zero — exploited below.
-        int dsCount = ch0Count / 2;
-        for (int i = 0; i < dsCount; i++) {
-            // Push 2 input samples into the delay line (decimation by 2)
-            for (int k = 0; k < 2; k++) {
-                // Shift delay line right by 1
-                for (int d = FIR_TAPS - 1; d > 0; d--)
-                    firDelay[d] = firDelay[d - 1];
-                firDelay[0] = ch0Buf[i * 2 + k];
-            }
-
-            // Compute FIR output — exploit symmetry and half-band zeros.
-            // Non-zero taps: 0,2,4,6,7,8,10,12,14
-            // Symmetric pairs: (0,14), (2,12), (4,10), (6,8), center=7
-            int32_t acc = 0;
-            acc += (int32_t)FIR_Q15[0]  * ((int32_t)firDelay[0]  + firDelay[14]);
-            acc += (int32_t)FIR_Q15[2]  * ((int32_t)firDelay[2]  + firDelay[12]);
-            acc += (int32_t)FIR_Q15[4]  * ((int32_t)firDelay[4]  + firDelay[10]);
-            acc += (int32_t)FIR_Q15[6]  * ((int32_t)firDelay[6]  + firDelay[8]);
-            acc += (int32_t)FIR_Q15[7]  * (int32_t)firDelay[7];  // center tap
-
-            int16_t s = (int16_t)(acc >> FIR_SHIFT);
-
-            // Hard limiter: clamp to ±LIMITER_THRESHOLD to prevent ADC clipping artifacts
-            if (s > LIMITER_THRESHOLD) s = LIMITER_THRESHOLD;
-            else if (s < -LIMITER_THRESHOLD) s = -LIMITER_THRESHOLD;
-            dsBuf[i] = s;
-            int16_t v = s < 0 ? -s : s;
-            if (v > runningPeakDs) runningPeakDs = v;
-        }
-
-        // Measure actual sample rate: count deinterleaved samples per second
-        totalDsSamples += dsCount;
+        // Measure actual sample rate
+        totalSamples += ch0Count;
         uint32_t now = millis();
         uint32_t elapsed = now - rateCheckMs;
         if (elapsed >= 2000) {
-            uint32_t rate = (totalDsSamples * 1000) / elapsed;
+            uint32_t rate = (totalSamples * 1000) / elapsed;
             {
                 char logbuf[128];
-                snprintf(logbuf, sizeof(logbuf), "[CAP] rate=%luHz frames=%lu rawPeak=%d dsPeak=%d ringDrops=%lu",
+                snprintf(logbuf, sizeof(logbuf), "[CAP] rate=%luHz frames=%lu peak=%d ringDrops=%lu",
                          (unsigned long)rate, (unsigned long)framesEncoded,
-                         runningPeakRaw, runningPeakDs, (unsigned long)ringDrops);
+                         runningPeak, (unsigned long)ringDrops);
                 pyxis_log(logbuf);
             }
-            totalDsSamples = 0;
+            totalSamples = 0;
             rateCheckMs = now;
-            runningPeakRaw = 0;
-            runningPeakDs = 0;
+            runningPeak = 0;
         }
 
-        // Accumulate downsampled samples into frame-sized buffer
+        // Accumulate mono samples into frame-sized buffer
         int offset = 0;
-        while (offset < dsCount && capturing_.load(std::memory_order_relaxed)) {
+        while (offset < ch0Count && capturing_.load(std::memory_order_relaxed)) {
             int needed = frameSamples_ - accumCount_;
-            int available = dsCount - offset;
+            int available = ch0Count - offset;
             int toCopy = (available < needed) ? available : needed;
 
-            memcpy(accumBuffer_ + accumCount_, dsBuf + offset, toCopy * sizeof(int16_t));
+            memcpy(accumBuffer_ + accumCount_, ch0Buf + offset, toCopy * sizeof(int16_t));
             accumCount_ += toCopy;
             offset += toCopy;
 

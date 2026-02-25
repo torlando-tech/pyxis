@@ -73,6 +73,12 @@ public:
     void update();
 
     /**
+     * Pump TX audio without LVGL lock — call from main loop for low-latency TX.
+     * Safe to call on every loop iteration; no-ops when not in a call.
+     */
+    void pump_call_tx();
+
+    /**
      * Show conversation list screen
      */
     void show_conversation_list();
@@ -276,7 +282,11 @@ private:
     bool _call_muted;
     volatile bool _call_answer_pending;  // Set by LVGL task, consumed by main loop
     volatile bool _call_link_closed_pending;  // Set by link callback, consumed by call_update
-    volatile uint8_t _call_signal_pending;    // 0xFF = none; set by packet callback
+    // Signal queue: written by Reticulum thread, consumed by call_update under LVGL lock
+    static constexpr int SIGNAL_QUEUE_SIZE = 8;
+    volatile uint8_t _call_signal_queue[SIGNAL_QUEUE_SIZE];
+    volatile uint8_t _call_signal_write;  // Next write index (Reticulum thread)
+    volatile uint8_t _call_signal_read;   // Next read index (main thread)
     uint32_t _call_audio_rx_count;    // Count of received audio frames (for diagnostics)
     uint32_t _call_audio_tx_count;    // Count of sent audio frames (for diagnostics)
 

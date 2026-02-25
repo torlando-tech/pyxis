@@ -44,7 +44,7 @@ bool LXSTAudio::init(int codec2Mode, uint8_t micGain) {
         cfg.codec_mode = AUDIO_HAL_CODEC_MODE_ENCODE;
         cfg.i2s_iface.mode = AUDIO_HAL_MODE_SLAVE;
         cfg.i2s_iface.fmt = AUDIO_HAL_I2S_NORMAL;
-        cfg.i2s_iface.samples = AUDIO_HAL_16K_SAMPLES;
+        cfg.i2s_iface.samples = AUDIO_HAL_08K_SAMPLES;
         cfg.i2s_iface.bits = AUDIO_HAL_BIT_LENGTH_16BITS;
 
         uint32_t ret_val = ESP_OK;
