@@ -77,6 +77,12 @@ public:
     void set_rns_status(bool connected, const String& server_name = "");
 
     /**
+     * Set propagation node display string
+     * @param display Formatted string like "Auto (NodeName)" or "None"
+     */
+    void set_propagation_node(const String& display);
+
+    /**
      * BLE peer summary for display (matches BLEInterface::PeerSummary)
      */
     struct BLEPeerInfo {
@@ -140,6 +146,7 @@ private:
     lv_obj_t* _label_wifi_ip;
     lv_obj_t* _label_wifi_rssi;
     lv_obj_t* _label_rns_status;
+    lv_obj_t* _label_prop_node;
 
     // BLE peer labels (pre-allocated, hidden when unused)
     lv_obj_t* _label_ble_header;
@@ -149,6 +156,7 @@ private:
     RNS::Bytes _lxmf_address;
     bool _rns_connected;
     String _rns_server;
+    String _prop_node_display;
 
     // BLE peer data (cached for display)
     BLEPeerInfo _ble_peers[MAX_BLE_PEERS];

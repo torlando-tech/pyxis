@@ -21,7 +21,7 @@ StatusScreen::StatusScreen(lv_obj_t* parent)
       _btn_share(nullptr), _label_uptime(nullptr),
       _label_identity_value(nullptr), _label_lxmf_value(nullptr),
       _label_wifi_status(nullptr), _label_wifi_ip(nullptr), _label_wifi_rssi(nullptr),
-      _label_rns_status(nullptr), _label_ble_header(nullptr),
+      _label_rns_status(nullptr), _label_prop_node(nullptr), _label_ble_header(nullptr),
       _rns_connected(false), _ble_peer_count(0) {
     // Initialize BLE peer labels array
     for (size_t i = 0; i < MAX_BLE_PEERS; i++) {
@@ -172,6 +172,14 @@ void StatusScreen::create_content() {
     lv_label_set_long_mode(_label_rns_status, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_pad_bottom(_label_rns_status, 8, 0);
 
+    // Propagation node section
+    _label_prop_node = lv_label_create(_content);
+    lv_label_set_text(_label_prop_node, "Prop Node: None");
+    lv_obj_set_style_text_color(_label_prop_node, Theme::textPrimary(), 0);
+    lv_obj_set_width(_label_prop_node, lv_pct(100));
+    lv_label_set_long_mode(_label_prop_node, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_pad_bottom(_label_prop_node, 8, 0);
+
     // BLE section header
     _label_ble_header = lv_label_create(_content);
     lv_label_set_text(_label_ble_header, "BLE: No peers");
@@ -214,6 +222,12 @@ void StatusScreen::set_ble_info(const BLEPeerInfo* peers, size_t count) {
     for (size_t i = 0; i < _ble_peer_count; i++) {
         memcpy(&_ble_peers[i], &peers[i], sizeof(BLEPeerInfo));
     }
+    update_labels();
+}
+
+void StatusScreen::set_propagation_node(const String& display) {
+    LVGL_LOCK();
+    _prop_node_display = display;
     update_labels();
 }
 
@@ -287,6 +301,15 @@ void StatusScreen::update_labels() {
     } else {
         lv_label_set_text(_label_rns_status, "RNS: Disconnected");
         lv_obj_set_style_text_color(_label_rns_status, Theme::error(), 0);
+    }
+
+    // Update propagation node
+    if (_prop_node_display.length() > 0) {
+        char prop_text[80];
+        snprintf(prop_text, sizeof(prop_text), "Prop Node: %s", _prop_node_display.c_str());
+        lv_label_set_text(_label_prop_node, prop_text);
+    } else {
+        lv_label_set_text(_label_prop_node, "Prop Node: None");
     }
 
     // Update BLE peer info

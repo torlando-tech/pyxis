@@ -11,6 +11,7 @@
 #include "Utilities/OS.h"
 #include "../LVGL/LVGLInit.h"
 #include "../LVGL/LVGLLock.h"
+#include "../TextAreaHelper.h"
 
 using namespace RNS;
 
@@ -21,7 +22,7 @@ PropagationNodesScreen::PropagationNodesScreen(lv_obj_t* parent)
     : _screen(nullptr), _header(nullptr), _list(nullptr),
       _btn_back(nullptr), _btn_sync(nullptr), _auto_select_row(nullptr),
       _auto_select_checkbox(nullptr), _empty_label(nullptr),
-      _auto_select_enabled(true) {
+      _search_input(nullptr), _auto_select_enabled(true) {
 
     // Create screen object
     if (parent) {
@@ -40,6 +41,7 @@ PropagationNodesScreen::PropagationNodesScreen(lv_obj_t* parent)
 
     // Create UI components
     create_header();
+    create_search_row();
     create_auto_select_row();
     create_list();
 
@@ -100,10 +102,39 @@ void PropagationNodesScreen::create_header() {
     lv_obj_set_style_text_font(label_sync, &lv_font_montserrat_12, 0);
 }
 
+void PropagationNodesScreen::create_search_row() {
+    lv_obj_t* row = lv_obj_create(_screen);
+    lv_obj_set_size(row, LV_PCT(100), 32);
+    lv_obj_align(row, LV_ALIGN_TOP_MID, 0, 36);
+    lv_obj_set_style_bg_color(row, Theme::surface(), 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_radius(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 2, 0);
+    lv_obj_set_style_pad_left(row, 8, 0);
+    lv_obj_set_style_pad_right(row, 8, 0);
+
+    _search_input = lv_textarea_create(row);
+    lv_obj_set_size(_search_input, LV_PCT(100), 28);
+    lv_obj_align(_search_input, LV_ALIGN_CENTER, 0, 0);
+    lv_textarea_set_placeholder_text(_search_input, "Filter nodes...");
+    lv_textarea_set_one_line(_search_input, true);
+    lv_textarea_set_max_length(_search_input, 32);
+    lv_obj_set_style_bg_color(_search_input, Theme::surfaceInput(), 0);
+    lv_obj_set_style_text_color(_search_input, Theme::textPrimary(), 0);
+    lv_obj_set_style_border_color(_search_input, Theme::border(), 0);
+    lv_obj_set_style_border_width(_search_input, 1, 0);
+    lv_obj_set_style_radius(_search_input, 4, 0);
+    lv_obj_set_style_text_font(_search_input, &lv_font_montserrat_12, 0);
+    lv_obj_add_event_cb(_search_input, on_search_changed, LV_EVENT_VALUE_CHANGED, this);
+
+    // Enable paste on long-press
+    TextAreaHelper::enable_paste(_search_input);
+}
+
 void PropagationNodesScreen::create_auto_select_row() {
     _auto_select_row = lv_obj_create(_screen);
     lv_obj_set_size(_auto_select_row, LV_PCT(100), 36);
-    lv_obj_align(_auto_select_row, LV_ALIGN_TOP_MID, 0, 36);
+    lv_obj_align(_auto_select_row, LV_ALIGN_TOP_MID, 0, 68);
     lv_obj_set_style_bg_color(_auto_select_row, lv_color_hex(0x1e1e1e), 0);
     lv_obj_set_style_border_width(_auto_select_row, 0, 0);
     lv_obj_set_style_border_side(_auto_select_row, LV_BORDER_SIDE_BOTTOM, 0);
@@ -133,8 +164,8 @@ void PropagationNodesScreen::create_auto_select_row() {
 
 void PropagationNodesScreen::create_list() {
     _list = lv_obj_create(_screen);
-    lv_obj_set_size(_list, LV_PCT(100), 168);  // 240 - 36 (header) - 36 (auto-select row)
-    lv_obj_align(_list, LV_ALIGN_TOP_MID, 0, 72);
+    lv_obj_set_size(_list, LV_PCT(100), 136);  // 240 - 36 (header) - 32 (search) - 36 (auto-select)
+    lv_obj_align(_list, LV_ALIGN_TOP_MID, 0, 104);
     lv_obj_set_style_pad_all(_list, 4, 0);
     lv_obj_set_style_pad_gap(_list, 4, 0);
     lv_obj_set_style_bg_color(_list, Theme::surface(), 0);
@@ -161,7 +192,6 @@ void PropagationNodesScreen::load_nodes(::LXMF::PropagationNodeManager& manager,
     }
 
     // Clear existing items
-    lv_obj_clean(_list);
     _nodes.clear();
     _empty_label = nullptr;
 
@@ -172,8 +202,9 @@ void PropagationNodesScreen::load_nodes(::LXMF::PropagationNodeManager& manager,
         NodeItem item;
         item.node_hash = node_info.node_hash;
         item.name = node_info.name.c_str();
-        item.hash_display = truncate_hash(node_info.node_hash);
+        item.hash_display = format_hash(node_info.node_hash);
         item.hops = node_info.hops;
+        item.stamp_cost = node_info.stamp_cost;
         item.enabled = node_info.enabled;
         item.is_selected = (!_auto_select_enabled && node_info.node_hash == _selected_hash);
 
@@ -183,13 +214,7 @@ void PropagationNodesScreen::load_nodes(::LXMF::PropagationNodeManager& manager,
     std::string count_msg = "  Found " + std::to_string(_nodes.size()) + " propagation nodes";
     INFO(count_msg.c_str());
 
-    if (_nodes.empty()) {
-        show_empty_state();
-    } else {
-        for (size_t i = 0; i < _nodes.size(); i++) {
-            create_node_item(_nodes[i], i);
-        }
-    }
+    apply_filter();
 }
 
 void PropagationNodesScreen::refresh() {
@@ -199,7 +224,7 @@ void PropagationNodesScreen::refresh() {
 
 void PropagationNodesScreen::show_empty_state() {
     _empty_label = lv_label_create(_list);
-    lv_label_set_text(_empty_label, "No propagation nodes\n\nWaiting for nodes\nto announce...");
+    lv_label_set_text(_empty_label, "No propagation nodes\n\nWaiting for announces\nor enter 32-char hash");
     lv_obj_set_style_text_color(_empty_label, Theme::textMuted(), 0);
     lv_obj_set_style_text_align(_empty_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(_empty_label, LV_ALIGN_CENTER, 0, 0);
@@ -263,22 +288,83 @@ void PropagationNodesScreen::create_node_item(const NodeItem& item, size_t index
         lv_obj_align(label_status, LV_ALIGN_BOTTOM_RIGHT, -4, -2);
         lv_obj_set_style_text_color(label_status, Theme::error(), 0);
         lv_obj_set_style_text_font(label_status, &lv_font_montserrat_12, 0);
+    } else if (item.stamp_cost > 0) {
+        lv_obj_t* label_cost = lv_label_create(container);
+        lv_label_set_text_fmt(label_cost, "stamp:%d", item.stamp_cost);
+        lv_obj_align(label_cost, LV_ALIGN_BOTTOM_RIGHT, -4, -2);
+        lv_obj_set_style_text_color(label_cost, Theme::textTertiary(), 0);
+        lv_obj_set_style_text_font(label_cost, &lv_font_montserrat_12, 0);
+    }
+}
+
+void PropagationNodesScreen::create_manual_entry_item(const Bytes& hash, const String& hex_display) {
+    lv_obj_t* container = lv_obj_create(_list);
+    lv_obj_set_size(container, LV_PCT(100), 44);
+    lv_obj_set_style_bg_color(container, lv_color_hex(0x1e1e1e), 0);
+    lv_obj_set_style_bg_color(container, Theme::surfaceInput(), LV_STATE_PRESSED);
+    lv_obj_set_style_border_width(container, 1, 0);
+    lv_obj_set_style_border_color(container, Theme::info(), 0);
+    lv_obj_set_style_radius(container, 6, 0);
+    lv_obj_set_style_pad_all(container, 4, 0);
+    lv_obj_add_flag(container, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(container, on_manual_node_clicked, LV_EVENT_CLICKED, this);
+
+    // Radio indicator
+    bool is_selected = (!_auto_select_enabled && hash == _selected_hash);
+    lv_obj_t* radio = lv_obj_create(container);
+    lv_obj_set_size(radio, 16, 16);
+    lv_obj_align(radio, LV_ALIGN_LEFT_MID, 2, 0);
+    lv_obj_set_style_radius(radio, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(radio, 2, 0);
+    lv_obj_clear_flag(radio, LV_OBJ_FLAG_CLICKABLE);
+    if (is_selected) {
+        lv_obj_set_style_bg_color(radio, Theme::info(), 0);
+        lv_obj_set_style_border_color(radio, Theme::info(), 0);
+    } else {
+        lv_obj_set_style_bg_color(radio, lv_color_hex(0x1e1e1e), 0);
+        lv_obj_set_style_border_color(radio, Theme::textMuted(), 0);
+    }
+
+    // Row 1: "Use manual node"
+    lv_obj_t* label_name = lv_label_create(container);
+    lv_label_set_text(label_name, "Use manual node");
+    lv_obj_align(label_name, LV_ALIGN_TOP_LEFT, 24, 2);
+    lv_obj_set_style_text_color(label_name, Theme::info(), 0);
+    lv_obj_set_style_text_font(label_name, &lv_font_montserrat_14, 0);
+
+    // Row 2: Full hex hash
+    lv_obj_t* label_hash = lv_label_create(container);
+    lv_label_set_text(label_hash, hex_display.c_str());
+    lv_obj_align(label_hash, LV_ALIGN_BOTTOM_LEFT, 24, -2);
+    lv_obj_set_style_text_color(label_hash, Theme::textMuted(), 0);
+    lv_obj_set_style_text_font(label_hash, &lv_font_montserrat_12, 0);
+}
+
+void PropagationNodesScreen::on_manual_node_clicked(lv_event_t* event) {
+    PropagationNodesScreen* screen = static_cast<PropagationNodesScreen*>(lv_event_get_user_data(event));
+
+    if (screen->_manual_hash.size() == 0) return;
+
+    INFO("Manual propagation node selected");
+
+    // Disable auto-select
+    screen->_auto_select_enabled = false;
+    lv_obj_clear_state(screen->_auto_select_checkbox, LV_STATE_CHECKED);
+
+    screen->_selected_hash = screen->_manual_hash;
+    screen->update_selection_ui();
+
+    if (screen->_auto_select_changed_callback) {
+        screen->_auto_select_changed_callback(false);
+    }
+
+    if (screen->_node_selected_callback) {
+        screen->_node_selected_callback(screen->_manual_hash);
     }
 }
 
 void PropagationNodesScreen::update_selection_ui() {
-    // Clear and recreate list to update selection state
-    lv_obj_clean(_list);
-    _empty_label = nullptr;
-
-    if (_nodes.empty()) {
-        show_empty_state();
-    } else {
-        for (size_t i = 0; i < _nodes.size(); i++) {
-            _nodes[i].is_selected = (!_auto_select_enabled && _nodes[i].node_hash == _selected_hash);
-            create_node_item(_nodes[i], i);
-        }
-    }
+    apply_filter();
 }
 
 // Event handlers
@@ -347,6 +433,60 @@ void PropagationNodesScreen::on_auto_select_changed(lv_event_t* event) {
     }
 }
 
+void PropagationNodesScreen::on_search_changed(lv_event_t* event) {
+    PropagationNodesScreen* screen = static_cast<PropagationNodesScreen*>(lv_event_get_user_data(event));
+    const char* text = lv_textarea_get_text(screen->_search_input);
+    screen->_search_filter = text;
+    screen->_search_filter.toLowerCase();
+    screen->apply_filter();
+}
+
+void PropagationNodesScreen::apply_filter() {
+    lv_obj_clean(_list);
+    _empty_label = nullptr;
+    _manual_hash = {};
+
+    // Check if search is a valid 32-char hex hash with no matching discovered node
+    bool show_manual = false;
+    if (is_valid_hex(_search_filter)) {
+        Bytes parsed_hash;
+        parsed_hash.assignHex(_search_filter.c_str());
+        bool found_in_nodes = false;
+        for (size_t i = 0; i < _nodes.size(); i++) {
+            if (_nodes[i].node_hash == parsed_hash) {
+                found_in_nodes = true;
+                break;
+            }
+        }
+        if (!found_in_nodes) {
+            show_manual = true;
+            _manual_hash = parsed_hash;
+            create_manual_entry_item(parsed_hash, _search_filter);
+        }
+    }
+
+    size_t shown = 0;
+    for (size_t i = 0; i < _nodes.size(); i++) {
+        if (_search_filter.length() > 0) {
+            String name_lower = _nodes[i].name;
+            name_lower.toLowerCase();
+            String hash_lower = _nodes[i].hash_display;
+            hash_lower.toLowerCase();
+            if (name_lower.indexOf(_search_filter) < 0 &&
+                hash_lower.indexOf(_search_filter) < 0) {
+                continue;
+            }
+        }
+        _nodes[i].is_selected = (!_auto_select_enabled && _nodes[i].node_hash == _selected_hash);
+        create_node_item(_nodes[i], i);
+        shown++;
+    }
+
+    if (shown == 0 && !show_manual) {
+        show_empty_state();
+    }
+}
+
 // Callback setters
 void PropagationNodesScreen::set_node_selected_callback(NodeSelectedCallback callback) {
     _node_selected_callback = callback;
@@ -374,6 +514,7 @@ void PropagationNodesScreen::show() {
     lv_group_t* group = LVGL::LVGLInit::get_default_group();
     if (group) {
         if (_btn_back) lv_group_add_obj(group, _btn_back);
+        if (_search_input) lv_group_add_obj(group, _search_input);
         if (_btn_sync) lv_group_add_obj(group, _btn_sync);
 
         // Focus on back button
@@ -389,6 +530,7 @@ void PropagationNodesScreen::hide() {
     lv_group_t* group = LVGL::LVGLInit::get_default_group();
     if (group) {
         if (_btn_back) lv_group_remove_obj(_btn_back);
+        if (_search_input) lv_group_remove_obj(_search_input);
         if (_btn_sync) lv_group_remove_obj(_btn_sync);
     }
 
@@ -400,16 +542,26 @@ lv_obj_t* PropagationNodesScreen::get_object() {
 }
 
 // Utility functions
-String PropagationNodesScreen::truncate_hash(const Bytes& hash) {
-    if (hash.size() < 8) return "???";
-    String hex = hash.toHex().c_str();
-    return hex.substring(0, 8) + "...";
+String PropagationNodesScreen::format_hash(const Bytes& hash) {
+    if (hash.size() == 0) return "???";
+    return String(hash.toHex().c_str());
 }
 
 String PropagationNodesScreen::format_hops(uint8_t hops) {
     if (hops == 0) return "direct";
     if (hops == 0xFF) return "? hops";
     return String(hops) + " hop" + (hops == 1 ? "" : "s");
+}
+
+bool PropagationNodesScreen::is_valid_hex(const String& str) {
+    if (str.length() != 32) return false;
+    for (size_t i = 0; i < 32; i++) {
+        char c = str.charAt(i);
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+            return false;
+        }
+    }
+    return true;
 }
 
 } // namespace LXMF

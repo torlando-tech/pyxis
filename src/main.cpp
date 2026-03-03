@@ -839,7 +839,6 @@ void setup_lxmf() {
     INFO("Propagation node manager registered");
 
     // Configure propagation settings
-    router->set_propagation_node_manager(propagation_manager);
     router->set_fallback_to_propagation(app_settings.prop_fallback_enabled);
     router->set_propagation_only(app_settings.prop_only);
     if (!app_settings.prop_selected_node.isEmpty()) {
@@ -1462,6 +1461,7 @@ void loop() {
     if (router) {
         router->process_outbound();
         router->process_inbound();
+        router->process_sync();
     }
 
     // Update UI manager (processes LXMF messages)

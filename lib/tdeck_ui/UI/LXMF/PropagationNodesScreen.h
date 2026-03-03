@@ -50,6 +50,7 @@ public:
         String name;
         String hash_display;
         uint8_t hops;
+        uint8_t stamp_cost;
         bool enabled;
         bool is_selected;
     };
@@ -137,10 +138,13 @@ private:
     lv_obj_t* _auto_select_row;
     lv_obj_t* _auto_select_checkbox;
     lv_obj_t* _empty_label;
+    lv_obj_t* _search_input;
 
     std::vector<NodeItem> _nodes;
     RNS::Bytes _selected_hash;
+    RNS::Bytes _manual_hash;
     bool _auto_select_enabled;
+    String _search_filter;
 
     // Callbacks
     NodeSelectedCallback _node_selected_callback;
@@ -150,21 +154,27 @@ private:
 
     // UI construction
     void create_header();
+    void create_search_row();
     void create_auto_select_row();
     void create_list();
     void create_node_item(const NodeItem& item, size_t index);
+    void create_manual_entry_item(const RNS::Bytes& hash, const String& hex_display);
     void show_empty_state();
     void update_selection_ui();
+    void apply_filter();
 
     // Event handlers
     static void on_node_clicked(lv_event_t* event);
+    static void on_manual_node_clicked(lv_event_t* event);
     static void on_back_clicked(lv_event_t* event);
     static void on_sync_clicked(lv_event_t* event);
     static void on_auto_select_changed(lv_event_t* event);
+    static void on_search_changed(lv_event_t* event);
 
     // Utility
-    static String truncate_hash(const RNS::Bytes& hash);
+    static String format_hash(const RNS::Bytes& hash);
     static String format_hops(uint8_t hops);
+    static bool is_valid_hex(const String& str);
 };
 
 } // namespace LXMF

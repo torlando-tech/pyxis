@@ -21,6 +21,7 @@ using namespace RNS;
 static const char* NVS_NAMESPACE = "propagation";
 static const char* KEY_AUTO_SELECT = "auto_select";
 static const char* KEY_NODE_HASH = "node_hash";
+static const char* KEY_STAMP_COST = "stamp_cost";
 
 namespace UI {
 namespace LXMF {
@@ -223,6 +224,28 @@ bool UIManager::init() {
     // Load settings from NVS
     _settings_screen->load_settings();
 
+    // Restore propagation node selection from NVS
+    {
+        Preferences prefs;
+        prefs.begin(NVS_NAMESPACE, true);
+        bool auto_select = prefs.getBool(KEY_AUTO_SELECT, true);
+        uint8_t stamp_cost = prefs.getUChar(KEY_STAMP_COST, 0);
+        Bytes saved_hash;
+        size_t hash_len = prefs.getBytesLength(KEY_NODE_HASH);
+        if (hash_len > 0 && hash_len <= 32) {
+            uint8_t buf[32];
+            prefs.getBytes(KEY_NODE_HASH, buf, hash_len);
+            saved_hash = Bytes(buf, hash_len);
+        }
+        prefs.end();
+
+        if (!auto_select && saved_hash.size() > 0) {
+            _router.set_outbound_propagation_node(saved_hash);
+            _router.set_outbound_propagation_stamp_cost(stamp_cost);
+            INFO(("Restored propagation node from NVS: " + saved_hash.toHex().substr(0, 16) + "...").c_str());
+        }
+    }
+
     // Set identity and LXMF address on settings screen
     _settings_screen->set_identity_hash(_router.identity().hash());
     _settings_screen->set_lxmf_address(_router.delivery_destination().hash());
@@ -375,6 +398,50 @@ void UIManager::show_announces() {
 void UIManager::show_status() {
     LVGL_LOCK();
     INFO("Showing status screen");
+
+    // Build propagation node display string
+    if (_propagation_manager) {
+        Preferences prefs;
+        prefs.begin(NVS_NAMESPACE, true);
+        bool auto_select = prefs.getBool(KEY_AUTO_SELECT, true);
+
+        Bytes saved_hash;
+        size_t hash_len = prefs.getBytesLength(KEY_NODE_HASH);
+        if (hash_len > 0 && hash_len <= 32) {
+            uint8_t buf[32];
+            prefs.getBytes(KEY_NODE_HASH, buf, hash_len);
+            saved_hash = Bytes(buf, hash_len);
+        }
+        prefs.end();
+
+        Bytes effective = auto_select ? _propagation_manager->get_effective_node() : saved_hash;
+
+        String display;
+        if (auto_select) {
+            if (effective.size() > 0) {
+                auto info = _propagation_manager->get_node(effective);
+                if (info && !info.name.empty()) {
+                    display = "Auto (" + String(info.name.c_str()) + ")";
+                } else {
+                    display = "Auto (" + String(effective.toHex().substr(0, 12).c_str()) + "...)";
+                }
+            } else {
+                display = "Auto";
+            }
+        } else {
+            if (effective.size() > 0) {
+                auto info = _propagation_manager->get_node(effective);
+                if (info && !info.name.empty()) {
+                    display = String(info.name.c_str());
+                } else {
+                    display = String(effective.toHex().substr(0, 12).c_str()) + "...";
+                }
+            } else {
+                display = "None";
+            }
+        }
+        _status_screen->set_propagation_node(display);
+    }
 
     _status_screen->refresh();
     _status_screen->show();
@@ -549,11 +616,28 @@ void UIManager::on_propagation_node_selected(const Bytes& node_hash) {
     // Set the node in the router
     _router.set_outbound_propagation_node(node_hash);
 
+    // Set stamp cost from node info if available
+    uint8_t stamp_cost = 0;
+    if (_propagation_manager) {
+        auto node_info = _propagation_manager->get_node(node_hash);
+        if (node_info) {
+            stamp_cost = node_info.stamp_cost;
+        }
+    }
+    _router.set_outbound_propagation_stamp_cost(stamp_cost);
+
+    // Proactively request path if we don't have one
+    if (!Transport::has_path(node_hash)) {
+        DEBUG("Requesting path for propagation node");
+        Transport::request_path(node_hash);
+    }
+
     // Save to NVS
     Preferences prefs;
     prefs.begin(NVS_NAMESPACE, false);
     prefs.putBool(KEY_AUTO_SELECT, false);
     prefs.putBytes(KEY_NODE_HASH, node_hash.data(), node_hash.size());
+    prefs.putUChar(KEY_STAMP_COST, stamp_cost);
     prefs.end();
     DEBUG("Propagation node saved to NVS");
 }
@@ -573,7 +657,8 @@ void UIManager::on_propagation_auto_select_changed(bool enabled) {
     prefs.begin(NVS_NAMESPACE, false);
     prefs.putBool(KEY_AUTO_SELECT, enabled);
     if (enabled) {
-        prefs.remove(KEY_NODE_HASH);  // Clear saved node when auto-select enabled
+        prefs.remove(KEY_NODE_HASH);
+        prefs.remove(KEY_STAMP_COST);
     }
     prefs.end();
     DEBUG("Propagation auto-select saved to NVS");
