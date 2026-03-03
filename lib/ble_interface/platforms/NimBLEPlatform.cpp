@@ -859,6 +859,7 @@ bool NimBLEPlatform::startScan(uint16_t duration_ms) {
              (reset_reason != 0 ? " (nimble_reason=" + std::to_string(reset_reason) + ")" : ""));
         _host_desync_since = 0;
         _host_reset_attempts = 0;
+        _last_desync_recovery = millis();  // Start cooldown before allowing connections
     }
 
     // Log GAP hardware state before checking
@@ -1013,6 +1014,14 @@ bool NimBLEPlatform::isScanning() const {
 
 bool NimBLEPlatform::connect(const BLEAddress& address, uint16_t timeout_ms) {
     NimBLEAddress nimAddr = toNimBLE(address);
+
+    // Skip connections during desync cooldown — connecting while the NimBLE
+    // stack is recovering from a desync can hang client->connect() (the host
+    // task can't process the completion event), leading to WDT crashes.
+    if (_host_desync_since != 0 || (_last_desync_recovery > 0 && millis() - _last_desync_recovery < DESYNC_CONNECT_COOLDOWN_MS)) {
+        DEBUG("NimBLEPlatform: Skipping connect during desync cooldown");
+        return false;
+    }
 
     // Rate limit connections to avoid overwhelming the BLE stack
     // Non-blocking: return false if too soon, caller can retry later

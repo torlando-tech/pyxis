@@ -1196,6 +1196,29 @@ void setup() {
     INFO("╚══════════════════════════════════════╝");
     INFO("");
 
+    // Log ESP reset reason — helps diagnose crashes in soak tests
+    {
+        esp_reset_reason_t reason = esp_reset_reason();
+        const char* reason_str = "UNKNOWN";
+        switch (reason) {
+            case ESP_RST_POWERON:  reason_str = "POWERON"; break;
+            case ESP_RST_SW:       reason_str = "SOFTWARE"; break;
+            case ESP_RST_PANIC:    reason_str = "PANIC"; break;
+            case ESP_RST_INT_WDT:  reason_str = "INT_WDT"; break;
+            case ESP_RST_TASK_WDT: reason_str = "TASK_WDT"; break;
+            case ESP_RST_WDT:      reason_str = "WDT"; break;
+            case ESP_RST_DEEPSLEEP: reason_str = "DEEPSLEEP"; break;
+            case ESP_RST_BROWNOUT: reason_str = "BROWNOUT"; break;
+            case ESP_RST_SDIO:     reason_str = "SDIO"; break;
+            default: break;
+        }
+        if (reason != ESP_RST_POWERON) {
+            WARNING("Reset reason: " + std::string(reason_str) + " (" + std::to_string(reason) + ")");
+        } else {
+            INFO("Reset reason: " + std::string(reason_str));
+        }
+    }
+
     // Check for LXST crash breadcrumb from previous boot
     {
         Preferences _dbg;

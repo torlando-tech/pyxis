@@ -279,11 +279,13 @@ private:
     uint8_t _conn_establish_fail_count = 0;  // rc=574 connection establishment failures
     unsigned long _last_full_recovery_time = 0;
     unsigned long _host_desync_since = 0;    // millis() when host first lost sync (0 = synced)
+    unsigned long _last_desync_recovery = 0; // millis() when last desync recovered (for connect cooldown)
     uint8_t _host_reset_attempts = 0;       // ble_hs_sched_reset attempts since last sync
     static constexpr uint8_t SCAN_FAIL_RECOVERY_THRESHOLD = 10;
     static constexpr uint8_t LIGHTWEIGHT_RESET_MAX_FAILS = 3;
     static constexpr uint8_t CONN_ESTABLISH_FAIL_THRESHOLD = 5;
     static constexpr unsigned long FULL_RECOVERY_COOLDOWN_MS = 60000;  // 60 seconds
+    static constexpr unsigned long DESYNC_CONNECT_COOLDOWN_MS = 30000;  // Don't connect for 30s after desync recovery
     static constexpr unsigned long HOST_DESYNC_REBOOT_MS = 60000;      // Reboot after 60s desync (no connections)
     bool recoverBLEStack();
     bool attemptHostReset();
