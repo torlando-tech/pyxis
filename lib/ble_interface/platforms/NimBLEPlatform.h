@@ -239,6 +239,25 @@ private:
     void resumeSlave();
     void enterErrorRecovery();
 
+    // Deferred disconnect queue (SPSC: NimBLE host task produces, BLE loop task consumes)
+    // Disconnect events arrive from the host task and must not modify _connections/_clients
+    // directly, as the BLE loop task may be iterating them concurrently.
+    static constexpr size_t PENDING_DISC_QUEUE_SIZE = 8;
+    struct PendingDisconnect {
+        uint16_t conn_handle;
+        int reason;
+        bool is_peripheral;  // true = server disconnect, false = native GAP handler
+    };
+    PendingDisconnect _pending_disc_queue[PENDING_DISC_QUEUE_SIZE];
+    volatile uint8_t _pending_disc_write = 0;  // Next write slot (host task only)
+    volatile uint8_t _pending_disc_read = 0;   // Next read slot (loop task only)
+
+    void queueDisconnect(uint16_t conn_handle, int reason, bool is_peripheral);
+    void processPendingDisconnects();
+
+    // Deferred error recovery (set from any context, processed in loop task)
+    volatile bool _error_recovery_requested = false;
+
     // Track if slave was paused for a master operation
     bool _slave_paused_for_master = false;
 
@@ -280,6 +299,9 @@ private:
 
     // Client connections (as central)
     std::map<uint16_t, NimBLEClient*> _clients;
+
+    // Cached RX characteristic pointers (avoids repeated service/char lookups in write())
+    std::map<uint16_t, NimBLERemoteCharacteristic*> _cached_rx_chars;
 
     // Connection tracking
     std::map<uint16_t, ConnectionHandle> _connections;

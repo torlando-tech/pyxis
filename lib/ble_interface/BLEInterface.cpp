@@ -220,6 +220,14 @@ void BLEInterface::loop() {
                 if (resolved.size() == Limits::IDENTITY_SIZE) {
                     stored_id = resolved;
                 } else {
+                    // Expire entries that have waited longer than HANDSHAKE_TIMEOUT.
+                    // If a peer sends data but never completes handshake (e.g., disconnect
+                    // during handshake), these entries would stay indefinitely.
+                    if (now - _pending_data_pool[i].queued_at > Timing::HANDSHAKE_TIMEOUT) {
+                        DEBUG("BLEInterface: Expiring stale pending data (no identity after " +
+                              std::to_string((int)(now - _pending_data_pool[i].queued_at)) + "s)");
+                        continue;  // Drop this entry
+                    }
                     // Still no identity — keep for next loop iteration
                     if (requeue_count != i) {
                         _pending_data_pool[requeue_count] = _pending_data_pool[i];
@@ -759,8 +767,8 @@ void BLEInterface::onCentralConnected(const ConnectionHandle& conn) {
 
     Bytes mac = conn.peer_address.toBytes();
 
-    // Update peer manager
-    _peer_manager.addDiscoveredPeer(mac, 0);
+    // Update peer manager with connection RSSI
+    _peer_manager.addDiscoveredPeer(mac, conn.rssi);
     _peer_manager.setPeerState(mac, PeerState::HANDSHAKING);
     _peer_manager.setPeerHandle(mac, conn.handle);
 
@@ -1086,6 +1094,7 @@ void BLEInterface::handleIncomingData(const ConnectionHandle& conn, const Bytes&
             PendingData& pending = _pending_data_pool[_pending_data_count];
             pending.identity = mac;  // Use MAC as temporary key
             pending.data = data;
+            pending.queued_at = Utilities::OS::time();
             _pending_data_count++;
         }
         return;
@@ -1099,6 +1108,7 @@ void BLEInterface::handleIncomingData(const ConnectionHandle& conn, const Bytes&
     PendingData& pending = _pending_data_pool[_pending_data_count];
     pending.identity = identity;
     pending.data = data;
+    pending.queued_at = Utilities::OS::time();
     _pending_data_count++;
 }
 

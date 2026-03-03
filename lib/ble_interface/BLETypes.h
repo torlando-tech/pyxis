@@ -325,6 +325,7 @@ struct ConnectionHandle {
     Role local_role = Role::NONE;       // Our role in this connection
     ConnectionState state = ConnectionState::DISCONNECTED;
     uint16_t mtu = MTU::MINIMUM;        // Negotiated MTU
+    int8_t rssi = 0;                    // Connection RSSI at connect time
 
     // Characteristic handles (discovered after connection)
     uint16_t rx_char_handle = 0;        // Handle for RX characteristic
@@ -340,6 +341,7 @@ struct ConnectionHandle {
         local_role = Role::NONE;
         state = ConnectionState::DISCONNECTED;
         mtu = MTU::MINIMUM;
+        rssi = 0;
         rx_char_handle = 0;
         tx_char_handle = 0;
         tx_cccd_handle = 0;
