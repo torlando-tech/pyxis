@@ -1,5 +1,5 @@
 # Pyxis
-An LXMF client firmware for T-Deck, built on a [highly modified fork](https://github.com/torlando-tech/microReticulum/tree/feat/t-deck) of [microReticulum](https://github.com/attermann/microReticulum)
+An LXMF and LXST client firmware for T-Deck, built on a [highly modified fork](https://github.com/torlando-tech/microReticulum/tree/feat/t-deck) of [microReticulum](https://github.com/attermann/microReticulum)
 
 Very much WIP, don't expect stability :) 
 
@@ -14,10 +14,11 @@ Other features:
 - GPS-synced time
 - One really annoying beep when you get a new message (user toggle)
 - View the announce stream
-- Choose a propagation node (and sync with it)
+- Choose a propagation node (and sync with it) (fixed in v0.2.1)
 - Set auto announce timer
 - Light up keyboard (user toggle)
-- Will crash in about 5 minutes of normal use (sorry)
+- ~~Will crash in about 5 minutes of normal use (sorry)~~ I had 5d uptime on v0.2.0 with BLE disabled
+- Make LXST voice calls (codec2 only, quality sounds horrible coming out the other end in Columba, needs work)
 
 ## Why "Pyxis"
 Pyxis, latin for "compass," is a [constellation](https://en.wikipedia.org/wiki/Pyxis) in the southern sky depicting a mariner's compass. Small but essential, the compass ensures every message finds its destination - even when the path is uncertain. 
