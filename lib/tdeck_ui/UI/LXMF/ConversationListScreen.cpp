@@ -195,6 +195,7 @@ void ConversationListScreen::refresh() {
     _conversations.clear();
     _conversation_containers.clear();
     _peer_hash_pool.clear();
+    _has_unresolved_names = false;
 
     // Load conversations from store
     std::vector<Bytes> peer_hashes = _message_store->get_conversations();
@@ -226,16 +227,21 @@ void ConversationListScreen::refresh() {
         item.peer_hash = peer_hash;
 
         // Try to get display name from app_data, fall back to hash
+        bool resolved = false;
         Bytes app_data = Identity::recall_app_data(peer_hash);
         if (app_data && app_data.size() > 0) {
             String display_name = parse_display_name(app_data);
             if (display_name.length() > 0) {
                 item.peer_name = display_name;
+                resolved = true;
             } else {
                 item.peer_name = truncate_hash(peer_hash);
             }
         } else {
             item.peer_name = truncate_hash(peer_hash);
+        }
+        if (!resolved) {
+            _has_unresolved_names = true;
         }
 
         // Get message content for preview
@@ -543,6 +549,23 @@ void ConversationListScreen::update_status() {
         }
         lv_obj_set_style_text_color(_label_battery_icon, battery_color, 0);
         lv_obj_set_style_text_color(_label_battery_pct, battery_color, 0);
+    }
+
+    // Check if any unresolved display names can now be resolved
+    // (announces may have arrived since the list was last refreshed)
+    if (_has_unresolved_names && _message_store) {
+        for (const auto& item : _conversations) {
+            Bytes app_data = Identity::recall_app_data(item.peer_hash);
+            if (app_data && app_data.size() > 0) {
+                String name = parse_display_name(app_data);
+                if (name.length() > 0 && item.peer_name != name) {
+                    // A name has become available — refresh the whole list
+                    DEBUG("Display name resolved, refreshing conversation list");
+                    refresh();
+                    return;
+                }
+            }
+        }
     }
 }
 
