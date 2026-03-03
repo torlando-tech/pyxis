@@ -58,7 +58,7 @@
 #include <UI/LXMF/SettingsScreen.h>
 
 // Audio notifications
-#include "tone/Tone.h"
+#include "Tone.h"
 
 // Logging
 #include <Log.h>
