@@ -36,6 +36,10 @@ extern "C" {
     void ble_hs_sched_reset(int reason);
 }
 
+// Defined in patched NimBLEDevice.cpp — set in onReset callback with the reason code.
+// Poll from BLE loop to log via UDP (NimBLE's own logging only reaches serial UART).
+extern volatile int nimble_host_reset_reason;
+
 namespace RNS { namespace BLE {
 
 //=============================================================================
@@ -794,11 +798,18 @@ bool NimBLEPlatform::startScan(uint16_t duration_ms) {
         if (!ble_hs_synced()) {
             unsigned long desync_duration = millis() - _host_desync_since;
             _scan_fail_count++;
+            // Capture NimBLE's internal reset reason (set in patched onReset callback)
+            int reset_reason = nimble_host_reset_reason;
+            if (reset_reason != 0) {
+                nimble_host_reset_reason = 0;
+            }
             WARNING("NimBLEPlatform: Host not synced, desync " +
                     std::to_string(desync_duration / 1000) + "s (fail " +
                     std::to_string(_scan_fail_count) + "/" +
                     std::to_string(SCAN_FAIL_RECOVERY_THRESHOLD) +
-                    ", resets=" + std::to_string(_host_reset_attempts) + ")");
+                    ", resets=" + std::to_string(_host_reset_attempts) +
+                    (reset_reason != 0 ? ", nimble_reason=" + std::to_string(reset_reason) : "") +
+                    ")");
 
             // Tiered recovery:
             //   0-10s:  Wait for natural self-recovery
@@ -839,7 +850,13 @@ bool NimBLEPlatform::startScan(uint16_t duration_ms) {
     // Host is synced — clear desync tracking
     if (_host_desync_since != 0) {
         unsigned long recovery_time = millis() - _host_desync_since;
-        INFO("NimBLEPlatform: Host re-synced after " + std::to_string(recovery_time) + "ms");
+        // Capture any remaining reset reason from NimBLE
+        int reset_reason = nimble_host_reset_reason;
+        if (reset_reason != 0) {
+            nimble_host_reset_reason = 0;
+        }
+        INFO("NimBLEPlatform: Host re-synced after " + std::to_string(recovery_time) + "ms" +
+             (reset_reason != 0 ? " (nimble_reason=" + std::to_string(reset_reason) + ")" : ""));
         _host_desync_since = 0;
         _host_reset_attempts = 0;
     }
@@ -921,9 +938,20 @@ bool NimBLEPlatform::startScan(uint16_t duration_ms) {
 
     _scan_fail_count++;
     if (_scan_fail_count >= SCAN_FAIL_RECOVERY_THRESHOLD) {
-        WARNING("NimBLEPlatform: Too many scan failures, entering error recovery");
         _scan_fail_count = 0;  // Reset so we don't immediately re-enter after recovery
-        enterErrorRecovery();
+        _lightweight_reset_fails++;
+
+        if (_lightweight_reset_fails >= LIGHTWEIGHT_RESET_MAX_FAILS) {
+            WARNING("NimBLEPlatform: " + std::to_string(_lightweight_reset_fails) +
+                    " error recoveries failed to restore scan, escalating to full stack recovery");
+            _lightweight_reset_fails = 0;
+            recoverBLEStack();
+        } else {
+            WARNING("NimBLEPlatform: Too many scan failures, entering error recovery (" +
+                    std::to_string(_lightweight_reset_fails) + "/" +
+                    std::to_string(LIGHTWEIGHT_RESET_MAX_FAILS) + ")");
+            enterErrorRecovery();
+        }
     }
 
     resumeSlave();
