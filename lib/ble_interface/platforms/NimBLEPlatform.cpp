@@ -1817,7 +1817,7 @@ bool NimBLEPlatform::notify(uint16_t conn_handle, const Bytes& data) {
 }
 
 bool NimBLEPlatform::notifyAll(const Bytes& data) {
-    if (!_tx_char) {
+    if (!ble_hs_synced() || !_tx_char) {
         return false;
     }
 
