@@ -87,6 +87,8 @@ public:
     static void lvgl_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p);
 
 private:
+    // Show boot splash image, called from init_hardware_only()
+    static void show_splash();
     // SPI commands for ST7789V
     enum Command : uint8_t {
         NOP = 0x00,
@@ -145,7 +147,8 @@ private:
     static SPIClass* _spi;
     static SemaphoreHandle_t _spi_mutex;
     static uint8_t _brightness;
-    static bool _initialized;
+    static bool _initialized;      // Full init (hardware + LVGL)
+    static bool _hw_initialized;   // Hardware-only init (SPI + registers)
 
     // Display health monitoring
     static volatile uint32_t _flush_count;
