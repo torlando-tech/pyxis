@@ -11,7 +11,6 @@
 #include "Identity.h"
 #include <algorithm>
 #include <esp_mac.h>
-#include <esp_task_wdt.h>
 
 // WiFi coexistence: Check if WiFi is available and connected
 // This is used to add extra delays before BLE connection attempts
@@ -310,7 +309,6 @@ void NimBLEPlatform::shutdown() {
               " active write operation(s)");
         // DELAY RATIONALE: Shutdown wait polling - check every 100ms for write completion
         delay(100);
-        esp_task_wdt_reset();
     }
 
     // Check if we timed out
@@ -412,7 +410,6 @@ bool NimBLEPlatform::attemptHostReset() {
     uint32_t start = millis();
     while (!ble_hs_synced() && (millis() - start) < 3000) {
         delay(50);
-        esp_task_wdt_reset();
     }
 
     if (ble_hs_synced()) {
@@ -539,7 +536,6 @@ bool NimBLEPlatform::pauseSlaveForMaster() {
         while (ble_gap_adv_active() && millis() - start < 2000) {
             // DELAY RATIONALE: Advertising stop polling - check completion every NimBLE scheduler tick (~10ms)
             delay(10);
-            esp_task_wdt_reset();  // Feed WDT during blocking wait
         }
 
         if (ble_gap_adv_active()) {
@@ -574,7 +570,6 @@ bool NimBLEPlatform::pauseSlaveForMaster() {
         }
         // DELAY RATIONALE: Slave state polling - check completion every NimBLE scheduler tick (~10ms)
         delay(10);
-        esp_task_wdt_reset();
     }
 
     WARNING("NimBLEPlatform: Timed out waiting for slave to become idle");
@@ -649,7 +644,6 @@ void NimBLEPlatform::enterErrorRecovery() {
         uint32_t sync_start = millis();
         while (!ble_hs_synced() && (millis() - sync_start) < 5000) {
             delay(50);
-            esp_task_wdt_reset();
         }
         if (ble_hs_synced()) {
             INFO("NimBLEPlatform: Host sync restored after " +
@@ -676,7 +670,6 @@ void NimBLEPlatform::enterErrorRecovery() {
         uint32_t reset_start = millis();
         while (!ble_hs_synced() && (millis() - reset_start) < 5000) {
             delay(50);
-            esp_task_wdt_reset();
         }
         if (ble_hs_synced()) {
             INFO("NimBLEPlatform: Host-controller resync after " +
@@ -1018,7 +1011,6 @@ void NimBLEPlatform::stopScan() {
     while (ble_gap_disc_active() && millis() - start < 1000) {
         // DELAY RATIONALE: Scan stop polling - check completion every NimBLE scheduler tick (~10ms)
         delay(10);
-        esp_task_wdt_reset();
     }
 
     // Transition to IDLE
@@ -1141,7 +1133,6 @@ bool NimBLEPlatform::connect(const BLEAddress& address, uint16_t timeout_ms) {
         while (ble_gap_conn_active() && millis() - start < 1000) {
             // DELAY RATIONALE: Service discovery polling - check completion per scheduler tick
             delay(10);
-            esp_task_wdt_reset();
         }
         if (ble_gap_conn_active()) {
             ERROR("NimBLEPlatform: GAP connection still active after timeout");
@@ -1437,9 +1428,7 @@ bool NimBLEPlatform::discoverServices(uint16_t conn_handle) {
     NimBLEClient* client = client_it->second;
 
     // Get our service — blocking GATT operation
-    esp_task_wdt_reset();
     NimBLERemoteService* service = client->getService(UUID::SERVICE);
-    esp_task_wdt_reset();
     if (!service) {
         ERROR("NimBLEPlatform: Service not found");
         if (_on_services_discovered) {
@@ -1451,11 +1440,8 @@ bool NimBLEPlatform::discoverServices(uint16_t conn_handle) {
 
     // Get characteristics — each is a blocking GATT operation
     NimBLERemoteCharacteristic* rxChar = service->getCharacteristic(UUID::RX_CHAR);
-    esp_task_wdt_reset();
     NimBLERemoteCharacteristic* txChar = service->getCharacteristic(UUID::TX_CHAR);
-    esp_task_wdt_reset();
     NimBLERemoteCharacteristic* idChar = service->getCharacteristic(UUID::IDENTITY_CHAR);
-    esp_task_wdt_reset();
 
     if (!rxChar || !txChar) {
         ERROR("NimBLEPlatform: Required characteristics not found");
@@ -1512,7 +1498,6 @@ bool NimBLEPlatform::startAdvertising() {
         uint32_t sync_wait = millis();
         while (!ble_hs_synced() && (millis() - sync_wait) < 1000) {
             delay(50);
-            esp_task_wdt_reset();
         }
         if (!ble_hs_synced()) {
             DEBUG("NimBLEPlatform: Host not synced, cannot start advertising");
@@ -1583,7 +1568,6 @@ void NimBLEPlatform::stopAdvertising() {
     while (ble_gap_adv_active() && millis() - start < 1000) {
         // DELAY RATIONALE: Loop iteration throttle - prevent tight loop CPU consumption
         delay(10);
-        esp_task_wdt_reset();
     }
 
     // Transition to IDLE
@@ -1718,9 +1702,7 @@ bool NimBLEPlatform::writeCharacteristic(uint16_t conn_handle, uint16_t char_han
     NimBLEClient* client = client_it->second;
     if (!client->isConnected()) return false;
 
-    esp_task_wdt_reset();
     NimBLERemoteService* service = client->getService(UUID::SERVICE);
-    esp_task_wdt_reset();
     if (!service) return false;
 
     // Find characteristic by handle
@@ -1733,7 +1715,6 @@ bool NimBLEPlatform::writeCharacteristic(uint16_t conn_handle, uint16_t char_han
     if (!chr) {
         chr = service->getCharacteristic(UUID::RX_CHAR);
     }
-    esp_task_wdt_reset();
     if (!chr) return false;
 
     return chr->writeValue(data.data(), data.size(), response);
@@ -1758,9 +1739,7 @@ bool NimBLEPlatform::read(uint16_t conn_handle, uint16_t char_handle,
         return false;
     }
 
-    esp_task_wdt_reset();
     NimBLERemoteService* service = client->getService(UUID::SERVICE);
-    esp_task_wdt_reset();
     if (!service) {
         if (callback) callback(OperationResult::NOT_FOUND, Bytes());
         return false;
@@ -1799,13 +1778,10 @@ bool NimBLEPlatform::enableNotifications(uint16_t conn_handle, bool enable) {
     NimBLEClient* client = client_it->second;
     if (!client->isConnected()) return false;
 
-    esp_task_wdt_reset();
     NimBLERemoteService* service = client->getService(UUID::SERVICE);
-    esp_task_wdt_reset();
     if (!service) return false;
 
     NimBLERemoteCharacteristic* txChar = service->getCharacteristic(UUID::TX_CHAR);
-    esp_task_wdt_reset();
     if (!txChar) return false;
 
     if (enable) {
