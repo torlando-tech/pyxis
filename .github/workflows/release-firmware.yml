@@ -78,7 +78,7 @@ jobs:
             echo "Downloading assets for ${tag}..."
             for asset in bootloader.bin partitions.bin boot_app0.bin firmware.bin; do
               url="https://github.com/${{ github.repository }}/releases/download/${tag}/${asset}"
-              if curl -sL -o "${dir}/${asset}" -w '%{http_code}' "${url}" | grep -q 200; then
+              if curl -sL -o "${dir}/${asset}" -w '%{http_code}' "${url}" | grep -qx 200; then
                 echo "  ${asset} OK"
               else
                 rm -f "${dir}/${asset}"
