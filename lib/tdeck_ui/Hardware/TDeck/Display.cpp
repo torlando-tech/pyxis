@@ -70,6 +70,7 @@ bool Display::init() {
         return false;
     }
 
+    _initialized = true;
     INFO("Display initialized successfully");
     return true;
 }
