@@ -10,7 +10,6 @@
 #ifdef ARDUINO
 #include <Arduino.h>
 #include <esp_heap_caps.h>
-#include <esp_task_wdt.h>
 #endif
 
 using namespace RNS;
@@ -1136,12 +1135,13 @@ void BLEInterface::ble_task(void* param) {
     BLEInterface* self = static_cast<BLEInterface*>(param);
     Serial.printf("BLE task started on core %d\n", xPortGetCoreID());
 
-    // Subscribe BLE task to Task Watchdog — detects BLE deadlocks
-    esp_task_wdt_add(NULL);
+    // NOTE: BLE task is intentionally NOT subscribed to the FreeRTOS Task WDT.
+    // Blocking NimBLE GATT operations (service discovery, subscribe, read, write)
+    // each have ~30s internal timeouts. A full connect chain (connect + discover +
+    // enable notifications + identity read) can legitimately block 30-60s total,
+    // which exceeds the 30s WDT. NimBLE's own timeouts provide recovery.
 
     while (true) {
-        esp_task_wdt_reset();
-
         // Run the BLE loop (already has internal mutex protection)
         self->loop();
 

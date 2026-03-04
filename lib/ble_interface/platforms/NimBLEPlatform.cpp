@@ -11,7 +11,6 @@
 #include "Identity.h"
 #include <algorithm>
 #include <esp_mac.h>
-#include <esp_task_wdt.h>
 
 // WiFi coexistence: Check if WiFi is available and connected
 // This is used to add extra delays before BLE connection attempts
@@ -310,7 +309,6 @@ void NimBLEPlatform::shutdown() {
               " active write operation(s)");
         // DELAY RATIONALE: Shutdown wait polling - check every 100ms for write completion
         delay(100);
-        esp_task_wdt_reset();
     }
 
     // Check if we timed out
@@ -412,7 +410,6 @@ bool NimBLEPlatform::attemptHostReset() {
     uint32_t start = millis();
     while (!ble_hs_synced() && (millis() - start) < 3000) {
         delay(50);
-        esp_task_wdt_reset();
     }
 
     if (ble_hs_synced()) {
@@ -539,7 +536,6 @@ bool NimBLEPlatform::pauseSlaveForMaster() {
         while (ble_gap_adv_active() && millis() - start < 2000) {
             // DELAY RATIONALE: Advertising stop polling - check completion every NimBLE scheduler tick (~10ms)
             delay(10);
-            esp_task_wdt_reset();  // Feed WDT during blocking wait
         }
 
         if (ble_gap_adv_active()) {
@@ -574,7 +570,6 @@ bool NimBLEPlatform::pauseSlaveForMaster() {
         }
         // DELAY RATIONALE: Slave state polling - check completion every NimBLE scheduler tick (~10ms)
         delay(10);
-        esp_task_wdt_reset();
     }
 
     WARNING("NimBLEPlatform: Timed out waiting for slave to become idle");
@@ -649,7 +644,6 @@ void NimBLEPlatform::enterErrorRecovery() {
         uint32_t sync_start = millis();
         while (!ble_hs_synced() && (millis() - sync_start) < 5000) {
             delay(50);
-            esp_task_wdt_reset();
         }
         if (ble_hs_synced()) {
             INFO("NimBLEPlatform: Host sync restored after " +
@@ -676,7 +670,6 @@ void NimBLEPlatform::enterErrorRecovery() {
         uint32_t reset_start = millis();
         while (!ble_hs_synced() && (millis() - reset_start) < 5000) {
             delay(50);
-            esp_task_wdt_reset();
         }
         if (ble_hs_synced()) {
             INFO("NimBLEPlatform: Host-controller resync after " +
@@ -1018,7 +1011,6 @@ void NimBLEPlatform::stopScan() {
     while (ble_gap_disc_active() && millis() - start < 1000) {
         // DELAY RATIONALE: Scan stop polling - check completion every NimBLE scheduler tick (~10ms)
         delay(10);
-        esp_task_wdt_reset();
     }
 
     // Transition to IDLE
@@ -1141,7 +1133,6 @@ bool NimBLEPlatform::connect(const BLEAddress& address, uint16_t timeout_ms) {
         while (ble_gap_conn_active() && millis() - start < 1000) {
             // DELAY RATIONALE: Service discovery polling - check completion per scheduler tick
             delay(10);
-            esp_task_wdt_reset();
         }
         if (ble_gap_conn_active()) {
             ERROR("NimBLEPlatform: GAP connection still active after timeout");
@@ -1329,14 +1320,9 @@ bool NimBLEPlatform::connectNative(const BLEAddress& address, uint16_t timeout_m
     // discovery) that would deadlock the host task.
     _native_connect_pending = true;
 
-    // Feed WDT before blocking connect — NimBLE connect can take several seconds
-    // with WiFi coexistence, and the BLE task is subscribed to the 10s WDT
-    esp_task_wdt_reset();
-
     // Connect (blocking) — NimBLE handles GAP event management internally
     bool connected = client->connect(nimAddr, false);  // deleteAttributes=false
 
-    esp_task_wdt_reset();  // Feed WDT after connect returns
     _native_connect_pending = false;
 
     if (!connected) {
@@ -1360,7 +1346,8 @@ bool NimBLEPlatform::connectNative(const BLEAddress& address, uint16_t timeout_m
          " MTU=" + std::to_string(negotiated_mtu));
 
     // Fire _on_connected from THIS task (BLEInterface loop), not the host task.
-    // This allows the callback to safely do blocking GATT operations.
+    // This allows the callback to safely do blocking GATT operations
+    // (service discovery, notification enable, identity read/write).
     if (_on_connected) {
         ConnectionHandle conn = getConnection(conn_handle);
         _on_connected(conn);
@@ -1429,6 +1416,10 @@ bool NimBLEPlatform::requestMTU(uint16_t conn_handle, uint16_t mtu) {
 }
 
 bool NimBLEPlatform::discoverServices(uint16_t conn_handle) {
+    if (!ble_hs_synced()) {
+        return false;
+    }
+
     auto client_it = _clients.find(conn_handle);
     if (client_it == _clients.end() || !client_it->second) {
         return false;
@@ -1436,7 +1427,7 @@ bool NimBLEPlatform::discoverServices(uint16_t conn_handle) {
 
     NimBLEClient* client = client_it->second;
 
-    // Get our service
+    // Get our service — blocking GATT operation
     NimBLERemoteService* service = client->getService(UUID::SERVICE);
     if (!service) {
         ERROR("NimBLEPlatform: Service not found");
@@ -1447,7 +1438,7 @@ bool NimBLEPlatform::discoverServices(uint16_t conn_handle) {
         return false;
     }
 
-    // Get characteristics
+    // Get characteristics — each is a blocking GATT operation
     NimBLERemoteCharacteristic* rxChar = service->getCharacteristic(UUID::RX_CHAR);
     NimBLERemoteCharacteristic* txChar = service->getCharacteristic(UUID::TX_CHAR);
     NimBLERemoteCharacteristic* idChar = service->getCharacteristic(UUID::IDENTITY_CHAR);
@@ -1507,7 +1498,6 @@ bool NimBLEPlatform::startAdvertising() {
         uint32_t sync_wait = millis();
         while (!ble_hs_synced() && (millis() - sync_wait) < 1000) {
             delay(50);
-            esp_task_wdt_reset();
         }
         if (!ble_hs_synced()) {
             DEBUG("NimBLEPlatform: Host not synced, cannot start advertising");
@@ -1578,7 +1568,6 @@ void NimBLEPlatform::stopAdvertising() {
     while (ble_gap_adv_active() && millis() - start < 1000) {
         // DELAY RATIONALE: Loop iteration throttle - prevent tight loop CPU consumption
         delay(10);
-        esp_task_wdt_reset();
     }
 
     // Transition to IDLE
@@ -1635,6 +1624,12 @@ void NimBLEPlatform::setIdentityData(const Bytes& identity) {
 //=============================================================================
 
 bool NimBLEPlatform::write(uint16_t conn_handle, const Bytes& data, bool response) {
+    // Guard against use-after-free: during a host reset, NimBLE invalidates
+    // client objects on core 0 while we may still hold stale pointers.
+    if (!ble_hs_synced()) {
+        return false;
+    }
+
     auto conn_it = _connections.find(conn_handle);
     if (conn_it == _connections.end()) {
         DEBUG("NimBLEPlatform::write: no connection for handle " + std::to_string(conn_handle));
@@ -1695,6 +1690,10 @@ bool NimBLEPlatform::write(uint16_t conn_handle, const Bytes& data, bool respons
 
 bool NimBLEPlatform::writeCharacteristic(uint16_t conn_handle, uint16_t char_handle,
                                           const Bytes& data, bool response) {
+    if (!ble_hs_synced()) {
+        return false;
+    }
+
     auto client_it = _clients.find(conn_handle);
     if (client_it == _clients.end() || !client_it->second) {
         return false;
@@ -1723,6 +1722,11 @@ bool NimBLEPlatform::writeCharacteristic(uint16_t conn_handle, uint16_t char_han
 
 bool NimBLEPlatform::read(uint16_t conn_handle, uint16_t char_handle,
                           std::function<void(OperationResult, const Bytes&)> callback) {
+    if (!ble_hs_synced()) {
+        if (callback) callback(OperationResult::DISCONNECTED, Bytes());
+        return false;
+    }
+
     auto client_it = _clients.find(conn_handle);
     if (client_it == _clients.end() || !client_it->second) {
         if (callback) callback(OperationResult::NOT_FOUND, Bytes());
@@ -1762,6 +1766,10 @@ bool NimBLEPlatform::read(uint16_t conn_handle, uint16_t char_handle,
 }
 
 bool NimBLEPlatform::enableNotifications(uint16_t conn_handle, bool enable) {
+    if (!ble_hs_synced()) {
+        return false;
+    }
+
     auto client_it = _clients.find(conn_handle);
     if (client_it == _clients.end() || !client_it->second) {
         return false;
@@ -1800,7 +1808,7 @@ bool NimBLEPlatform::enableNotifications(uint16_t conn_handle, bool enable) {
 }
 
 bool NimBLEPlatform::notify(uint16_t conn_handle, const Bytes& data) {
-    if (!_tx_char) {
+    if (!ble_hs_synced() || !_tx_char) {
         return false;
     }
 
@@ -1809,7 +1817,7 @@ bool NimBLEPlatform::notify(uint16_t conn_handle, const Bytes& data) {
 }
 
 bool NimBLEPlatform::notifyAll(const Bytes& data) {
-    if (!_tx_char) {
+    if (!ble_hs_synced() || !_tx_char) {
         return false;
     }
 

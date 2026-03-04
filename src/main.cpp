@@ -656,9 +656,10 @@ void setup_lvgl_and_ui() {
     INFO("LVGL initialized");
 
     // Start LVGL on its own FreeRTOS task for responsive UI
-    // Core 1, priority 2 (higher than default to ensure smooth rendering)
-    // All LVGL API calls from other code are protected by mutex (LVGL_LOCK)
-    if (!UI::LVGL::LVGLInit::start_task(2, 1)) {
+    // Core 1, priority 1 (same as loopTask — round-robin scheduling).
+    // Previously priority 2, but this starved loopTask of CPU time during
+    // heavy rendering, causing 30s WDT timeouts on loopTask.
+    if (!UI::LVGL::LVGLInit::start_task(1, 1)) {
         ERROR("Failed to start LVGL task!");
         while (1) delay(1000);
     }
