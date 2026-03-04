@@ -386,7 +386,7 @@
                     const hasAll = REQUIRED_FULL_ASSETS.every(f => assetNames.includes(f));
                     option.value = release.tag_name;
                     option.textContent = release.tag_name + (release.name && release.name !== release.tag_name ? ` — ${release.name}` : '');
-                    option.dataset.downloadUrl = `https://github.com/torlando-tech/pyxis/releases/download/${release.tag_name}/`;
+                    option.dataset.downloadUrl = `firmware/releases/${release.tag_name}/`;
                     option.dataset.hasFullAssets = hasAll ? 'true' : 'false';
                     versionSelect.appendChild(option);
                 }
@@ -458,7 +458,7 @@
                 for (const file of files) {
                     log(`Loading ${file.name}...`);
                     const response = await fetch(file.path);
-                    if (!response.ok) throw new Error(`Failed to load ${file.name}`);
+                    if (!response.ok) throw new Error(`Failed to fetch ${file.name} (HTTP ${response.status}). This version may not be available yet — try "Latest" instead.`);
                     const arrayBuffer = await response.arrayBuffer();
                     const bytes = new Uint8Array(arrayBuffer);
                     let binaryString = '';
