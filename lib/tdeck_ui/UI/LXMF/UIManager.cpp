@@ -8,7 +8,7 @@
 #include <lvgl.h>
 #include <Preferences.h>
 #include "Log.h"
-#include "tone/Tone.h"
+#include "Tone.h"
 #include "../LVGL/LVGLLock.h"
 #include "lxst_audio.h"
 #include "Packet.h"
