@@ -36,6 +36,10 @@ extern "C" {
     void ble_hs_sched_reset(int reason);
 }
 
+// Defined in patched NimBLEDevice.cpp — set in onReset callback with the reason code.
+// Poll from BLE loop to log via UDP (NimBLE's own logging only reaches serial UART).
+extern volatile int nimble_host_reset_reason;
+
 namespace RNS { namespace BLE {
 
 //=============================================================================
@@ -204,6 +208,16 @@ void NimBLEPlatform::loop() {
         return;
     }
 
+    // Process deferred disconnects from NimBLE host task callbacks.
+    // Must run before other loop logic to ensure stale connections are cleaned up.
+    processPendingDisconnects();
+
+    // Process deferred error recovery (requested from callback context)
+    if (_error_recovery_requested) {
+        _error_recovery_requested = false;
+        enterErrorRecovery();
+    }
+
     // Check if continuous scan should stop
     portENTER_CRITICAL(&_state_mux);
     MasterState ms = _master_state;
@@ -221,6 +235,7 @@ void NimBLEPlatform::loop() {
     // Stuck-state safety net: if GAP hardware is idle but our state machine
     // thinks we're busy, reset state machine. This recovers from missed callbacks
     // (e.g., service discovery disconnect not properly cleaning up state).
+    // Skip during CONNECTING — connectNative() can legitimately take up to 10s.
     static uint32_t last_stuck_check = 0;
     uint32_t now_ms = millis();
     if (now_ms - last_stuck_check >= 5000) {  // Check every 5 seconds
@@ -232,22 +247,27 @@ void NimBLEPlatform::loop() {
         SlaveState ss = _slave_state;
         portEXIT_CRITICAL(&_state_mux);
 
-        bool gap_idle = !ble_gap_disc_active() && !ble_gap_adv_active() && !ble_gap_conn_active();
+        // Don't fire stuck detector while a connection attempt is in progress
+        if (ms2 == MasterState::CONNECTING || ms2 == MasterState::CONN_STARTING) {
+            // Expected — connect can take several seconds
+        } else {
+            bool gap_idle = !ble_gap_disc_active() && !ble_gap_adv_active() && !ble_gap_conn_active();
 
-        if (gap_idle && (gs != GAPState::READY || ms2 != MasterState::IDLE || ss != SlaveState::IDLE)) {
-            WARNING(std::string("NimBLEPlatform: Stuck state detected - GAP idle but state=") +
-                    gapStateName(gs) + " master=" + masterStateName(ms2) +
-                    " slave=" + slaveStateName(ss) + ". Resetting.");
-            portENTER_CRITICAL(&_state_mux);
-            _gap_state = GAPState::READY;
-            _master_state = MasterState::IDLE;
-            _slave_state = SlaveState::IDLE;
-            _slave_paused_for_master = false;
-            portEXIT_CRITICAL(&_state_mux);
+            if (gap_idle && (gs != GAPState::READY || ms2 != MasterState::IDLE || ss != SlaveState::IDLE)) {
+                WARNING(std::string("NimBLEPlatform: Stuck state detected - GAP idle but state=") +
+                        gapStateName(gs) + " master=" + masterStateName(ms2) +
+                        " slave=" + slaveStateName(ss) + ". Resetting.");
+                portENTER_CRITICAL(&_state_mux);
+                _gap_state = GAPState::READY;
+                _master_state = MasterState::IDLE;
+                _slave_state = SlaveState::IDLE;
+                _slave_paused_for_master = false;
+                portEXIT_CRITICAL(&_state_mux);
 
-            // Restart advertising in dual/peripheral mode
-            if (_config.role == Role::PERIPHERAL || _config.role == Role::DUAL) {
-                startAdvertising();
+                // Restart advertising in dual/peripheral mode
+                if (_config.role == Role::PERIPHERAL || _config.role == Role::DUAL) {
+                    startAdvertising();
+                }
             }
         }
     }
@@ -309,6 +329,9 @@ void NimBLEPlatform::shutdown() {
     // Notify higher layers about all disconnections BEFORE deinit,
     // so the peer manager can reset peer states properly.
     // Do NOT delete clients individually — deinit(true) handles all client cleanup.
+    // Process any remaining deferred disconnects before shutdown cleanup
+    processPendingDisconnects();
+
     if (xSemaphoreTake(_conn_mutex, pdMS_TO_TICKS(1000))) {
         if (_on_disconnected) {
             for (auto& kv : _connections) {
@@ -317,6 +340,7 @@ void NimBLEPlatform::shutdown() {
         }
         _clients.clear();
         _connections.clear();
+        _cached_rx_chars.clear();
         _discovered_devices.clear();
         _discovered_order.clear();
         xSemaphoreGive(_conn_mutex);
@@ -329,6 +353,7 @@ void NimBLEPlatform::shutdown() {
         }
         _clients.clear();
         _connections.clear();
+        _cached_rx_chars.clear();
         _discovered_devices.clear();
         _discovered_order.clear();
     }
@@ -598,6 +623,10 @@ void NimBLEPlatform::enterErrorRecovery() {
     if (ble_gap_disc_active()) {
         ble_gap_disc_cancel();
     }
+    if (ble_gap_conn_active()) {
+        WARNING("NimBLEPlatform: Cancelling stuck GAP connection in error recovery");
+        ble_gap_conn_cancel();
+    }
     if (ble_gap_adv_active()) {
         ble_gap_adv_stop();
     }
@@ -620,6 +649,7 @@ void NimBLEPlatform::enterErrorRecovery() {
         uint32_t sync_start = millis();
         while (!ble_hs_synced() && (millis() - sync_start) < 5000) {
             delay(50);
+            esp_task_wdt_reset();
         }
         if (ble_hs_synced()) {
             INFO("NimBLEPlatform: Host sync restored after " +
@@ -636,8 +666,28 @@ void NimBLEPlatform::enterErrorRecovery() {
         }
     }
 
+    // Force host-controller resync to clear stale HCI state (fixes rc=530 / Invalid HCI params)
+    // After a 574 desync, the controller's scan state can become corrupted even after host re-syncs.
+    INFO("NimBLEPlatform: Scheduling host reset for controller resync");
+    ble_hs_sched_reset(BLE_HS_ECONTROLLER);
+
+    // Wait for host to re-sync after reset
+    {
+        uint32_t reset_start = millis();
+        while (!ble_hs_synced() && (millis() - reset_start) < 5000) {
+            delay(50);
+            esp_task_wdt_reset();
+        }
+        if (ble_hs_synced()) {
+            INFO("NimBLEPlatform: Host-controller resync after " +
+                 std::to_string(millis() - reset_start) + "ms");
+        } else {
+            WARNING("NimBLEPlatform: Host-controller resync failed after 5s");
+        }
+    }
+
     // DELAY RATIONALE: Connect attempt recovery - ESP32-S3 settling time after host sync
-    delay(50);
+    delay(100);
 
     // Re-acquire scan object to reset NimBLE internal state
     // This is necessary because NimBLE scan object can get into stuck state
@@ -669,6 +719,71 @@ void NimBLEPlatform::enterErrorRecovery() {
     }
 
     in_recovery = false;
+}
+
+//=============================================================================
+// Deferred Disconnect Processing
+//=============================================================================
+
+void NimBLEPlatform::queueDisconnect(uint16_t conn_handle, int reason, bool is_peripheral) {
+    uint8_t next = (_pending_disc_write + 1) % PENDING_DISC_QUEUE_SIZE;
+    if (next == _pending_disc_read) {
+        // Queue full — more simultaneous disconnects than queue size
+        WARNING("NimBLEPlatform: Pending disconnect queue full, dropping handle=" +
+                std::to_string(conn_handle));
+        return;
+    }
+    _pending_disc_queue[_pending_disc_write] = {conn_handle, reason, is_peripheral};
+    _pending_disc_write = next;
+}
+
+void NimBLEPlatform::processPendingDisconnects() {
+    while (_pending_disc_read != _pending_disc_write) {
+        PendingDisconnect& pd = _pending_disc_queue[_pending_disc_read];
+
+        auto conn_it = _connections.find(pd.conn_handle);
+        if (conn_it != _connections.end()) {
+            ConnectionHandle conn = conn_it->second;
+            _connections.erase(conn_it);
+
+            INFO("NimBLEPlatform: Processing deferred disconnect for " +
+                 conn.peer_address.toString() + " reason=" + std::to_string(pd.reason));
+
+            if (!pd.is_peripheral) {
+                // Central mode: clean up client object and cached char pointer
+                auto client_it = _clients.find(pd.conn_handle);
+                if (client_it != _clients.end()) {
+                    if (client_it->second) {
+                        NimBLEDevice::deleteClient(client_it->second);
+                    }
+                    _clients.erase(client_it);
+                }
+                _cached_rx_chars.erase(pd.conn_handle);
+            }
+
+            // Clear operation queue for this connection
+            clearForConnection(pd.conn_handle);
+
+            // Notify higher layers
+            if (pd.is_peripheral) {
+                if (_on_central_disconnected) {
+                    _on_central_disconnected(conn);
+                }
+            } else {
+                if (_on_disconnected) {
+                    _on_disconnected(conn, static_cast<uint8_t>(pd.reason));
+                }
+            }
+
+            // Restart advertising if in peripheral/dual mode
+            if ((_config.role == Role::PERIPHERAL || _config.role == Role::DUAL) &&
+                !isAdvertising()) {
+                startAdvertising();
+            }
+        }
+
+        _pending_disc_read = (_pending_disc_read + 1) % PENDING_DISC_QUEUE_SIZE;
+    }
 }
 
 //=============================================================================
@@ -707,11 +822,18 @@ bool NimBLEPlatform::startScan(uint16_t duration_ms) {
         if (!ble_hs_synced()) {
             unsigned long desync_duration = millis() - _host_desync_since;
             _scan_fail_count++;
+            // Capture NimBLE's internal reset reason (set in patched onReset callback)
+            int reset_reason = nimble_host_reset_reason;
+            if (reset_reason != 0) {
+                nimble_host_reset_reason = 0;
+            }
             WARNING("NimBLEPlatform: Host not synced, desync " +
                     std::to_string(desync_duration / 1000) + "s (fail " +
                     std::to_string(_scan_fail_count) + "/" +
                     std::to_string(SCAN_FAIL_RECOVERY_THRESHOLD) +
-                    ", resets=" + std::to_string(_host_reset_attempts) + ")");
+                    ", resets=" + std::to_string(_host_reset_attempts) +
+                    (reset_reason != 0 ? ", nimble_reason=" + std::to_string(reset_reason) : "") +
+                    ")");
 
             // Tiered recovery:
             //   0-10s:  Wait for natural self-recovery
@@ -752,19 +874,33 @@ bool NimBLEPlatform::startScan(uint16_t duration_ms) {
     // Host is synced — clear desync tracking
     if (_host_desync_since != 0) {
         unsigned long recovery_time = millis() - _host_desync_since;
-        INFO("NimBLEPlatform: Host re-synced after " + std::to_string(recovery_time) + "ms");
+        // Capture any remaining reset reason from NimBLE
+        int reset_reason = nimble_host_reset_reason;
+        if (reset_reason != 0) {
+            nimble_host_reset_reason = 0;
+        }
+        INFO("NimBLEPlatform: Host re-synced after " + std::to_string(recovery_time) + "ms" +
+             (reset_reason != 0 ? " (nimble_reason=" + std::to_string(reset_reason) + ")" : ""));
         _host_desync_since = 0;
         _host_reset_attempts = 0;
+        _last_desync_recovery = millis();  // Start cooldown before allowing connections
     }
 
-    // Log GAP hardware state before checking
-    DEBUG("NimBLEPlatform: Pre-scan GAP state: disc=" + std::to_string(ble_gap_disc_active()) +
-          " adv=" + std::to_string(ble_gap_adv_active()) +
-          " conn=" + std::to_string(ble_gap_conn_active()));
+    // Log GAP hardware state before checking (INFO for UDP visibility during soak test)
+    INFO("NimBLEPlatform: Pre-scan GAP: disc=" + std::to_string(ble_gap_disc_active()) +
+         " adv=" + std::to_string(ble_gap_adv_active()) +
+         " conn=" + std::to_string(ble_gap_conn_active()));
+
+    // If a stale GAP connection is blocking scan, cancel it proactively
+    if (ble_gap_conn_active() && _master_state == MasterState::IDLE) {
+        WARNING("NimBLEPlatform: Stale GAP conn blocking scan - cancelling");
+        ble_gap_conn_cancel();
+        delay(50);  // Let GAP process the cancel
+    }
 
     // Verify we can start scan
     if (!canStartScan()) {
-        DEBUG("NimBLEPlatform: Cannot start scan - state check failed" +
+        WARNING("NimBLEPlatform: Cannot start scan - state check failed" +
               std::string(" master=") + masterStateName(current_master) +
               " gap_disc=" + std::to_string(ble_gap_disc_active()) +
               " gap_conn=" + std::to_string(ble_gap_conn_active()));
@@ -823,8 +959,11 @@ bool NimBLEPlatform::startScan(uint16_t duration_ms) {
         return true;
     }
 
-    // Scan failed
-    ERROR("NimBLEPlatform: Failed to start scan");
+    // Scan failed — log GAP state for diagnosis
+    ERROR("NimBLEPlatform: Failed to start scan - GAP: disc=" + std::to_string(ble_gap_disc_active()) +
+          " conn=" + std::to_string(ble_gap_conn_active()) +
+          " adv=" + std::to_string(ble_gap_adv_active()) +
+          " master=" + masterStateName(_master_state));
 
     // Reset state
     portENTER_CRITICAL(&_state_mux);
@@ -834,9 +973,20 @@ bool NimBLEPlatform::startScan(uint16_t duration_ms) {
 
     _scan_fail_count++;
     if (_scan_fail_count >= SCAN_FAIL_RECOVERY_THRESHOLD) {
-        WARNING("NimBLEPlatform: Too many scan failures, entering error recovery");
         _scan_fail_count = 0;  // Reset so we don't immediately re-enter after recovery
-        enterErrorRecovery();
+        _lightweight_reset_fails++;
+
+        if (_lightweight_reset_fails >= LIGHTWEIGHT_RESET_MAX_FAILS) {
+            WARNING("NimBLEPlatform: " + std::to_string(_lightweight_reset_fails) +
+                    " error recoveries failed to restore scan, escalating to full stack recovery");
+            _lightweight_reset_fails = 0;
+            recoverBLEStack();
+        } else {
+            WARNING("NimBLEPlatform: Too many scan failures, entering error recovery (" +
+                    std::to_string(_lightweight_reset_fails) + "/" +
+                    std::to_string(LIGHTWEIGHT_RESET_MAX_FAILS) + ")");
+            enterErrorRecovery();
+        }
     }
 
     resumeSlave();
@@ -898,6 +1048,14 @@ bool NimBLEPlatform::isScanning() const {
 
 bool NimBLEPlatform::connect(const BLEAddress& address, uint16_t timeout_ms) {
     NimBLEAddress nimAddr = toNimBLE(address);
+
+    // Skip connections during desync cooldown — connecting while the NimBLE
+    // stack is recovering from a desync can hang client->connect() (the host
+    // task can't process the completion event), leading to WDT crashes.
+    if (_host_desync_since != 0 || (_last_desync_recovery > 0 && millis() - _last_desync_recovery < DESYNC_CONNECT_COOLDOWN_MS)) {
+        DEBUG("NimBLEPlatform: Skipping connect during desync cooldown");
+        return false;
+    }
 
     // Rate limit connections to avoid overwhelming the BLE stack
     // Non-blocking: return false if too soon, caller can retry later
@@ -1116,38 +1274,10 @@ int NimBLEPlatform::nativeGapEventHandler(struct ble_gap_event* event, void* arg
                 break;
             }
 
-            // Clean up established connections (handles MAC rotation, out of range, etc.)
-            auto conn_it = platform->_connections.find(disc_handle);
-            if (conn_it != platform->_connections.end()) {
-                ConnectionHandle conn = conn_it->second;
-                platform->_connections.erase(conn_it);
-
-                INFO("NimBLEPlatform: Native connection lost to " + conn.peer_address.toString() +
-                     " reason=" + std::to_string(disc_reason));
-
-                // Clean up client object
-                auto client_it = platform->_clients.find(disc_handle);
-                if (client_it != platform->_clients.end()) {
-                    if (client_it->second) {
-                        NimBLEDevice::deleteClient(client_it->second);
-                    }
-                    platform->_clients.erase(client_it);
-                }
-
-                // Clear operation queue for this connection
-                platform->clearForConnection(disc_handle);
-
-                // Notify higher layers
-                if (platform->_on_disconnected) {
-                    platform->_on_disconnected(conn, static_cast<uint8_t>(disc_reason));
-                }
-
-                // Restart advertising if in peripheral/dual mode and not currently advertising
-                if ((platform->_config.role == Role::PERIPHERAL || platform->_config.role == Role::DUAL) &&
-                    !platform->isAdvertising()) {
-                    platform->startAdvertising();
-                }
-            }
+            // Defer map cleanup to BLE loop task to avoid data race.
+            // This callback runs in the NimBLE host task while the BLE loop task
+            // may be iterating _connections/_clients concurrently.
+            platform->queueDisconnect(disc_handle, disc_reason, false);
             break;
         }
 
@@ -1527,13 +1657,22 @@ bool NimBLEPlatform::write(uint16_t conn_handle, const Bytes& data, bool respons
             return false;
         }
 
-        NimBLERemoteService* service = client->getService(UUID::SERVICE);
-        if (!service) {
-            WARNING("NimBLEPlatform::write: service not found for handle " + std::to_string(conn_handle));
-            return false;
+        // Use cached RX characteristic pointer to avoid repeated service/char lookups
+        NimBLERemoteCharacteristic* rxChar = nullptr;
+        auto cached_it = _cached_rx_chars.find(conn_handle);
+        if (cached_it != _cached_rx_chars.end()) {
+            rxChar = cached_it->second;
+        } else {
+            NimBLERemoteService* service = client->getService(UUID::SERVICE);
+            if (!service) {
+                WARNING("NimBLEPlatform::write: service not found for handle " + std::to_string(conn_handle));
+                return false;
+            }
+            rxChar = service->getCharacteristic(UUID::RX_CHAR);
+            if (rxChar) {
+                _cached_rx_chars[conn_handle] = rxChar;
+            }
         }
-
-        NimBLERemoteCharacteristic* rxChar = service->getCharacteristic(UUID::RX_CHAR);
         if (!rxChar) {
             WARNING("NimBLEPlatform::write: RX char not found for handle " + std::to_string(conn_handle));
             return false;
@@ -1591,6 +1730,11 @@ bool NimBLEPlatform::read(uint16_t conn_handle, uint16_t char_handle,
     }
 
     NimBLEClient* client = client_it->second;
+    if (!client->isConnected()) {
+        if (callback) callback(OperationResult::DISCONNECTED, Bytes());
+        return false;
+    }
+
     NimBLERemoteService* service = client->getService(UUID::SERVICE);
     if (!service) {
         if (callback) callback(OperationResult::NOT_FOUND, Bytes());
@@ -1624,6 +1768,8 @@ bool NimBLEPlatform::enableNotifications(uint16_t conn_handle, bool enable) {
     }
 
     NimBLEClient* client = client_it->second;
+    if (!client->isConnected()) return false;
+
     NimBLERemoteService* service = client->getService(UUID::SERVICE);
     if (!service) return false;
 
@@ -1631,11 +1777,17 @@ bool NimBLEPlatform::enableNotifications(uint16_t conn_handle, bool enable) {
     if (!txChar) return false;
 
     if (enable) {
-        // Subscribe to notifications
-        auto notifyCb = [this, conn_handle](NimBLERemoteCharacteristic* pChar,
+        // Subscribe to notifications.
+        // Capture peer_address to guard against conn_handle reuse: if peer A disconnects
+        // (handle=1) and peer B connects (handle=1), we must not deliver B's data as A's.
+        BLEAddress expected_peer = getConnection(conn_handle).peer_address;
+        auto notifyCb = [this, conn_handle, expected_peer](NimBLERemoteCharacteristic* pChar,
                                              uint8_t* pData, size_t length, bool isNotify) {
             if (_on_data_received) {
                 ConnectionHandle conn = getConnection(conn_handle);
+                if (!conn.isValid() || conn.peer_address != expected_peer) {
+                    return;  // Stale handle — peer changed
+                }
                 Bytes data(pData, length);
                 _on_data_received(conn, data);
             }
@@ -1810,9 +1962,16 @@ void NimBLEPlatform::onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) 
     conn.state = ConnectionState::CONNECTED;
     conn.mtu = MTU::MINIMUM - MTU::ATT_OVERHEAD;
 
+    // Read connection RSSI
+    int8_t rssi_val = 0;
+    if (ble_gap_conn_rssi(conn_handle, &rssi_val) == 0) {
+        conn.rssi = rssi_val;
+    }
+
     _connections[conn_handle] = conn;
 
-    DEBUG("NimBLEPlatform: Central connected: " + conn.peer_address.toString());
+    DEBUG("NimBLEPlatform: Central connected: " + conn.peer_address.toString() +
+          " rssi=" + std::to_string(conn.rssi));
 
     if (_on_central_connected) {
         _on_central_connected(conn);
@@ -1829,21 +1988,13 @@ void NimBLEPlatform::onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInf
 
     uint16_t conn_handle = connInfo.getConnHandle();
 
-    auto it = _connections.find(conn_handle);
-    if (it != _connections.end()) {
-        ConnectionHandle conn = it->second;
-        _connections.erase(it);
+    DEBUG("NimBLEPlatform: Central disconnect event for handle=" + std::to_string(conn_handle) +
+          " reason=" + std::to_string(reason));
 
-        DEBUG("NimBLEPlatform: Central disconnected: " + conn.peer_address.toString() +
-              " reason: " + std::to_string(reason));
-
-        if (_on_central_disconnected) {
-            _on_central_disconnected(conn);
-        }
-    }
-
-    // Clear operation queue for this connection
-    BLEOperationQueue::clearForConnection(conn_handle);
+    // Defer map cleanup to BLE loop task to avoid data race.
+    // This callback runs in the NimBLE host task while the BLE loop task
+    // may be iterating _connections concurrently.
+    queueDisconnect(conn_handle, reason, true);
 }
 
 void NimBLEPlatform::onMTUChange(uint16_t MTU, NimBLEConnInfo& connInfo) {
@@ -1959,25 +2110,15 @@ void NimBLEPlatform::onDisconnect(NimBLEClient* pClient, int reason) {
         return;
     }
 
-    auto it = _connections.find(conn_handle);
-    if (it != _connections.end()) {
-        ConnectionHandle conn = it->second;
-        _connections.erase(it);
+    DEBUG("NimBLEPlatform: Client disconnect event for handle=" + std::to_string(conn_handle) +
+          " reason=" + std::to_string(reason));
 
-        DEBUG("NimBLEPlatform: Disconnected from peripheral: " + conn.peer_address.toString() +
-              " reason: " + std::to_string(reason));
-
-        if (_on_disconnected) {
-            _on_disconnected(conn, static_cast<uint8_t>(reason));
-        }
-    }
-
-    // Remove client
-    _clients.erase(conn_handle);
-    NimBLEDevice::deleteClient(pClient);
-
-    // Clear operation queue
-    BLEOperationQueue::clearForConnection(conn_handle);
+    // Defer map cleanup to BLE loop task to avoid data race.
+    // This callback runs in the NimBLE host task while the BLE loop task
+    // may be iterating _connections/_clients concurrently.
+    // Note: NimBLEDevice::deleteClient() for this client will be called
+    // in processPendingDisconnects() from the loop task context.
+    queueDisconnect(conn_handle, reason, false);
 }
 
 //=============================================================================

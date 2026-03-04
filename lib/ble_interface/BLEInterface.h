@@ -270,6 +270,7 @@ private:
     struct PendingData {
         RNS::Bytes identity;
         RNS::Bytes data;
+        double queued_at = 0;  // Timestamp for expiry of unresolvable entries
     };
     PendingData _pending_data_pool[MAX_PENDING_DATA];
     size_t _pending_data_count = 0;

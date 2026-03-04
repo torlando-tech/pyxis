@@ -1196,6 +1196,9 @@ void setup() {
     INFO("╚══════════════════════════════════════╝");
     INFO("");
 
+    // Capture ESP reset reason early (before WiFi) — logged after WiFi init for UDP visibility
+    esp_reset_reason_t _boot_reset_reason = esp_reset_reason();
+
     // Check for LXST crash breadcrumb from previous boot
     {
         Preferences _dbg;
@@ -1250,6 +1253,28 @@ void setup() {
     BOOT_PROFILE_START("wifi");
     setup_wifi();
     BOOT_PROFILE_END("wifi");
+
+    // Log ESP reset reason after WiFi so it reaches UDP logs
+    {
+        const char* reason_str = "UNKNOWN";
+        switch (_boot_reset_reason) {
+            case ESP_RST_POWERON:  reason_str = "POWERON"; break;
+            case ESP_RST_SW:       reason_str = "SOFTWARE"; break;
+            case ESP_RST_PANIC:    reason_str = "PANIC"; break;
+            case ESP_RST_INT_WDT:  reason_str = "INT_WDT"; break;
+            case ESP_RST_TASK_WDT: reason_str = "TASK_WDT"; break;
+            case ESP_RST_WDT:      reason_str = "WDT"; break;
+            case ESP_RST_DEEPSLEEP: reason_str = "DEEPSLEEP"; break;
+            case ESP_RST_BROWNOUT: reason_str = "BROWNOUT"; break;
+            case ESP_RST_SDIO:     reason_str = "SDIO"; break;
+            default: break;
+        }
+        if (_boot_reset_reason != ESP_RST_POWERON) {
+            WARNING("Reset reason: " + std::string(reason_str) + " (" + std::to_string((int)_boot_reset_reason) + ")");
+        } else {
+            INFO("Reset reason: " + std::string(reason_str));
+        }
+    }
 
     // Initialize LVGL and hardware drivers
     BOOT_PROFILE_START("lvgl");

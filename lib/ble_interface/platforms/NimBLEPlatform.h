@@ -239,6 +239,25 @@ private:
     void resumeSlave();
     void enterErrorRecovery();
 
+    // Deferred disconnect queue (SPSC: NimBLE host task produces, BLE loop task consumes)
+    // Disconnect events arrive from the host task and must not modify _connections/_clients
+    // directly, as the BLE loop task may be iterating them concurrently.
+    static constexpr size_t PENDING_DISC_QUEUE_SIZE = 8;
+    struct PendingDisconnect {
+        uint16_t conn_handle;
+        int reason;
+        bool is_peripheral;  // true = server disconnect, false = native GAP handler
+    };
+    PendingDisconnect _pending_disc_queue[PENDING_DISC_QUEUE_SIZE];
+    volatile uint8_t _pending_disc_write = 0;  // Next write slot (host task only)
+    volatile uint8_t _pending_disc_read = 0;   // Next read slot (loop task only)
+
+    void queueDisconnect(uint16_t conn_handle, int reason, bool is_peripheral);
+    void processPendingDisconnects();
+
+    // Deferred error recovery (set from any context, processed in loop task)
+    volatile bool _error_recovery_requested = false;
+
     // Track if slave was paused for a master operation
     bool _slave_paused_for_master = false;
 
@@ -260,11 +279,13 @@ private:
     uint8_t _conn_establish_fail_count = 0;  // rc=574 connection establishment failures
     unsigned long _last_full_recovery_time = 0;
     unsigned long _host_desync_since = 0;    // millis() when host first lost sync (0 = synced)
+    unsigned long _last_desync_recovery = 0; // millis() when last desync recovered (for connect cooldown)
     uint8_t _host_reset_attempts = 0;       // ble_hs_sched_reset attempts since last sync
-    static constexpr uint8_t SCAN_FAIL_RECOVERY_THRESHOLD = 10;
+    static constexpr uint8_t SCAN_FAIL_RECOVERY_THRESHOLD = 5;
     static constexpr uint8_t LIGHTWEIGHT_RESET_MAX_FAILS = 3;
     static constexpr uint8_t CONN_ESTABLISH_FAIL_THRESHOLD = 5;
     static constexpr unsigned long FULL_RECOVERY_COOLDOWN_MS = 60000;  // 60 seconds
+    static constexpr unsigned long DESYNC_CONNECT_COOLDOWN_MS = 30000;  // Don't connect for 30s after desync recovery
     static constexpr unsigned long HOST_DESYNC_REBOOT_MS = 60000;      // Reboot after 60s desync (no connections)
     bool recoverBLEStack();
     bool attemptHostReset();
@@ -280,6 +301,9 @@ private:
 
     // Client connections (as central)
     std::map<uint16_t, NimBLEClient*> _clients;
+
+    // Cached RX characteristic pointers (avoids repeated service/char lookups in write())
+    std::map<uint16_t, NimBLERemoteCharacteristic*> _cached_rx_chars;
 
     // Connection tracking
     std::map<uint16_t, ConnectionHandle> _connections;
