@@ -1,0 +1,39 @@
+name: Build Check
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        environment: [tdeck, tdeck-bluedroid]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build ${{ matrix.environment }}
+        run: pio run -e ${{ matrix.environment }}
+
+      - name: Upload firmware artifact
+        if: matrix.environment == 'tdeck'
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ github.event.pull_request.head.sha }}
+          path: |
+            .pio/build/tdeck/firmware.bin
+            .pio/build/tdeck/bootloader.bin
+            .pio/build/tdeck/partitions.bin
