@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pyxis — LXMF Messenger for T-Deck</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+         max-width: 800px; margin: 0 auto; padding: 2rem 1rem; line-height: 1.6;
+         background: #0f172a; color: #e2e8f0; }
+  a { color: #3b82f6; }
+  h1, h2 { color: #3b82f6; }
+  code { background: rgba(255,255,255,0.1); padding: 0.15em 0.4em; border-radius: 4px; font-size: 0.9em; }
+  .nav { text-align: center; margin: 2rem 0; }
+  .nav a { display: inline-block; padding: 0.75rem 1.5rem; background: #3b82f6; color: white;
+           text-decoration: none; border-radius: 8px; margin: 0.5rem; font-weight: 500; }
+  .nav a:hover { background: #2563eb; }
+</style>
+</head>
+<body>
+<h1>Pyxis</h1>
+<p>An LXMF and LXST client firmware for T-Deck, built on a <a href="https://github.com/torlando-tech/microReticulum/tree/feat/t-deck">highly modified fork</a> of <a href="https://github.com/attermann/microReticulum">microReticulum</a></p>
+<p>Very much WIP, don't expect stability :) </p>
+<h2>Features</h2>
+<p>Reticulum transport over: 
+- RNode-compatible LoRa
+- AutoInterface (local wifi)
+- TCP Client
+- BLE Interface (barely working if at all)</p>
+<p>Other features:
+- GPS-synced time
+- One really annoying beep when you get a new message (user toggle)
+- View the announce stream
+- Choose a propagation node (and sync with it) (fixed in v0.2.1)
+- Set auto announce timer
+- Light up keyboard (user toggle)
+- ~~Will crash in about 5 minutes of normal use (sorry)~~ I had 5d uptime on v0.2.0 with BLE disabled
+- Make LXST voice calls (codec2 only, quality sounds horrible coming out the other end in Columba, needs work)</p>
+<h2>Why "Pyxis"</h2>
+<p>Pyxis, latin for "compass," is a <a href="https://en.wikipedia.org/wiki/Pyxis">constellation</a> in the southern sky depicting a mariner's compass. Small but essential, the compass ensures every message finds its destination - even when the path is uncertain. </p>
+<div class="nav">
+  <a href="flasher/">Web Flasher</a>
+  <a href="https://github.com/torlando-tech/pyxis">GitHub</a>
+  <a href="https://github.com/torlando-tech/pyxis/releases">Releases</a>
+</div>
+</body></html>
