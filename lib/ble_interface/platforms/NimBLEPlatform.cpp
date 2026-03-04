@@ -1329,14 +1329,9 @@ bool NimBLEPlatform::connectNative(const BLEAddress& address, uint16_t timeout_m
     // discovery) that would deadlock the host task.
     _native_connect_pending = true;
 
-    // Feed WDT before blocking connect — NimBLE connect can take several seconds
-    // with WiFi coexistence, and the BLE task is subscribed to the 10s WDT
-    esp_task_wdt_reset();
-
     // Connect (blocking) — NimBLE handles GAP event management internally
     bool connected = client->connect(nimAddr, false);  // deleteAttributes=false
 
-    esp_task_wdt_reset();  // Feed WDT after connect returns
     _native_connect_pending = false;
 
     if (!connected) {
@@ -1360,7 +1355,8 @@ bool NimBLEPlatform::connectNative(const BLEAddress& address, uint16_t timeout_m
          " MTU=" + std::to_string(negotiated_mtu));
 
     // Fire _on_connected from THIS task (BLEInterface loop), not the host task.
-    // This allows the callback to safely do blocking GATT operations.
+    // This allows the callback to safely do blocking GATT operations
+    // (service discovery, notification enable, identity read/write).
     if (_on_connected) {
         ConnectionHandle conn = getConnection(conn_handle);
         _on_connected(conn);
@@ -1429,6 +1425,10 @@ bool NimBLEPlatform::requestMTU(uint16_t conn_handle, uint16_t mtu) {
 }
 
 bool NimBLEPlatform::discoverServices(uint16_t conn_handle) {
+    if (!ble_hs_synced()) {
+        return false;
+    }
+
     auto client_it = _clients.find(conn_handle);
     if (client_it == _clients.end() || !client_it->second) {
         return false;
@@ -1436,8 +1436,10 @@ bool NimBLEPlatform::discoverServices(uint16_t conn_handle) {
 
     NimBLEClient* client = client_it->second;
 
-    // Get our service
+    // Get our service — blocking GATT operation
+    esp_task_wdt_reset();
     NimBLERemoteService* service = client->getService(UUID::SERVICE);
+    esp_task_wdt_reset();
     if (!service) {
         ERROR("NimBLEPlatform: Service not found");
         if (_on_services_discovered) {
@@ -1447,10 +1449,13 @@ bool NimBLEPlatform::discoverServices(uint16_t conn_handle) {
         return false;
     }
 
-    // Get characteristics
+    // Get characteristics — each is a blocking GATT operation
     NimBLERemoteCharacteristic* rxChar = service->getCharacteristic(UUID::RX_CHAR);
+    esp_task_wdt_reset();
     NimBLERemoteCharacteristic* txChar = service->getCharacteristic(UUID::TX_CHAR);
+    esp_task_wdt_reset();
     NimBLERemoteCharacteristic* idChar = service->getCharacteristic(UUID::IDENTITY_CHAR);
+    esp_task_wdt_reset();
 
     if (!rxChar || !txChar) {
         ERROR("NimBLEPlatform: Required characteristics not found");
@@ -1635,6 +1640,12 @@ void NimBLEPlatform::setIdentityData(const Bytes& identity) {
 //=============================================================================
 
 bool NimBLEPlatform::write(uint16_t conn_handle, const Bytes& data, bool response) {
+    // Guard against use-after-free: during a host reset, NimBLE invalidates
+    // client objects on core 0 while we may still hold stale pointers.
+    if (!ble_hs_synced()) {
+        return false;
+    }
+
     auto conn_it = _connections.find(conn_handle);
     if (conn_it == _connections.end()) {
         DEBUG("NimBLEPlatform::write: no connection for handle " + std::to_string(conn_handle));
@@ -1695,6 +1706,10 @@ bool NimBLEPlatform::write(uint16_t conn_handle, const Bytes& data, bool respons
 
 bool NimBLEPlatform::writeCharacteristic(uint16_t conn_handle, uint16_t char_handle,
                                           const Bytes& data, bool response) {
+    if (!ble_hs_synced()) {
+        return false;
+    }
+
     auto client_it = _clients.find(conn_handle);
     if (client_it == _clients.end() || !client_it->second) {
         return false;
@@ -1703,7 +1718,9 @@ bool NimBLEPlatform::writeCharacteristic(uint16_t conn_handle, uint16_t char_han
     NimBLEClient* client = client_it->second;
     if (!client->isConnected()) return false;
 
+    esp_task_wdt_reset();
     NimBLERemoteService* service = client->getService(UUID::SERVICE);
+    esp_task_wdt_reset();
     if (!service) return false;
 
     // Find characteristic by handle
@@ -1716,6 +1733,7 @@ bool NimBLEPlatform::writeCharacteristic(uint16_t conn_handle, uint16_t char_han
     if (!chr) {
         chr = service->getCharacteristic(UUID::RX_CHAR);
     }
+    esp_task_wdt_reset();
     if (!chr) return false;
 
     return chr->writeValue(data.data(), data.size(), response);
@@ -1723,6 +1741,11 @@ bool NimBLEPlatform::writeCharacteristic(uint16_t conn_handle, uint16_t char_han
 
 bool NimBLEPlatform::read(uint16_t conn_handle, uint16_t char_handle,
                           std::function<void(OperationResult, const Bytes&)> callback) {
+    if (!ble_hs_synced()) {
+        if (callback) callback(OperationResult::DISCONNECTED, Bytes());
+        return false;
+    }
+
     auto client_it = _clients.find(conn_handle);
     if (client_it == _clients.end() || !client_it->second) {
         if (callback) callback(OperationResult::NOT_FOUND, Bytes());
@@ -1735,7 +1758,9 @@ bool NimBLEPlatform::read(uint16_t conn_handle, uint16_t char_handle,
         return false;
     }
 
+    esp_task_wdt_reset();
     NimBLERemoteService* service = client->getService(UUID::SERVICE);
+    esp_task_wdt_reset();
     if (!service) {
         if (callback) callback(OperationResult::NOT_FOUND, Bytes());
         return false;
@@ -1762,6 +1787,10 @@ bool NimBLEPlatform::read(uint16_t conn_handle, uint16_t char_handle,
 }
 
 bool NimBLEPlatform::enableNotifications(uint16_t conn_handle, bool enable) {
+    if (!ble_hs_synced()) {
+        return false;
+    }
+
     auto client_it = _clients.find(conn_handle);
     if (client_it == _clients.end() || !client_it->second) {
         return false;
@@ -1770,10 +1799,13 @@ bool NimBLEPlatform::enableNotifications(uint16_t conn_handle, bool enable) {
     NimBLEClient* client = client_it->second;
     if (!client->isConnected()) return false;
 
+    esp_task_wdt_reset();
     NimBLERemoteService* service = client->getService(UUID::SERVICE);
+    esp_task_wdt_reset();
     if (!service) return false;
 
     NimBLERemoteCharacteristic* txChar = service->getCharacteristic(UUID::TX_CHAR);
+    esp_task_wdt_reset();
     if (!txChar) return false;
 
     if (enable) {
@@ -1800,7 +1832,7 @@ bool NimBLEPlatform::enableNotifications(uint16_t conn_handle, bool enable) {
 }
 
 bool NimBLEPlatform::notify(uint16_t conn_handle, const Bytes& data) {
-    if (!_tx_char) {
+    if (!ble_hs_synced() || !_tx_char) {
         return false;
     }
 
