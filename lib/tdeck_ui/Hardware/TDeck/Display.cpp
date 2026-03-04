@@ -174,14 +174,9 @@ void Display::set_power(bool on) {
 }
 
 void Display::show_splash() {
-    // Background color: #1D1A1E -> RGB565 0x18C3
-    static const uint16_t BG_COLOR = 0x18C3;
-
-#ifdef HAS_SPLASH_IMAGE
-    // Full-screen splash has background baked in — skip redundant fill
-#else
-    // No splash image — fill with background color
-    fill_screen(BG_COLOR);
+#ifndef HAS_SPLASH_IMAGE
+    // No splash image — fill with background color (#1D1A1E -> RGB565 0x18C3)
+    fill_screen(0x18C3);
 #endif
 
 #ifdef HAS_SPLASH_IMAGE

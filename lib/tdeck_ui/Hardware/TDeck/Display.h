@@ -69,19 +69,14 @@ public:
     static void draw_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color);
 
     /**
-     * Show boot splash image (centered Pyxis logo)
-     * Called during init_registers() before backlight turns on.
-     * Falls back to black screen if SplashImage.h not generated.
-     */
-    static void show_splash();
-
-    /**
      * LVGL flush callback - called by LVGL to update display
      * Do not call directly - used internally by LVGL
      */
     static void lvgl_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p);
 
 private:
+    // Show boot splash image, called from init_hardware_only()
+    static void show_splash();
     // SPI commands for ST7789V
     enum Command : uint8_t {
         NOP = 0x00,
