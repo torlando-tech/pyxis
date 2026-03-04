@@ -85,6 +85,7 @@ else:
             f.write(f"#define SPLASH_HEIGHT {SPLASH_HEIGHT}\n")
             f.write(f"#define HAS_SPLASH_IMAGE 1\n\n")
             f.write(f"// {SPLASH_WIDTH}x{SPLASH_HEIGHT} RGB565 big-endian ({len(rgb565_bytes)} bytes)\n")
+            f.write("// WARNING: static linkage — include from exactly ONE translation unit\n")
             f.write("static const uint8_t PROGMEM splash_image[] = {\n")
 
             # Write bytes, 16 per line

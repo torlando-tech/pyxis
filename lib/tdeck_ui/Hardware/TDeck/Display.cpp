@@ -174,15 +174,10 @@ void Display::set_power(bool on) {
 }
 
 void Display::show_splash() {
-#ifndef HAS_SPLASH_IMAGE
-    // No splash image — fill with background color (#1D1A1E -> RGB565 0x18C3)
-    fill_screen(0x18C3);
-#endif
-
 #ifdef HAS_SPLASH_IMAGE
     // Splash image is full-screen (320x240), so offsets are 0
-    static const uint16_t X_OFFSET = (Disp::WIDTH - SPLASH_WIDTH) / 2;    // 0
-    static const uint16_t Y_OFFSET = (Disp::HEIGHT - SPLASH_HEIGHT) / 2;  // 0
+    static const uint16_t X_OFFSET = (Disp::WIDTH - SPLASH_WIDTH) / 2;
+    static const uint16_t Y_OFFSET = (Disp::HEIGHT - SPLASH_HEIGHT) / 2;
 
     set_addr_window(X_OFFSET, Y_OFFSET,
                     X_OFFSET + SPLASH_WIDTH - 1,
@@ -204,6 +199,9 @@ void Display::show_splash() {
 
     end_write();
     INFO("  Splash image rendered");
+#else
+    // No splash image — fill with background color (#1D1A1E -> RGB565 0x18C3)
+    fill_screen(0x18C3);
 #endif
 
     // Backlight on now that screen content is ready
