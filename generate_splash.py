@@ -1,7 +1,7 @@
 """
 PlatformIO pre-build script: Convert pyxis-icon.svg to RGB565 PROGMEM header.
 
-Generates lib/tdeck_ui/Hardware/TDeck/SplashImage.h containing a 160x160
+Generates lib/tdeck_ui/Hardware/TDeck/SplashImage.h containing a 320x240
 pixel splash image as a PROGMEM byte array. Skips regeneration if the
 header is already newer than the source SVG.
 
