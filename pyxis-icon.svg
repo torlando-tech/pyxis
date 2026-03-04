@@ -8,6 +8,8 @@
     </radialGradient>
   </defs>
   <circle cx="256" cy="256" r="256" fill="#1D1A1E"/>
+  <text x="256" y="80" text-anchor="middle" font-family="sans-serif" font-size="64" font-weight="bold" letter-spacing="12" fill="#FFFFFF" opacity="0.85">PYXIS</text>
+  <g transform="translate(256, 276) scale(0.8) translate(-256, -256)">
   <g transform="matrix(1, 0, 0, 1, 17.99218, -6.964715)">
     <path stroke="#FFFFFF" stroke-width="4.5" fill="none" stroke-linecap="round" opacity="0.6" d="M 245.377 322.844 L 181.759 90.3"/>
     <path stroke="#FFFFFF" stroke-width="4.5" fill="none" stroke-linecap="round" opacity="0.6" d="M 273.819 413.359 L 245.377 322.844"/>
@@ -17,5 +19,6 @@
     <circle cx="245.377" cy="322.844" r="10" fill="#FFFFFF"/>
     <circle cx="273.819" cy="413.359" r="22" fill="url(#starGlow)"/>
     <circle cx="273.819" cy="413.359" r="9" fill="#FFFFFF"/>
+  </g>
   </g>
 </svg>

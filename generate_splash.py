@@ -13,7 +13,8 @@ Import("env")
 import os
 import struct
 
-ICON_SIZE = 160
+SPLASH_WIDTH = 320
+SPLASH_HEIGHT = 240
 SVG_FILE = "pyxis-icon.svg"
 HEADER_FILE = os.path.join("lib", "tdeck_ui", "Hardware", "TDeck", "SplashImage.h")
 BG_COLOR = (0x1D, 0x1A, 0x1E)  # #1D1A1E — matches fill_screen in show_splash()
@@ -49,20 +50,21 @@ else:
         print(f"[generate_splash] Missing dependency ({e}), skipping splash generation")
         print(f"[generate_splash] Install with: pip install cairosvg Pillow")
     else:
-        print(f"[generate_splash] Rendering {SVG_FILE} -> {HEADER_FILE} ({ICON_SIZE}x{ICON_SIZE} RGB565)")
+        print(f"[generate_splash] Rendering {SVG_FILE} -> {HEADER_FILE} ({SPLASH_WIDTH}x{SPLASH_HEIGHT} RGB565)")
 
-        # Render SVG to PNG at target size
+        # Render SVG to PNG — scale to fit height, center horizontally
         png_data = cairosvg.svg2png(
             url=svg_path,
-            output_width=ICON_SIZE,
-            output_height=ICON_SIZE,
+            output_width=SPLASH_HEIGHT,   # Square SVG scaled to screen height
+            output_height=SPLASH_HEIGHT,
         )
 
-        img = Image.open(io.BytesIO(png_data)).convert("RGBA")
+        icon = Image.open(io.BytesIO(png_data)).convert("RGBA")
 
-        # Composite onto background color (handles transparency)
-        bg = Image.new("RGBA", (ICON_SIZE, ICON_SIZE), BG_COLOR + (255,))
-        bg.paste(img, (0, 0), img)
+        # Composite onto full-screen background (handles transparency)
+        bg = Image.new("RGBA", (SPLASH_WIDTH, SPLASH_HEIGHT), BG_COLOR + (255,))
+        x_offset = (SPLASH_WIDTH - icon.width) // 2
+        bg.paste(icon, (x_offset, 0), icon)
         img = bg.convert("RGB")
 
         # Convert to RGB565 big-endian byte array
@@ -79,10 +81,10 @@ else:
             f.write("#ifndef SPLASH_IMAGE_H\n")
             f.write("#define SPLASH_IMAGE_H\n\n")
             f.write("#include <Arduino.h>\n\n")
-            f.write(f"#define SPLASH_WIDTH  {ICON_SIZE}\n")
-            f.write(f"#define SPLASH_HEIGHT {ICON_SIZE}\n")
+            f.write(f"#define SPLASH_WIDTH  {SPLASH_WIDTH}\n")
+            f.write(f"#define SPLASH_HEIGHT {SPLASH_HEIGHT}\n")
             f.write(f"#define HAS_SPLASH_IMAGE 1\n\n")
-            f.write(f"// {ICON_SIZE}x{ICON_SIZE} RGB565 big-endian ({len(rgb565_bytes)} bytes)\n")
+            f.write(f"// {SPLASH_WIDTH}x{SPLASH_HEIGHT} RGB565 big-endian ({len(rgb565_bytes)} bytes)\n")
             f.write("static const uint8_t PROGMEM splash_image[] = {\n")
 
             # Write bytes, 16 per line
@@ -95,4 +97,4 @@ else:
             f.write("};\n\n")
             f.write("#endif // SPLASH_IMAGE_H\n")
 
-        print(f"[generate_splash] Generated {len(rgb565_bytes)} bytes ({ICON_SIZE}x{ICON_SIZE} RGB565)")
+        print(f"[generate_splash] Generated {len(rgb565_bytes)} bytes ({SPLASH_WIDTH}x{SPLASH_HEIGHT} RGB565)")
