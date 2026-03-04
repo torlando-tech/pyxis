@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="pyxis-icon.svg" width="200" alt="Pyxis logo">
+</p>
+
 # Pyxis
 An LXMF and LXST client firmware for T-Deck, built on a [highly modified fork](https://github.com/torlando-tech/microReticulum/tree/feat/t-deck) of [microReticulum](https://github.com/attermann/microReticulum)
 
