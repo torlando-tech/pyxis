@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <radialGradient id="starGlow">
+      <stop offset="0" style="stop-color:#FFFFFF;stop-opacity:0.8"/>
+      <stop offset="0.5" style="stop-color:#FFFFFF;stop-opacity:0.3"/>
+      <stop offset="1" style="stop-color:#FFFFFF;stop-opacity:0"/>
+    </radialGradient>
+  </defs>
+  <circle cx="256" cy="256" r="256" fill="#1D1A1E"/>
+  <g transform="matrix(1, 0, 0, 1, 17.99218, -6.964715)">
+    <path stroke="#FFFFFF" stroke-width="4.5" fill="none" stroke-linecap="round" opacity="0.6" d="M 245.377 322.844 L 181.759 90.3"/>
+    <path stroke="#FFFFFF" stroke-width="4.5" fill="none" stroke-linecap="round" opacity="0.6" d="M 273.819 413.359 L 245.377 322.844"/>
+    <circle cx="181.759" cy="90.3" r="20" fill="url(#starGlow)"/>
+    <circle cx="181.759" cy="90.3" r="8" fill="#FFFFFF"/>
+    <circle cx="245.377" cy="322.844" r="26" fill="url(#starGlow)"/>
+    <circle cx="245.377" cy="322.844" r="10" fill="#FFFFFF"/>
+    <circle cx="273.819" cy="413.359" r="22" fill="url(#starGlow)"/>
+    <circle cx="273.819" cy="413.359" r="9" fill="#FFFFFF"/>
+  </g>
+</svg>

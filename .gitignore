@@ -2,3 +2,4 @@
 .vscode/
 *.pyc
 docs/flasher/firmware/
+lib/tdeck_ui/Hardware/TDeck/SplashImage.h
