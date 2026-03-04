@@ -180,9 +180,9 @@ void Display::show_splash() {
     fill_screen(BG_COLOR);
 
 #ifdef HAS_SPLASH_IMAGE
-    // Center 160x160 image on 320x240 screen
-    static const uint16_t X_OFFSET = (Disp::WIDTH - SPLASH_WIDTH) / 2;    // 80
-    static const uint16_t Y_OFFSET = (Disp::HEIGHT - SPLASH_HEIGHT) / 2;  // 40
+    // Splash image is full-screen (320x240), so offsets are 0
+    static const uint16_t X_OFFSET = (Disp::WIDTH - SPLASH_WIDTH) / 2;    // 0
+    static const uint16_t Y_OFFSET = (Disp::HEIGHT - SPLASH_HEIGHT) / 2;  // 0
 
     set_addr_window(X_OFFSET, Y_OFFSET,
                     X_OFFSET + SPLASH_WIDTH - 1,
