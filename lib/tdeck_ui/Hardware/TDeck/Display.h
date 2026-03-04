@@ -69,6 +69,13 @@ public:
     static void draw_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color);
 
     /**
+     * Show boot splash image (centered Pyxis logo)
+     * Called during init_registers() before backlight turns on.
+     * Falls back to black screen if SplashImage.h not generated.
+     */
+    static void show_splash();
+
+    /**
      * LVGL flush callback - called by LVGL to update display
      * Do not call directly - used internally by LVGL
      */
@@ -132,7 +139,8 @@ private:
 
     static SPIClass* _spi;
     static uint8_t _brightness;
-    static bool _initialized;
+    static bool _initialized;      // Full init (hardware + LVGL)
+    static bool _hw_initialized;   // Hardware-only init (SPI + registers)
 
     // Display health monitoring
     static volatile uint32_t _flush_count;

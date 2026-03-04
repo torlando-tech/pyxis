@@ -637,10 +637,8 @@ void setup_hardware() {
     Wire.setClock(I2C::FREQUENCY);
     INFO("I2C initialized");
 
-    // Initialize power
-    pinMode(Pin::POWER_EN, OUTPUT);
-    digitalWrite(Pin::POWER_EN, HIGH);
-    INFO("Power enabled");
+    // Note: POWER_EN already set HIGH in setup() before display splash
+    INFO("Power enabled (early init)");
 }
 
 void setup_lvgl_and_ui() {
@@ -651,6 +649,11 @@ void setup_lvgl_and_ui() {
         ERROR("LVGL initialization failed!");
         while (1) delay(1000);
     }
+
+    // Match LVGL default screen background to splash color (#1D1A1E)
+    // so LVGL's first render doesn't flash over the boot splash
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x1D1A1E), 0);
+    lv_obj_set_style_bg_opa(lv_scr_act(), LV_OPA_COVER, 0);
 
     INFO("LVGL initialized");
 
@@ -1195,6 +1198,17 @@ void setup() {
     INFO("║   Pyxis + LVGL UI                   ║");
     INFO("╚══════════════════════════════════════╝");
     INFO("");
+
+    // Enable peripheral power rail before display init.
+    // Display needs ~120ms after power-on before accepting SPI commands
+    // (ST7789V power-on reset time). Without this delay, SWRESET is sent
+    // to an unpowered chip and silently lost.
+    pinMode(Pin::POWER_EN, OUTPUT);
+    digitalWrite(Pin::POWER_EN, HIGH);
+    delay(150);
+
+    // Show boot splash ASAP — before any slow init (GPS, WiFi, SD, Reticulum).
+    Hardware::TDeck::Display::init_hardware_only();
 
     // Capture ESP reset reason early (before WiFi) — logged after WiFi init for UDP visibility
     esp_reset_reason_t _boot_reset_reason = esp_reset_reason();

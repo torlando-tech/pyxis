@@ -8,6 +8,10 @@
 #include "Log.h"
 #include <esp_heap_caps.h>
 
+#if __has_include("SplashImage.h")
+#include "SplashImage.h"
+#endif
+
 using namespace RNS;
 
 namespace Hardware {
@@ -16,6 +20,7 @@ namespace TDeck {
 SPIClass* Display::_spi = nullptr;
 uint8_t Display::_brightness = Disp::BACKLIGHT_DEFAULT;
 bool Display::_initialized = false;
+bool Display::_hw_initialized = false;
 volatile uint32_t Display::_flush_count = 0;
 volatile uint32_t Display::_last_flush_ms = 0;
 uint32_t Display::_last_health_log_ms = 0;
@@ -70,16 +75,17 @@ bool Display::init() {
 }
 
 bool Display::init_hardware_only() {
-    if (_initialized) {
+    if (_hw_initialized) {
         return true;
     }
 
     INFO("Initializing display hardware");
 
-    // Configure backlight PWM
+    // Configure backlight PWM — keep OFF until splash is rendered
+    // Use ledcWrite directly so _brightness retains the default value for show_splash()
     ledcSetup(Disp::BACKLIGHT_CHANNEL, Disp::BACKLIGHT_FREQ, Disp::BACKLIGHT_RESOLUTION);
     ledcAttachPin(Pin::DISPLAY_BACKLIGHT, Disp::BACKLIGHT_CHANNEL);
-    set_brightness(_brightness);
+    ledcWrite(Disp::BACKLIGHT_CHANNEL, 0);
 
     // Initialize SPI
     _spi = new SPIClass(HSPI);
@@ -94,7 +100,7 @@ bool Display::init_hardware_only() {
     // Initialize ST7789V registers
     init_registers();
 
-    _initialized = true;
+    _hw_initialized = true;
     INFO("  Display hardware ready");
     return true;
 }
@@ -141,8 +147,8 @@ void Display::init_registers() {
     // DELAY RATIONALE: SPI command settling - allow display controller to process command before next
     delay(10);
 
-    // Clear screen to black
-    fill_screen(0x0000);
+    // Show splash image (or black screen if SplashImage.h not generated)
+    show_splash();
 
     INFO("  ST7789V initialized");
 }
@@ -164,6 +170,44 @@ void Display::set_power(bool on) {
         set_brightness(0);
         write_command(Command::DISPOFF);
     }
+}
+
+void Display::show_splash() {
+    // Background color: #1D1A1E -> RGB565 0x18C3
+    static const uint16_t BG_COLOR = 0x18C3;
+
+    // Fill entire screen with background color
+    fill_screen(BG_COLOR);
+
+#ifdef HAS_SPLASH_IMAGE
+    // Center 160x160 image on 320x240 screen
+    static const uint16_t X_OFFSET = (Disp::WIDTH - SPLASH_WIDTH) / 2;    // 80
+    static const uint16_t Y_OFFSET = (Disp::HEIGHT - SPLASH_HEIGHT) / 2;  // 40
+
+    set_addr_window(X_OFFSET, Y_OFFSET,
+                    X_OFFSET + SPLASH_WIDTH - 1,
+                    Y_OFFSET + SPLASH_HEIGHT - 1);
+
+    begin_write();
+    write_command(Command::RAMWR);
+
+    // Stream PROGMEM data in 512-byte chunks to avoid large stack allocation
+    static const size_t CHUNK_SIZE = 512;
+    uint8_t buf[CHUNK_SIZE];
+    size_t total = SPLASH_WIDTH * SPLASH_HEIGHT * 2;
+
+    for (size_t offset = 0; offset < total; offset += CHUNK_SIZE) {
+        size_t len = (offset + CHUNK_SIZE <= total) ? CHUNK_SIZE : (total - offset);
+        memcpy_P(buf, splash_image + offset, len);
+        write_data(buf, len);
+    }
+
+    end_write();
+    INFO("  Splash image rendered");
+#endif
+
+    // Backlight on now that screen content is ready
+    set_brightness(_brightness);
 }
 
 void Display::fill_screen(uint16_t color) {
