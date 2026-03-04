@@ -281,7 +281,7 @@ private:
     unsigned long _host_desync_since = 0;    // millis() when host first lost sync (0 = synced)
     unsigned long _last_desync_recovery = 0; // millis() when last desync recovered (for connect cooldown)
     uint8_t _host_reset_attempts = 0;       // ble_hs_sched_reset attempts since last sync
-    static constexpr uint8_t SCAN_FAIL_RECOVERY_THRESHOLD = 10;
+    static constexpr uint8_t SCAN_FAIL_RECOVERY_THRESHOLD = 5;
     static constexpr uint8_t LIGHTWEIGHT_RESET_MAX_FAILS = 3;
     static constexpr uint8_t CONN_ESTABLISH_FAIL_THRESHOLD = 5;
     static constexpr unsigned long FULL_RECOVERY_COOLDOWN_MS = 60000;  // 60 seconds

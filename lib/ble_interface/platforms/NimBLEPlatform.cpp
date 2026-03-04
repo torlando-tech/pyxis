@@ -623,6 +623,10 @@ void NimBLEPlatform::enterErrorRecovery() {
     if (ble_gap_disc_active()) {
         ble_gap_disc_cancel();
     }
+    if (ble_gap_conn_active()) {
+        WARNING("NimBLEPlatform: Cancelling stuck GAP connection in error recovery");
+        ble_gap_conn_cancel();
+    }
     if (ble_gap_adv_active()) {
         ble_gap_adv_stop();
     }
@@ -662,8 +666,28 @@ void NimBLEPlatform::enterErrorRecovery() {
         }
     }
 
+    // Force host-controller resync to clear stale HCI state (fixes rc=530 / Invalid HCI params)
+    // After a 574 desync, the controller's scan state can become corrupted even after host re-syncs.
+    INFO("NimBLEPlatform: Scheduling host reset for controller resync");
+    ble_hs_sched_reset(BLE_HS_ECONTROLLER);
+
+    // Wait for host to re-sync after reset
+    {
+        uint32_t reset_start = millis();
+        while (!ble_hs_synced() && (millis() - reset_start) < 5000) {
+            delay(50);
+            esp_task_wdt_reset();
+        }
+        if (ble_hs_synced()) {
+            INFO("NimBLEPlatform: Host-controller resync after " +
+                 std::to_string(millis() - reset_start) + "ms");
+        } else {
+            WARNING("NimBLEPlatform: Host-controller resync failed after 5s");
+        }
+    }
+
     // DELAY RATIONALE: Connect attempt recovery - ESP32-S3 settling time after host sync
-    delay(50);
+    delay(100);
 
     // Re-acquire scan object to reset NimBLE internal state
     // This is necessary because NimBLE scan object can get into stuck state
@@ -862,14 +886,21 @@ bool NimBLEPlatform::startScan(uint16_t duration_ms) {
         _last_desync_recovery = millis();  // Start cooldown before allowing connections
     }
 
-    // Log GAP hardware state before checking
-    DEBUG("NimBLEPlatform: Pre-scan GAP state: disc=" + std::to_string(ble_gap_disc_active()) +
-          " adv=" + std::to_string(ble_gap_adv_active()) +
-          " conn=" + std::to_string(ble_gap_conn_active()));
+    // Log GAP hardware state before checking (INFO for UDP visibility during soak test)
+    INFO("NimBLEPlatform: Pre-scan GAP: disc=" + std::to_string(ble_gap_disc_active()) +
+         " adv=" + std::to_string(ble_gap_adv_active()) +
+         " conn=" + std::to_string(ble_gap_conn_active()));
+
+    // If a stale GAP connection is blocking scan, cancel it proactively
+    if (ble_gap_conn_active() && _master_state == MasterState::IDLE) {
+        WARNING("NimBLEPlatform: Stale GAP conn blocking scan - cancelling");
+        ble_gap_conn_cancel();
+        delay(50);  // Let GAP process the cancel
+    }
 
     // Verify we can start scan
     if (!canStartScan()) {
-        DEBUG("NimBLEPlatform: Cannot start scan - state check failed" +
+        WARNING("NimBLEPlatform: Cannot start scan - state check failed" +
               std::string(" master=") + masterStateName(current_master) +
               " gap_disc=" + std::to_string(ble_gap_disc_active()) +
               " gap_conn=" + std::to_string(ble_gap_conn_active()));
@@ -928,8 +959,11 @@ bool NimBLEPlatform::startScan(uint16_t duration_ms) {
         return true;
     }
 
-    // Scan failed
-    ERROR("NimBLEPlatform: Failed to start scan");
+    // Scan failed — log GAP state for diagnosis
+    ERROR("NimBLEPlatform: Failed to start scan - GAP: disc=" + std::to_string(ble_gap_disc_active()) +
+          " conn=" + std::to_string(ble_gap_conn_active()) +
+          " adv=" + std::to_string(ble_gap_adv_active()) +
+          " master=" + masterStateName(_master_state));
 
     // Reset state
     portENTER_CRITICAL(&_state_mux);

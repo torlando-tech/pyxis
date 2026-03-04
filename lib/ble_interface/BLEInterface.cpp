@@ -931,10 +931,10 @@ void BLEInterface::processDiscoveredPeers() {
             last_peer_log = now;
         }
 
-        if (candidate && candidate->mac_address.size() >= Limits::MAC_SIZE) {
+        if (candidate && candidate->mac_address.size() >= Limits::MAC_SIZE &&
+            _peer_manager.canAcceptConnection()) {
             INFO("BLE: Connection candidate: " + BLEAddress(candidate->mac_address.data()).toString() +
-                  " type=" + std::to_string(candidate->address_type) +
-                  " canAccept=" + std::string(_peer_manager.canAcceptConnection() ? "yes" : "no"));
+                  " type=" + std::to_string(candidate->address_type));
         }
 
         if (candidate && _peer_manager.canAcceptConnection()) {
