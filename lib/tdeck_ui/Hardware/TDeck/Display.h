@@ -36,6 +36,9 @@ public:
      */
     static void set_spi_mutex(SemaphoreHandle_t mutex);
 
+    /** Get the SPI instance (for sharing with SD card) */
+    static SPIClass* get_spi() { return _spi; }
+
     /**
      * Initialize display and LVGL
      * @return true if initialization successful

@@ -13,7 +13,6 @@ namespace Hardware {
 namespace TDeck {
 
 SemaphoreHandle_t SDAccess::_spi_mutex = nullptr;
-SPIClass* SDAccess::_sd_spi = nullptr;
 bool SDAccess::_ready = false;
 
 bool SDAccess::init(SemaphoreHandle_t mutex) {
@@ -25,22 +24,24 @@ bool SDAccess::init(SemaphoreHandle_t mutex) {
 
     _spi_mutex = mutex;
 
-    // Drive SD CS high before init to avoid bus contention
+    // Drive ALL SPI CS lines high to deselect other devices on the bus.
+    pinMode(Pin::DISPLAY_CS, OUTPUT);
+    digitalWrite(Pin::DISPLAY_CS, HIGH);
+    pinMode(Radio::LORA_CS, OUTPUT);
+    digitalWrite(Radio::LORA_CS, HIGH);
     pinMode(SDCard::CS, OUTPUT);
     digitalWrite(SDCard::CS, HIGH);
 
-    // Acquire mutex for SD.begin() since it reconfigures SPI
+    // Acquire mutex for SD.begin()
     if (xSemaphoreTake(_spi_mutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
         Serial.println("[SDAccess] Failed to acquire SPI mutex for init");
         return false;
     }
 
-    // Create SPIClass on HSPI — attaches to same hardware peripheral
-    // as display and LoRa, but SD.begin() needs its own instance
-    _sd_spi = new SPIClass(HSPI);
-    _sd_spi->begin(Pin::DISPLAY_SCK, Radio::SPI_MISO, Pin::DISPLAY_MOSI, SDCard::CS);
+    // SD card init: use global SPI (FSPI) before Display claims HSPI
+    SPI.begin(Pin::DISPLAY_SCK, Radio::SPI_MISO, Pin::DISPLAY_MOSI);
 
-    bool ok = SD.begin(SDCard::CS, *_sd_spi, SD_SPI_FREQ);
+    bool ok = SD.begin(SDCard::CS, SPI, SD_SPI_FREQ);
 
     xSemaphoreGive(_spi_mutex);
 

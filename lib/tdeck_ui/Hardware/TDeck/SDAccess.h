@@ -29,9 +29,9 @@ namespace TDeck {
 class SDAccess {
 public:
     /**
-     * Initialize SD card on the shared HSPI bus.
-     * Creates its own SPIClass(HSPI) attached to the same hardware
-     * peripheral, then calls SD.begin() with that instance.
+     * Initialize SD card on the shared SPI bus.
+     * Must be called BEFORE Display::init() to avoid SPI peripheral conflicts.
+     * Uses the global SPI (FSPI) instance matching LilyGo's reference code.
      *
      * @param mutex Shared SPI bus mutex (created in main.cpp)
      * @return true if SD card mounted successfully
@@ -66,10 +66,9 @@ public:
 
 private:
     static SemaphoreHandle_t _spi_mutex;
-    static SPIClass* _sd_spi;
     static bool _ready;
 
-    static constexpr uint32_t SD_SPI_FREQ = 20000000;  // 20MHz for SD card
+    static constexpr uint32_t SD_SPI_FREQ = 800000;  // 800kHz (matches LilyGo example)
 };
 
 } // namespace TDeck

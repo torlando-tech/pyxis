@@ -88,7 +88,9 @@ bool Display::init_hardware_only() {
 
     // Initialize SPI
     _spi = new SPIClass(HSPI);
-    _spi->begin(Pin::DISPLAY_SCK, -1, Pin::DISPLAY_MOSI, Pin::DISPLAY_CS);
+    // Include MISO (pin 38) even though display is write-only — SD card and
+    // LoRa share this SPI instance and need MISO for read operations.
+    _spi->begin(Pin::DISPLAY_SCK, Radio::SPI_MISO, Pin::DISPLAY_MOSI, Pin::DISPLAY_CS);
 
     // Configure CS and DC pins
     pinMode(Pin::DISPLAY_CS, OUTPUT);

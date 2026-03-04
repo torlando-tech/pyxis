@@ -1277,11 +1277,23 @@ void setup() {
         }
     }
 
-    // Create shared SPI bus mutex (display, LoRa, SD card all share HSPI)
+    // Create shared SPI bus mutex (display, LoRa, SD card all share SPI)
     SemaphoreHandle_t spi_mutex = xSemaphoreCreateMutex();
     if (!spi_mutex) {
         ERROR("Failed to create SPI bus mutex!");
     }
+
+    // Try SD card FIRST, before display claims pins — matches LilyGo init order.
+    // Uses global SPI (FSPI) with no competing peripheral on the bus.
+    BOOT_PROFILE_START("sd_card");
+    if (spi_mutex) {
+        if (Hardware::TDeck::SDAccess::init(spi_mutex)) {
+            INFO("SD card initialized on shared SPI bus");
+        } else {
+            INFO("SD card not available (no card inserted?)");
+        }
+    }
+    BOOT_PROFILE_END("sd_card");
 
     // Set SPI mutex on Display before init (null-safe if mutex creation failed)
     Hardware::TDeck::Display::set_spi_mutex(spi_mutex);
@@ -1301,20 +1313,12 @@ void setup() {
     setup_reticulum();
     BOOT_PROFILE_END("reticulum");
 
-    // Initialize SD card on shared SPI bus (after display + LoRa)
-    BOOT_PROFILE_START("sd_card");
-    if (spi_mutex) {
-        if (Hardware::TDeck::SDAccess::init(spi_mutex)) {
-            INFO("SD card initialized on shared SPI bus");
-            // Initialize SD logging now that SDAccess is ready
-            if (Hardware::TDeck::SDLogger::init()) {
-                INFO("SD card logging active");
-            }
-        } else {
-            INFO("SD card not available (no card inserted?)");
+    // Initialize SD logging (SDAccess already initialized above)
+    if (Hardware::TDeck::SDAccess::is_ready()) {
+        if (Hardware::TDeck::SDLogger::init()) {
+            INFO("SD card logging active");
         }
     }
-    BOOT_PROFILE_END("sd_card");
 
     // Initialize LXMF
     BOOT_PROFILE_START("lxmf");
