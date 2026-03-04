@@ -51,6 +51,44 @@ jobs:
           BOOT_APP0=$(find ~/.platformio -name "boot_app0.bin" | head -1)
           cp "$BOOT_APP0" docs/flasher/firmware/
 
+          # For tagged releases, also deploy to a versioned path on GitHub Pages
+          # so the flasher can fetch them same-origin (GitHub release downloads lack CORS)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            mkdir -p "docs/flasher/firmware/releases/${TAG}"
+            cp .pio/build/tdeck/bootloader.bin "docs/flasher/firmware/releases/${TAG}/"
+            cp .pio/build/tdeck/partitions.bin "docs/flasher/firmware/releases/${TAG}/"
+            cp .pio/build/tdeck/firmware.bin "docs/flasher/firmware/releases/${TAG}/"
+            cp "$BOOT_APP0" "docs/flasher/firmware/releases/${TAG}/"
+          fi
+
+      - name: Download existing release assets for GitHub Pages
+        run: |
+          # Fetch all published releases and download their firmware assets
+          # so versioned firmware is available same-origin on GitHub Pages.
+          # With keep_files: true, each release only needs to be downloaded once.
+          for tag in $(gh api repos/${{ github.repository }}/releases --jq '.[].tag_name'); do
+            dir="docs/flasher/firmware/releases/${tag}"
+            # Skip if we already have this version's firmware (e.g., current tagged build)
+            if [ -f "${dir}/firmware.bin" ]; then
+              echo "Skipping ${tag} — already present"
+              continue
+            fi
+            mkdir -p "${dir}"
+            echo "Downloading assets for ${tag}..."
+            for asset in bootloader.bin partitions.bin boot_app0.bin firmware.bin; do
+              url="https://github.com/${{ github.repository }}/releases/download/${tag}/${asset}"
+              if curl -sL -o "${dir}/${asset}" -w '%{http_code}' "${url}" | grep -q 200; then
+                echo "  ${asset} OK"
+              else
+                rm -f "${dir}/${asset}"
+                echo "  ${asset} not found"
+              fi
+            done
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Generate manifest files
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
@@ -94,6 +132,7 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./docs/flasher
           destination_dir: flasher
+          keep_files: true
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
