@@ -87,14 +87,12 @@ bool SX1262Interface::start() {
     pinMode(SX1262Pins::CS, OUTPUT);
     digitalWrite(SX1262Pins::CS, HIGH);
 
-    // Create SPI instance for LoRa using HSPI (same bus as display)
-    // Display uses HSPI without MISO (write-only), we add MISO for radio reads
-    // SCK=40, MISO=38, MOSI=41
-    _lora_spi = new SPIClass(HSPI);
-    _lora_spi->begin(40, SX1262Pins::SPI_MISO, 41, SX1262Pins::CS);
-    DEBUG("SX1262Interface: HSPI initialized (SCK=40, MISO=38, MOSI=41, CS=9)");
+    // Use global SPI (FSPI) — all peripherals share same SPI peripheral
+    // to avoid GPIO matrix conflicts. SPI.begin() already called by SDAccess or Display.
+    _lora_spi = &SPI;
+    DEBUG("SX1262Interface: Using global SPI (FSPI) for LoRa");
 
-    // Create RadioLib module and radio with our SPI instance
+    // Create RadioLib module and radio with the shared SPI instance
     _module = new Module(SX1262Pins::CS, SX1262Pins::DIO1, SX1262Pins::RST, SX1262Pins::BUSY, *_lora_spi);
     _radio = new SX1262(_module);
 

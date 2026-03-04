@@ -41,7 +41,8 @@ bool SDAccess::init(SemaphoreHandle_t mutex) {
     // SD card init: use global SPI (FSPI) before Display claims HSPI
     SPI.begin(Pin::DISPLAY_SCK, Radio::SPI_MISO, Pin::DISPLAY_MOSI);
 
-    bool ok = SD.begin(SDCard::CS, SPI, SD_SPI_FREQ);
+    // format_if_empty=true auto-formats unformatted cards as FAT
+    bool ok = SD.begin(SDCard::CS, SPI, SD_SPI_FREQ, "/sd", 5, true);
 
     xSemaphoreGive(_spi_mutex);
 

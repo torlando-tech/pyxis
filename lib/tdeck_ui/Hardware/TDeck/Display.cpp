@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "Display.h"
+#include "SDAccess.h"
 
 #ifdef ARDUINO
 
@@ -86,11 +87,14 @@ bool Display::init_hardware_only() {
     ledcAttachPin(Pin::DISPLAY_BACKLIGHT, Disp::BACKLIGHT_CHANNEL);
     set_brightness(_brightness);
 
-    // Initialize SPI
-    _spi = new SPIClass(HSPI);
-    // Include MISO (pin 38) even though display is write-only — SD card and
-    // LoRa share this SPI instance and need MISO for read operations.
-    _spi->begin(Pin::DISPLAY_SCK, Radio::SPI_MISO, Pin::DISPLAY_MOSI, Pin::DISPLAY_CS);
+    // Use global SPI (FSPI) — all peripherals (display, LoRa, SD card) must
+    // share the same SPI peripheral to avoid GPIO matrix pin conflicts.
+    // SDAccess::init() already called SPI.begin() with correct pins.
+    _spi = &SPI;
+    if (!SDAccess::is_ready()) {
+        // SD didn't init (no card) — we need to init SPI ourselves
+        _spi->begin(Pin::DISPLAY_SCK, Radio::SPI_MISO, Pin::DISPLAY_MOSI, Pin::DISPLAY_CS);
+    }
 
     // Configure CS and DC pins
     pinMode(Pin::DISPLAY_CS, OUTPUT);
