@@ -63,7 +63,8 @@
 // Logging
 #include <Log.h>
 
-// SD Card logging for crash debugging
+// SD Card access and logging
+#include <Hardware/TDeck/SDAccess.h>
 #include <Hardware/TDeck/SDLogger.h>
 
 // OTA flashing
@@ -1276,18 +1277,44 @@ void setup() {
         }
     }
 
+    // Create shared SPI bus mutex (display, LoRa, SD card all share HSPI)
+    SemaphoreHandle_t spi_mutex = xSemaphoreCreateMutex();
+    if (!spi_mutex) {
+        ERROR("Failed to create SPI bus mutex!");
+    }
+
+    // Set SPI mutex on Display before init (null-safe if mutex creation failed)
+    Hardware::TDeck::Display::set_spi_mutex(spi_mutex);
+
     // Initialize LVGL and hardware drivers
     BOOT_PROFILE_START("lvgl");
     setup_lvgl_and_ui();
     BOOT_PROFILE_END("lvgl");
 
-    // NOTE: SD card logging disabled - shares SPI with display and causes blank screen
-    // TODO: Need to reinitialize display SPI after SD.begin() or use separate bus
+    // Set SPI mutex on LoRa interface (before setup_reticulum creates it)
+    if (spi_mutex) {
+        SX1262Interface::set_spi_mutex(spi_mutex);
+    }
 
-    // Initialize Reticulum
+    // Initialize Reticulum (includes LoRa on shared SPI bus)
     BOOT_PROFILE_START("reticulum");
     setup_reticulum();
     BOOT_PROFILE_END("reticulum");
+
+    // Initialize SD card on shared SPI bus (after display + LoRa)
+    BOOT_PROFILE_START("sd_card");
+    if (spi_mutex) {
+        if (Hardware::TDeck::SDAccess::init(spi_mutex)) {
+            INFO("SD card initialized on shared SPI bus");
+            // Initialize SD logging now that SDAccess is ready
+            if (Hardware::TDeck::SDLogger::init()) {
+                INFO("SD card logging active");
+            }
+        } else {
+            INFO("SD card not available (no card inserted?)");
+        }
+    }
+    BOOT_PROFILE_END("sd_card");
 
     // Initialize LXMF
     BOOT_PROFILE_START("lxmf");

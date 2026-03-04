@@ -14,11 +14,16 @@ namespace Hardware {
 namespace TDeck {
 
 SPIClass* Display::_spi = nullptr;
+SemaphoreHandle_t Display::_spi_mutex = nullptr;
 uint8_t Display::_brightness = Disp::BACKLIGHT_DEFAULT;
 bool Display::_initialized = false;
 volatile uint32_t Display::_flush_count = 0;
 volatile uint32_t Display::_last_flush_ms = 0;
 uint32_t Display::_last_health_log_ms = 0;
+
+void Display::set_spi_mutex(SemaphoreHandle_t mutex) {
+    _spi_mutex = mutex;
+}
 
 bool Display::init() {
     if (_initialized) {
@@ -157,6 +162,9 @@ uint8_t Display::get_brightness() {
 }
 
 void Display::set_power(bool on) {
+    if (_spi_mutex && xSemaphoreTake(_spi_mutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+        return;
+    }
     if (on) {
         write_command(Command::DISPON);
         set_brightness(_brightness);
@@ -164,9 +172,13 @@ void Display::set_power(bool on) {
         set_brightness(0);
         write_command(Command::DISPOFF);
     }
+    if (_spi_mutex) xSemaphoreGive(_spi_mutex);
 }
 
 void Display::fill_screen(uint16_t color) {
+    if (_spi_mutex && xSemaphoreTake(_spi_mutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+        return;
+    }
     set_addr_window(0, 0, Disp::WIDTH - 1, Disp::HEIGHT - 1);
 
     begin_write();
@@ -181,10 +193,15 @@ void Display::fill_screen(uint16_t color) {
         write_data(color_bytes, 2);
     }
     end_write();
+    if (_spi_mutex) xSemaphoreGive(_spi_mutex);
 }
 
 void Display::draw_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) {
     if (x < 0 || y < 0 || x + w > Disp::WIDTH || y + h > Disp::HEIGHT) {
+        return;
+    }
+
+    if (_spi_mutex && xSemaphoreTake(_spi_mutex, pdMS_TO_TICKS(200)) != pdTRUE) {
         return;
     }
 
@@ -201,9 +218,16 @@ void Display::draw_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t col
         write_data(color_bytes, 2);
     }
     end_write();
+    if (_spi_mutex) xSemaphoreGive(_spi_mutex);
 }
 
 void Display::lvgl_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {
+    if (_spi_mutex && xSemaphoreTake(_spi_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        // Skip this frame — LVGL will retry next tick
+        lv_disp_flush_ready(drv);
+        return;
+    }
+
     uint32_t start = millis();
 
     int32_t w = area->x2 - area->x1 + 1;
@@ -220,6 +244,8 @@ void Display::lvgl_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_
     write_data((const uint8_t*)color_p, len);
 
     end_write();
+
+    if (_spi_mutex) xSemaphoreGive(_spi_mutex);
 
     _flush_count++;
     _last_flush_ms = millis();

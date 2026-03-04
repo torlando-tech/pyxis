@@ -12,9 +12,17 @@
 using namespace RNS;
 
 #ifdef ARDUINO
-// Static members for SPI mutex (shared with display)
+// Static members for SPI mutex (shared with display and SD card)
 SemaphoreHandle_t SX1262Interface::_spi_mutex = nullptr;
 bool SX1262Interface::_mutex_initialized = false;
+
+void SX1262Interface::set_spi_mutex(SemaphoreHandle_t mutex) {
+    _spi_mutex = mutex;
+    _mutex_initialized = (mutex != nullptr);
+    if (_mutex_initialized) {
+        DEBUG("SX1262Interface: Using external SPI mutex");
+    }
+}
 #endif
 
 SX1262Interface::SX1262Interface(const char* name) : InterfaceImpl(name) {
@@ -58,15 +66,15 @@ bool SX1262Interface::start() {
     INFO("  CR: 4/" + std::to_string(_config.coding_rate));
     INFO("  TX Power: " + std::to_string(_config.tx_power) + " dBm");
 
-    // Initialize SPI mutex if not already done
+    // Use external mutex if provided, otherwise create our own (fallback)
     if (!_mutex_initialized) {
+        WARNING("SX1262Interface: No external SPI mutex set, creating own");
         _spi_mutex = xSemaphoreCreateMutex();
         if (_spi_mutex == nullptr) {
             ERROR("SX1262Interface: Failed to create SPI mutex");
             return false;
         }
         _mutex_initialized = true;
-        DEBUG("SX1262Interface: SPI mutex created");
     }
 
     // Acquire SPI mutex

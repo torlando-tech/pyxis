@@ -5,6 +5,7 @@
 #define HARDWARE_TDECK_SDLOGGER_H
 
 #include "Config.h"
+#include "SDAccess.h"
 #include <Log.h>
 
 #ifdef ARDUINO
@@ -29,10 +30,10 @@ namespace TDeck {
 class SDLogger {
 public:
     /**
-     * Initialize SD card and set up logging callback.
-     * Must be called after SPI bus is initialized (after display init).
+     * Initialize SD logging. Must be called after SDAccess::init().
+     * Uses the shared SPI mutex from SDAccess for all file operations.
      *
-     * @return true if SD card mounted and logging active
+     * @return true if SD card accessible and logging active
      */
     static bool init();
 
