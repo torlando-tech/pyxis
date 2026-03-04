@@ -10,6 +10,8 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <lvgl.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 namespace Hardware {
 namespace TDeck {
@@ -27,6 +29,16 @@ namespace TDeck {
  */
 class Display {
 public:
+    /**
+     * Set the shared SPI bus mutex. Call before init().
+     * If not set, Display operates without mutex protection
+     * (safe during early boot before other SPI users exist).
+     */
+    static void set_spi_mutex(SemaphoreHandle_t mutex);
+
+    /** Get the SPI instance (for sharing with SD card) */
+    static SPIClass* get_spi() { return _spi; }
+
     /**
      * Initialize display and LVGL
      * @return true if initialization successful
@@ -131,6 +143,7 @@ private:
     };
 
     static SPIClass* _spi;
+    static SemaphoreHandle_t _spi_mutex;
     static uint8_t _brightness;
     static bool _initialized;
 

@@ -51,6 +51,12 @@ public:
     virtual ~SX1262Interface();
 
     /**
+     * Set the shared SPI bus mutex. Call before start().
+     * If set, the interface uses this mutex instead of creating its own.
+     */
+    static void set_spi_mutex(SemaphoreHandle_t mutex);
+
+    /**
      * Set configuration before calling start().
      * Changes take effect on next start().
      */

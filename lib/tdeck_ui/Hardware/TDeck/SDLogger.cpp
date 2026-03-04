@@ -25,24 +25,21 @@ bool SDLogger::init() {
     }
     _initialized = true;
 
-    // Initialize SD card on shared SPI bus
-    // Note: SPI should already be initialized by display
-    if (!SD.begin(SDCard::CS)) {
-        Serial.println("[SDLogger] SD card mount failed");
+    // SDAccess must already be initialized (handles SD.begin with mutex)
+    if (!SDAccess::is_ready()) {
+        Serial.println("[SDLogger] SDAccess not ready, skipping SD logging");
         return false;
     }
 
-    // Check card type
-    uint8_t cardType = SD.cardType();
-    if (cardType == CARD_NONE) {
-        Serial.println("[SDLogger] No SD card detected");
+    // Open log file with mutex protection
+    if (!SDAccess::acquire_bus(1000)) {
+        Serial.println("[SDLogger] Failed to acquire SPI mutex for log file open");
         return false;
     }
 
-    // Open or create log file
-    // Use append mode to preserve history across reboots
     _logFile = SD.open(CURRENT_LOG, FILE_APPEND);
     if (!_logFile) {
+        SDAccess::release_bus();
         Serial.println("[SDLogger] Failed to open log file");
         return false;
     }
@@ -55,6 +52,8 @@ bool SDLogger::init() {
     _logFile.println("========================================\n");
     _logFile.flush();
 
+    SDAccess::release_bus();
+
     _bytes_written = 0;
     _last_flush = millis();
     _line_count = 0;
@@ -64,7 +63,6 @@ bool SDLogger::init() {
     RNS::setLogCallback(logCallback);
 
     Serial.println("[SDLogger] SD card logging active");
-    Serial.printf("[SDLogger] Card size: %lluMB\n", SD.cardSize() / (1024 * 1024));
 
     return true;
 }
@@ -85,6 +83,10 @@ void SDLogger::logCallback(const char* msg, RNS::LogLevel level) {
 }
 
 void SDLogger::writeToFile(const char* msg, RNS::LogLevel level) {
+    if (!SDAccess::acquire_bus(50)) {
+        return;  // Skip this log line rather than block the caller
+    }
+
     // Format: timestamp [LEVEL] message
     int written = _logFile.printf("%s [%s] %s\n",
                                   RNS::getTimeString(),
@@ -118,28 +120,34 @@ void SDLogger::writeToFile(const char* msg, RNS::LogLevel level) {
         _line_count = 0;
     }
 
-    // Check if we need to rotate
+    // Check if we need to rotate (still holding mutex)
     if (_bytes_written >= MAX_LOG_SIZE) {
         rotateIfNeeded();
     }
+
+    SDAccess::release_bus();
 }
 
 void SDLogger::flush() {
     if (_active && _logFile) {
+        if (!SDAccess::acquire_bus(100)) return;
         _logFile.flush();
         _last_flush = millis();
         _line_count = 0;
+        SDAccess::release_bus();
     }
 }
 
 void SDLogger::marker(const char* msg) {
     if (_active && _logFile) {
+        if (!SDAccess::acquire_bus(200)) return;
         _logFile.println("----------------------------------------");
         _logFile.printf(">>> MARKER: %s <<<\n", msg);
         _logFile.printf(">>> Heap: %lu / Min: %lu <<<\n",
                        ESP.getFreeHeap(), ESP.getMinFreeHeap());
         _logFile.println("----------------------------------------");
         _logFile.flush();
+        SDAccess::release_bus();
     }
 }
 
@@ -175,9 +183,12 @@ void SDLogger::rotateIfNeeded() {
 
 void SDLogger::close() {
     if (_active && _logFile) {
-        _logFile.println("\n=== LOG CLOSED CLEANLY ===");
-        _logFile.flush();
-        _logFile.close();
+        if (SDAccess::acquire_bus(500)) {
+            _logFile.println("\n=== LOG CLOSED CLEANLY ===");
+            _logFile.flush();
+            _logFile.close();
+            SDAccess::release_bus();
+        }
         _active = false;
     }
     // Restore default logging
