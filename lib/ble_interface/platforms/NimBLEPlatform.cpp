@@ -1743,7 +1743,8 @@ bool NimBLEPlatform::write(uint16_t conn_handle, const Bytes& data, bool respons
     }
 
     if (!rxChar) {
-        WARNING("NimBLEPlatform::write: RX char not found for handle " + std::to_string(conn_handle));
+        WARNING("NimBLEPlatform::write: RX char not cached for handle " + std::to_string(conn_handle) +
+                " (discoverServices() not yet called or failed?)");
         return false;
     }
 
