@@ -1458,12 +1458,17 @@ bool NimBLEPlatform::discoverServices(uint16_t conn_handle) {
         return false;
     }
 
-    auto client_it = _clients.find(conn_handle);
-    if (client_it == _clients.end() || !client_it->second) {
+    NimBLEClient* client = nullptr;
+    if (xSemaphoreTake(_conn_mutex, pdMS_TO_TICKS(100))) {
+        auto client_it = _clients.find(conn_handle);
+        if (client_it != _clients.end()) {
+            client = client_it->second;
+        }
+        xSemaphoreGive(_conn_mutex);
+    }
+    if (!client) {
         return false;
     }
-
-    NimBLEClient* client = client_it->second;
 
     // Get our service — blocking GATT operation
     NimBLERemoteService* service = client->getService(UUID::SERVICE);
