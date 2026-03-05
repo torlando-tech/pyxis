@@ -14,6 +14,8 @@
 #include "Packet.h"
 #include "Transport.h"
 #include "Destination.h"
+#include <TinyGPSPlus.h>
+#include "Utilities/OS.h"
 
 using namespace RNS;
 
@@ -52,8 +54,10 @@ UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::Me
       _settings_screen(nullptr),
       _propagation_nodes_screen(nullptr),
       _call_screen(nullptr),
+      _map_screen(nullptr),
       _propagation_manager(nullptr),
       _ble_interface(nullptr),
+      _gps(nullptr),
       _initialized(false),
       _call_state(CallState::IDLE),
       _lxst_audio(nullptr),
@@ -85,6 +89,7 @@ UIManager::~UIManager() {
     if (_settings_screen) delete _settings_screen;
     if (_propagation_nodes_screen) delete _propagation_nodes_screen;
     if (_call_screen) delete _call_screen;
+    if (_map_screen) delete _map_screen;
 }
 
 bool UIManager::init() {
@@ -105,6 +110,7 @@ bool UIManager::init() {
     _settings_screen = new SettingsScreen();
     _propagation_nodes_screen = new PropagationNodesScreen();
     _call_screen = new CallScreen();
+    _map_screen = new MapScreen();
 
     // Set up callbacks for conversation list screen
     _conversation_list_screen->set_conversation_selected_callback(
@@ -255,6 +261,26 @@ bool UIManager::init() {
         [this]() { show_status(); }
     );
 
+    // Set up callback for map button in conversation list
+    _conversation_list_screen->set_map_callback(
+        [this]() { show_map(); }
+    );
+
+    // Set up callback for map screen back button
+    _map_screen->set_back_callback(
+        [this]() { show_conversation_list(); }
+    );
+
+    // Set up location sharing callback for chat screen
+    _chat_screen->set_location_share_callback(
+        [this](int duration_index) {
+            on_location_share_requested(_current_peer_hash, duration_index);
+        }
+    );
+
+    // Load telemetry state from SPIFFS
+    _telemetry_manager.load();
+
     // Set identity hash and LXMF address on status screen
     _status_screen->set_identity_hash(_router.identity().hash());
     _status_screen->set_lxmf_address(_router.delivery_destination().hash());
@@ -322,6 +348,18 @@ void UIManager::update() {
         if (_current_screen == SCREEN_STATUS && _status_screen) {
             _status_screen->refresh();
         }
+        // Update map GPS position if visible
+        if (_current_screen == SCREEN_MAP && _map_screen) {
+            _map_screen->update_gps_position();
+            update_map_peer_markers();
+        }
+
+        // Update telemetry: check expired sessions, send to peers
+        uint32_t time_now = (uint32_t)Utilities::OS::time();
+        std::vector<Bytes> peers_to_send = _telemetry_manager.update(time_now);
+        for (const auto& peer : peers_to_send) {
+            send_telemetry(peer);
+        }
     }
 }
 
@@ -338,6 +376,7 @@ void UIManager::show_conversation_list() {
     _settings_screen->hide();
     _propagation_nodes_screen->hide();
     if (_call_screen) _call_screen->hide();
+    if (_map_screen) _map_screen->hide();
 
     _current_screen = SCREEN_CONVERSATION_LIST;
 }
@@ -351,6 +390,7 @@ void UIManager::show_chat(const Bytes& peer_hash) {
     _current_peer_hash = peer_hash;
 
     _chat_screen->load_conversation(peer_hash, _store);
+    _chat_screen->set_sharing_state(_telemetry_manager.is_sharing(peer_hash));
     _chat_screen->show();
     _conversation_list_screen->hide();
     _compose_screen->hide();
@@ -359,6 +399,7 @@ void UIManager::show_chat(const Bytes& peer_hash) {
     _settings_screen->hide();
     _propagation_nodes_screen->hide();
     if (_call_screen) _call_screen->hide();
+    if (_map_screen) _map_screen->hide();
 
     _current_screen = SCREEN_CHAT;
 }
@@ -375,6 +416,7 @@ void UIManager::show_compose() {
     _status_screen->hide();
     _settings_screen->hide();
     _propagation_nodes_screen->hide();
+    if (_map_screen) _map_screen->hide();
 
     _current_screen = SCREEN_COMPOSE;
 }
@@ -391,6 +433,7 @@ void UIManager::show_announces() {
     _status_screen->hide();
     _settings_screen->hide();
     _propagation_nodes_screen->hide();
+    if (_map_screen) _map_screen->hide();
 
     _current_screen = SCREEN_ANNOUNCES;
 }
@@ -451,8 +494,26 @@ void UIManager::show_status() {
     _announce_list_screen->hide();
     _settings_screen->hide();
     _propagation_nodes_screen->hide();
+    if (_map_screen) _map_screen->hide();
 
     _current_screen = SCREEN_STATUS;
+}
+
+void UIManager::show_map() {
+    LVGL_LOCK();
+    INFO("Showing map screen");
+
+    _map_screen->show();
+    _conversation_list_screen->hide();
+    _chat_screen->hide();
+    _compose_screen->hide();
+    _announce_list_screen->hide();
+    _status_screen->hide();
+    _settings_screen->hide();
+    _propagation_nodes_screen->hide();
+    if (_call_screen) _call_screen->hide();
+
+    _current_screen = SCREEN_MAP;
 }
 
 void UIManager::on_conversation_selected(const Bytes& peer_hash) {
@@ -475,6 +536,7 @@ void UIManager::show_settings() {
     _announce_list_screen->hide();
     _status_screen->hide();
     _propagation_nodes_screen->hide();
+    if (_map_screen) _map_screen->hide();
 
     _current_screen = SCREEN_SETTINGS;
 }
@@ -513,6 +575,7 @@ void UIManager::show_propagation_nodes() {
     _announce_list_screen->hide();
     _status_screen->hide();
     _settings_screen->hide();
+    if (_map_screen) _map_screen->hide();
 
     _current_screen = SCREEN_PROPAGATION_NODES;
 }
@@ -535,8 +598,12 @@ void UIManager::set_ble_interface(Interface* iface) {
 }
 
 void UIManager::set_gps(TinyGPSPlus* gps) {
+    _gps = gps;
     if (_conversation_list_screen) {
         _conversation_list_screen->set_gps(gps);
+    }
+    if (_map_screen) {
+        _map_screen->set_gps(gps);
     }
 }
 
@@ -755,6 +822,29 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
         }
     }
 
+    // Check for telemetry fields
+    const Bytes* telemetry_field = message.fields_get(Bytes({Telemetry::FIELD_TELEMETRY}));
+    if (telemetry_field) {
+        Telemetry::LocationData loc = Telemetry::decode_telemetry(*telemetry_field);
+        if (loc.valid) {
+            _telemetry_manager.on_location_received(message.source_hash(), loc);
+            if (_current_screen == SCREEN_MAP) {
+                update_map_peer_markers();
+            }
+        }
+    }
+
+    // Check for Columba cease signal
+    const Bytes* meta_field = message.fields_get(Bytes({Telemetry::FIELD_COLUMBA_META}));
+    if (meta_field) {
+        if (Telemetry::decode_columba_cease(*meta_field)) {
+            _telemetry_manager.on_cease_received(message.source_hash());
+            if (_current_screen == SCREEN_MAP) {
+                update_map_peer_markers();
+            }
+        }
+    }
+
     // Update conversation list unread count
     // TODO: Track unread counts
     _conversation_list_screen->refresh();
@@ -814,7 +904,140 @@ void UIManager::refresh_current_screen() {
             break;
         case SCREEN_QR:
             break;
+        case SCREEN_MAP:
+            break;
     }
+}
+
+// ── Telemetry / Location Sharing ──
+
+void UIManager::send_telemetry(const Bytes& peer_hash) {
+    if (!_gps || !_gps->location.isValid()) {
+        return;  // No GPS fix, skip
+    }
+
+    Telemetry::LocationData loc;
+    loc.lat = _gps->location.lat();
+    loc.lon = _gps->location.lng();
+    loc.altitude = _gps->altitude.isValid() ? _gps->altitude.meters() : 0.0;
+    loc.speed = _gps->speed.isValid() ? _gps->speed.mps() : 0.0;
+    loc.bearing = _gps->course.isValid() ? _gps->course.deg() : 0.0;
+    loc.accuracy = _gps->hdop.isValid() ? _gps->hdop.hdop() * 5.0 : 0.0;  // HDOP to approx meters
+    loc.timestamp = (uint32_t)Utilities::OS::time();
+
+    Bytes telemetry_data = Telemetry::encode_telemetry(loc);
+
+    // Find session to get end_time for Columba meta
+    uint32_t end_time = 0;
+    for (const auto& session : _telemetry_manager.get_sessions()) {
+        if (session.peer_hash == peer_hash) {
+            end_time = session.end_time;
+            break;
+        }
+    }
+
+    // Create a telemetry-only LXMF message (empty content)
+    Destination source = _router.delivery_destination();
+    Bytes content_bytes;
+    Bytes title;
+
+    Identity dest_identity = Identity::recall(peer_hash);
+    Destination destination(Type::NONE);
+    if (dest_identity) {
+        destination = Destination(dest_identity, Type::Destination::OUT,
+                                  Type::Destination::SINGLE, "lxmf", "delivery");
+    }
+
+    ::LXMF::LXMessage message(destination, source, content_bytes, title);
+    if (!dest_identity) {
+        message.destination_hash(peer_hash);
+    }
+
+    // Set telemetry field
+    message.fields_set(Bytes({Telemetry::FIELD_TELEMETRY}), telemetry_data);
+
+    // Set Columba meta field
+    Bytes meta = Telemetry::encode_columba_meta(end_time, 0, false);
+    message.fields_set(Bytes({Telemetry::FIELD_COLUMBA_META}), meta);
+
+    message.pack();
+    _router.handle_outbound(message);
+    // Note: telemetry messages are NOT saved to MessageStore (ephemeral)
+
+    DEBUG("Sent telemetry to peer");
+}
+
+void UIManager::send_cease(const Bytes& peer_hash) {
+    Destination source = _router.delivery_destination();
+    Bytes content_bytes;
+    Bytes title;
+
+    Identity dest_identity = Identity::recall(peer_hash);
+    Destination destination(Type::NONE);
+    if (dest_identity) {
+        destination = Destination(dest_identity, Type::Destination::OUT,
+                                  Type::Destination::SINGLE, "lxmf", "delivery");
+    }
+
+    ::LXMF::LXMessage message(destination, source, content_bytes, title);
+    if (!dest_identity) {
+        message.destination_hash(peer_hash);
+    }
+
+    Bytes meta = Telemetry::encode_columba_meta(0, 0, true);
+    message.fields_set(Bytes({Telemetry::FIELD_COLUMBA_META}), meta);
+
+    message.pack();
+    _router.handle_outbound(message);
+
+    INFO("Sent cease to peer");
+}
+
+void UIManager::on_location_share_requested(const Bytes& peer_hash, int duration_index) {
+    if (duration_index == 5) {
+        // Stop sharing
+        send_cease(peer_hash);
+        _telemetry_manager.stop_sharing(peer_hash);
+        _chat_screen->set_sharing_state(false);
+        return;
+    }
+
+    Telemetry::ShareDuration duration;
+    switch (duration_index) {
+        case 0: duration = Telemetry::ShareDuration::MINUTES_15; break;
+        case 1: duration = Telemetry::ShareDuration::HOURS_1; break;
+        case 2: duration = Telemetry::ShareDuration::HOURS_4; break;
+        case 3: duration = Telemetry::ShareDuration::UNTIL_MIDNIGHT; break;
+        case 4: duration = Telemetry::ShareDuration::INDEFINITE; break;
+        default: return;
+    }
+
+    _telemetry_manager.start_sharing(peer_hash, duration);
+    _chat_screen->set_sharing_state(true);
+
+    // Send initial telemetry immediately
+    send_telemetry(peer_hash);
+}
+
+void UIManager::update_map_peer_markers() {
+    if (!_map_screen) return;
+
+    const auto& locs = _telemetry_manager.get_received_locations();
+    if (locs.empty()) return;
+
+    // Convert to MapScreen::PeerLocation array
+    std::vector<MapScreen::PeerLocation> peer_locs;
+    peer_locs.reserve(locs.size());
+    for (const auto& loc : locs) {
+        MapScreen::PeerLocation pl;
+        pl.peer_hash = loc.peer_hash;
+        pl.lat = loc.lat;
+        pl.lon = loc.lon;
+        pl.timestamp = loc.timestamp;
+        peer_locs.push_back(pl);
+    }
+
+    _map_screen->update_peer_locations(peer_locs.data(), peer_locs.size());
 }
 
 // ── LXST Voice Call Implementation ──

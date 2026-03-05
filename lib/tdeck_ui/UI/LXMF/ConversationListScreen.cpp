@@ -158,12 +158,12 @@ void ConversationListScreen::create_bottom_nav() {
     lv_obj_set_flex_flow(_bottom_nav, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(_bottom_nav, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    // Bottom navigation buttons: Messages, Announces, Status, Settings
-    const char* icons[] = {LV_SYMBOL_ENVELOPE, LV_SYMBOL_BELL, LV_SYMBOL_BARS, LV_SYMBOL_SETTINGS};
+    // Bottom navigation buttons: Messages, Announces, Status, Map, Settings
+    const char* icons[] = {LV_SYMBOL_ENVELOPE, LV_SYMBOL_BELL, LV_SYMBOL_BARS, LV_SYMBOL_GPS, LV_SYMBOL_SETTINGS};
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 5; i++) {
         lv_obj_t* btn = lv_btn_create(_bottom_nav);
-        lv_obj_set_size(btn, 65, 28);
+        lv_obj_set_size(btn, 52, 28);
         lv_obj_set_user_data(btn, (void*)(intptr_t)i);
         lv_obj_set_style_bg_color(btn, Theme::surfaceInput(), 0);
         lv_obj_set_style_bg_color(btn, lv_color_hex(0x3a3a3a), LV_STATE_PRESSED);
@@ -359,6 +359,10 @@ void ConversationListScreen::set_announces_callback(AnnouncesCallback callback) 
 
 void ConversationListScreen::set_status_callback(StatusCallback callback) {
     _status_callback = callback;
+}
+
+void ConversationListScreen::set_map_callback(MapCallback callback) {
+    _map_callback = callback;
 }
 
 void ConversationListScreen::show() {
@@ -617,7 +621,12 @@ void ConversationListScreen::on_bottom_nav_clicked(lv_event_t* event) {
                 screen->_status_callback();
             }
             break;
-        case 3: // Settings
+        case 3: // Map
+            if (screen->_map_callback) {
+                screen->_map_callback();
+            }
+            break;
+        case 4: // Settings
             if (screen->_settings_callback) {
                 screen->_settings_callback();
             }

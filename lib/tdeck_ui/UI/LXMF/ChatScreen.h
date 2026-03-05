@@ -62,6 +62,7 @@ public:
     using BackCallback = std::function<void()>;
     using SendMessageCallback = std::function<void(const String& content)>;
     using CallCallback = std::function<void()>;
+    using LocationShareCallback = std::function<void(int duration_index)>;
 
     /**
      * Create chat screen
@@ -119,6 +120,18 @@ public:
     void set_call_callback(CallCallback callback);
 
     /**
+     * Set callback for location sharing
+     * @param callback Function called with duration index (0-4 for durations, 5 for stop)
+     */
+    void set_location_share_callback(LocationShareCallback callback);
+
+    /**
+     * Update location sharing button state
+     * @param active True if currently sharing location with this peer
+     */
+    void set_sharing_state(bool active);
+
+    /**
      * Show the screen
      */
     void show();
@@ -143,6 +156,7 @@ private:
     lv_obj_t* _btn_send;
     lv_obj_t* _btn_back;
     lv_obj_t* _btn_call;
+    lv_obj_t* _btn_location;
 
     RNS::Bytes _peer_hash;
     ::LXMF::MessageStore* _message_store;
@@ -154,6 +168,8 @@ private:
     BackCallback _back_callback;
     SendMessageCallback _send_message_callback;
     CallCallback _call_callback;
+    LocationShareCallback _location_share_callback;
+    bool _sharing_active;
 
     // UI construction
     void create_header();
@@ -164,6 +180,8 @@ private:
     // Event handlers
     static void on_back_clicked(lv_event_t* event);
     static void on_call_clicked(lv_event_t* event);
+    static void on_location_clicked(lv_event_t* event);
+    static void on_location_duration_selected(lv_event_t* event);
     static void on_send_clicked(lv_event_t* event);
     static void on_message_long_pressed(lv_event_t* event);
     static void on_copy_dialog_action(lv_event_t* event);

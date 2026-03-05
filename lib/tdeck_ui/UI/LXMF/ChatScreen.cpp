@@ -21,7 +21,9 @@ namespace LXMF {
 ChatScreen::ChatScreen(lv_obj_t* parent)
     : _screen(nullptr), _header(nullptr), _message_list(nullptr), _input_area(nullptr),
       _text_area(nullptr), _btn_send(nullptr), _btn_back(nullptr), _btn_call(nullptr),
-      _message_store(nullptr), _display_start_idx(0), _loading_more(false) {
+      _btn_location(nullptr),
+      _message_store(nullptr), _sharing_active(false),
+      _display_start_idx(0), _loading_more(false) {
     LVGL_LOCK();
 
     // Create screen object
@@ -85,8 +87,21 @@ void ChatScreen::create_header() {
     lv_obj_align(label_peer, LV_ALIGN_LEFT_MID, 60, 0);
     lv_obj_set_style_text_color(label_peer, Theme::textPrimary(), 0);
     lv_obj_set_style_text_font(label_peer, &lv_font_montserrat_16, 0);
-    lv_obj_set_width(label_peer, 195);
+    lv_obj_set_width(label_peer, 145);
     lv_label_set_long_mode(label_peer, LV_LABEL_LONG_DOT);
+
+    // Location share button (right of peer name, left of call button)
+    _btn_location = lv_btn_create(_header);
+    lv_obj_set_size(_btn_location, 40, 28);
+    lv_obj_align(_btn_location, LV_ALIGN_RIGHT_MID, -54, 0);
+    lv_obj_set_style_bg_color(_btn_location, Theme::btnSecondary(), 0);
+    lv_obj_set_style_bg_color(_btn_location, Theme::btnSecondaryPressed(), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(_btn_location, on_location_clicked, LV_EVENT_CLICKED, this);
+
+    lv_obj_t* label_loc = lv_label_create(_btn_location);
+    lv_label_set_text(label_loc, LV_SYMBOL_GPS);
+    lv_obj_center(label_loc);
+    lv_obj_set_style_text_color(label_loc, Theme::textSecondary(), 0);
 
     // Voice call button (right side of header)
     _btn_call = lv_btn_create(_header);
@@ -490,6 +505,22 @@ void ChatScreen::set_call_callback(CallCallback callback) {
     _call_callback = callback;
 }
 
+void ChatScreen::set_location_share_callback(LocationShareCallback callback) {
+    _location_share_callback = callback;
+}
+
+void ChatScreen::set_sharing_state(bool active) {
+    LVGL_LOCK();
+    _sharing_active = active;
+    if (_btn_location) {
+        if (active) {
+            lv_obj_set_style_bg_color(_btn_location, Theme::successDark(), 0);
+        } else {
+            lv_obj_set_style_bg_color(_btn_location, Theme::btnSecondary(), 0);
+        }
+    }
+}
+
 void ChatScreen::show() {
     LVGL_LOCK();
     lv_obj_clear_flag(_screen, LV_OBJ_FLAG_HIDDEN);
@@ -500,6 +531,7 @@ void ChatScreen::show() {
     lv_group_t* group = LVGL::LVGLInit::get_default_group();
     if (group) {
         if (_btn_back) lv_group_add_obj(group, _btn_back);
+        if (_btn_location) lv_group_add_obj(group, _btn_location);
         if (_btn_call) lv_group_add_obj(group, _btn_call);
         if (_btn_send) lv_group_add_obj(group, _btn_send);
 
@@ -516,6 +548,7 @@ void ChatScreen::hide() {
     lv_group_t* group = LVGL::LVGLInit::get_default_group();
     if (group) {
         if (_btn_back) lv_group_remove_obj(_btn_back);
+        if (_btn_location) lv_group_remove_obj(_btn_location);
         if (_btn_call) lv_group_remove_obj(_btn_call);
         if (_btn_send) lv_group_remove_obj(_btn_send);
     }
@@ -541,6 +574,55 @@ void ChatScreen::on_call_clicked(lv_event_t* event) {
     if (screen->_call_callback) {
         screen->_call_callback();
     }
+}
+
+void ChatScreen::on_location_clicked(lv_event_t* event) {
+    ChatScreen* screen = (ChatScreen*)lv_event_get_user_data(event);
+
+    // Show duration picker dialog
+    static const char* btns_sharing[] = {"15 min", "1 hour", "4 hours", ""};
+    static const char* btns_sharing2[] = {"Midnight", "Indefinite", "Stop", ""};
+
+    if (screen->_sharing_active) {
+        // Show stop option prominently
+        static const char* btns_stop[] = {"Stop", "Cancel", ""};
+        lv_obj_t* mbox = lv_msgbox_create(NULL, "Location Sharing",
+            "Currently sharing location.", btns_stop, false);
+        lv_obj_center(mbox);
+        lv_obj_add_event_cb(mbox, on_location_duration_selected, LV_EVENT_VALUE_CHANGED, screen);
+        // Tag with 100 to indicate stop dialog
+        lv_obj_set_user_data(mbox, (void*)100);
+    } else {
+        static const char* btns[] = {"15 min", "1 hour", "4 hours", ""};
+        lv_obj_t* mbox = lv_msgbox_create(NULL, "Share Location",
+            "Share your location for:", btns, false);
+        lv_obj_center(mbox);
+        lv_obj_add_event_cb(mbox, on_location_duration_selected, LV_EVENT_VALUE_CHANGED, screen);
+        lv_obj_set_user_data(mbox, (void*)0);
+    }
+}
+
+void ChatScreen::on_location_duration_selected(lv_event_t* event) {
+    lv_obj_t* mbox = lv_event_get_current_target(event);
+    ChatScreen* screen = (ChatScreen*)lv_event_get_user_data(event);
+    uint16_t btn_id = lv_msgbox_get_active_btn(mbox);
+    int dialog_type = (int)(intptr_t)lv_obj_get_user_data(mbox);
+
+    if (screen->_location_share_callback) {
+        if (dialog_type == 100) {
+            // Stop dialog: btn 0 = Stop, btn 1 = Cancel
+            if (btn_id == 0) {
+                screen->_location_share_callback(5);  // 5 = stop
+            }
+        } else {
+            // Duration dialog: btn 0 = 15min, btn 1 = 1hr, btn 2 = 4hr
+            if (btn_id <= 2) {
+                screen->_location_share_callback(btn_id);
+            }
+        }
+    }
+
+    lv_msgbox_close(mbox);
 }
 
 void ChatScreen::on_send_clicked(lv_event_t* event) {

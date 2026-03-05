@@ -17,6 +17,9 @@
 #include "SettingsScreen.h"
 #include "PropagationNodesScreen.h"
 #include "CallScreen.h"
+#include "MapScreen.h"
+#include "../../Telemetry/TelemetryManager.h"
+#include "../../Telemetry/TelemetryCodec.h"
 #include "LXMF/LXMRouter.h"
 #include "LXMF/PropagationNodeManager.h"
 #include "LXMF/MessageStore.h"
@@ -110,6 +113,11 @@ public:
     void show_settings();
 
     /**
+     * Show map screen
+     */
+    void show_map();
+
+    /**
      * Show propagation nodes screen
      */
     void show_propagation_nodes();
@@ -190,7 +198,8 @@ private:
         SCREEN_QR,
         SCREEN_SETTINGS,
         SCREEN_PROPAGATION_NODES,
-        SCREEN_CALL
+        SCREEN_CALL,
+        SCREEN_MAP
     };
 
     RNS::Reticulum& _reticulum;
@@ -210,9 +219,12 @@ private:
     SettingsScreen* _settings_screen;
     PropagationNodesScreen* _propagation_nodes_screen;
     CallScreen* _call_screen;
+    MapScreen* _map_screen;
 
     ::LXMF::PropagationNodeManager* _propagation_manager;
     RNS::Interface* _ble_interface;
+    TinyGPSPlus* _gps;
+    Telemetry::TelemetryManager _telemetry_manager;
 
     bool _initialized;
 
@@ -237,6 +249,10 @@ private:
 
     // LXMF message handling
     void send_message(const RNS::Bytes& dest_hash, const String& content);
+    void send_telemetry(const RNS::Bytes& peer_hash);
+    void send_cease(const RNS::Bytes& peer_hash);
+    void on_location_share_requested(const RNS::Bytes& peer_hash, int duration_index);
+    void update_map_peer_markers();
 
     // UI updates
     void refresh_current_screen();

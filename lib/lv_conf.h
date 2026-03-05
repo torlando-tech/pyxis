@@ -156,6 +156,7 @@
    3RD PARTY LIBRARIES
  *====================*/
 #define LV_USE_QRCODE 1
+#define LV_USE_PNG 1
 
 /*====================
    THEMES

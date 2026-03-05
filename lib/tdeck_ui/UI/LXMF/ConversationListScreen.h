@@ -67,6 +67,7 @@ public:
     using SettingsCallback = std::function<void()>;
     using AnnouncesCallback = std::function<void()>;
     using StatusCallback = std::function<void()>;
+    using MapCallback = std::function<void()>;
 
     /**
      * Create conversation list screen
@@ -132,6 +133,12 @@ public:
      * @param callback Function to call when status button is pressed
      */
     void set_status_callback(StatusCallback callback);
+
+    /**
+     * Set callback for map button
+     * @param callback Function to call when map button is pressed
+     */
+    void set_map_callback(MapCallback callback);
 
     /**
      * Show the screen
@@ -205,6 +212,7 @@ private:
     SettingsCallback _settings_callback;
     AnnouncesCallback _announces_callback;
     StatusCallback _status_callback;
+    MapCallback _map_callback;
 
     // UI construction
     void create_header();

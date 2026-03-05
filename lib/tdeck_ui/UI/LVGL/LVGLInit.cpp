@@ -12,6 +12,9 @@
 #include "../../Hardware/TDeck/Keyboard.h"
 #include "../../Hardware/TDeck/Touch.h"
 #include "../../Hardware/TDeck/Trackball.h"
+#include "../../Hardware/TDeck/LVGLFSDriver.h"
+#include <lvgl.h>
+#include "extra/libs/png/lv_png.h"
 
 using namespace RNS;
 using namespace Hardware::TDeck;
@@ -46,6 +49,9 @@ bool LVGLInit::init() {
     // Initialize LVGL library
     lv_init();
 
+    // Initialize PNG decoder (lodepng, ~25KB flash)
+    lv_png_init();
+
     // LVGL 8.x logging is configured via lv_conf.h LV_USE_LOG
     // No runtime callback registration needed
 
@@ -55,6 +61,9 @@ bool LVGLInit::init() {
         return false;
     }
     _display = lv_disp_get_default();
+
+    // Register LVGL filesystem driver for SD card (drive letter 'S')
+    Hardware::TDeck::LVGLFSDriver::init();
 
     INFO("  Display initialized");
 
