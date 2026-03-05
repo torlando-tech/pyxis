@@ -2576,6 +2576,9 @@ void NimBLEPlatform::updateConnectionMTU(uint16_t conn_handle, uint16_t mtu) {
             it->second.mtu = mtu - MTU::ATT_OVERHEAD;
         }
         xSemaphoreGive(_conn_mutex);
+    } else {
+        WARNING("NimBLEPlatform::updateConnectionMTU: mutex timeout for handle " +
+                std::to_string(conn_handle));
     }
 }
 
