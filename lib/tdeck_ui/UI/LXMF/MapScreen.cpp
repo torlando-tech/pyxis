@@ -10,6 +10,7 @@
 #include "Log.h"
 #include "../LVGL/LVGLInit.h"
 #include "../LVGL/LVGLLock.h"
+#include "../../Hardware/TDeck/TileDownloader.h"
 #include <TinyGPSPlus.h>
 
 using namespace RNS;
@@ -340,7 +341,10 @@ void MapScreen::pan(int dx, int dy) {
 }
 
 void MapScreen::load_tile(int slot, int tile_x, int tile_y, int z) {
-    // Build tile path: "S:tiles/{z}/{x}/{y}.png"
+    // Ensure tile is on SD (download if missing and WiFi available)
+    Hardware::TDeck::TileDownloader::ensure_tile(z, tile_x, tile_y);
+
+    // Build LVGL FS path: "S:tiles/{z}/{x}/{y}.png"
     char path[64];
     snprintf(path, sizeof(path), "S:tiles/%d/%d/%d.png", z, tile_x, tile_y);
 
