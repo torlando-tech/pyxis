@@ -749,6 +749,13 @@ void NimBLEPlatform::processPendingDisconnects() {
         }
 
         if (xSemaphoreTake(_conn_mutex, pdMS_TO_TICKS(100))) {
+            // Re-check under mutex: a write() on the other core may have
+            // called beginWriteOperation() between our check above and
+            // this mutex acquisition.
+            if (hasActiveWriteOperations()) {
+                xSemaphoreGive(_conn_mutex);
+                break;
+            }
             auto conn_it = _connections.find(pd.conn_handle);
             if (conn_it != _connections.end()) {
                 conn = conn_it->second;
@@ -1493,11 +1500,13 @@ bool NimBLEPlatform::discoverServices(uint16_t conn_handle) {
                 conn_it->second.identity_handle = idChar->getHandle();
             }
             conn_it->second.state = ConnectionState::READY;
-        }
-        _cached_rx_chars[conn_handle] = rxChar;
-        _cached_tx_chars[conn_handle] = txChar;
-        if (idChar) {
-            _cached_identity_chars[conn_handle] = idChar;
+            // Only cache if connection still exists — if it was deleted
+            // during blocking discovery, caching would leave dangling pointers.
+            _cached_rx_chars[conn_handle] = rxChar;
+            _cached_tx_chars[conn_handle] = txChar;
+            if (idChar) {
+                _cached_identity_chars[conn_handle] = idChar;
+            }
         }
         xSemaphoreGive(_conn_mutex);
     }
@@ -2126,6 +2135,9 @@ void NimBLEPlatform::onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) 
     if (xSemaphoreTake(_conn_mutex, pdMS_TO_TICKS(100))) {
         _connections[conn_handle] = conn;
         xSemaphoreGive(_conn_mutex);
+    } else {
+        WARNING("NimBLEPlatform: onConnect(server): mutex timeout, handle=" +
+                std::to_string(conn_handle) + " not tracked");
     }
 
     DEBUG("NimBLEPlatform: Central connected: " + conn.peer_address.toString() +
@@ -2231,6 +2243,9 @@ void NimBLEPlatform::onConnect(NimBLEClient* pClient) {
         _connections[conn_handle] = conn;
         _clients[conn_handle] = pClient;
         xSemaphoreGive(_conn_mutex);
+    } else {
+        WARNING("NimBLEPlatform: onConnect(client): mutex timeout, handle=" +
+                std::to_string(conn_handle) + " not tracked");
     }
 
     DEBUG("NimBLEPlatform: Connected to peripheral: " + peer_addr.toString() +
