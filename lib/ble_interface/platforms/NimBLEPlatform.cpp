@@ -740,6 +740,8 @@ void NimBLEPlatform::processPendingDisconnects() {
         bool found = false;
         bool is_peripheral = pd.is_peripheral;
 
+        NimBLEClient* client_to_delete = nullptr;
+
         if (xSemaphoreTake(_conn_mutex, pdMS_TO_TICKS(100))) {
             auto conn_it = _connections.find(pd.conn_handle);
             if (conn_it != _connections.end()) {
@@ -748,12 +750,12 @@ void NimBLEPlatform::processPendingDisconnects() {
                 found = true;
 
                 if (!pd.is_peripheral) {
-                    // Central mode: clean up client object and cached char pointer
+                    // Central mode: remove from maps, defer client deletion
+                    // until after mutex release to avoid use-after-free when
+                    // write() holds a pointer to a child characteristic.
                     auto client_it = _clients.find(pd.conn_handle);
                     if (client_it != _clients.end()) {
-                        if (client_it->second) {
-                            NimBLEDevice::deleteClient(client_it->second);
-                        }
+                        client_to_delete = client_it->second;
                         _clients.erase(client_it);
                     }
                     _cached_rx_chars.erase(pd.conn_handle);
@@ -763,6 +765,17 @@ void NimBLEPlatform::processPendingDisconnects() {
         } else {
             WARNING("NimBLEPlatform: Could not acquire mutex for disconnect processing");
             break;  // Retry next loop iteration
+        }
+
+        // Delete client AFTER releasing mutex — wait for any in-flight
+        // write() calls that may still hold a child characteristic pointer.
+        if (client_to_delete) {
+            int wait_ms = 0;
+            while (hasActiveWriteOperations() && wait_ms < 5000) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+                wait_ms += 10;
+            }
+            NimBLEDevice::deleteClient(client_to_delete);
         }
 
         if (found) {
@@ -1942,25 +1955,40 @@ ConnectionHandle NimBLEPlatform::getConnection(uint16_t handle) const {
 }
 
 size_t NimBLEPlatform::getConnectionCount() const {
-    return _connections.size();
+    size_t count = 0;
+    if (xSemaphoreTake(_conn_mutex, pdMS_TO_TICKS(50))) {
+        count = _connections.size();
+        xSemaphoreGive(_conn_mutex);
+    }
+    return count;
 }
 
 bool NimBLEPlatform::isConnectedTo(const BLEAddress& address) const {
-    for (const auto& kv : _connections) {
-        if (kv.second.peer_address == address) {
-            return true;
+    bool found = false;
+    if (xSemaphoreTake(_conn_mutex, pdMS_TO_TICKS(50))) {
+        for (const auto& kv : _connections) {
+            if (kv.second.peer_address == address) {
+                found = true;
+                break;
+            }
         }
+        xSemaphoreGive(_conn_mutex);
     }
-    return false;
+    return found;
 }
 
 bool NimBLEPlatform::isDeviceConnected(const std::string& addrKey) const {
-    for (const auto& kv : _connections) {
-        if (kv.second.peer_address.toString() == addrKey) {
-            return true;
+    bool found = false;
+    if (xSemaphoreTake(_conn_mutex, pdMS_TO_TICKS(50))) {
+        for (const auto& kv : _connections) {
+            if (kv.second.peer_address.toString() == addrKey) {
+                found = true;
+                break;
+            }
         }
+        xSemaphoreGive(_conn_mutex);
     }
-    return false;
+    return found;
 }
 
 //=============================================================================
