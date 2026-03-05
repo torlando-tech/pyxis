@@ -1513,7 +1513,8 @@ bool NimBLEPlatform::discoverServices(uint16_t conn_handle) {
         WARNING("NimBLEPlatform::discoverServices: mutex timeout, handle=" +
                 std::to_string(conn_handle));
         if (_on_services_discovered) {
-            ConnectionHandle conn = getConnection(conn_handle);
+            ConnectionHandle conn;
+            conn.handle = conn_handle;
             _on_services_discovered(conn, false);
         }
         return false;
