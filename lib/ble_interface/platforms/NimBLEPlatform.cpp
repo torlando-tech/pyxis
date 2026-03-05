@@ -1509,6 +1509,14 @@ bool NimBLEPlatform::discoverServices(uint16_t conn_handle) {
             }
         }
         xSemaphoreGive(_conn_mutex);
+    } else {
+        WARNING("NimBLEPlatform::discoverServices: mutex timeout, handle=" +
+                std::to_string(conn_handle));
+        if (_on_services_discovered) {
+            ConnectionHandle conn = getConnection(conn_handle);
+            _on_services_discovered(conn, false);
+        }
+        return false;
     }
 
     DEBUG("NimBLEPlatform: Services discovered for " + std::to_string(conn_handle));
