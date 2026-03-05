@@ -1780,7 +1780,10 @@ bool NimBLEPlatform::writeCharacteristic(uint16_t conn_handle, uint16_t char_han
 
     if (!chr) return false;
 
-    return chr->writeValue(data.data(), data.size(), response);
+    beginWriteOperation();
+    bool result = chr->writeValue(data.data(), data.size(), response);
+    endWriteOperation();
+    return result;
 }
 
 bool NimBLEPlatform::read(uint16_t conn_handle, uint16_t char_handle,
@@ -1833,7 +1836,9 @@ bool NimBLEPlatform::read(uint16_t conn_handle, uint16_t char_handle,
         return false;
     }
 
+    beginWriteOperation();
     NimBLEAttValue value = chr->readValue();
+    endWriteOperation();
     if (callback) {
         Bytes result(value.data(), value.size());
         callback(OperationResult::SUCCESS, result);
@@ -1903,9 +1908,15 @@ bool NimBLEPlatform::enableNotifications(uint16_t conn_handle, bool enable) {
             }
         };
 
-        return txChar->subscribe(true, notifyCb);
+        beginWriteOperation();
+        bool result = txChar->subscribe(true, notifyCb);
+        endWriteOperation();
+        return result;
     } else {
-        return txChar->unsubscribe();
+        beginWriteOperation();
+        bool result = txChar->unsubscribe();
+        endWriteOperation();
+        return result;
     }
 }
 
