@@ -1906,9 +1906,11 @@ bool NimBLEPlatform::enableNotifications(uint16_t conn_handle, bool enable) {
         }
 
         auto conn_it = _connections.find(conn_handle);
-        if (conn_it != _connections.end()) {
-            expected_peer = conn_it->second.peer_address;
+        if (conn_it == _connections.end()) {
+            xSemaphoreGive(_conn_mutex);
+            return false;
         }
+        expected_peer = conn_it->second.peer_address;
 
         beginWriteOperation();
         xSemaphoreGive(_conn_mutex);
