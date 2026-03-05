@@ -1715,6 +1715,12 @@ bool NimBLEPlatform::write(uint16_t conn_handle, const Bytes& data, bool respons
             }
         }
 
+        // Register active op BEFORE releasing mutex so processPendingDisconnects()
+        // sees it when checking hasActiveWriteOperations() — closes TOCTOU gap.
+        if (rxChar) {
+            beginWriteOperation();
+        }
+
         xSemaphoreGive(_conn_mutex);
     }
 
@@ -1723,9 +1729,7 @@ bool NimBLEPlatform::write(uint16_t conn_handle, const Bytes& data, bool respons
         return false;
     }
 
-    // CONC-H4: Track active write for graceful shutdown
     // writeValue() is a blocking GATT op — must NOT hold _conn_mutex here
-    beginWriteOperation();
     bool result = rxChar->writeValue(data.data(), data.size(), response);
     endWriteOperation();
     if (!result) {
@@ -1775,12 +1779,15 @@ bool NimBLEPlatform::writeCharacteristic(uint16_t conn_handle, uint16_t char_han
             chr = service->getCharacteristic(UUID::RX_CHAR);
         }
 
+        if (chr) {
+            beginWriteOperation();
+        }
+
         xSemaphoreGive(_conn_mutex);
     }
 
     if (!chr) return false;
 
-    beginWriteOperation();
     bool result = chr->writeValue(data.data(), data.size(), response);
     endWriteOperation();
     return result;
@@ -1828,6 +1835,10 @@ bool NimBLEPlatform::read(uint16_t conn_handle, uint16_t char_handle,
             chr = service->getCharacteristic(UUID::IDENTITY_CHAR);
         }
 
+        if (chr) {
+            beginWriteOperation();
+        }
+
         xSemaphoreGive(_conn_mutex);
     }
 
@@ -1836,7 +1847,6 @@ bool NimBLEPlatform::read(uint16_t conn_handle, uint16_t char_handle,
         return false;
     }
 
-    beginWriteOperation();
     NimBLEAttValue value = chr->readValue();
     endWriteOperation();
     if (callback) {
@@ -1889,6 +1899,7 @@ bool NimBLEPlatform::enableNotifications(uint16_t conn_handle, bool enable) {
             expected_peer = conn_it->second.peer_address;
         }
 
+        beginWriteOperation();
         xSemaphoreGive(_conn_mutex);
     }
 
@@ -1908,12 +1919,10 @@ bool NimBLEPlatform::enableNotifications(uint16_t conn_handle, bool enable) {
             }
         };
 
-        beginWriteOperation();
         bool result = txChar->subscribe(true, notifyCb);
         endWriteOperation();
         return result;
     } else {
-        beginWriteOperation();
         bool result = txChar->unsubscribe();
         endWriteOperation();
         return result;
@@ -2111,7 +2120,10 @@ void NimBLEPlatform::onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) 
         conn.rssi = rssi_val;
     }
 
-    _connections[conn_handle] = conn;
+    if (xSemaphoreTake(_conn_mutex, pdMS_TO_TICKS(100))) {
+        _connections[conn_handle] = conn;
+        xSemaphoreGive(_conn_mutex);
+    }
 
     DEBUG("NimBLEPlatform: Central connected: " + conn.peer_address.toString() +
           " rssi=" + std::to_string(conn.rssi));
@@ -2212,8 +2224,11 @@ void NimBLEPlatform::onConnect(NimBLEClient* pClient) {
     conn.state = ConnectionState::CONNECTED;
     conn.mtu = pClient->getMTU() - MTU::ATT_OVERHEAD;
 
-    _connections[conn_handle] = conn;
-    _clients[conn_handle] = pClient;
+    if (xSemaphoreTake(_conn_mutex, pdMS_TO_TICKS(100))) {
+        _connections[conn_handle] = conn;
+        _clients[conn_handle] = pClient;
+        xSemaphoreGive(_conn_mutex);
+    }
 
     DEBUG("NimBLEPlatform: Connected to peripheral: " + peer_addr.toString() +
           " handle=" + std::to_string(conn_handle) + " mtu=" + std::to_string(conn.mtu));
@@ -2537,9 +2552,12 @@ void NimBLEPlatform::freeConnHandle(uint16_t handle) {
 }
 
 void NimBLEPlatform::updateConnectionMTU(uint16_t conn_handle, uint16_t mtu) {
-    auto it = _connections.find(conn_handle);
-    if (it != _connections.end()) {
-        it->second.mtu = mtu - MTU::ATT_OVERHEAD;
+    if (xSemaphoreTake(_conn_mutex, pdMS_TO_TICKS(50))) {
+        auto it = _connections.find(conn_handle);
+        if (it != _connections.end()) {
+            it->second.mtu = mtu - MTU::ATT_OVERHEAD;
+        }
+        xSemaphoreGive(_conn_mutex);
     }
 }
 
