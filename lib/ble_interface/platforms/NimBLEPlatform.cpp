@@ -734,13 +734,19 @@ void NimBLEPlatform::processPendingDisconnects() {
     while (_pending_disc_read != _pending_disc_write) {
         PendingDisconnect& pd = _pending_disc_queue[_pending_disc_read];
 
-        // Hold _conn_mutex while modifying _connections/_clients/_cached_rx_chars
+        // Hold _conn_mutex while modifying _connections/_clients/_cached_*_chars
         // to prevent races with write() called from the main loop task.
         ConnectionHandle conn;
         bool found = false;
         bool is_peripheral = pd.is_peripheral;
 
         NimBLEClient* client_to_delete = nullptr;
+
+        // If GATT ops are in flight, defer this disconnect to avoid blocking
+        // the loop task. It will be retried on the next iteration.
+        if (hasActiveWriteOperations()) {
+            break;
+        }
 
         if (xSemaphoreTake(_conn_mutex, pdMS_TO_TICKS(100))) {
             auto conn_it = _connections.find(pd.conn_handle);
@@ -759,6 +765,8 @@ void NimBLEPlatform::processPendingDisconnects() {
                         _clients.erase(client_it);
                     }
                     _cached_rx_chars.erase(pd.conn_handle);
+                    _cached_tx_chars.erase(pd.conn_handle);
+                    _cached_identity_chars.erase(pd.conn_handle);
                 }
             }
             xSemaphoreGive(_conn_mutex);
@@ -767,14 +775,9 @@ void NimBLEPlatform::processPendingDisconnects() {
             break;  // Retry next loop iteration
         }
 
-        // Delete client AFTER releasing mutex — wait for any in-flight
-        // write() calls that may still hold a child characteristic pointer.
+        // Delete client AFTER releasing mutex. GATT ops were checked above,
+        // so no in-flight operations should be holding child pointers.
         if (client_to_delete) {
-            int wait_ms = 0;
-            while (hasActiveWriteOperations() && wait_ms < 5000) {
-                vTaskDelay(pdMS_TO_TICKS(10));
-                wait_ms += 10;
-            }
             NimBLEDevice::deleteClient(client_to_delete);
         }
 
@@ -1480,15 +1483,23 @@ bool NimBLEPlatform::discoverServices(uint16_t conn_handle) {
         return false;
     }
 
-    // Update connection with characteristic handles
-    auto conn_it = _connections.find(conn_handle);
-    if (conn_it != _connections.end()) {
-        conn_it->second.rx_char_handle = rxChar->getHandle();
-        conn_it->second.tx_char_handle = txChar->getHandle();
-        if (idChar) {
-            conn_it->second.identity_handle = idChar->getHandle();
+    // Update connection with characteristic handles and cache char pointers
+    if (xSemaphoreTake(_conn_mutex, pdMS_TO_TICKS(200))) {
+        auto conn_it = _connections.find(conn_handle);
+        if (conn_it != _connections.end()) {
+            conn_it->second.rx_char_handle = rxChar->getHandle();
+            conn_it->second.tx_char_handle = txChar->getHandle();
+            if (idChar) {
+                conn_it->second.identity_handle = idChar->getHandle();
+            }
+            conn_it->second.state = ConnectionState::READY;
         }
-        conn_it->second.state = ConnectionState::READY;
+        _cached_rx_chars[conn_handle] = rxChar;
+        _cached_tx_chars[conn_handle] = txChar;
+        if (idChar) {
+            _cached_identity_chars[conn_handle] = idChar;
+        }
+        xSemaphoreGive(_conn_mutex);
     }
 
     DEBUG("NimBLEPlatform: Services discovered for " + std::to_string(conn_handle));
@@ -1698,21 +1709,10 @@ bool NimBLEPlatform::write(uint16_t conn_handle, const Bytes& data, bool respons
             return false;
         }
 
-        // Use cached RX characteristic pointer to avoid repeated service/char lookups
+        // Use cached RX characteristic pointer (populated by discoverServices())
         auto cached_it = _cached_rx_chars.find(conn_handle);
         if (cached_it != _cached_rx_chars.end()) {
             rxChar = cached_it->second;
-        } else {
-            NimBLERemoteService* service = client->getService(UUID::SERVICE);
-            if (!service) {
-                xSemaphoreGive(_conn_mutex);
-                WARNING("NimBLEPlatform::write: service not found for handle " + std::to_string(conn_handle));
-                return false;
-            }
-            rxChar = service->getCharacteristic(UUID::RX_CHAR);
-            if (rxChar) {
-                _cached_rx_chars[conn_handle] = rxChar;
-            }
         }
 
         // Register active op BEFORE releasing mutex so processPendingDisconnects()
@@ -1744,7 +1744,7 @@ bool NimBLEPlatform::writeCharacteristic(uint16_t conn_handle, uint16_t char_han
         return false;
     }
 
-    // Resolve pointers under _conn_mutex, release before blocking writeValue()
+    // Resolve pointers under _conn_mutex using cached chars, release before blocking writeValue()
     NimBLERemoteCharacteristic* chr = nullptr;
     {
         if (!xSemaphoreTake(_conn_mutex, pdMS_TO_TICKS(50))) {
@@ -1763,20 +1763,19 @@ bool NimBLEPlatform::writeCharacteristic(uint16_t conn_handle, uint16_t char_han
             return false;
         }
 
-        NimBLERemoteService* service = client->getService(UUID::SERVICE);
-        if (!service) {
-            xSemaphoreGive(_conn_mutex);
-            return false;
-        }
-
-        // Find characteristic by handle
+        // Use cached characteristic pointers — populated after service discovery
         auto conn_it = _connections.find(conn_handle);
         if (conn_it != _connections.end() && char_handle == conn_it->second.identity_handle) {
-            chr = service->getCharacteristic(UUID::IDENTITY_CHAR);
+            auto id_it = _cached_identity_chars.find(conn_handle);
+            if (id_it != _cached_identity_chars.end()) {
+                chr = id_it->second;
+            }
         }
-        // Fall through to RX_CHAR if not identity
         if (!chr) {
-            chr = service->getCharacteristic(UUID::RX_CHAR);
+            auto rx_it = _cached_rx_chars.find(conn_handle);
+            if (rx_it != _cached_rx_chars.end()) {
+                chr = rx_it->second;
+            }
         }
 
         if (chr) {
@@ -1800,7 +1799,7 @@ bool NimBLEPlatform::read(uint16_t conn_handle, uint16_t char_handle,
         return false;
     }
 
-    // Resolve pointers under _conn_mutex, release before blocking readValue()
+    // Resolve pointers under _conn_mutex using cached chars, release before blocking readValue()
     NimBLERemoteCharacteristic* chr = nullptr;
     {
         if (!xSemaphoreTake(_conn_mutex, pdMS_TO_TICKS(50))) {
@@ -1822,17 +1821,13 @@ bool NimBLEPlatform::read(uint16_t conn_handle, uint16_t char_handle,
             return false;
         }
 
-        NimBLERemoteService* service = client->getService(UUID::SERVICE);
-        if (!service) {
-            xSemaphoreGive(_conn_mutex);
-            if (callback) callback(OperationResult::NOT_FOUND, Bytes());
-            return false;
-        }
-
-        // Find characteristic by handle
+        // Use cached identity characteristic pointer
         auto conn_it = _connections.find(conn_handle);
         if (conn_it != _connections.end() && char_handle == conn_it->second.identity_handle) {
-            chr = service->getCharacteristic(UUID::IDENTITY_CHAR);
+            auto id_it = _cached_identity_chars.find(conn_handle);
+            if (id_it != _cached_identity_chars.end()) {
+                chr = id_it->second;
+            }
         }
 
         if (chr) {
@@ -1862,7 +1857,7 @@ bool NimBLEPlatform::enableNotifications(uint16_t conn_handle, bool enable) {
         return false;
     }
 
-    // Resolve pointers under _conn_mutex, release before blocking subscribe()
+    // Resolve pointers under _conn_mutex using cached chars, release before blocking subscribe()
     NimBLERemoteCharacteristic* txChar = nullptr;
     BLEAddress expected_peer;
     {
@@ -1882,13 +1877,11 @@ bool NimBLEPlatform::enableNotifications(uint16_t conn_handle, bool enable) {
             return false;
         }
 
-        NimBLERemoteService* service = client->getService(UUID::SERVICE);
-        if (!service) {
-            xSemaphoreGive(_conn_mutex);
-            return false;
+        // Use cached TX characteristic pointer
+        auto tx_it = _cached_tx_chars.find(conn_handle);
+        if (tx_it != _cached_tx_chars.end()) {
+            txChar = tx_it->second;
         }
-
-        txChar = service->getCharacteristic(UUID::TX_CHAR);
         if (!txChar) {
             xSemaphoreGive(_conn_mutex);
             return false;
@@ -1958,6 +1951,8 @@ std::vector<ConnectionHandle> NimBLEPlatform::getConnections() const {
             result.push_back(kv.second);
         }
         xSemaphoreGive(_conn_mutex);
+    } else {
+        WARNING("NimBLEPlatform::getConnections: mutex timeout");
     }
     return result;
 }
@@ -1970,6 +1965,8 @@ ConnectionHandle NimBLEPlatform::getConnection(uint16_t handle) const {
             result = it->second;
         }
         xSemaphoreGive(_conn_mutex);
+    } else {
+        WARNING("NimBLEPlatform::getConnection: mutex timeout for handle " + std::to_string(handle));
     }
     return result;
 }
@@ -1979,6 +1976,8 @@ size_t NimBLEPlatform::getConnectionCount() const {
     if (xSemaphoreTake(_conn_mutex, pdMS_TO_TICKS(50))) {
         count = _connections.size();
         xSemaphoreGive(_conn_mutex);
+    } else {
+        WARNING("NimBLEPlatform::getConnectionCount: mutex timeout");
     }
     return count;
 }
@@ -1993,6 +1992,8 @@ bool NimBLEPlatform::isConnectedTo(const BLEAddress& address) const {
             }
         }
         xSemaphoreGive(_conn_mutex);
+    } else {
+        WARNING("NimBLEPlatform::isConnectedTo: mutex timeout");
     }
     return found;
 }
@@ -2007,6 +2008,8 @@ bool NimBLEPlatform::isDeviceConnected(const std::string& addrKey) const {
             }
         }
         xSemaphoreGive(_conn_mutex);
+    } else {
+        WARNING("NimBLEPlatform::isDeviceConnected: mutex timeout");
     }
     return found;
 }
