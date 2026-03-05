@@ -302,8 +302,10 @@ private:
     // Client connections (as central)
     std::map<uint16_t, NimBLEClient*> _clients;
 
-    // Cached RX characteristic pointers (avoids repeated service/char lookups in write())
+    // Cached characteristic pointers (avoids repeated service/char lookups under mutex)
     std::map<uint16_t, NimBLERemoteCharacteristic*> _cached_rx_chars;
+    std::map<uint16_t, NimBLERemoteCharacteristic*> _cached_tx_chars;
+    std::map<uint16_t, NimBLERemoteCharacteristic*> _cached_identity_chars;
 
     // Connection tracking
     std::map<uint16_t, ConnectionHandle> _connections;
