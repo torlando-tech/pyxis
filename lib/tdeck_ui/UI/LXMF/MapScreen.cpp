@@ -35,11 +35,11 @@ MapScreen::MapScreen(lv_obj_t* parent)
     _last_touch_x = 0;
     _last_touch_y = 0;
 
-    // Create download queue and background task
+    // Download queue created once; task started/stopped on show/hide
     _download_queue = xQueueCreate(8, sizeof(TileRequest));
     _download_complete = false;
     _download_task = nullptr;
-    xTaskCreatePinnedToCore(download_task_func, "tile_dl", 16384, this, 1, &_download_task, 0);
+    _task_should_stop = false;
 
     LVGL_LOCK();
 
@@ -66,6 +66,17 @@ MapScreen::MapScreen(lv_obj_t* parent)
 }
 
 MapScreen::~MapScreen() {
+    // Stop download task if running
+    if (_download_task) {
+        _task_should_stop = true;
+        TileRequest dummy = {0, 0, 0};
+        xQueueSend(_download_queue, &dummy, 0);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    if (_download_queue) {
+        vQueueDelete(_download_queue);
+    }
+
     LVGL_LOCK();
     if (_screen) {
         lv_obj_del(_screen);
@@ -167,6 +178,13 @@ void MapScreen::create_viewport() {
 }
 
 void MapScreen::show() {
+    // Start download task (16KB stack only while map is visible)
+    if (!_download_task) {
+        _task_should_stop = false;
+        xQueueReset(_download_queue);
+        xTaskCreatePinnedToCore(download_task_func, "tile_dl", 16384, this, 1, &_download_task, 0);
+    }
+
     LVGL_LOCK();
     lv_obj_clear_flag(_screen, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(_screen);
@@ -191,6 +209,19 @@ void MapScreen::show() {
 }
 
 void MapScreen::hide() {
+    // Stop download task to free 16KB internal RAM
+    if (_download_task) {
+        _task_should_stop = true;
+        // Send dummy request to wake the task from xQueueReceive
+        TileRequest dummy = {0, 0, 0};
+        xQueueSend(_download_queue, &dummy, 0);
+        // Wait for task to exit (up to 2s)
+        for (int i = 0; i < 200 && _download_task; i++) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        _download_task = nullptr;
+    }
+
     LVGL_LOCK();
     lv_group_t* group = LVGL::LVGLInit::get_default_group();
     if (group) {
@@ -309,17 +340,14 @@ void MapScreen::update_tiles() {
             int tx = tile_coords[i][0];
             int ty = tile_coords[i][1];
 
-            if (Hardware::TDeck::TileDownloader::tile_exists(_zoom, tx, ty)) {
-                // Tile on SD — load immediately (fast with LVGL image cache)
-                load_tile(i, tx, ty, _zoom);
-                _loaded_tile_x[i] = tx;
-                _loaded_tile_y[i] = ty;
-            } else {
-                // Queue download + deferred load
-                _pending_tiles[_pending_count++] = {i, _zoom, tx, ty};
+            // Always queue for incremental loading (one per update cycle)
+            // to prevent multiple simultaneous PNG decodes from crashing
+            _pending_tiles[_pending_count++] = {i, _zoom, tx, ty};
+
+            if (!Hardware::TDeck::TileDownloader::tile_exists(_zoom, tx, ty)) {
+                // Queue background download for missing tiles
                 TileRequest req = {_zoom, tx, ty};
                 xQueueSend(_download_queue, &req, 0);
-                lv_img_set_src(_tile_imgs[i], "");
             }
         }
     }
@@ -395,13 +423,16 @@ void MapScreen::load_tile(int slot, int tile_x, int tile_y, int z) {
 void MapScreen::download_task_func(void* param) {
     MapScreen* self = (MapScreen*)param;
     TileRequest req;
-    while (true) {
-        if (xQueueReceive(self->_download_queue, &req, portMAX_DELAY) == pdTRUE) {
+    while (!self->_task_should_stop) {
+        if (xQueueReceive(self->_download_queue, &req, pdMS_TO_TICKS(500)) == pdTRUE) {
+            if (self->_task_should_stop) break;
             if (Hardware::TDeck::TileDownloader::download_tile(req.z, req.x, req.y)) {
                 self->_download_complete = true;
             }
         }
     }
+    self->_download_task = nullptr;
+    vTaskDelete(NULL);
 }
 
 void MapScreen::on_touch_event(lv_event_t* event) {

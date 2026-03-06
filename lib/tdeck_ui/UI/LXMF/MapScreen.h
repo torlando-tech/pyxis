@@ -127,6 +127,7 @@ private:
     QueueHandle_t _download_queue;
     TaskHandle_t _download_task;
     volatile bool _download_complete;
+    volatile bool _task_should_stop;
 
     static void download_task_func(void* param);
 

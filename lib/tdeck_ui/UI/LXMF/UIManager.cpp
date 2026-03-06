@@ -17,6 +17,9 @@
 #include <TinyGPSPlus.h>
 #include "Utilities/OS.h"
 
+// Direct UDP+Serial log (bypasses RNS log system which may not reach UDP)
+extern "C" void pyxis_log(const char* msg);
+
 using namespace RNS;
 
 // NVS keys for propagation settings
@@ -356,7 +359,26 @@ void UIManager::update() {
 
         // Update telemetry: check expired sessions, send to peers
         uint32_t time_now = (uint32_t)Utilities::OS::time();
+        {
+            // Periodic telemetry state debug (every ~30s)
+            static uint32_t last_telem_debug = 0;
+            if (now - last_telem_debug > 30000) {
+                last_telem_debug = now;
+                auto& sessions = _telemetry_manager.get_sessions();
+                char dbg[128];
+                snprintf(dbg, sizeof(dbg), "[TELEM] sessions=%zu time=%u gps=%s sats=%d",
+                    sessions.size(), time_now,
+                    (_gps && _gps->location.isValid()) ? "fix" : "none",
+                    _gps ? (int)_gps->satellites.value() : -1);
+                pyxis_log(dbg);
+            }
+        }
         std::vector<Bytes> peers_to_send = _telemetry_manager.update(time_now);
+        if (!peers_to_send.empty()) {
+            char log_buf[64];
+            snprintf(log_buf, sizeof(log_buf), "[TELEM] %zu peers need send", peers_to_send.size());
+            pyxis_log(log_buf);
+        }
         for (const auto& peer : peers_to_send) {
             send_telemetry(peer);
         }
@@ -823,24 +845,30 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
     }
 
     // Check for telemetry fields
-    const Bytes* telemetry_field = message.fields_get(Bytes({Telemetry::FIELD_TELEMETRY}));
-    if (telemetry_field) {
-        Telemetry::LocationData loc = Telemetry::decode_telemetry(*telemetry_field);
-        if (loc.valid) {
-            _telemetry_manager.on_location_received(message.source_hash(), loc);
-            if (_current_screen == SCREEN_MAP) {
-                update_map_peer_markers();
+    {
+        uint8_t telem_key = Telemetry::FIELD_TELEMETRY;
+        const Bytes* telemetry_field = message.fields_get(Bytes(&telem_key, 1));
+        if (telemetry_field) {
+            Telemetry::LocationData loc = Telemetry::decode_telemetry(*telemetry_field);
+            if (loc.valid) {
+                _telemetry_manager.on_location_received(message.source_hash(), loc);
+                if (_current_screen == SCREEN_MAP) {
+                    update_map_peer_markers();
+                }
             }
         }
     }
 
     // Check for Columba cease signal
-    const Bytes* meta_field = message.fields_get(Bytes({Telemetry::FIELD_COLUMBA_META}));
-    if (meta_field) {
-        if (Telemetry::decode_columba_cease(*meta_field)) {
-            _telemetry_manager.on_cease_received(message.source_hash());
-            if (_current_screen == SCREEN_MAP) {
-                update_map_peer_markers();
+    {
+        uint8_t meta_key = Telemetry::FIELD_COLUMBA_META;
+        const Bytes* meta_field = message.fields_get(Bytes(&meta_key, 1));
+        if (meta_field) {
+            if (Telemetry::decode_columba_cease(*meta_field)) {
+                _telemetry_manager.on_cease_received(message.source_hash());
+                if (_current_screen == SCREEN_MAP) {
+                    update_map_peer_markers();
+                }
             }
         }
     }
@@ -912,8 +940,20 @@ void UIManager::refresh_current_screen() {
 // ── Telemetry / Location Sharing ──
 
 void UIManager::send_telemetry(const Bytes& peer_hash) {
-    if (!_gps || !_gps->location.isValid()) {
-        return;  // No GPS fix, skip
+    if (!_gps) {
+        pyxis_log("[TELEM] No GPS object, skipping send");
+        return;
+    }
+    if (!_gps->location.isValid()) {
+        char gps_buf[128];
+        snprintf(gps_buf, sizeof(gps_buf),
+            "[TELEM] No GPS fix (sats=%d, age=%lu, lat=%.4f, lon=%.4f)",
+            (int)_gps->satellites.value(),
+            _gps->location.age(),
+            _gps->location.lat(),
+            _gps->location.lng());
+        pyxis_log(gps_buf);
+        return;
     }
 
     Telemetry::LocationData loc;
@@ -949,22 +989,33 @@ void UIManager::send_telemetry(const Bytes& peer_hash) {
     }
 
     ::LXMF::LXMessage message(destination, source, content_bytes, title);
+    message.set_method(::LXMF::Type::Message::OPPORTUNISTIC);
     if (!dest_identity) {
         message.destination_hash(peer_hash);
     }
 
     // Set telemetry field
-    message.fields_set(Bytes({Telemetry::FIELD_TELEMETRY}), telemetry_data);
+    uint8_t telem_key = Telemetry::FIELD_TELEMETRY;
+    message.fields_set(Bytes(&telem_key, 1), telemetry_data);
 
-    // Set Columba meta field
-    Bytes meta = Telemetry::encode_columba_meta(end_time, 0, false);
-    message.fields_set(Bytes({Telemetry::FIELD_COLUMBA_META}), meta);
+    // Set Columba meta field (expires in milliseconds to match Columba convention)
+    uint64_t expires_ms = (uint64_t)end_time * 1000ULL;
+    Bytes meta = Telemetry::encode_columba_meta(expires_ms, 0, false);
+    uint8_t meta_key = Telemetry::FIELD_COLUMBA_META;
+    message.fields_set(Bytes(&meta_key, 1), meta);
 
     message.pack();
-    _router.handle_outbound(message);
-    // Note: telemetry messages are NOT saved to MessageStore (ephemeral)
 
-    DEBUG("Sent telemetry to peer");
+    {
+        char log_buf[128];
+        snprintf(log_buf, sizeof(log_buf),
+            "[TELEM] Sent to %.8s (%.4f,%.4f) packed=%zu",
+            peer_hash.toHex().c_str(), loc.lat, loc.lon,
+            message.packed().size());
+        pyxis_log(log_buf);
+    }
+
+    _router.handle_outbound(message);
 }
 
 void UIManager::send_cease(const Bytes& peer_hash) {
@@ -980,12 +1031,14 @@ void UIManager::send_cease(const Bytes& peer_hash) {
     }
 
     ::LXMF::LXMessage message(destination, source, content_bytes, title);
+    message.set_method(::LXMF::Type::Message::OPPORTUNISTIC);
     if (!dest_identity) {
         message.destination_hash(peer_hash);
     }
 
     Bytes meta = Telemetry::encode_columba_meta(0, 0, true);
-    message.fields_set(Bytes({Telemetry::FIELD_COLUMBA_META}), meta);
+    uint8_t cease_meta_key = Telemetry::FIELD_COLUMBA_META;
+    message.fields_set(Bytes(&cease_meta_key, 1), meta);
 
     message.pack();
     _router.handle_outbound(message);

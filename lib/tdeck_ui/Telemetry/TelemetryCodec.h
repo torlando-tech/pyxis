@@ -207,38 +207,56 @@ inline LocationData decode_telemetry(const RNS::Bytes& data) {
 
 /**
  * Encode Columba meta field (FIELD_COLUMBA_META).
- * msgpack map with optional keys: expires, approxRadius, cease
+ * JSON string matching Columba's format: json.dumps({"expires": <uint>, ...})
+ * Columba sends this as a Python str, which msgpack packs as STR type.
+ * Our LXMF packs field values as BIN, but Columba handles both:
+ *   if isinstance(meta_data, bytes): meta_data = meta_data.decode('utf-8')
+ *   meta = json.loads(meta_data)
  */
-inline RNS::Bytes encode_columba_meta(uint32_t expires, int approx_radius, bool cease) {
-    MsgPack::Packer packer;
+inline RNS::Bytes encode_columba_meta(uint64_t expires_ms, int approx_radius, bool cease) {
+    // Build JSON string manually (simple enough to avoid a JSON library)
+    String json = "{";
+    bool first = true;
 
-    int count = 0;
-    if (expires > 0) count++;
-    if (approx_radius > 0) count++;
-    if (cease) count++;
-
-    packer.packMapSize(count);
-
-    if (expires > 0) {
-        packer.packString("expires", 7);
-        packer.pack(expires);
+    if (expires_ms > 0) {
+        json += "\"expires\":";
+        // Arduino String doesn't support uint64_t, format manually
+        char buf[21];
+        snprintf(buf, sizeof(buf), "%llu", (unsigned long long)expires_ms);
+        json += buf;
+        first = false;
     }
     if (approx_radius > 0) {
-        packer.packString("approxRadius", 12);
-        packer.pack(approx_radius);
+        if (!first) json += ",";
+        json += "\"approxRadius\":";
+        json += String(approx_radius);
+        first = false;
     }
     if (cease) {
-        packer.packString("cease", 5);
-        packer.pack(true);
+        if (!first) json += ",";
+        json += "\"cease\":true";
     }
 
-    return RNS::Bytes(packer.data(), packer.size());
+    json += "}";
+
+    return RNS::Bytes((const uint8_t*)json.c_str(), json.length());
 }
 
 /**
  * Check if a Columba meta field contains a cease signal.
+ * Handles both JSON format (from Columba/Pyxis) and msgpack (from Sideband).
  */
 inline bool decode_columba_cease(const RNS::Bytes& data) {
+    if (data.size() == 0) return false;
+
+    // Try JSON first (Columba format): look for "cease":true
+    // Simple string search — no JSON parser needed for this check
+    String json_str((const char*)data.data(), data.size());
+    if (json_str.indexOf("\"cease\":true") >= 0 || json_str.indexOf("\"cease\": true") >= 0) {
+        return true;
+    }
+
+    // Fallback: try msgpack (Sideband format)
     MsgPack::Unpacker unpacker;
     unpacker.feed(data.data(), data.size());
 
@@ -254,7 +272,6 @@ inline bool decode_columba_cease(const RNS::Bytes& data) {
             if (unpacker.deserialize(val)) return val;
             return false;
         } else {
-            // Skip value
             unpacker.unpackNil();
         }
     }
