@@ -8,8 +8,30 @@
 #include "SDAccess.h"
 #include <SD.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <Log.h>
+#include <mbedtls/platform.h>
+#include <esp_heap_caps.h>
+
+// ESP-IDF's default mbedtls allocator only uses internal SRAM (~36KB free),
+// which is too small for TLS handshake (~40-50KB). Redirect to PSRAM.
+// ESP32-S3's unified cache makes PSRAM safe for crypto operations.
+static void* psram_calloc(size_t n, size_t size) {
+    void* ptr = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!ptr) {
+        ptr = calloc(n, size);  // Fallback to default allocator
+    }
+    return ptr;
+}
+
+static bool _tls_allocator_set = false;
+
+static void ensure_psram_tls() {
+    if (_tls_allocator_set) return;
+    mbedtls_platform_set_calloc_free(psram_calloc, free);
+    _tls_allocator_set = true;
+}
 
 namespace Hardware {
 namespace TDeck {
@@ -61,26 +83,37 @@ bool TileDownloader::create_tile_dirs(int z, int x) {
 }
 
 bool TileDownloader::download_tile(int z, int x, int y) {
+    char log_buf[128];
+
     if (WiFi.status() != WL_CONNECTED) {
+        WARNING("TileDownloader: WiFi not connected, skipping download");
         return false;
     }
 
     if (!SDAccess::is_ready()) {
+        WARNING("TileDownloader: SD card not ready, skipping download");
         return false;
     }
 
     String url = build_url(z, x, y);
     String sd_path = build_sd_path(z, x, y);
 
-    char log_buf[128];
-    snprintf(log_buf, sizeof(log_buf), "TileDownloader: Fetching tile %d/%d/%d", z, x, y);
-    DEBUG(log_buf);
+    snprintf(log_buf, sizeof(log_buf), "TileDownloader: Downloading tile %d/%d/%d", z, x, y);
+    INFO(log_buf);
+
+    // Route mbedtls allocations to PSRAM (one-time, persists for all future TLS)
+    ensure_psram_tls();
+
+    WiFiClientSecure secureClient;
+    secureClient.setInsecure();
+    secureClient.setHandshakeTimeout(10);
 
     HTTPClient http;
     http.setUserAgent("Pyxis/1.0 (ESP32; LXMF messenger)");
     http.setTimeout(10000);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
-    if (!http.begin(url)) {
+    if (!http.begin(secureClient, url)) {
         WARNING("TileDownloader: Failed to begin HTTP connection");
         return false;
     }

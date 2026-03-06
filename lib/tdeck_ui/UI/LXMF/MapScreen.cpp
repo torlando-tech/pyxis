@@ -30,6 +30,16 @@ MapScreen::MapScreen(lv_obj_t* parent)
     memset(_peer_labels, 0, sizeof(_peer_labels));
     memset(_loaded_tile_x, -1, sizeof(_loaded_tile_x));
     memset(_loaded_tile_y, -1, sizeof(_loaded_tile_y));
+    memset(_pending_tiles, 0, sizeof(_pending_tiles));
+    _pending_count = 0;
+    _last_touch_x = 0;
+    _last_touch_y = 0;
+
+    // Create download queue and background task
+    _download_queue = xQueueCreate(8, sizeof(TileRequest));
+    _download_complete = false;
+    _download_task = nullptr;
+    xTaskCreatePinnedToCore(download_task_func, "tile_dl", 16384, this, 1, &_download_task, 0);
 
     LVGL_LOCK();
 
@@ -150,6 +160,10 @@ void MapScreen::create_viewport() {
     // Register key event on viewport for pan/zoom
     lv_obj_add_flag(_viewport, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(_viewport, on_key_event, LV_EVENT_KEY, this);
+
+    // Touch drag for panning
+    lv_obj_add_event_cb(_viewport, on_touch_event, LV_EVENT_PRESSED, this);
+    lv_obj_add_event_cb(_viewport, on_touch_event, LV_EVENT_PRESSING, this);
 }
 
 void MapScreen::show() {
@@ -186,6 +200,23 @@ void MapScreen::hide() {
 }
 
 void MapScreen::update_gps_position() {
+    // Reload tiles after background downloads complete
+    if (_download_complete) {
+        _download_complete = false;
+        _loaded_zoom = -1;  // Force tile reload
+        update_tiles();
+    }
+
+    // Incremental tile loading: process one pending tile per cycle
+    // This prevents LVGL mutex timeout from decoding multiple PNGs at once
+    if (_pending_count > 0) {
+        PendingTile& pt = _pending_tiles[_pending_count - 1];
+        load_tile(pt.slot, pt.x, pt.y, pt.z);
+        _loaded_tile_x[pt.slot] = pt.x;
+        _loaded_tile_y[pt.slot] = pt.y;
+        _pending_count--;
+    }
+
     if (!_gps) return;
 
     if (_gps->location.isValid()) {
@@ -261,6 +292,8 @@ void MapScreen::update_tiles() {
         {base_tile_x + 1, base_tile_y + 1}
     };
 
+    _pending_count = 0;
+
     for (int i = 0; i < 4; i++) {
         int col = i % 2;
         int row = i / 2;
@@ -272,9 +305,22 @@ void MapScreen::update_tiles() {
         if (_loaded_zoom != _zoom ||
             _loaded_tile_x[i] != tile_coords[i][0] ||
             _loaded_tile_y[i] != tile_coords[i][1]) {
-            load_tile(i, tile_coords[i][0], tile_coords[i][1], _zoom);
-            _loaded_tile_x[i] = tile_coords[i][0];
-            _loaded_tile_y[i] = tile_coords[i][1];
+
+            int tx = tile_coords[i][0];
+            int ty = tile_coords[i][1];
+
+            if (Hardware::TDeck::TileDownloader::tile_exists(_zoom, tx, ty)) {
+                // Tile on SD — load immediately (fast with LVGL image cache)
+                load_tile(i, tx, ty, _zoom);
+                _loaded_tile_x[i] = tx;
+                _loaded_tile_y[i] = ty;
+            } else {
+                // Queue download + deferred load
+                _pending_tiles[_pending_count++] = {i, _zoom, tx, ty};
+                TileRequest req = {_zoom, tx, ty};
+                xQueueSend(_download_queue, &req, 0);
+                lv_img_set_src(_tile_imgs[i], "");
+            }
         }
     }
     _loaded_zoom = _zoom;
@@ -341,14 +387,44 @@ void MapScreen::pan(int dx, int dy) {
 }
 
 void MapScreen::load_tile(int slot, int tile_x, int tile_y, int z) {
-    // Ensure tile is on SD (download if missing and WiFi available)
-    Hardware::TDeck::TileDownloader::ensure_tile(z, tile_x, tile_y);
-
-    // Build LVGL FS path: "S:tiles/{z}/{x}/{y}.png"
     char path[64];
     snprintf(path, sizeof(path), "S:tiles/%d/%d/%d.png", z, tile_x, tile_y);
-
     lv_img_set_src(_tile_imgs[slot], path);
+}
+
+void MapScreen::download_task_func(void* param) {
+    MapScreen* self = (MapScreen*)param;
+    TileRequest req;
+    while (true) {
+        if (xQueueReceive(self->_download_queue, &req, portMAX_DELAY) == pdTRUE) {
+            if (Hardware::TDeck::TileDownloader::download_tile(req.z, req.x, req.y)) {
+                self->_download_complete = true;
+            }
+        }
+    }
+}
+
+void MapScreen::on_touch_event(lv_event_t* event) {
+    MapScreen* screen = (MapScreen*)lv_event_get_user_data(event);
+    lv_event_code_t code = lv_event_get_code(event);
+    lv_indev_t* indev = lv_indev_get_act();
+    if (!indev) return;
+
+    lv_point_t point;
+    lv_indev_get_point(indev, &point);
+
+    if (code == LV_EVENT_PRESSED) {
+        screen->_last_touch_x = point.x;
+        screen->_last_touch_y = point.y;
+    } else if (code == LV_EVENT_PRESSING) {
+        int dx = screen->_last_touch_x - point.x;
+        int dy = screen->_last_touch_y - point.y;
+        if (dx != 0 || dy != 0) {
+            screen->pan(dx, dy);
+            screen->_last_touch_x = point.x;
+            screen->_last_touch_y = point.y;
+        }
+    }
 }
 
 void MapScreen::on_back_clicked(lv_event_t* event) {

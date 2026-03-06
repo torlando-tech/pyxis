@@ -8,6 +8,8 @@
 #include <Arduino.h>
 #include <lvgl.h>
 #include <functional>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 #include "Bytes.h"
 
 class TinyGPSPlus;
@@ -107,11 +109,33 @@ private:
     // Load a tile image into one of the 4 slots
     void load_tile(int slot, int tile_x, int tile_y, int z);
 
+    // Touch drag state
+    int _last_touch_x;
+    int _last_touch_y;
+
+    // Incremental tile loading — one tile per update cycle to avoid LVGL mutex timeout
+    struct PendingTile {
+        int slot, z, x, y;
+    };
+    PendingTile _pending_tiles[4];
+    int _pending_count;
+
+    // Async tile downloading
+    struct TileRequest {
+        int z, x, y;
+    };
+    QueueHandle_t _download_queue;
+    TaskHandle_t _download_task;
+    volatile bool _download_complete;
+
+    static void download_task_func(void* param);
+
     // Event handlers
     static void on_back_clicked(lv_event_t* event);
     static void on_zoom_in_clicked(lv_event_t* event);
     static void on_zoom_out_clicked(lv_event_t* event);
     static void on_key_event(lv_event_t* event);
+    static void on_touch_event(lv_event_t* event);
 };
 
 } // namespace LXMF
