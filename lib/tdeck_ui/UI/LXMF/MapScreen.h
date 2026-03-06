@@ -8,6 +8,8 @@
 #include <Arduino.h>
 #include <lvgl.h>
 #include <functional>
+#include <string>
+#include <vector>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include "Bytes.h"
@@ -40,6 +42,7 @@ class MapScreen {
 public:
     struct PeerLocation {
         RNS::Bytes peer_hash;
+        std::string name;
         double lat, lon;
         uint32_t timestamp;
     };
@@ -75,6 +78,7 @@ private:
     lv_obj_t* _peer_markers[MAX_PEER_MARKERS];
     lv_obj_t* _peer_labels[MAX_PEER_MARKERS];
     int _peer_marker_count;
+    std::vector<PeerLocation> _peer_locations;  // stored for repositioning
 
     TinyGPSPlus* _gps;
     BackCallback _back_callback;

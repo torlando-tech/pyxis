@@ -274,7 +274,13 @@ void MapScreen::update_peer_locations(const PeerLocation* locations, size_t coun
 
     _peer_marker_count = (count > MAX_PEER_MARKERS) ? MAX_PEER_MARKERS : (int)count;
 
+    // Store locations for repositioning on pan/zoom
+    _peer_locations.clear();
+    _peer_locations.reserve(_peer_marker_count);
+
     for (int i = 0; i < _peer_marker_count; i++) {
+        _peer_locations.push_back(locations[i]);
+
         // Create marker dot
         _peer_markers[i] = lv_obj_create(_viewport);
         lv_obj_set_size(_peer_markers[i], 10, 10);
@@ -285,11 +291,15 @@ void MapScreen::update_peer_locations(const PeerLocation* locations, size_t coun
         lv_obj_set_style_border_color(_peer_markers[i], lv_color_white(), 0);
         lv_obj_set_style_pad_all(_peer_markers[i], 0, 0);
 
-        // Create name label
+        // Create name label — use display name if available, else truncated hash
         _peer_labels[i] = lv_label_create(_viewport);
-        char name[12];
-        snprintf(name, sizeof(name), "%.6s", locations[i].peer_hash.toHex().c_str());
-        lv_label_set_text(_peer_labels[i], name);
+        if (!locations[i].name.empty()) {
+            lv_label_set_text(_peer_labels[i], locations[i].name.c_str());
+        } else {
+            char hash_str[12];
+            snprintf(hash_str, sizeof(hash_str), "%.6s", locations[i].peer_hash.toHex().c_str());
+            lv_label_set_text(_peer_labels[i], hash_str);
+        }
         lv_obj_set_style_text_color(_peer_labels[i], Theme::textPrimary(), 0);
         lv_obj_set_style_text_font(_peer_labels[i], &lv_font_montserrat_12, 0);
     }
@@ -382,14 +392,27 @@ void MapScreen::position_gps_marker() {
 }
 
 void MapScreen::position_peer_markers() {
-    // This will be called with stored peer location data
-    // For now peer positions are set via update_peer_locations
-    // which creates the markers. Here we just reposition based on
-    // current center/zoom if the map has moved.
+    double center_px, center_py;
+    TileMath::latlon_to_pixel(_center_lat, _center_lon, _zoom, center_px, center_py);
 
-    // Peer positions are stored externally; this method repositions existing markers.
-    // Actual position update requires the PeerLocation data which is stored
-    // in TelemetryManager (will be wired in Phase 5).
+    for (int i = 0; i < _peer_marker_count && i < (int)_peer_locations.size(); i++) {
+        double peer_px, peer_py;
+        TileMath::latlon_to_pixel(_peer_locations[i].lat, _peer_locations[i].lon, _zoom, peer_px, peer_py);
+
+        int screen_x = (int)(peer_px - center_px) + VIEWPORT_W / 2 - 5;  // -5 for marker center (10px dot)
+        int screen_y = (int)(peer_py - center_py) + VIEWPORT_H / 2 - 5;
+
+        if (screen_x < -50 || screen_x > VIEWPORT_W + 50 ||
+            screen_y < -50 || screen_y > VIEWPORT_H + 50) {
+            lv_obj_add_flag(_peer_markers[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(_peer_labels[i], LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(_peer_markers[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(_peer_labels[i], LV_OBJ_FLAG_HIDDEN);
+            lv_obj_set_pos(_peer_markers[i], screen_x, screen_y);
+            lv_obj_set_pos(_peer_labels[i], screen_x + 12, screen_y - 2);  // label right of dot
+        }
+    }
 }
 
 void MapScreen::update_zoom_label() {

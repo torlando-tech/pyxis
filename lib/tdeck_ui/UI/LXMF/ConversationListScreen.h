@@ -180,6 +180,9 @@ public:
      */
     void set_gps(TinyGPSPlus* gps) { _gps = gps; }
 
+    /** Parse display name from LXMF announce app_data */
+    static String parse_display_name(const RNS::Bytes& app_data);
+
 private:
     lv_obj_t* _screen;
     lv_obj_t* _header;
@@ -232,7 +235,6 @@ private:
     // Utility
     static String format_timestamp(uint32_t timestamp);
     static String truncate_hash(const RNS::Bytes& hash);
-    static String parse_display_name(const RNS::Bytes& app_data);
 };
 
 } // namespace LXMF

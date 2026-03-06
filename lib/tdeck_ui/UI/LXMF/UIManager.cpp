@@ -827,49 +827,69 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
     // Mark sender as a persistent contact (survives reboot)
     RNS::Identity::mark_persistent(message.source_hash());
 
-    // Save to store
-    _store.save_message(message);
+    // Check for telemetry fields FIRST — telemetry-only messages should not
+    // be saved to store, shown in chat, or play notification sounds
+    bool has_telemetry = false;
+    bool has_cease = false;
 
-    // Update UI if we're viewing this conversation
-    bool viewing_this_chat = (_current_screen == SCREEN_CHAT && _current_peer_hash == message.source_hash());
-    if (viewing_this_chat) {
-        _chat_screen->add_message(message, false);
-    }
-
-    // Play notification sound if enabled and not viewing this conversation
-    if (_settings_screen) {
-        const auto& settings = _settings_screen->get_settings();
-        if (settings.notification_sound && !viewing_this_chat) {
-            Notification::tone_play(1000, 100, settings.notification_volume);  // 1kHz beep, 100ms
-        }
-    }
-
-    // Check for telemetry fields
     {
         uint8_t telem_key = Telemetry::FIELD_TELEMETRY;
         const Bytes* telemetry_field = message.fields_get(Bytes(&telem_key, 1));
         if (telemetry_field) {
+            has_telemetry = true;
+            char log_buf[128];
+            snprintf(log_buf, sizeof(log_buf), "[TELEM-RX] Got telemetry field from %s (%d bytes)",
+                     source_hex.c_str(), (int)telemetry_field->size());
+            pyxis_log(log_buf);
             Telemetry::LocationData loc = Telemetry::decode_telemetry(*telemetry_field);
             if (loc.valid) {
+                snprintf(log_buf, sizeof(log_buf), "[TELEM-RX] Location: %.6f, %.6f", loc.lat, loc.lon);
+                pyxis_log(log_buf);
                 _telemetry_manager.on_location_received(message.source_hash(), loc);
                 if (_current_screen == SCREEN_MAP) {
                     update_map_peer_markers();
                 }
+            } else {
+                pyxis_log("[TELEM-RX] Decode failed — location invalid");
             }
         }
     }
 
-    // Check for Columba cease signal
     {
         uint8_t meta_key = Telemetry::FIELD_COLUMBA_META;
         const Bytes* meta_field = message.fields_get(Bytes(&meta_key, 1));
         if (meta_field) {
+            has_cease = true;
             if (Telemetry::decode_columba_cease(*meta_field)) {
                 _telemetry_manager.on_cease_received(message.source_hash());
                 if (_current_screen == SCREEN_MAP) {
                     update_map_peer_markers();
                 }
             }
+        }
+    }
+
+    // If message has telemetry/cease fields but no body content, treat as
+    // telemetry-only — skip chat, notification, and message store
+    bool is_telemetry_only = (has_telemetry || has_cease) && message.content().size() == 0;
+
+    if (is_telemetry_only) {
+        INFO("  Telemetry-only message — skipping chat/store/notification");
+        return;
+    }
+
+    // Normal message flow: save, display, notify
+    _store.save_message(message);
+
+    bool viewing_this_chat = (_current_screen == SCREEN_CHAT && _current_peer_hash == message.source_hash());
+    if (viewing_this_chat) {
+        _chat_screen->add_message(message, false);
+    }
+
+    if (_settings_screen) {
+        const auto& settings = _settings_screen->get_settings();
+        if (settings.notification_sound && !viewing_this_chat) {
+            Notification::tone_play(1000, 100, settings.notification_volume);  // 1kHz beep, 100ms
         }
     }
 
@@ -1078,7 +1098,7 @@ void UIManager::update_map_peer_markers() {
     const auto& locs = _telemetry_manager.get_received_locations();
     if (locs.empty()) return;
 
-    // Convert to MapScreen::PeerLocation array
+    // Convert to MapScreen::PeerLocation array with display names
     std::vector<MapScreen::PeerLocation> peer_locs;
     peer_locs.reserve(locs.size());
     for (const auto& loc : locs) {
@@ -1087,6 +1107,16 @@ void UIManager::update_map_peer_markers() {
         pl.lat = loc.lat;
         pl.lon = loc.lon;
         pl.timestamp = loc.timestamp;
+
+        // Resolve display name from announce app_data
+        Bytes app_data = RNS::Identity::recall_app_data(loc.peer_hash);
+        if (app_data && app_data.size() > 0) {
+            String display_name = ConversationListScreen::parse_display_name(app_data);
+            if (display_name.length() > 0) {
+                pl.name = display_name.c_str();
+            }
+        }
+
         peer_locs.push_back(pl);
     }
 
