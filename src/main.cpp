@@ -223,27 +223,18 @@ int calculate_timezone_offset_hours(double longitude) {
 bool sync_time_from_gps(uint32_t timeout_ms = 30000) {
     INFO("Attempting GPS time sync...");
 
-    uint32_t start = millis();
-    bool got_time = false;
-    bool got_location = false;
+    // Check if gps object already has valid data (from main loop feeding)
+    bool got_time = (gps.date.isValid() && gps.time.isValid() && gps.date.year() >= 2024);
+    bool got_location = gps.location.isValid();
 
-    while (millis() - start < timeout_ms) {
+    // If not ready yet, wait and read serial data
+    uint32_t start = millis();
+    while (!(got_time && got_location) && (millis() - start < timeout_ms)) {
         while (GPSSerial.available() > 0) {
-            if (gps.encode(GPSSerial.read())) {
-                // Check if we have valid date/time
-                if (gps.date.isValid() && gps.time.isValid() && gps.date.year() >= 2024) {
-                    got_time = true;
-                }
-                // Check if we have valid location (for timezone)
-                if (gps.location.isValid()) {
-                    got_location = true;
-                }
-                // If we have both, we can sync
-                if (got_time && got_location) {
-                    break;
-                }
-            }
+            gps.encode(GPSSerial.read());
         }
+        got_time = (gps.date.isValid() && gps.time.isValid() && gps.date.year() >= 2024);
+        got_location = gps.location.isValid();
         if (got_time && got_location) break;
         delay(10);
     }
@@ -264,12 +255,11 @@ bool sync_time_from_gps(uint32_t timeout_ms = 30000) {
     gps_time.tm_isdst = 0;  // GPS time is UTC, no DST
 
     // Convert to Unix timestamp (UTC)
-    time_t gps_unix = mktime(&gps_time);
-    // mktime assumes local time, adjust back to UTC
-    // Actually, we'll set TZ to UTC first
+    // Set TZ to UTC BEFORE mktime — mktime interprets its argument as local
+    // time and mutates the struct, so TZ must be correct on the first call.
     setenv("TZ", "UTC0", 1);
     tzset();
-    gps_unix = mktime(&gps_time);
+    time_t gps_unix = mktime(&gps_time);
 
     // Set the system time
     struct timeval tv;
@@ -278,31 +268,41 @@ bool sync_time_from_gps(uint32_t timeout_ms = 30000) {
     settimeofday(&tv, nullptr);
 
     // Set timezone based on location if available
+    // Use US timezone with DST rules when in continental US longitude range,
+    // otherwise fall back to a simple offset without DST.
+    const char* tz_str = "EST5EDT,M3.2.0,M11.1.0";  // default
     if (got_location) {
         double longitude = gps.location.lng();
-        int tz_offset = calculate_timezone_offset_hours(longitude);
-
-        // Build POSIX TZ string (e.g., "EST5" for UTC-5)
-        // Note: POSIX uses opposite sign convention!
-        char tz_str[32];
-        if (tz_offset >= 0) {
-            snprintf(tz_str, sizeof(tz_str), "GPS%d", -tz_offset);
-        } else {
-            snprintf(tz_str, sizeof(tz_str), "GPS+%d", -tz_offset);
+        if (longitude >= -67.0 && longitude < -67.0)       // Atlantic: not continental US
+            tz_str = "AST4ADT,M3.2.0,M11.1.0";
+        else if (longitude >= -82.5 && longitude < -67.0)   // Eastern
+            tz_str = "EST5EDT,M3.2.0,M11.1.0";
+        else if (longitude >= -97.5 && longitude < -82.5)   // Central
+            tz_str = "CST6CDT,M3.2.0,M11.1.0";
+        else if (longitude >= -112.5 && longitude < -97.5)  // Mountain
+            tz_str = "MST7MDT,M3.2.0,M11.1.0";
+        else if (longitude >= -127.5 && longitude < -112.5) // Pacific
+            tz_str = "PST8PDT,M3.2.0,M11.1.0";
+        else {
+            // Outside US — use simple offset from longitude (no DST)
+            int tz_offset = calculate_timezone_offset_hours(longitude);
+            static char tz_buf[32];
+            if (tz_offset >= 0)
+                snprintf(tz_buf, sizeof(tz_buf), "GPS%d", -tz_offset);
+            else
+                snprintf(tz_buf, sizeof(tz_buf), "GPS+%d", -tz_offset);
+            tz_str = tz_buf;
         }
-        setenv("TZ", tz_str, 1);
-        tzset();
 
-        String msg = "  GPS location: " + String(gps.location.lat(), 4) + ", " + String(longitude, 4);
+        String msg = "  GPS location: " + String(gps.location.lat(), 4) + ", " + String(gps.location.lng(), 4);
         INFO(msg.c_str());
-        msg = "  Timezone offset: UTC" + String(tz_offset >= 0 ? "+" : "") + String(tz_offset);
+        msg = "  Timezone: " + String(tz_str);
         INFO(msg.c_str());
     } else {
-        // No location, use default Eastern Time
         WARNING("GPS location not available, using Eastern Time");
-        setenv("TZ", "EST5EDT,M3.2.0,M11.1.0", 1);
-        tzset();
     }
+    setenv("TZ", tz_str, 1);
+    tzset();
 
     // Set the time offset for Utilities::OS::time()
     time_t now = time(nullptr);
@@ -1662,6 +1662,14 @@ void loop() {
     // Read GPS data continuously (TinyGPSPlus needs constant feeding)
     while (GPSSerial.available() > 0) {
         gps.encode(GPSSerial.read());
+    }
+
+    // Retry GPS time sync once we get a fix (boot timeout often misses cold start)
+    if (!gps_time_synced && gps.date.isValid() && gps.time.isValid()
+        && gps.date.year() >= 2024 && gps.location.isValid()) {
+        // Data is already in the gps object from the feed loop above —
+        // sync_time_from_gps will find it on the first iteration
+        sync_time_from_gps(1000);
     }
 
     // Screen timeout handling
