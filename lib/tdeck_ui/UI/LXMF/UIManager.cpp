@@ -860,12 +860,31 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
         const Bytes* meta_field = message.fields_get(Bytes(&meta_key, 1));
         if (meta_field) {
             has_cease = true;
+            char log_buf[128];
+            snprintf(log_buf, sizeof(log_buf), "[TELEM-RX] Got COLUMBA_META from %s (%d bytes)",
+                     source_hex.c_str(), (int)meta_field->size());
+            pyxis_log(log_buf);
             if (Telemetry::decode_columba_cease(*meta_field)) {
+                pyxis_log("[TELEM-RX] Cease signal decoded — removing peer location");
                 _telemetry_manager.on_cease_received(message.source_hash());
+                snprintf(log_buf, sizeof(log_buf), "[TELEM-RX] Remaining locations: %d",
+                         (int)_telemetry_manager.get_received_locations().size());
+                pyxis_log(log_buf);
                 if (_current_screen == SCREEN_MAP) {
+                    pyxis_log("[TELEM-RX] Updating map markers after cease");
                     update_map_peer_markers();
+                } else {
+                    pyxis_log("[TELEM-RX] Not on map screen, markers will update on next view");
                 }
+            } else {
+                pyxis_log("[TELEM-RX] COLUMBA_META present but not a cease signal");
             }
+        } else {
+            // Log all field keys we DO have for debugging
+            char log_buf[128];
+            snprintf(log_buf, sizeof(log_buf), "[TELEM-RX] No COLUMBA_META (0x70) field found in message from %s",
+                     source_hex.c_str());
+            pyxis_log(log_buf);
         }
     }
 
@@ -1096,7 +1115,11 @@ void UIManager::update_map_peer_markers() {
     if (!_map_screen) return;
 
     const auto& locs = _telemetry_manager.get_received_locations();
-    if (locs.empty()) return;
+    if (locs.empty()) {
+        // Clear all markers (e.g. after cease)
+        _map_screen->update_peer_locations(nullptr, 0);
+        return;
+    }
 
     // Convert to MapScreen::PeerLocation array with display names
     std::vector<MapScreen::PeerLocation> peer_locs;
