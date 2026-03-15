@@ -24,5 +24,8 @@ Other features:
 - ~~Will crash in about 5 minutes of normal use (sorry)~~ I had 5d uptime on v0.2.0 with BLE disabled
 - Make LXST voice calls (codec2 only, quality sounds horrible coming out the other end in Columba, needs work)
 
+## Documentation
+- [User manual](docs/user-manual.md)
+
 ## Why "Pyxis"
 Pyxis, latin for "compass," is a [constellation](https://en.wikipedia.org/wiki/Pyxis) in the southern sky depicting a mariner's compass. Small but essential, the compass ensures every message finds its destination - even when the path is uncertain. 
