@@ -1,5 +1,6 @@
 .pio/
 .vscode/
 *.pyc
+/tiles/
 docs/flasher/firmware/
 lib/tdeck_ui/Hardware/TDeck/SplashImage.h
