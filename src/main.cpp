@@ -115,6 +115,28 @@ Interface* auto_interface = nullptr;
 BLEInterface* ble_interface_impl = nullptr;
 Interface* ble_interface = nullptr;
 
+static void refresh_outbound_propagation_node() {
+    if (!router || !propagation_manager) {
+        return;
+    }
+
+    Bytes effective_node;
+    if (!app_settings.prop_auto_select && !app_settings.prop_selected_node.isEmpty()) {
+        effective_node.assignHex(app_settings.prop_selected_node.c_str());
+    } else {
+        effective_node = propagation_manager->get_effective_node();
+    }
+
+    router->set_outbound_propagation_node(effective_node);
+
+    uint8_t stamp_cost = 0;
+    if (effective_node.size() > 0) {
+        PropagationNodeInfo node_info = propagation_manager->get_node(effective_node);
+        stamp_cost = node_info.stamp_cost;
+    }
+    router->set_outbound_propagation_stamp_cost(stamp_cost);
+}
+
 // Timing
 uint32_t last_ui_update = 0;
 uint32_t last_announce = 0;
@@ -842,6 +864,9 @@ void setup_lxmf() {
     propagation_manager = new PropagationNodeManager();
     Transport::register_announce_handler(HAnnounceHandler(propagation_manager));
     INFO("Propagation node manager registered");
+    propagation_manager->set_update_callback([]() {
+        refresh_outbound_propagation_node();
+    });
 
     // Configure propagation settings
     router->set_fallback_to_propagation(app_settings.prop_fallback_enabled);
@@ -859,6 +884,7 @@ void setup_lxmf() {
     } else {
         INFO("  Propagation node: auto-select (no cached node)");
     }
+    refresh_outbound_propagation_node();
     INFO(("  Fallback to propagation: " + String(app_settings.prop_fallback_enabled ? "enabled" : "disabled")).c_str());
     INFO(("  Propagation only: " + String(app_settings.prop_only ? "enabled" : "disabled")).c_str());
 
@@ -1134,6 +1160,7 @@ void setup_ui_manager() {
             if (router) {
                 router->set_fallback_to_propagation(new_settings.prop_fallback_enabled);
                 router->set_propagation_only(new_settings.prop_only);
+                refresh_outbound_propagation_node();
 
                 // When auto-select is enabled, save the current effective node for next boot
                 if (new_settings.prop_auto_select && propagation_manager) {
@@ -1388,6 +1415,28 @@ void setup() {
         }
         INFO(">>> APP DELIVERED CALLBACK EXIT");
         Serial.flush();
+    });
+
+    router->register_failed_callback([](LXMF::LXMessage& msg) {
+        RNS::Bytes msg_hash = msg.hash();
+        WARNING("Message delivery failed for message: " + msg_hash.toHex().substr(0, 16) + "...");
+        Serial.flush();
+
+        if (message_store) {
+            message_store->update_message_state(msg_hash, LXMF::Type::Message::FAILED);
+
+            LXMF::LXMessage full_msg = message_store->load_message(msg_hash);
+            if (full_msg.hash()) {
+                full_msg.state(LXMF::Type::Message::FAILED);
+                if (ui_manager) {
+                    ui_manager->on_message_failed(full_msg);
+                }
+            } else if (ui_manager) {
+                ui_manager->on_message_failed(msg);
+            }
+        } else if (ui_manager) {
+            ui_manager->on_message_failed(msg);
+        }
     });
 
     // Boot profiling complete

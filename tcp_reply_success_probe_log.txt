@@ -1,0 +1,247 @@
+[TCP] Reading 375 bytes
+[TCP] First bytes: 7e 51 04 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b ce 
+[HDLC] Frame #236: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #237: 188 escaped bytes
+[TCP] Processing frame: 187 bytes
+[HDLC] Frame #238: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #239: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+[TCP] Reading 193 bytes
+[TCP] First bytes: 7e 51 04 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 03 
+[HDLC] Frame #240: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #241: 191 escaped bytes
+[TCP] Processing frame: 191 bytes
+20543-17:43:15.312 [INF] PropagationNodeManager: Node c6c87ab385f8c956... reports propagation disabled
+[TCP] Reading 187 bytes
+[TCP] First bytes: 7e 51 02 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 53 
+[HDLC] Frame #242: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #243: 185 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HEAP] free=74480 min=63372 max_block=61428 delta=+72 stack_hwm=17180 step=13
+[PSRAM] free=6882227/8358871  [INTERNAL] free=74480 max_block=61428
+[TCP] Reading 227 bytes
+[TCP] First bytes: 7e 51 02 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b f0 
+[HDLC] Frame #244: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #245: 225 escaped bytes
+[TCP] Processing frame: 225 bytes
+20543-17:43:17.105 [WRN] PropagationNodeManager: Invalid app_data array size: 0
+20543-17:43:17.114 [WRN] PropagationNodeManager: Failed to parse announce app_data
+[TCP] connected=1 online=1 avail=0 loops=916 rx=24102 buf=1
+[TCP] Reading 193 bytes
+[TCP] First bytes: 7e 51 04 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b ad 
+[HDLC] Frame #246: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #247: 191 escaped bytes
+[TCP] Processing frame: 191 bytes
+[TCP] Reading 374 bytes
+[TCP] First bytes: 7e 51 03 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 73 
+[HDLC] Frame #248: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #249: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #250: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #251: 187 escaped bytes
+[TCP] Processing frame: 187 bytes
+[HEAP] free=74460 min=63372 max_block=61428 delta=-20 stack_hwm=17180 step=13
+[PSRAM] free=6882195/8358871  [INTERNAL] free=74460 max_block=61428
+[DIAG] ikd=221 ikr=61 ann=0 dest=16 pkt=64 held=0 rev=0 link=0
+[TCP] Reading 187 bytes
+[TCP] First bytes: 7e 51 02 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 53 
+[HDLC] Frame #252: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #253: 185 escaped bytes
+[TCP] Processing frame: 183 bytes
+[TCP] connected=1 online=1 avail=0 loops=1040 rx=24856 buf=1
+[DISP] ok: last_flush=128 ms ago, total_flushes=501
+[TCP] Reading 227 bytes
+[TCP] First bytes: 7e 51 02 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b f0 
+[HDLC] Frame #254: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #255: 225 escaped bytes
+[TCP] Processing frame: 225 bytes
+20543-17:43:23.451 [INF] PropagationNodeManager: Discovered propagation node 'Propagation Node' at f473ad711e14cb9d... (4 hops)
+[TELEM] sessions=0 time=1774979003 gps=none sats=0
+20543-17:43:24.583 [INF] LXST: Voice announce from 44e444c27e8efa02...
+20543-17:43:24.644 [NOT] [HEAP] int_free=74328 int_largest=61428 int_min=63372 int_frag=18% psram_free=6882195 psram_largest=6815732
+20543-17:43:24.645 [NOT] [POOL] tiny=233/1024 small=2/16 med=0/12 large=0/12 hits=111333 misses=0 fallbacks=0
+20543-17:43:24.646 [NOT] [STACK] lvgl=9328 
+[TCP] Reading 193 bytes
+[TCP] First bytes: 7e 51 04 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b ad 
+[HDLC] Frame #256: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #257: 191 escaped bytes
+[TCP] Processing frame: 191 bytes
+20543-17:43:25.882 [INF] PropagationNodeManager: Node b8790b96d407b3cd... reports propagation disabled
+[TCP] Reading 189 bytes
+[TCP] First bytes: 7e 51 04 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 7f 
+[HDLC] Frame #258: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #259: 187 escaped bytes
+[TCP] Processing frame: 187 bytes
+[HEAP] free=74084 min=63372 max_block=61428 delta=-376 stack_hwm=17180 step=13
+[PSRAM] free=6882195/8358871  [INTERNAL] free=74084 max_block=61428
+20543-17:43:27.028 [INF] LXST: Voice announce from c8771b33e217a37c...
+[TCP] Reading 185 bytes
+[TCP] First bytes: 7e 51 03 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 73 
+[HDLC] Frame #260: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #261: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+[TCP] connected=1 online=1 avail=0 loops=1006 rx=25650 buf=1
+20543-17:43:28.157 [WRN] PropagationNodeManager: Invalid app_data array size: 0
+20543-17:43:28.165 [WRN] PropagationNodeManager: Failed to parse announce app_data
+20543-17:43:28.275 [WRN] PropagationNodeManager: Invalid app_data array size: 4
+20543-17:43:28.284 [WRN] PropagationNodeManager: Failed to parse announce app_data
+20543-17:43:30.698 [INF] PropagationNodeManager: Node 95ca807f05d258f7... reports propagation disabled
+[HEAP] free=74272 min=63372 max_block=61428 delta=+188 stack_hwm=17180 step=13
+[PSRAM] free=6882135/8358871  [INTERNAL] free=74272 max_block=61428
+20543-17:43:32.344 [INF] Transport::inbound: Received DATA packet
+20543-17:43:32.353 [INF]   dest_type=0, context=0, dest_hash=0d051f3b6f844380c3e0c5d14e37fac8
+20543-17:43:32.354 [INF] Transport::inbound: Local destination 0d051f3b6f844380c3e0c5d14e37fac8 NOT FOUND
+20543-17:43:32.355 [INF]   Registered destinations count: 4
+[TCP] connected=1 online=1 avail=0 loops=996 rx=25650 buf=1
+[DISP] ok: last_flush=346 ms ago, total_flushes=525
+[TCP] Reading 567 bytes
+[TCP] First bytes: 7e 51 03 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 73 
+[HDLC] Frame #262: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #263: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #264: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #265: 191 escaped bytes
+[TCP] Processing frame: 191 bytes
+[HDLC] Frame #266: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #267: 187 escaped bytes
+[TCP] Processing frame: 187 bytes
+[HEAP] free=74308 min=63372 max_block=61428 delta=+36 stack_hwm=17180 step=13
+[PSRAM] free=6881839/8358871  [INTERNAL] free=74308 max_block=61428
+[TCP] connected=1 online=1 avail=0 loops=1048 rx=26217 buf=1
+[TCP] Reading 382 bytes
+[TCP] First bytes: 7e 51 04 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 03 
+[HDLC] Frame #268: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #269: 191 escaped bytes
+[TCP] Processing frame: 191 bytes
+[HDLC] Frame #270: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #271: 187 escaped bytes
+[TCP] Processing frame: 187 bytes
+[TCP] Reading 185 bytes
+[TCP] First bytes: 7e 51 03 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 73 
+[HDLC] Frame #272: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #273: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HEAP] free=74300 min=63372 max_block=61428 delta=-8 stack_hwm=17180 step=13
+[PSRAM] free=6881667/8358871  [INTERNAL] free=74300 max_block=61428
+20543-17:43:42.170 [INF] LXST: Voice announce from f3fd7b889425559c...
+[TCP] connected=1 online=1 avail=0 loops=1130 rx=26784 buf=1
+[DISP] ok: last_flush=141 ms ago, total_flushes=550
+[TCP] Reading 382 bytes
+[TCP] First bytes: 7e 51 04 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b ad 
+[HDLC] Frame #274: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #275: 191 escaped bytes
+[TCP] Processing frame: 191 bytes
+[HDLC] Frame #276: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #277: 187 escaped bytes
+[TCP] Processing frame: 187 bytes
+[TCP] Reading 185 bytes
+[TCP] First bytes: 7e 51 03 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 73 
+[HDLC] Frame #278: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #279: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+20543-17:43:44.982 [INF] Announcing LXMF delivery destination: 78977f0875e41d4c2a4fd968ff9aace3
+20543-17:43:45.051 [INF] WIRE TX raw (180 bytes): 010078977f0875e41d4c2a4fd968ff9aace300dcee7e3a9fb4c5b75a2b3eb6e7b9bc563627011535dad0a42b427df7d6ecc6...
+20543-17:43:45.054 [INF] WIRE TX framed (184 bytes): 7e010078977f0875e41d4c2a4fd968ff9aace300dcee7d5e3a9fb4c5b75a...
+20543-17:43:45.684 [INF] AutoInterface: Sent 180 bytes to fe80:0000:0000:0000:55c1:3e30:85ab:c79b port 42671
+20543-17:43:45.686 [INF] AutoInterface: Sent 180 bytes to fe80:0000:0000:0000:3e84:27ff:fecb:81dc port 42671
+20543-17:43:45.689 [INF] Announce sent successfully
+20543-17:43:45.748 [INF] WIRE TX raw (167 bytes): 0100d9fdbfc5fcce044fd8221e13bc7fb28000dcee7e3a9fb4c5b75a2b3eb6e7b9bc563627011535dad0a42b427df7d6ecc6...
+20543-17:43:45.750 [INF] WIRE TX framed (173 bytes): 7e0100d9fdbfc5fcce044fd8221e13bc7fb28000dcee7d5e3a9fb4c5b75a...
+20543-17:43:46.337 [INF] AutoInterface: Sent 167 bytes to fe80:0000:0000:0000:55c1:3e30:85ab:c79b port 42671
+20543-17:43:46.348 [INF] AutoInterface: Sent 167 bytes to fe80:0000:0000:0000:3e84:27ff:fecb:81dc port 42671
+20543-17:43:46.350 [INF] Periodic announce sent (interval: 60s)
+[HEAP] free=73448 min=63372 max_block=61428 delta=-852 stack_hwm=17180 step=13
+[PSRAM] free=6860327/8358727  [INTERNAL] free=73448 max_block=61428
+20543-17:43:47.060 [INF] LXST: Voice announce from 1dec3fd9c11e0de5...
+[TCP] Reading 385 bytes
+[TCP] First bytes: 7e 51 01 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 1d 
+[HDLC] Frame #280: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #281: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #282: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #283: 198 escaped bytes
+[TCP] Processing frame: 196 bytes
+[HDLC] Frame #284: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #285: 187 escaped bytes
+[TCP] Processing frame: 183 bytes
+[TCP] connected=1 online=1 avail=0 loops=520 rx=27736 buf=1
+[TCP] Reading 103 bytes
+[TCP] First bytes: 7e 0c 01 8a 3b a7 8f 9e 09 52 b4 5c 60 60 5b a1 4d 96 d6 fc 
+[HDLC] Frame #286: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #287: 101 escaped bytes
+[TCP] Processing frame: 99 bytes
+20543-17:43:48.549 [INF] Transport::inbound: Received DATA packet
+20543-17:43:48.557 [INF]   dest_type=3, context=252, dest_hash=8a3ba78f9e0952b45c60605ba14d96d6
+[TCP] Reading 382 bytes
+[TCP] First bytes: 7e 51 04 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b ad 
+[HDLC] Frame #288: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #289: 191 escaped bytes
+[TCP] Processing frame: 191 bytes
+[HDLC] Frame #290: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #291: 187 escaped bytes
+[TCP] Processing frame: 187 bytes
+[TCP] Reading 185 bytes
+[TCP] First bytes: 7e 51 03 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 73 
+[HDLC] Frame #292: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #293: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+20543-17:43:50.699 [INF] PropagationNodeManager: Node 44213278b52d8886... reports propagation disabled
+[HEAP] free=75712 min=63372 max_block=61428 delta=+2264 stack_hwm=17180 step=13
+[PSRAM] free=6896383/8358887  [INTERNAL] free=75712 max_block=61428
+[DIAG] ikd=230 ikr=64 ann=0 dest=16 pkt=64 held=0 rev=0 link=0
+[TCP] connected=1 online=1 avail=0 loops=984 rx=28406 buf=1
+20543-17:43:52.515 [INF] LXST: Voice announce from 154b4bb873c69953...
+[DISP] ok: last_flush=144 ms ago, total_flushes=572
+[TELEM] sessions=0 time=1774979033 gps=none sats=0
+20543-17:43:54.646 [NOT] [HEAP] int_free=75496 int_largest=61428 int_min=63372 int_frag=19% psram_free=6896383 psram_largest=6815732
+20543-17:43:54.655 [NOT] [POOL] tiny=224/1024 small=2/16 med=0/12 large=0/12 hits=119915 misses=0 fallbacks=0
+20543-17:43:54.656 [NOT] [STACK] lvgl=9328 
+[TCP] Reading 186 bytes
+[TCP] First bytes: 7e 51 03 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 73 
+[HDLC] Frame #294: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #295: 184 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HEAP] free=75000 min=63372 max_block=61428 delta=-712 stack_hwm=17180 step=13
+[PSRAM] free=6896379/8358887  [INTERNAL] free=75000 max_block=61428
+[TCP] Reading 384 bytes
+[TCP] First bytes: 7e 51 04 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b ce 
+[HDLC] Frame #296: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #297: 189 escaped bytes
+[TCP] Processing frame: 187 bytes
+[HDLC] Frame #298: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #299: 191 escaped bytes
+[TCP] Processing frame: 191 bytes
+[TCP] connected=1 online=1 avail=0 loops=1024 rx=28976 buf=1
+20543-17:43:57.753 [INF] PropagationNodeManager: Node 44213278b52d8886... reports propagation disabled
