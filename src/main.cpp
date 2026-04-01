@@ -1403,7 +1403,7 @@ void setup() {
         ui_manager->announce_lxst();
     }
 
-    // Register delivered callback to update message status in storage and UI
+    // Register sent callback to update message status in storage and UI
     router->register_sent_callback([](LXMF::LXMessage& msg) {
         RNS::Bytes msg_hash = msg.hash();
         bool propagated = (msg.method() == LXMF::Type::Message::PROPAGATED);
@@ -1411,18 +1411,29 @@ void setup() {
         Serial.flush();
 
         if (message_store) {
-            message_store->update_message_state(msg_hash, LXMF::Type::Message::SENT);
-            message_store->update_message_propagated(msg_hash, propagated);
+            message_store->update_message_delivery_status(
+                msg_hash,
+                LXMF::Type::Message::SENT,
+                propagated
+            );
 
-            LXMF::LXMessage full_msg = message_store->load_message(msg_hash);
-            if (full_msg.hash()) {
-                full_msg.state(LXMF::Type::Message::SENT);
-                full_msg.set_method(msg.method());
+            if (msg.destination_hash()) {
+                msg.state(LXMF::Type::Message::SENT);
+                msg.set_method(msg.method());
                 if (ui_manager) {
-                    ui_manager->on_message_sent(full_msg);
+                    ui_manager->on_message_sent(msg);
                 }
-            } else if (ui_manager) {
-                ui_manager->on_message_sent(msg);
+            } else {
+                LXMF::LXMessage full_msg = message_store->load_message(msg_hash);
+                if (full_msg.hash()) {
+                    full_msg.state(LXMF::Type::Message::SENT);
+                    full_msg.set_method(msg.method());
+                    if (ui_manager) {
+                        ui_manager->on_message_sent(full_msg);
+                    }
+                } else if (ui_manager) {
+                    ui_manager->on_message_sent(msg);
+                }
             }
         } else if (ui_manager) {
             ui_manager->on_message_sent(msg);
