@@ -1,0 +1,1267 @@
+[HDLC] Frame #2854: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2855: 221 escaped bytes
+[TCP] Processing frame: 221 bytes
+[HDLC] Time budget exhausted with 594 buffered bytes remaining
+[HDLC] Frame #2856: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2857: 188 escaped bytes
+[TCP] Processing frame: 187 bytes
+[HDLC] Frame #2858: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2859: 215 escaped bytes
+[TCP] Processing frame: 214 bytes
+20544-18:10:43.634 [INF] PropagationNodeManager: Updated propagation node 'Propagation Node' at 852a7b730f90ff99... (5 hops)
+[HDLC] Frame #2860: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2861: 184 escaped bytes
+[TCP] Processing frame: 183 bytes
+[TCP] Reading 200 bytes
+[TCP] First bytes: 7e 51 07 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b f5 
+[HDLC] Frame #2862: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2863: 198 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Time budget exhausted with 1 buffered bytes remaining
+[TCP] connected=1 online=1 avail=0 loops=780 rx=280818 buf=1
+[HDLC] Frame #2864: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2865: 225 escaped bytes
+[TCP] Processing frame: 224 bytes
+[HDLC] Time budget exhausted with 826 buffered bytes remaining
+[HDLC] Frame #2866: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2867: 192 escaped bytes
+[TCP] Processing frame: 192 bytes
+[HDLC] Frame #2868: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2869: 197 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HEAP] free=55460 min=44840 max_block=42996 delta=+176 stack_hwm=16112 step=13
+[PSRAM] free=6691311/8358279  [INTERNAL] free=55460 max_block=42996
+[HDLC] Frame #2870: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2871: 198 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #2872: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2873: 230 escaped bytes
+[TCP] Processing frame: 230 bytes
+[HDLC] Frame #2874: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2875: 199 escaped bytes
+[TCP] Processing frame: 198 bytes
+20544-18:10:46.037 [INF] LXST: Voice announce from ef4ca76c3e07077f...
+[TCP] Reading 1331 bytes
+[TCP] First bytes: 7e 51 07 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 38 
+[HDLC] Frame #2876: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2877: 200 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Time budget exhausted with 1130 buffered bytes remaining
+[HDLC] Frame #2878: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2879: 221 escaped bytes
+[TCP] Processing frame: 221 bytes
+[HDLC] Frame #2880: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2881: 210 escaped bytes
+[TCP] Processing frame: 207 bytes
+[HDLC] Frame #2882: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2883: 293 escaped bytes
+[TCP] Processing frame: 292 bytes
+[HDLC] Frame #2884: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2885: 197 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #2886: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2887: 198 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #2888: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2889: 223 escaped bytes
+[TCP] Processing frame: 222 bytes
+[TCP] Reading 219 bytes
+[TCP] First bytes: 7e 71 06 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 71 
+[HDLC] Frame #2890: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2891: 217 escaped bytes
+[TCP] Processing frame: 215 bytes
+[HDLC] Time budget exhausted with 1 buffered bytes remaining
+[HDLC] Frame #2892: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2893: 215 escaped bytes
+[TCP] Processing frame: 214 bytes
+[HDLC] Frame #2894: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2895: 184 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #2896: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2897: 200 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Time budget exhausted with 186 buffered bytes remaining
+[HDLC] Frame #2898: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2899: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+20544-18:10:49.676 [INF] LXST: Voice announce from 5301f2610f5bb8f2...
+[TCP] connected=1 online=1 avail=0 loops=822 rx=284636 buf=1
+[HDLC] Frame #2900: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2901: 203 escaped bytes
+[TCP] Processing frame: 202 bytes
+20544-18:10:50.404 [INF] PropagationNodeManager: Updated propagation node 'Propagation Node' at 3b171e0b79acf468... (5 hops)
+[DISP] ok: last_flush=253 ms ago, total_flushes=662
+[HDLC] Frame #2902: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2903: 292 escaped bytes
+[TCP] Processing frame: 292 bytes
+[HDLC] Frame #2904: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2905: 230 escaped bytes
+[TCP] Processing frame: 229 bytes
+[HEAP] free=55468 min=44840 max_block=42996 delta=+8 stack_hwm=16112 step=13
+[PSRAM] free=6689655/8358279  [INTERNAL] free=55468 max_block=42996
+[TCP] Reading 832 bytes
+[TCP] First bytes: 7e 51 07 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 8d 
+[HDLC] Time budget exhausted with 833 buffered bytes remaining
+[HDLC] Frame #2906: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2907: 197 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #2908: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2909: 198 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #2910: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2911: 230 escaped bytes
+[TCP] Processing frame: 230 bytes
+[HDLC] Frame #2912: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2913: 199 escaped bytes
+[TCP] Processing frame: 198 bytes
+[HDLC] Frame #2914: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2915: 231 escaped bytes
+[TCP] Processing frame: 230 bytes
+[HDLC] Frame #2916: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2917: 221 escaped bytes
+[TCP] Processing frame: 221 bytes
+[HDLC] Time budget exhausted with 612 buffered bytes remaining
+[HDLC] Frame #2918: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2919: 210 escaped bytes
+[TCP] Processing frame: 207 bytes
+[HDLC] Frame #2920: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2921: 197 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #2922: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2923: 198 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #2924: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2925: 226 escaped bytes
+[TCP] Processing frame: 225 bytes
+[HDLC] Frame #2926: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2927: 241 escaped bytes
+[TCP] Processing frame: 239 bytes
+[HDLC] Frame #2928: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2929: 194 escaped bytes
+[TCP] Processing frame: 194 bytes
+[HDLC] Frame #2930: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2931: 211 escaped bytes
+[TCP] Processing frame: 210 bytes
+[TCP] Reading 837 bytes
+[TCP] First bytes: 7e 71 06 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b ff 
+[HDLC] Time budget exhausted with 838 buffered bytes remaining
+[HDLC] Frame #2932: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2933: 223 escaped bytes
+[TCP] Processing frame: 222 bytes
+[HDLC] Frame #2934: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2935: 206 escaped bytes
+[TCP] Processing frame: 202 bytes
+20544-18:10:53.797 [WRN] PropagationNodeManager: Pool full, dropping lower-priority node 7b2a717a7c80c474
+[HDLC] Frame #2936: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2937: 216 escaped bytes
+[TCP] Processing frame: 213 bytes
+[HDLC] Frame #2938: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2939: 184 escaped bytes
+[TCP] Processing frame: 183 bytes
+20544-18:10:54.037 [INF] LXST: Voice announce from 0f823eb6d73e39ed...
+[HDLC] Frame #2940: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2941: 204 escaped bytes
+[TCP] Processing frame: 202 bytes
+20544-18:10:54.662 [INF] PropagationNodeManager: Evicting node c077d6b4bf557e71... for better candidate 2ddc58c4e4cd221d
+20544-18:10:54.663 [INF] PropagationNodeManager: Discovered propagation node 'Propagation Node' at 2ddc58c4e4cd221d... (5 hops)
+[HDLC] Time budget exhausted with 424 buffered bytes remaining
+[HDLC] Frame #2942: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2943: 234 escaped bytes
+[TCP] Processing frame: 233 bytes
+20544-18:10:54.769 [INF]   attempt=1/8 method=PROPAGATED packed=122 identity=yes path=yes opp_path=yes prop=yes fallback=on
+20544-18:10:54.770 [INF]   Falling back to PROPAGATED delivery: message already marked for propagated delivery
+20544-18:10:54.771 [INF] Sending LXMF message via PROPAGATED delivery
+20544-18:10:54.863 [INF] AutoInterface: Sent 86 bytes to fe80:0000:0000:0000:3e84:27ff:fecb:81dc port 42671
+20544-18:10:54.874 [INF] AutoInterface: Sent 86 bytes to fe80:0000:0000:0000:55c1:3e30:85ab:c79b port 42671
+20544-18:10:54.876 [INF]   Establishing link to propagation node...
+20544-18:10:54.877 [INF]   Waiting for propagation link activation
+[HDLC] Frame #2944: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2945: 185 escaped bytes
+[TCP] Processing frame: 183 bytes
+[TCP] connected=1 online=1 avail=0 loops=668 rx=289612 buf=1
+[TCP] Reading 202 bytes
+[TCP] First bytes: 7e 51 07 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 14 
+[HDLC] Frame #2946: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2947: 200 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Time budget exhausted with 762 buffered bytes remaining
+[HDLC] Frame #2948: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2949: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HEAP] free=53944 min=44840 max_block=42996 delta=-1524 stack_hwm=16112 step=13
+[PSRAM] free=6661547/8358231  [INTERNAL] free=53944 max_block=42996
+[HDLC] Frame #2950: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2951: 202 escaped bytes
+[TCP] Processing frame: 202 bytes
+[HDLC] Frame #2952: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2953: 184 escaped bytes
+[TCP] Processing frame: 183 bytes
+20544-18:10:56.081 [INF]   attempt=2/8 method=PROPAGATED packed=122 identity=yes path=yes opp_path=yes prop=yes fallback=on
+20544-18:10:56.090 [INF]   Falling back to PROPAGATED delivery: message already marked for propagated delivery
+20544-18:10:56.091 [INF] Sending LXMF message via PROPAGATED delivery
+20544-18:10:56.092 [INF]   Propagation link pending activation
+[HDLC] Frame #2954: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2955: 184 escaped bytes
+[TCP] Processing frame: 183 bytes
+20544-18:10:56.249 [INF] Announcing LXMF delivery destination: 78977f0875e41d4c2a4fd968ff9aace3
+20544-18:10:56.309 [INF] WIRE TX raw (180 bytes): 010078977f0875e41d4c2a4fd968ff9aace300dcee7e3a9fb4c5b75a2b3eb6e7b9bc563627011535dad0a42b427df7d6ecc6...
+20544-18:10:56.311 [INF] WIRE TX framed (184 bytes): 7e010078977f0875e41d4c2a4fd968ff9aace300dcee7d5e3a9fb4c5b75a...
+20544-18:10:56.943 [INF] AutoInterface: Sent 180 bytes to fe80:0000:0000:0000:3e84:27ff:fecb:81dc port 42671
+20544-18:10:56.945 [INF] AutoInterface: Sent 180 bytes to fe80:0000:0000:0000:55c1:3e30:85ab:c79b port 42671
+20544-18:10:56.947 [INF] Announce sent successfully
+20544-18:10:57.006 [INF] WIRE TX raw (167 bytes): 0100d9fdbfc5fcce044fd8221e13bc7fb28000dcee7e3a9fb4c5b75a2b3eb6e7b9bc563627011535dad0a42b427df7d6ecc6...
+20544-18:10:57.015 [INF] WIRE TX framed (172 bytes): 7e0100d9fdbfc5fcce044fd8221e13bc7fb28000dcee7d5e3a9fb4c5b75a...
+20544-18:10:57.602 [INF] AutoInterface: Sent 167 bytes to fe80:0000:0000:0000:3e84:27ff:fecb:81dc port 42671
+20544-18:10:57.607 [INF] AutoInterface: Sent 167 bytes to fe80:0000:0000:0000:55c1:3e30:85ab:c79b port 42671
+20544-18:10:57.609 [INF] Periodic announce sent (interval: 60s)
+[TCP] Reading 1073 bytes
+[TCP] First bytes: 7e 71 05 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 18 
+[HDLC] Time budget exhausted with 1262 buffered bytes remaining
+[HDLC] Frame #2956: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2957: 231 escaped bytes
+[TCP] Processing frame: 230 bytes
+20544-18:10:57.718 [INF]   attempt=3/8 method=PROPAGATED packed=122 identity=yes path=no opp_path=no prop=yes fallback=on
+20544-18:10:57.720 [INF]   Falling back to PROPAGATED delivery: message already marked for propagated delivery
+20544-18:10:57.721 [INF] Sending LXMF message via PROPAGATED delivery
+20544-18:10:57.722 [INF]   Propagation link pending activation
+[HDLC] Frame #2958: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2959: 198 escaped bytes
+[TCP] Processing frame: 196 bytes
+[HDLC] Frame #2960: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2961: 203 escaped bytes
+[TCP] Processing frame: 201 bytes
+[HDLC] Frame #2962: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2963: 236 escaped bytes
+[TCP] Processing frame: 235 bytes
+[HDLC] Frame #2964: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2965: 195 escaped bytes
+[TCP] Processing frame: 194 bytes
+[HDLC] Frame #2966: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2967: 186 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Time budget exhausted with 1275 buffered bytes remaining
+[HDLC] Frame #2968: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2969: 226 escaped bytes
+[TCP] Processing frame: 225 bytes
+20544-18:10:58.761 [INF]   attempt=4/8 method=PROPAGATED packed=122 identity=yes path=no opp_path=no prop=yes fallback=on
+20544-18:10:58.769 [INF]   Falling back to PROPAGATED delivery: message already marked for propagated delivery
+20544-18:10:58.772 [INF] Sending LXMF message via PROPAGATED delivery
+20544-18:10:58.774 [INF]   Propagation link pending activation
+[HDLC] Frame #2970: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2971: 241 escaped bytes
+[TCP] Processing frame: 239 bytes
+[HDLC] Frame #2972: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2973: 194 escaped bytes
+[TCP] Processing frame: 194 bytes
+[HDLC] Frame #2974: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2975: 211 escaped bytes
+[TCP] Processing frame: 210 bytes
+[HDLC] Frame #2976: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2977: 204 escaped bytes
+[TCP] Processing frame: 203 bytes
+[HDLC] Frame #2978: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2979: 186 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #2980: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2981: 225 escaped bytes
+[TCP] Processing frame: 224 bytes
+[HDLC] Frame #2982: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2983: 198 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #2984: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2985: 206 escaped bytes
+[TCP] Processing frame: 202 bytes
+[HDLC] Frame #2986: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2987: 216 escaped bytes
+[TCP] Processing frame: 213 bytes
+[HDLC] Time budget exhausted with 187 buffered bytes remaining
+[HDLC] Frame #2988: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2989: 184 escaped bytes
+[TCP] Processing frame: 183 bytes
+20544-18:10:59.930 [INF]   attempt=5/8 method=PROPAGATED packed=122 identity=yes path=no opp_path=no prop=yes fallback=on
+20544-18:10:59.938 [INF]   Falling back to PROPAGATED delivery: message already marked for propagated delivery
+20544-18:10:59.940 [INF] Sending LXMF message via PROPAGATED delivery
+20544-18:10:59.941 [INF]   Propagation link pending activation
+[TCP] connected=1 online=1 avail=0 loops=408 rx=292593 buf=1
+[DISP] ok: last_flush=408 ms ago, total_flushes=683
+[TCP] Reading 1273 bytes
+[TCP] First bytes: 7e 51 04 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 2d 
+[HDLC] Time budget exhausted with 1882 buffered bytes remaining
+[HDLC] Frame #2990: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2991: 204 escaped bytes
+[TCP] Processing frame: 202 bytes
+20544-18:11:00.952 [INF]   attempt=6/8 method=PROPAGATED packed=122 identity=yes path=no opp_path=no prop=yes fallback=on
+20544-18:11:00.960 [INF]   Falling back to PROPAGATED delivery: message already marked for propagated delivery
+20544-18:11:00.962 [INF] Sending LXMF message via PROPAGATED delivery
+20544-18:11:00.963 [INF]   Propagation link pending activation
+[HEAP] free=53924 min=44840 max_block=42996 delta=-20 stack_hwm=16112 step=13
+[PSRAM] free=6656035/8358215  [INTERNAL] free=53652 max_block=42996
+[DIAG] ikd=364 ikr=112 ann=0 dest=32 pkt=128 held=0 rev=0 link=0
+[HDLC] Frame #2992: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2993: 234 escaped bytes
+[TCP] Processing frame: 233 bytes
+[HDLC] Frame #2994: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2995: 185 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #2996: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2997: 233 escaped bytes
+[TCP] Processing frame: 232 bytes
+[HDLC] Frame #2998: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #2999: 202 escaped bytes
+[TCP] Processing frame: 202 bytes
+20544-18:11:01.299 [INF] PropagationNodeManager: Updated propagation node 'Propagation Node' at 3b171e0b79acf468... (5 hops)
+[HDLC] Frame #3000: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3001: 203 escaped bytes
+[TCP] Processing frame: 202 bytes
+20544-18:11:01.414 [WRN] PropagationNodeManager: Pool full, dropping lower-priority node 532c9deb39d81b39
+[HDLC] Frame #3002: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3003: 226 escaped bytes
+[TCP] Processing frame: 225 bytes
+[HDLC] Frame #3004: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3005: 192 escaped bytes
+[TCP] Processing frame: 191 bytes
+[HDLC] Frame #3006: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3007: 184 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #3008: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3009: 202 escaped bytes
+[TCP] Processing frame: 202 bytes
+[HDLC] Time budget exhausted with 1045 buffered bytes remaining
+[HDLC] Frame #3010: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3011: 184 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #3012: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3013: 184 escaped bytes
+[TCP] Processing frame: 183 bytes
+20544-18:11:02.110 [INF]   attempt=7/8 method=PROPAGATED packed=122 identity=yes path=no opp_path=no prop=yes fallback=on
+20544-18:11:02.111 [INF]   Falling back to PROPAGATED delivery: message already marked for propagated delivery
+20544-18:11:02.112 [INF] Sending LXMF message via PROPAGATED delivery
+20544-18:11:02.113 [INF]   Propagation link pending activation
+[HDLC] Frame #3014: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3015: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+20544-18:11:02.222 [INF] LXST: Voice announce from 3fcd534476c27b70...
+[HDLC] Frame #3016: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3017: 234 escaped bytes
+[TCP] Processing frame: 231 bytes
+[HDLC] Frame #3018: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3019: 249 escaped bytes
+[TCP] Processing frame: 248 bytes
+[TCP] Reading 626 bytes
+[TCP] First bytes: 7e 71 04 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b d8 
+[HDLC] Frame #3020: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3021: 235 escaped bytes
+[TCP] Processing frame: 231 bytes
+[HDLC] Frame #3022: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3023: 197 escaped bytes
+[TCP] Processing frame: 196 bytes
+[HDLC] Time budget exhausted with 191 buffered bytes remaining
+20544-18:11:03.010 [INF] LXST: Voice announce from 1dec3fd9c11e0de5...
+[HDLC] Frame #3024: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3025: 188 escaped bytes
+[TCP] Processing frame: 187 bytes
+20544-18:11:03.134 [INF]   attempt=8/8 method=PROPAGATED packed=122 identity=yes path=no opp_path=no prop=yes fallback=on
+20544-18:11:03.136 [INF]   Falling back to PROPAGATED delivery: message already marked for propagated delivery
+20544-18:11:03.137 [INF] Sending LXMF message via PROPAGATED delivery
+20544-18:11:03.138 [INF]   Propagation link pending activation
+[TELEM] sessions=0 time=1775067063 gps=none sats=0
+[HDLC] Frame #3026: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3027: 203 escaped bytes
+[TCP] Processing frame: 201 bytes
+[HDLC] Frame #3028: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3029: 236 escaped bytes
+[TCP] Processing frame: 235 bytes
+[HDLC] Time budget exhausted with 772 buffered bytes remaining
+[HDLC] Frame #3030: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3031: 195 escaped bytes
+[TCP] Processing frame: 194 bytes
+[HDLC] Frame #3032: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3033: 185 escaped bytes
+[TCP] Processing frame: 183 bytes
+20544-18:11:04.132 [INF] LXST: Voice announce from 3fcd534476c27b70...
+[HDLC] Frame #3034: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3035: 184 escaped bytes
+[TCP] Processing frame: 183 bytes
+20544-18:11:04.236 [WRN] LXMF state OUTBOUND -> FAILED for e3659642202a90cd... (Max delivery attempts reached)
+20544-18:11:04.245 [WRN] Message delivery failed for message: e3659642202a90cd...
+20544-18:11:04.627 [INF] Message state updated to 255
+20544-18:11:04.631 [INF] Unpacking LXMF message from 122 bytes
+20544-18:11:04.636 [INF] Message unpacked successfully
+20544-18:11:04.638 [WRN] Message delivery failed: e3659642...
+20544-18:11:04.656 [NOT] [HEAP] int_free=61280 int_largest=42996 int_min=44840 int_frag=30% psram_free=6655951 psram_largest=6553588
+20544-18:11:04.657 [NOT] [POOL] tiny=390/1024 small=5/16 med=0/12 large=0/12 hits=197051 misses=0 fallbacks=0
+20544-18:11:04.658 [NOT] [STACK] lvgl=9376 
+[HDLC] Frame #3036: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3037: 199 escaped bytes
+[TCP] Processing frame: 197 bytes
+[TCP] Reading 998 bytes
+[TCP] First bytes: 7e 51 02 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 68 
+[HDLC] Time budget exhausted with 2229 buffered bytes remaining
+[HDLC] Frame #3038: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3039: 204 escaped bytes
+[TCP] Processing frame: 203 bytes
+[HDLC] Frame #3040: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3041: 186 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #3042: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3043: 225 escaped bytes
+[TCP] Processing frame: 224 bytes
+[HDLC] Frame #3044: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3045: 198 escaped bytes
+[TCP] Processing frame: 197 bytes
+[TCP] connected=1 online=1 avail=0 loops=451 rx=299182 buf=1408
+[HDLC] Frame #3046: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3047: 206 escaped bytes
+[TCP] Processing frame: 204 bytes
+[HDLC] Frame #3048: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3049: 199 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #3050: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3051: 187 escaped bytes
+[TCP] Processing frame: 186 bytes
+[HDLC] Frame #3052: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3053: 199 escaped bytes
+[TCP] Processing frame: 198 bytes
+[HDLC] Frame #3054: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3055: 198 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #3056: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3057: 202 escaped bytes
+[TCP] Processing frame: 202 bytes
+20544-18:11:05.992 [WRN] PropagationNodeManager: Pool full, dropping lower-priority node 95ca807f05d258f7
+[HDLC] Frame #3058: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3059: 202 escaped bytes
+[TCP] Processing frame: 202 bytes
+20544-18:11:06.103 [WRN] PropagationNodeManager: Pool full, dropping lower-priority node 582cdb2591d0248a
+[HDLC] Time budget exhausted with 201 buffered bytes remaining
+[HEAP] free=61376 min=44840 max_block=42996 delta=+7452 stack_hwm=16112 step=13
+[PSRAM] free=6657547/8358247  [INTERNAL] free=60952 max_block=42996
+[HDLC] Frame #3060: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3061: 198 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #3062: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3063: 233 escaped bytes
+[TCP] Processing frame: 232 bytes
+[HDLC] Frame #3064: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3065: 202 escaped bytes
+[TCP] Processing frame: 202 bytes
+[TCP] Reading 430 bytes
+[TCP] First bytes: 7e 51 06 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b e1 
+[HDLC] Time budget exhausted with 1653 buffered bytes remaining
+[HDLC] Frame #3066: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3067: 203 escaped bytes
+[TCP] Processing frame: 202 bytes
+[HDLC] Frame #3068: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3069: 226 escaped bytes
+[TCP] Processing frame: 225 bytes
+[HDLC] Frame #3070: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3071: 192 escaped bytes
+[TCP] Processing frame: 191 bytes
+[HDLC] Frame #3072: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3073: 184 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #3074: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3075: 222 escaped bytes
+[TCP] Processing frame: 221 bytes
+[HDLC] Frame #3076: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3077: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+20544-18:11:07.646 [INF] LXST: Voice announce from 8c8c16775e09dcc3...
+[HDLC] Frame #3078: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3079: 214 escaped bytes
+[TCP] Processing frame: 214 bytes
+20544-18:11:07.766 [INF] PropagationNodeManager: Updated propagation node 'Propagation Node' at e1a8a3a6644ef291... (7 hops)
+[HDLC] Frame #3080: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3081: 212 escaped bytes
+[TCP] Processing frame: 210 bytes
+[HDLC] Frame #3082: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3083: 249 escaped bytes
+[TCP] Processing frame: 248 bytes
+[HDLC] Frame #3084: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3085: 223 escaped bytes
+[TCP] Processing frame: 221 bytes
+[HDLC] Frame #3086: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3087: 212 escaped bytes
+[TCP] Processing frame: 210 bytes
+[HDLC] Time budget exhausted with 1 buffered bytes remaining
+[HDLC] Frame #3088: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3089: 235 escaped bytes
+[TCP] Processing frame: 231 bytes
+[HDLC] Frame #3090: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3091: 188 escaped bytes
+[TCP] Processing frame: 187 bytes
+[HDLC] Frame #3092: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3093: 202 escaped bytes
+[TCP] Processing frame: 200 bytes
+[HDLC] Time budget exhausted with 1 buffered bytes remaining
+[TCP] Reading 388 bytes
+[TCP] First bytes: 7e 51 04 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 3f 
+[HDLC] Frame #3094: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3095: 185 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #3096: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3097: 199 escaped bytes
+[TCP] Processing frame: 197 bytes
+[TCP] connected=1 online=1 avail=0 loops=665 rx=301756 buf=1
+[DISP] ok: last_flush=137 ms ago, total_flushes=709
+[HDLC] Time budget exhausted with 1184 buffered bytes remaining
+[HDLC] Frame #3098: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3099: 187 escaped bytes
+[TCP] Processing frame: 186 bytes
+[HDLC] Frame #3100: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3101: 199 escaped bytes
+[TCP] Processing frame: 198 bytes
+[HDLC] Frame #3102: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3103: 198 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HEAP] free=61312 min=44840 max_block=42996 delta=-64 stack_hwm=16112 step=13
+[PSRAM] free=6652407/8358231  [INTERNAL] free=61312 max_block=42996
+[HDLC] Frame #3104: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3105: 202 escaped bytes
+[TCP] Processing frame: 202 bytes
+[HDLC] Frame #3106: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3107: 202 escaped bytes
+[TCP] Processing frame: 202 bytes
+[HDLC] Frame #3108: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3109: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #3110: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3111: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #3112: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3113: 198 escaped bytes
+[TCP] Processing frame: 198 bytes
+[HDLC] Frame #3114: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3115: 204 escaped bytes
+[TCP] Processing frame: 202 bytes
+[TCP] Reading 432 bytes
+[TCP] First bytes: 7e 51 03 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 70 
+[HDLC] Frame #3116: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3117: 198 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Time budget exhausted with 233 buffered bytes remaining
+[HDLC] Frame #3118: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3119: 230 escaped bytes
+[TCP] Processing frame: 229 bytes
+[HDLC] Frame #3120: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3121: 184 escaped bytes
+[TCP] Processing frame: 183 bytes
+20544-18:11:12.316 [INF] LXST: Voice announce from eb7696909579f9d0...
+[HDLC] Frame #3122: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3123: 216 escaped bytes
+[TCP] Processing frame: 216 bytes
+[HDLC] Frame #3124: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3125: 239 escaped bytes
+[TCP] Processing frame: 235 bytes
+[HDLC] Frame #3126: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3127: 222 escaped bytes
+[TCP] Processing frame: 221 bytes
+[HDLC] Frame #3128: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3129: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Time budget exhausted with 1729 buffered bytes remaining
+[HDLC] Frame #3130: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3131: 214 escaped bytes
+[TCP] Processing frame: 214 bytes
+[HDLC] Frame #3132: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3133: 212 escaped bytes
+[TCP] Processing frame: 210 bytes
+[HDLC] Frame #3134: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3135: 215 escaped bytes
+[TCP] Processing frame: 214 bytes
+20544-18:11:13.468 [INF] PropagationNodeManager: Updated propagation node 'Propagation Node' at 852a7b730f90ff99... (5 hops)
+[HDLC] Frame #3136: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3137: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #3138: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3139: 293 escaped bytes
+[TCP] Processing frame: 292 bytes
+[HDLC] Frame #3140: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3141: 199 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #3142: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3143: 199 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #3144: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3145: 197 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Time budget exhausted with 1010 buffered bytes remaining
+[HDLC] Frame #3146: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3147: 223 escaped bytes
+[TCP] Processing frame: 221 bytes
+[HDLC] Frame #3148: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3149: 212 escaped bytes
+[TCP] Processing frame: 210 bytes
+[HDLC] Frame #3150: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3151: 184 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #3152: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3153: 197 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #3154: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3155: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+20544-18:11:14.694 [INF] LXST: Voice announce from 0217b4144f829296...
+[TCP] Reading 818 bytes
+[TCP] First bytes: 7e 51 06 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 3e 
+[HDLC] Time budget exhausted with 819 buffered bytes remaining
+[HDLC] Frame #3156: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3157: 202 escaped bytes
+[TCP] Processing frame: 200 bytes
+20544-18:11:15.313 [INF] >>> handshake(): entry
+20544-18:11:15.315 [INF] >>> handshake(): status is PENDING, starting X25519 exchange
+20544-18:11:15.346 [INF] >>> handshake(): X25519 exchange complete, deriving key
+20544-18:11:15.349 [INF] >>> handshake(): HKDF complete
+20544-18:11:15.448 [INF] AutoInterface: Sent 83 bytes to fe80:0000:0000:0000:3e84:27ff:fecb:81dc port 42671
+20544-18:11:15.450 [INF] AutoInterface: Sent 83 bytes to fe80:0000:0000:0000:55c1:3e30:85ab:c79b port 42671
+20544-18:11:15.858 [INF] LXST: Voice announce from 851f8a35a5d1fe5d...
+[TCP] connected=1 online=1 avail=0 loops=444 rx=308571 buf=615
+[HDLC] Frame #3158: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3159: 185 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #3160: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3161: 225 escaped bytes
+[TCP] Processing frame: 224 bytes
+[HDLC] Frame #3162: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3163: 198 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Time budget exhausted with 1 buffered bytes remaining
+[HEAP] free=60256 min=44840 max_block=42996 delta=-1056 stack_hwm=16112 step=13
+[PSRAM] free=6653363/8358247  [INTERNAL] free=59840 max_block=42996
+[HDLC] Frame #3164: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3165: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #3166: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3167: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #3168: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3169: 198 escaped bytes
+[TCP] Processing frame: 198 bytes
+[HDLC] Frame #3170: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3171: 204 escaped bytes
+[TCP] Processing frame: 202 bytes
+[HDLC] Time budget exhausted with 707 buffered bytes remaining
+[HDLC] Frame #3172: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3173: 185 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #3174: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3175: 294 escaped bytes
+[TCP] Processing frame: 292 bytes
+[HDLC] Frame #3176: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3177: 221 escaped bytes
+[TCP] Processing frame: 219 bytes
+[TCP] Reading 1321 bytes
+[TCP] First bytes: 7e 71 05 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 76 
+[HDLC] Frame #3178: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3179: 230 escaped bytes
+[TCP] Processing frame: 229 bytes
+[HDLC] Frame #3180: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3181: 184 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #3182: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3183: 216 escaped bytes
+[TCP] Processing frame: 216 bytes
+[HDLC] Time budget exhausted with 686 buffered bytes remaining
+[HDLC] Frame #3184: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3185: 239 escaped bytes
+[TCP] Processing frame: 235 bytes
+[HDLC] Frame #3186: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3187: 203 escaped bytes
+[TCP] Processing frame: 202 bytes
+20544-18:11:18.523 [WRN] PropagationNodeManager: Pool full, dropping lower-priority node 604b95adfa625746
+[HDLC] Frame #3188: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3189: 237 escaped bytes
+[TCP] Processing frame: 237 bytes
+20544-18:11:18.668 [INF] LXST: Voice announce from 154b4bb873c69953...
+[HDLC] Frame #3190: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3191: 215 escaped bytes
+[TCP] Processing frame: 214 bytes
+[HDLC] Frame #3192: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3193: 199 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #3194: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3195: 199 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #3196: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3197: 197 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Time budget exhausted with 441 buffered bytes remaining
+[HDLC] Frame #3198: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3199: 236 escaped bytes
+[TCP] Processing frame: 236 bytes
+[HDLC] Frame #3200: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3201: 200 escaped bytes
+[TCP] Processing frame: 200 bytes
+[HDLC] Frame #3202: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3203: 184 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #3204: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3205: 197 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #3206: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3207: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #3208: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3209: 197 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #3210: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3211: 197 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Time budget exhausted with 207 buffered bytes remaining
+[DISP] ok: last_flush=359 ms ago, total_flushes=733
+[HDLC] Frame #3212: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3213: 204 escaped bytes
+[TCP] Processing frame: 204 bytes
+[TCP] Reading 1231 bytes
+[TCP] First bytes: 7e 51 07 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 82 
+[HDLC] Frame #3214: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3215: 185 escaped bytes
+[TCP] Processing frame: 183 bytes
+[TCP] connected=1 online=1 avail=0 loops=504 rx=314410 buf=1045
+[HDLC] Frame #3216: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3217: 225 escaped bytes
+[TCP] Processing frame: 224 bytes
+[HDLC] Frame #3218: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3219: 198 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #3220: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3221: 208 escaped bytes
+[TCP] Processing frame: 208 bytes
+20544-18:11:21.381 [INF] PropagationNodeManager: Updated propagation node 'Propagation Node' at 93df1c70a148cd93... (2 hops)
+[HDLC] Frame #3222: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3223: 208 escaped bytes
+[TCP] Processing frame: 207 bytes
+[HEAP] free=60956 min=44840 max_block=42996 delta=+700 stack_hwm=16112 step=13
+[PSRAM] free=6650115/8358247  [INTERNAL] free=60956 max_block=42996
+[HDLC] Frame #3224: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3225: 195 escaped bytes
+[TCP] Processing frame: 192 bytes
+[HDLC] Time budget exhausted with 1 buffered bytes remaining
+[HDLC] Frame #3226: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3227: 194 escaped bytes
+[TCP] Processing frame: 194 bytes
+[HDLC] Frame #3228: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3229: 185 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Time budget exhausted with 520 buffered bytes remaining
+[HDLC] Frame #3230: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3231: 294 escaped bytes
+[TCP] Processing frame: 292 bytes
+[HDLC] Frame #3232: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3233: 221 escaped bytes
+[TCP] Processing frame: 219 bytes
+[TCP] Reading 1467 bytes
+[TCP] First bytes: 7e 51 03 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b ca 
+[HDLC] Time budget exhausted with 1468 buffered bytes remaining
+[HDLC] Frame #3234: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3235: 293 escaped bytes
+[TCP] Processing frame: 292 bytes
+[HDLC] Frame #3236: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3237: 203 escaped bytes
+[TCP] Processing frame: 202 bytes
+[HDLC] Frame #3238: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3239: 237 escaped bytes
+[TCP] Processing frame: 237 bytes
+[HDLC] Frame #3240: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3241: 200 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #3242: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3243: 330 escaped bytes
+[TCP] Processing frame: 328 bytes
+[HDLC] Frame #3244: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3245: 192 escaped bytes
+[TCP] Processing frame: 191 bytes
+20544-18:11:25.297 [INF] PropagationNodeManager: Updated propagation node 'Propagation Node' at 852a7b730f90ff99... (6 hops)
+20544-18:11:26.486 [WRN] PropagationNodeManager: Pool full, dropping lower-priority node 95ca807f05d258f7
+20544-18:11:26.699 [INF] LXST: Voice announce from 8c8c16775e09dcc3...
+20544-18:11:26.801 [INF] PropagationNodeManager: Updated propagation node 'Propagation Node' at e1a8a3a6644ef291... (8 hops)
+20544-18:11:27.102 [INF] LXST: Voice announce from eb7696909579f9d0...
+20544-18:11:27.299 [INF] LXST: Voice announce from 0217b4144f829296...
+20544-18:11:28.429 [WRN] PropagationNodeManager: Pool full, dropping lower-priority node cda5b312f5ccf186
+[TCP] connected=1 online=1 avail=1237 loops=628 rx=316779 buf=1
+[TCP] Reading 1237 bytes
+[TCP] First bytes: 7e 51 03 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 73 
+[HDLC] Time budget exhausted with 1238 buffered bytes remaining
+[HDLC] Frame #3246: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3247: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HEAP] free=59512 min=44840 max_block=42996 delta=-1444 stack_hwm=16112 step=13
+[PSRAM] free=6631543/8358119  [INTERNAL] free=59512 max_block=42996
+20544-18:11:28.987 [WRN] PropagationNodeManager: Pool full, dropping lower-priority node 44213278b52d8886
+[HDLC] Frame #3248: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3249: 236 escaped bytes
+[TCP] Processing frame: 236 bytes
+[HDLC] Frame #3250: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3251: 200 escaped bytes
+[TCP] Processing frame: 200 bytes
+[HDLC] Frame #3252: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3253: 217 escaped bytes
+[TCP] Processing frame: 214 bytes
+[HDLC] Frame #3254: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3255: 189 escaped bytes
+[TCP] Processing frame: 187 bytes
+[HDLC] Time budget exhausted with 2928 buffered bytes remaining
+[HDLC] Frame #3256: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3257: 200 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #3258: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3259: 197 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #3260: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3261: 197 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #3262: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3263: 221 escaped bytes
+[TCP] Processing frame: 221 bytes
+[HDLC] Frame #3264: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3265: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+20544-18:11:30.140 [INF] LXST: Voice announce from 8c8c16775e09dcc3...
+[HDLC] Frame #3266: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3267: 203 escaped bytes
+[TCP] Processing frame: 201 bytes
+20544-18:11:30.252 [INF] LXST: Voice announce from 546ddab0e90f5b6d...
+[HDLC] Frame #3268: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3269: 208 escaped bytes
+[TCP] Processing frame: 208 bytes
+20544-18:11:30.429 [INF] PropagationNodeManager: Updated propagation node 'Propagation Node' at 93df1c70a148cd93... (2 hops)
+[HDLC] Frame #3270: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3271: 208 escaped bytes
+[TCP] Processing frame: 207 bytes
+[HDLC] Frame #3272: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3273: 195 escaped bytes
+[TCP] Processing frame: 192 bytes
+[HDLC] Time budget exhausted with 1789 buffered bytes remaining
+[DISP] ok: last_flush=323 ms ago, total_flushes=758
+[HDLC] Frame #3274: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3275: 233 escaped bytes
+[TCP] Processing frame: 233 bytes
+[HDLC] Frame #3276: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3277: 225 escaped bytes
+[TCP] Processing frame: 224 bytes
+[HDLC] Frame #3278: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3279: 194 escaped bytes
+[TCP] Processing frame: 194 bytes
+[HDLC] Frame #3280: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3281: 221 escaped bytes
+[TCP] Processing frame: 217 bytes
+[HDLC] Frame #3282: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3283: 214 escaped bytes
+[TCP] Processing frame: 214 bytes
+[HDLC] Frame #3284: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3285: 293 escaped bytes
+[TCP] Processing frame: 292 bytes
+[TCP] Reading 826 bytes
+[TCP] First bytes: 7e 51 03 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b cd 
+[HDLC] Frame #3286: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3287: 200 escaped bytes
+[TCP] Processing frame: 197 bytes
+20544-18:11:31.560 [INF] PropagationNodeManager: Updated propagation node 'Propagation Node' at 852a7b730f90ff99... (3 hops)
+20544-18:11:31.774 [INF] LXST: Voice announce from ef4ca76c3e07077f...
+20544-18:11:32.476 [INF] LXST: Voice announce from 5301f2610f5bb8f2...
+20544-18:11:32.800 [INF] PropagationNodeManager: Updated propagation node 'Propagation Node' at 2ddc58c4e4cd221d... (6 hops)
+20544-18:11:33.548 [INF] LXST: Voice announce from dcf9820e090efeb9...
+20544-18:11:33.851 [WRN] PropagationNodeManager: Pool full, dropping lower-priority node 582cdb2591d0248a
+20544-18:11:34.062 [INF] PropagationNodeManager: Updated propagation node 'Propagation Node' at e1a8a3a6644ef291... (8 hops)
+20544-18:11:34.466 [INF] LXST: Voice announce from eb7696909579f9d0...
+20544-18:11:34.588 [INF] LXST: Voice announce from 0217b4144f829296...
+20544-18:11:34.906 [INF] PropagationNodeManager: Updated propagation node 'Propagation Node' at 93df1c70a148cd93... (3 hops)
+20544-18:11:35.220 [WRN] PropagationNodeManager: Invalid app_data array size: 0
+20544-18:11:35.229 [WRN] PropagationNodeManager: Failed to parse announce app_data
+20544-18:11:35.929 [INF] PropagationNodeManager: Updated propagation node 'Propagation Node' at da110452573becc3... (1 hops)
+20544-18:11:36.034 [WRN] PropagationNodeManager: Pool full, dropping lower-priority node cda5b312f5ccf186
+20544-18:11:36.045 [ERR] AutoInterface: No multicast echoes received. The networking hardware or a firewall may be blocking multicast traffic.
+[TCP] connected=1 online=1 avail=1284 loops=26 rx=322258 buf=1269
+[TCP] Reading 1284 bytes
+[TCP] First bytes: 7e 71 02 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b 94 
+[HDLC] Time budget exhausted with 2553 buffered bytes remaining
+[HDLC] Frame #3288: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3289: 192 escaped bytes
+[TCP] Processing frame: 191 bytes
+[TELEM] sessions=0 time=1775067096 gps=none sats=0
+20544-18:11:36.277 [NOT] [HEAP] int_free=59592 int_largest=42996 int_min=44840 int_frag=28% psram_free=6622395 psram_largest=6553588
+20544-18:11:36.280 [NOT] [POOL] tiny=403/1024 small=4/16 med=0/12 large=0/12 hits=216857 misses=0 fallbacks=0
+20544-18:11:36.281 [NOT] [STACK] lvgl=9376 
+[HEAP] free=59836 min=44840 max_block=42996 delta=+324 stack_hwm=16112 step=13
+[PSRAM] free=6622395/8358071  [INTERNAL] free=59424 max_block=42996
+[DIAG] ikd=386 ikr=109 ann=0 dest=32 pkt=128 held=0 rev=0 link=0
+[HDLC] Frame #3290: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3291: 217 escaped bytes
+[TCP] Processing frame: 214 bytes
+[HDLC] Frame #3292: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3293: 200 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #3294: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3295: 185 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #3296: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3297: 216 escaped bytes
+[TCP] Processing frame: 214 bytes
+20544-18:11:37.255 [INF] PropagationNodeManager: Updated propagation node 'Propagation Node' at 852a7b730f90ff99... (3 hops)
+[HDLC] Time budget exhausted with 2358 buffered bytes remaining
+[HDLC] Frame #3298: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3299: 246 escaped bytes
+[TCP] Processing frame: 244 bytes
+[HDLC] Frame #3300: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3301: 221 escaped bytes
+[TCP] Processing frame: 221 bytes
+[HDLC] Frame #3302: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3303: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+20544-18:11:37.709 [INF] LXST: Voice announce from 8c8c16775e09dcc3...
+20544-18:11:38.059 [INF] LXST: Voice announce from c45dc280fad340dd...
+[HDLC] Frame #3304: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3305: 203 escaped bytes
+[TCP] Processing frame: 201 bytes
+20544-18:11:38.263 [INF] LXST: Voice announce from 546ddab0e90f5b6d...
+[HDLC] Time budget exhausted with 2590 buffered bytes remaining
+[TCP] Reading 629 bytes
+[TCP] First bytes: 7e 71 03 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b e0 
+20544-18:11:38.397 [INF] Identity: Persisting 390 known destinations (dirty flag set)
+20544-18:11:38.401 [INF] Saving 5 persistent destinations (390 total in pool) to storage...
+20544-18:11:38.887 [WRN] PropagationNodeManager: Pool full, dropping lower-priority node f34a5b99e3b2d838
+[HDLC] Time budget exhausted with 4758 buffered bytes remaining
+[HDLC] Frame #3306: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3307: 242 escaped bytes
+[TCP] Processing frame: 241 bytes
+[HDLC] Frame #3308: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3309: 198 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #3310: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3311: 225 escaped bytes
+[TCP] Processing frame: 224 bytes
+[HDLC] Frame #3312: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3313: 221 escaped bytes
+[TCP] Processing frame: 217 bytes
+[HDLC] Frame #3314: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3315: 214 escaped bytes
+[TCP] Processing frame: 214 bytes
+20544-18:11:39.833 [WRN] PropagationNodeManager: Pool full, dropping lower-priority node 44213278b52d8886
+[HDLC] Frame #3316: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3317: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #3318: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3319: 199 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #3320: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3321: 185 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #3322: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3323: 216 escaped bytes
+[TCP] Processing frame: 214 bytes
+20544-18:11:40.591 [WRN] PropagationNodeManager: Pool full, dropping lower-priority node 95ca807f05d258f7
+[TCP] Reading 436 bytes
+[TCP] First bytes: 7e 71 05 7a c4 a0 c6 04 e3 03 03 e8 01 0d d9 a5 ec 46 8b e7 
+[HDLC] Time budget exhausted with 3293 buffered bytes remaining
+[HDLC] Frame #3324: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3325: 246 escaped bytes
+[TCP] Processing frame: 244 bytes
+[DISP] ok: last_flush=234 ms ago, total_flushes=783
+[HDLC] Frame #3326: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3327: 237 escaped bytes
+[TCP] Processing frame: 235 bytes
+[HDLC] Frame #3328: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3329: 199 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #3330: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3331: 242 escaped bytes
+[TCP] Processing frame: 241 bytes
+[HDLC] Frame #3332: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3333: 198 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #3334: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3335: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+[TCP] connected=1 online=1 avail=0 loops=31 rx=326947 buf=1976
+[HDLC] Frame #3336: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3337: 204 escaped bytes
+[TCP] Processing frame: 203 bytes
+[HDLC] Frame #3338: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3339: 214 escaped bytes
+[TCP] Processing frame: 214 bytes
+[HEAP] free=60916 min=44840 max_block=42996 delta=+1080 stack_hwm=16112 step=13
+[PSRAM] free=6645967/8358231  [INTERNAL] free=60916 max_block=42996
+[HDLC] Frame #3340: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3341: 198 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #3342: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3343: 201 escaped bytes
+[TCP] Processing frame: 197 bytes
+[HDLC] Frame #3344: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3345: 293 escaped bytes
+[TCP] Processing frame: 292 bytes
+[HDLC] Time budget exhausted with 1228 buffered bytes remaining
+[HDLC] Frame #3346: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3347: 184 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #3348: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3349: 231 escaped bytes
+[TCP] Processing frame: 229 bytes
+[HDLC] Frame #3350: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3351: 230 escaped bytes
+[TCP] Processing frame: 229 bytes
+[HDLC] Frame #3352: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3353: 202 escaped bytes
+[TCP] Processing frame: 202 bytes
+[HDLC] Frame #3354: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3355: 183 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #3356: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3357: 185 escaped bytes
+[TCP] Processing frame: 183 bytes
+[HDLC] Frame #3358: 0 escaped bytes
+[HDLC] Empty frame, skipping
+[HDLC] Frame #3359: 199 escaped bytes
+[TCP] Processing frame: 197 bytes

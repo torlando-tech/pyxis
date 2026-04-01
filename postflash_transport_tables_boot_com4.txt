@@ -1,0 +1,7 @@
+00:00:17.303 [WRN] GPS location not available, using Eastern Time
+20544-16:35:21.001 [INF]   GPS time synced: 2026-04-01 12:35:21 EDT
+20544-16:35:21.002 [NOT] [BOOT] WAIT: gps_sync (15006ms, total wait: 15006ms)
+20544-16:35:21.003 [NOT] [BOOT] END: gps (15528ms, cumulative: 16059ms)
+20544-16:35:21.004 [NOT] [BOOT] START: wifi (at 16060ms)
+20544-16:35:21.005 [INF] Connecting to WiFi: NETGEAR24
+..

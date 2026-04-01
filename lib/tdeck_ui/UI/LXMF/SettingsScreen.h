@@ -83,8 +83,8 @@ struct AppSettings {
         announce_interval(60),
         sync_interval(3600),
         gps_time_sync(true),
-        prop_auto_select(true),
-        prop_selected_node(""),
+        prop_auto_select(false),
+        prop_selected_node("93df1c70a148cd93af0053cc781ef11a"),
         prop_fallback_enabled(true),
         prop_only(false)
     {}

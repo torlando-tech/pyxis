@@ -177,6 +177,12 @@ public:
     void on_message_received(::LXMF::LXMessage& message);
 
     /**
+     * Handle message sent confirmation
+     * @param message Message that was sent
+     */
+    void on_message_sent(::LXMF::LXMessage& message);
+
+    /**
      * Handle message delivery confirmation
      * @param message Message that was delivered
      */

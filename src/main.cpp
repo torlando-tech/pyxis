@@ -99,6 +99,14 @@ using namespace Hardware::TDeck;
 // Application settings (loaded from NVS)
 UI::LXMF::AppSettings app_settings;
 
+static const char* SETTINGS_NAMESPACE = "settings";
+static const char* KEY_PROP_AUTO = "prop_auto";
+static const char* KEY_PROP_NODE = "prop_node";
+static const char* KEY_PROP_FALLBACK = "prop_fall";
+static const char* KEY_PROP_ONLY = "prop_only";
+static const char* KEY_PROP_PIN_MIGRATION = "prop_pin_v1";
+static const char* DEFAULT_PROP_NODE = "93df1c70a148cd93af0053cc781ef11a";
+
 // Global instances
 Reticulum* reticulum = nullptr;
 Identity* identity = nullptr;
@@ -120,12 +128,7 @@ static void refresh_outbound_propagation_node() {
         return;
     }
 
-    Bytes effective_node;
-    if (!app_settings.prop_auto_select && !app_settings.prop_selected_node.isEmpty()) {
-        effective_node.assignHex(app_settings.prop_selected_node.c_str());
-    } else {
-        effective_node = propagation_manager->get_effective_node();
-    }
+    Bytes effective_node = propagation_manager->get_effective_node();
 
     router->set_outbound_propagation_node(effective_node);
 
@@ -137,12 +140,26 @@ static void refresh_outbound_propagation_node() {
     router->set_outbound_propagation_stamp_cost(stamp_cost);
 }
 
+static void migrate_default_propagation_settings(Preferences& prefs) {
+    if (prefs.getBool(KEY_PROP_PIN_MIGRATION, false)) {
+        return;
+    }
+
+    prefs.putBool(KEY_PROP_AUTO, false);
+    prefs.putString(KEY_PROP_NODE, DEFAULT_PROP_NODE);
+    prefs.putBool(KEY_PROP_PIN_MIGRATION, true);
+    INFO(("Applied propagation default migration: pinned node " + String(DEFAULT_PROP_NODE).substring(0, 16) + "...").c_str());
+}
+
 // Timing
 uint32_t last_ui_update = 0;
 uint32_t last_announce = 0;
 uint32_t last_sync = 0;
 uint32_t last_status_check = 0;
+uint32_t last_persist_run = 0;
+uint32_t last_persist_defer_log = 0;
 const uint32_t STATUS_CHECK_INTERVAL = 1000;  // 1 second
+const uint32_t PERSIST_FORCE_INTERVAL_MS = 60000;
 const uint32_t INITIAL_SYNC_DELAY = 45000;    // 45 seconds after boot before first sync
 bool initial_sync_done = false;
 
@@ -445,7 +462,8 @@ void load_app_settings() {
     INFO("Loading application settings from NVS...");
 
     Preferences prefs;
-    prefs.begin("settings", true);  // Read-only
+    prefs.begin(SETTINGS_NAMESPACE, false);
+    migrate_default_propagation_settings(prefs);
 
     // Network
     app_settings.wifi_ssid = prefs.getString("wifi_ssid", "");
@@ -482,9 +500,10 @@ void load_app_settings() {
     app_settings.gps_time_sync = prefs.getBool("gps_sync", true);
 
     // Propagation
-    app_settings.prop_auto_select = prefs.getBool("prop_auto", true);
-    app_settings.prop_selected_node = prefs.getString("prop_node", "");
-    app_settings.prop_fallback_enabled = prefs.getBool("prop_fall", true);
+    app_settings.prop_auto_select = prefs.getBool(KEY_PROP_AUTO, false);
+    app_settings.prop_selected_node = prefs.getString(KEY_PROP_NODE, DEFAULT_PROP_NODE);
+    app_settings.prop_fallback_enabled = prefs.getBool(KEY_PROP_FALLBACK, true);
+    app_settings.prop_only = prefs.getBool(KEY_PROP_ONLY, false);
 
     prefs.end();
 
@@ -864,26 +883,22 @@ void setup_lxmf() {
     propagation_manager = new PropagationNodeManager();
     Transport::register_announce_handler(HAnnounceHandler(propagation_manager));
     INFO("Propagation node manager registered");
-    propagation_manager->set_update_callback([]() {
-        refresh_outbound_propagation_node();
-    });
 
     // Configure propagation settings
     router->set_fallback_to_propagation(app_settings.prop_fallback_enabled);
     router->set_propagation_only(app_settings.prop_only);
-    if (!app_settings.prop_selected_node.isEmpty()) {
-        // Use stored node (works for both manual and auto-select as initial/fallback)
+    if (!app_settings.prop_auto_select && !app_settings.prop_selected_node.isEmpty()) {
         Bytes selected_node;
         selected_node.assignHex(app_settings.prop_selected_node.c_str());
-        router->set_outbound_propagation_node(selected_node);
-        if (app_settings.prop_auto_select) {
-            INFO(("  Propagation node: auto-select (using last known: " + app_settings.prop_selected_node.substring(0, 16) + "...)").c_str());
-        } else {
-            INFO(("  Selected propagation node: " + app_settings.prop_selected_node.substring(0, 16) + "...").c_str());
-        }
+        propagation_manager->set_selected_node(selected_node);
+        INFO(("  Selected propagation node: " + app_settings.prop_selected_node.substring(0, 16) + "...").c_str());
     } else {
-        INFO("  Propagation node: auto-select (no cached node)");
+        propagation_manager->set_selected_node(Bytes());
+        INFO("  Propagation node: auto-select");
     }
+    propagation_manager->set_update_callback([]() {
+        refresh_outbound_propagation_node();
+    });
     refresh_outbound_propagation_node();
     INFO(("  Fallback to propagation: " + String(app_settings.prop_fallback_enabled ? "enabled" : "disabled")).c_str());
     INFO(("  Propagation only: " + String(app_settings.prop_only ? "enabled" : "disabled")).c_str());
@@ -1160,6 +1175,17 @@ void setup_ui_manager() {
             if (router) {
                 router->set_fallback_to_propagation(new_settings.prop_fallback_enabled);
                 router->set_propagation_only(new_settings.prop_only);
+
+                if (propagation_manager) {
+                    if (new_settings.prop_auto_select) {
+                        propagation_manager->set_selected_node(Bytes());
+                    } else if (!new_settings.prop_selected_node.isEmpty()) {
+                        Bytes selected_node;
+                        selected_node.assignHex(new_settings.prop_selected_node.c_str());
+                        propagation_manager->set_selected_node(selected_node);
+                    }
+                }
+
                 refresh_outbound_propagation_node();
 
                 // When auto-select is enabled, save the current effective node for next boot
@@ -1169,8 +1195,8 @@ void setup_ui_manager() {
                         app_settings.prop_selected_node = String(effective.toHex().c_str());
                         // Also persist to NVS
                         Preferences prefs;
-                        prefs.begin("lxmf", false);
-                        prefs.putString("prop_node", app_settings.prop_selected_node);
+                        prefs.begin(SETTINGS_NAMESPACE, false);
+                        prefs.putString(KEY_PROP_NODE, app_settings.prop_selected_node);
                         prefs.end();
                         INFO(("  Cached effective propagation node: " + app_settings.prop_selected_node.substring(0, 16) + "...").c_str());
                     }
@@ -1378,6 +1404,32 @@ void setup() {
     }
 
     // Register delivered callback to update message status in storage and UI
+    router->register_sent_callback([](LXMF::LXMessage& msg) {
+        RNS::Bytes msg_hash = msg.hash();
+        bool propagated = (msg.method() == LXMF::Type::Message::PROPAGATED);
+        INFO("Message sent for message: " + msg_hash.toHex().substr(0, 16) + "...");
+        Serial.flush();
+
+        if (message_store) {
+            message_store->update_message_state(msg_hash, LXMF::Type::Message::SENT);
+            message_store->update_message_propagated(msg_hash, propagated);
+
+            LXMF::LXMessage full_msg = message_store->load_message(msg_hash);
+            if (full_msg.hash()) {
+                full_msg.state(LXMF::Type::Message::SENT);
+                full_msg.set_method(msg.method());
+                if (ui_manager) {
+                    ui_manager->on_message_sent(full_msg);
+                }
+            } else if (ui_manager) {
+                ui_manager->on_message_sent(msg);
+            }
+        } else if (ui_manager) {
+            ui_manager->on_message_sent(msg);
+        }
+    });
+
+    // Register delivered callback to update message status in storage and UI
     router->register_delivered_callback([](LXMF::LXMessage& msg) {
         INFO(">>> APP DELIVERED CALLBACK ENTRY");
         Serial.flush();
@@ -1400,13 +1452,14 @@ void setup() {
             LXMF::LXMessage full_msg = message_store->load_message(msg_hash);
             INFO(">>> Message loaded, checking hash");
             Serial.flush();
-            if (full_msg.hash()) {
-                INFO(">>> Setting state on full message");
-                Serial.flush();
-                full_msg.state(LXMF::Type::Message::DELIVERED);
-                if (ui_manager) {
-                    INFO(">>> Calling UI manager on_message_delivered");
-                    Serial.flush();
+              if (full_msg.hash()) {
+                  INFO(">>> Setting state on full message");
+                  Serial.flush();
+                  full_msg.state(LXMF::Type::Message::DELIVERED);
+                  full_msg.set_method(msg.method());
+                  if (ui_manager) {
+                      INFO(">>> Calling UI manager on_message_delivered");
+                      Serial.flush();
                     ui_manager->on_message_delivered(full_msg);
                     INFO(">>> UI manager returned");
                     Serial.flush();
@@ -1428,6 +1481,7 @@ void setup() {
             LXMF::LXMessage full_msg = message_store->load_message(msg_hash);
             if (full_msg.hash()) {
                 full_msg.state(LXMF::Type::Message::FAILED);
+                full_msg.set_method(msg.method());
                 if (ui_manager) {
                     ui_manager->on_message_failed(full_msg);
                 }
@@ -1552,11 +1606,25 @@ void loop() {
     // involves sector erases (100ms each) and can take 5-15s total.
     // WDT feeds between calls prevent timeout during heavy flash I/O.
     LOOP_STEP(5);  // persist data
-    reticulum->should_persist_data();
-    esp_task_wdt_reset();
-    // Fast-persist known destinations (5s after dirty) to survive crashes
-    Identity::should_persist_data();
-    esp_task_wdt_reset();
+    {
+        uint32_t now = millis();
+        uint32_t last_flush_ms = Hardware::TDeck::Display::last_flush_ms();
+        bool ui_under_pressure = (last_flush_ms > 0 && (now - last_flush_ms) > 1000);
+        bool tcp_under_pressure = tcp_interface_impl && tcp_interface_impl->under_backpressure();
+        bool allow_persist = (!ui_under_pressure && !tcp_under_pressure) ||
+                             (now - last_persist_run >= PERSIST_FORCE_INTERVAL_MS);
+        if (allow_persist) {
+            reticulum->should_persist_data();
+            esp_task_wdt_reset();
+            // Fast-persist known destinations (5s after dirty) to survive crashes
+            Identity::should_persist_data();
+            esp_task_wdt_reset();
+            last_persist_run = now;
+        } else if (now - last_persist_defer_log >= 5000) {
+            last_persist_defer_log = now;
+            INFO("Deferring persistence while UI/TCP are under pressure");
+        }
+    }
 
     // Process TCP interface
     LOOP_STEP(6);  // TCP loop
@@ -1640,9 +1708,11 @@ void loop() {
                 router->request_messages_from_propagation_node();
                 last_sync = now;
                 INFO("Periodic propagation sync (interval: " + std::to_string(app_settings.sync_interval / 60) + " min)");
-            }
         }
     }
+
+    delay(1);
+}
 
     // Check for TCP reconnection (handles rapid disconnect/reconnect)
     if (tcp_interface_impl && tcp_interface_impl->check_reconnected()) {

@@ -45,6 +45,14 @@ public:
     // Reconnection parameters (match Python RNS)
     static const uint32_t RECONNECT_WAIT_MS = 5000;  // 5 seconds between reconnect attempts
     static const uint32_t CONNECT_TIMEOUT_MS = 5000; // 5 second connection timeout
+    static const size_t READ_BUDGET_BYTES = 2048;
+    static const size_t FRAME_BUDGET_PER_LOOP = 4;
+    static const uint32_t PROCESS_BUDGET_MS = 15;
+    static const size_t FRAME_BUFFER_HIGH_WATER = 8192;
+    static const size_t FRAME_BUFFER_LOW_WATER = 4096;
+    static const size_t FRAME_BUFFER_HARD_LIMIT = 16384;
+    static const uint32_t PRESSURE_LOG_INTERVAL_MS = 1000;
+    static const uint32_t READ_DETAIL_LOG_INTERVAL_MS = 2000;
 
     // TCP keepalive parameters (match Python RNS)
     static const int TCP_KEEPIDLE_SEC = 5;
@@ -63,6 +71,8 @@ public:
     virtual bool start();
     virtual void stop();
     virtual void loop();
+    size_t buffered_bytes() const { return _frame_buffer.size(); }
+    bool under_backpressure() const { return _read_throttled || _frame_buffer.size() >= FRAME_BUFFER_HIGH_WATER; }
 
     virtual inline std::string toString() const {
         return "TCPClientInterface[" + _name + "/" + _target_host + ":" + std::to_string(_target_port) + "]";
@@ -80,7 +90,7 @@ private:
 
     // HDLC frame processing
     void process_incoming();
-    void extract_and_process_frames();
+    void extract_and_process_frames(size_t max_frames, uint32_t start_ms, uint32_t budget_ms);
 
     // Target server
     std::string _target_host;
@@ -91,6 +101,11 @@ private:
     uint32_t _last_connect_attempt = 0;
     bool _reconnected = false;  // Set when connection re-established after being offline
     uint32_t _last_data_received = 0;  // Track last data receipt for stale connection detection
+    bool _read_throttled = false;
+    uint32_t _last_backpressure_log_ms = 0;
+    uint32_t _last_read_budget_log_ms = 0;
+    uint32_t _last_process_budget_log_ms = 0;
+    uint32_t _last_read_detail_log_ms = 0;
     static const uint32_t STALE_CONNECTION_MS = 120000;  // Consider connection stale after 2 min no data
 
 public:

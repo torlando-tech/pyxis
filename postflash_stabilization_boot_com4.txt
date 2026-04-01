@@ -1,0 +1,87 @@
+00:00:17.609 [WRN] GPS location not available, using Eastern Time
+20544-16:00:55.001 [INF]   GPS time synced: 2026-04-01 12:00:55 EDT
+20544-16:00:55.002 [NOT] [BOOT] WAIT: gps_sync (15006ms, total wait: 15006ms)
+20544-16:00:55.003 [NOT] [BOOT] END: gps (15839ms, cumulative: 16366ms)
+20544-16:00:55.004 [NOT] [BOOT] START: wifi (at 16367ms)
+20544-16:00:55.005 [INF] Connecting to WiFi: NETGEAR24
+....
+20544-16:00:57.066 [NOT] [BOOT] WAIT: wifi_connect (2000ms, total wait: 17006ms)
+20544-16:00:57.067 [INF] WiFi connected!
+20544-16:00:57.068 [INF]   IP address: 10.0.0.45
+20544-16:00:57.069 [INF]   RSSI: -58 dBm
+20544-16:00:57.070 [INF] Time already synced via GPS
+20544-16:00:57.083 [INF] OTA: Ready
+20544-16:00:57.085 [INF] UDP log broadcasting on port 9999
+20544-16:00:57.087 [NOT] [BOOT] END: wifi (2083ms, cumulative: 18450ms)
+20544-16:00:57.089 [WRN] Reset reason: UNKNOWN (0)
+20544-16:00:57.091 [NOT] [BOOT] START: sd_card (at 18454ms)
+[SDAccess] Card type: SDHC, size: 29823MB
+20544-16:00:57.116 [INF] SD card initialized on shared SPI bus
+20544-16:00:57.118 [NOT] [BOOT] END: sd_card (27ms, cumulative: 18481ms)
+20544-16:00:57.120 [NOT] [BOOT] START: lvgl (at 18483ms)
+20544-16:00:57.122 [INF] 
+=== LVGL & UI Initialization ===
+20544-16:00:57.124 [INF] Initializing LVGL
+20544-16:00:57.126 [INF] Initializing T-Deck display
+20544-16:00:57.128 [INF]   LVGL buffers allocated in PSRAM (307200 bytes)
+20544-16:00:57.132 [INF] Display initialized successfully
+20544-16:00:57.134 [INF] LVGLFSDriver: Registered drive 'S' for SD card
+20544-16:00:57.136 [INF]   Display initialized
+20544-16:00:57.138 [INF] Initializing T-Deck keyboard
+20544-16:00:57.140 [INF] Initializing keyboard hardware
+20544-16:00:57.142 [INF]   Keyboard hardware ready
+20544-16:00:57.145 [INF] Keyboard initialized successfully
+20544-16:00:57.147 [INF]   Keyboard registered with input group
+20544-16:00:57.149 [INF] Initializing T-Deck touch controller
+20544-16:00:57.151 [INF] Initializing touch hardware
+20544-16:00:57.153 [INF]   GT911 detected at address 0x5d
+20544-16:00:57.155 [INF]   Touch product ID: 911
+20544-16:00:57.158 [INF]   Touch hardware ready
+20544-16:00:57.160 [INF] Touch controller initialized successfully
+20544-16:00:57.162 [INF]   Touch registered
+20544-16:00:57.164 [INF] Initializing T-Deck trackball
+20544-16:00:57.166 [INF] Initializing trackball hardware
+20544-16:00:57.168 [INF]   Trackball hardware ready
+20544-16:00:57.171 [INF] Trackball initialized successfully
+20544-16:00:57.173 [INF]   Trackball registered with input group
+20544-16:00:57.174 [INF] LVGL initialized successfully
+20544-16:00:57.175 [INF] LVGL initialized
+LVGL task started on core 1
+LVGL task created with priority 1 on core 1
+20544-16:00:57.178 [INF] LVGL task started on core 1
+20544-16:00:57.184 [INF] Initializing memory monitor...
+20544-16:00:57.188 [NOT] [MEM_MON] Started (interval=30000ms)
+20544-16:00:57.193 [NOT] [HEAP] int_free=183052 int_largest=172020 int_min=182616 int_frag=7% psram_free=7912619 psram_largest=7864308
+20544-16:00:57.197 [NOT] [POOL] tiny=0/1024 small=0/16 med=0/12 large=0/12 hits=1 misses=0 fallbacks=0
+20544-16:00:57.202 [INF] Memory monitor started (30s interval)
+20544-16:00:57.206 [VRB] [MEM_MON] Registered task 'lvgl' (1/16)
+20544-16:00:57.210 [INF]   Registered LVGL task
+20544-16:00:57.214 [NOT] [BOOT] END: lvgl (94ms, cumulative: 18577ms)
+20544-16:00:57.217 [DBG] SX1262Interface: Using external SPI mutex
+20544-16:00:57.219 [NOT] [BOOT] START: reticulum (at 18582ms)
+20544-16:00:57.223 [INF] 
+=== Reticulum Initialization ===
+20544-16:00:57.227 [---] Initializing RNG...
+20544-16:00:57.249 [---] RNG initial random value: 3099113656
+20544-16:00:57.252 [INF] Transport pools initialized (45088 bytes total)
+20544-16:00:57.255 [INF] Checking for identity in NVS...
+NVS identity key length: 64
+20544-16:00:57.258 [INF] Identity found in NVS, loading...
+20544-16:00:57.347 [INF]   Identity loaded successfully from NVS
+20544-16:00:57.350 [INF]   Identity: dcee7e3a9fb4c5b7...
+20544-16:00:57.353 [INF] Creating TCP interface to 134.122.46.48:4242
+20544-16:00:57.477 [INF] TCPClientInterface: Connected to 134.122.46.48:4242
+20544-16:00:57.479 [INF] Initializing LoRa interface...
+20544-16:00:57.481 [INF] SX1262Interface: Initializing...
+20544-16:00:57.482 [INF]   Frequency: 927.250000 MHz
+20544-16:00:57.484 [INF]   Bandwidth: 62.500000 kHz
+20544-16:00:57.486 [INF]   SF: 7
+20544-16:00:57.487 [INF]   CR: 4/5
+20544-16:00:57.489 [INF]   TX Power: 17 dBm
+20544-16:00:57.549 [INF] SX1262Interface: Initialized successfully
+20544-16:00:57.550 [INF]   Bitrate: 0.000000 kbps
+20544-16:00:57.552 [INF] LoRa interface started
+20544-16:00:57.554 [INF] Initializing AutoInterface (IPv6 peer discovery)...
+20544-16:00:57.557 [INF] AutoInterface: Starting with group_id: reticulum
+20544-16:00:57.558 [INF] AutoInterface: Discovery port: 29716
+20544-16:00:57.559 [INF] AutoInterface: Data port: 42671

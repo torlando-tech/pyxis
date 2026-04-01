@@ -900,8 +900,8 @@ void SettingsScreen::load_settings() {
     _settings.ble_enabled = prefs.getBool(KEY_BLE_ENABLED, false);
 
     // Propagation settings
-    _settings.prop_auto_select = prefs.getBool(KEY_PROP_AUTO, true);
-    _settings.prop_selected_node = prefs.getString(KEY_PROP_NODE, "");
+    _settings.prop_auto_select = prefs.getBool(KEY_PROP_AUTO, false);
+    _settings.prop_selected_node = prefs.getString(KEY_PROP_NODE, "93df1c70a148cd93af0053cc781ef11a");
     _settings.prop_fallback_enabled = prefs.getBool(KEY_PROP_FALLBACK, true);
     _settings.prop_only = prefs.getBool(KEY_PROP_ONLY, false);
 

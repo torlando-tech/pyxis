@@ -23,10 +23,9 @@ extern "C" void pyxis_log(const char* msg);
 using namespace RNS;
 
 // NVS keys for propagation settings
-static const char* NVS_NAMESPACE = "propagation";
-static const char* KEY_AUTO_SELECT = "auto_select";
-static const char* KEY_NODE_HASH = "node_hash";
-static const char* KEY_STAMP_COST = "stamp_cost";
+static const char* NVS_NAMESPACE = "settings";
+static const char* KEY_AUTO_SELECT = "prop_auto";
+static const char* KEY_NODE_HASH = "prop_node";
 
 namespace UI {
 namespace LXMF {
@@ -237,20 +236,16 @@ bool UIManager::init() {
     {
         Preferences prefs;
         prefs.begin(NVS_NAMESPACE, true);
-        bool auto_select = prefs.getBool(KEY_AUTO_SELECT, true);
-        uint8_t stamp_cost = prefs.getUChar(KEY_STAMP_COST, 0);
+        bool auto_select = prefs.getBool(KEY_AUTO_SELECT, false);
         Bytes saved_hash;
-        size_t hash_len = prefs.getBytesLength(KEY_NODE_HASH);
-        if (hash_len > 0 && hash_len <= 32) {
-            uint8_t buf[32];
-            prefs.getBytes(KEY_NODE_HASH, buf, hash_len);
-            saved_hash = Bytes(buf, hash_len);
+        String saved_hex = prefs.getString(KEY_NODE_HASH, "");
+        if (saved_hex.length() > 0) {
+            saved_hash.assignHex(saved_hex.c_str());
         }
         prefs.end();
 
-        if (!auto_select && saved_hash.size() > 0) {
-            _router.set_outbound_propagation_node(saved_hash);
-            _router.set_outbound_propagation_stamp_cost(stamp_cost);
+        if (!auto_select && saved_hash.size() > 0 && _propagation_manager) {
+            _propagation_manager->set_selected_node(saved_hash);
             INFO(("Restored propagation node from NVS: " + saved_hash.toHex().substr(0, 16) + "...").c_str());
         }
     }
@@ -468,14 +463,12 @@ void UIManager::show_status() {
     if (_propagation_manager) {
         Preferences prefs;
         prefs.begin(NVS_NAMESPACE, true);
-        bool auto_select = prefs.getBool(KEY_AUTO_SELECT, true);
+        bool auto_select = prefs.getBool(KEY_AUTO_SELECT, false);
 
         Bytes saved_hash;
-        size_t hash_len = prefs.getBytesLength(KEY_NODE_HASH);
-        if (hash_len > 0 && hash_len <= 32) {
-            uint8_t buf[32];
-            prefs.getBytes(KEY_NODE_HASH, buf, hash_len);
-            saved_hash = Bytes(buf, hash_len);
+        String saved_hex = prefs.getString(KEY_NODE_HASH, "");
+        if (saved_hex.length() > 0) {
+            saved_hash.assignHex(saved_hex.c_str());
         }
         prefs.end();
 
@@ -571,20 +564,20 @@ void UIManager::show_propagation_nodes() {
         // Load settings from NVS
         Preferences prefs;
         prefs.begin(NVS_NAMESPACE, true);  // read-only
-        bool auto_select = prefs.getBool(KEY_AUTO_SELECT, true);
+        bool auto_select = prefs.getBool(KEY_AUTO_SELECT, false);
 
         Bytes selected_hash;
-        size_t hash_len = prefs.getBytesLength(KEY_NODE_HASH);
-        if (hash_len > 0 && hash_len <= 32) {
-            uint8_t buf[32];
-            prefs.getBytes(KEY_NODE_HASH, buf, hash_len);
-            selected_hash = Bytes(buf, hash_len);
+        String selected_hex = prefs.getString(KEY_NODE_HASH, "");
+        if (selected_hex.length() > 0) {
+            selected_hash.assignHex(selected_hex.c_str());
         }
         prefs.end();
 
         // If not auto-select and we have a saved hash, use it
         if (!auto_select && selected_hash.size() > 0) {
-            _router.set_outbound_propagation_node(selected_hash);
+            _propagation_manager->set_selected_node(selected_hash);
+        } else {
+            _propagation_manager->set_selected_node(Bytes());
         }
 
         _propagation_nodes_screen->load_nodes(*_propagation_manager, selected_hash, auto_select);
@@ -702,8 +695,11 @@ void UIManager::on_propagation_node_selected(const Bytes& node_hash) {
     std::string msg = "Propagation node selected: " + hash_hex + "...";
     INFO(msg.c_str());
 
-    // Set the node in the router
-    _router.set_outbound_propagation_node(node_hash);
+    if (_propagation_manager) {
+        _propagation_manager->set_selected_node(node_hash);
+    } else {
+        _router.set_outbound_propagation_node(node_hash);
+    }
 
     // Set stamp cost from node info if available
     uint8_t stamp_cost = 0;
@@ -725,8 +721,7 @@ void UIManager::on_propagation_node_selected(const Bytes& node_hash) {
     Preferences prefs;
     prefs.begin(NVS_NAMESPACE, false);
     prefs.putBool(KEY_AUTO_SELECT, false);
-    prefs.putBytes(KEY_NODE_HASH, node_hash.data(), node_hash.size());
-    prefs.putUChar(KEY_STAMP_COST, stamp_cost);
+    prefs.putString(KEY_NODE_HASH, String(node_hash.toHex().c_str()));
     prefs.end();
     DEBUG("Propagation node saved to NVS");
 }
@@ -737,8 +732,11 @@ void UIManager::on_propagation_auto_select_changed(bool enabled) {
     INFO(msg.c_str());
 
     if (enabled) {
-        // Clear manual selection, router will use best node
-        _router.set_outbound_propagation_node(Bytes());
+        if (_propagation_manager) {
+            _propagation_manager->set_selected_node(Bytes());
+        } else {
+            _router.set_outbound_propagation_node(Bytes());
+        }
     }
 
     // Save to NVS
@@ -746,8 +744,13 @@ void UIManager::on_propagation_auto_select_changed(bool enabled) {
     prefs.begin(NVS_NAMESPACE, false);
     prefs.putBool(KEY_AUTO_SELECT, enabled);
     if (enabled) {
-        prefs.remove(KEY_NODE_HASH);
-        prefs.remove(KEY_STAMP_COST);
+        Bytes effective;
+        if (_propagation_manager) {
+            effective = _propagation_manager->get_effective_node();
+        }
+        if (effective.size() > 0) {
+            prefs.putString(KEY_NODE_HASH, String(effective.toHex().c_str()));
+        }
     }
     prefs.end();
     DEBUG("Propagation auto-select saved to NVS");
@@ -927,7 +930,20 @@ void UIManager::on_message_delivered(::LXMF::LXMessage& message) {
 
     // Update UI if we're viewing this conversation
     if (_current_screen == SCREEN_CHAT && _current_peer_hash == message.destination_hash()) {
-        _chat_screen->update_message_status(message.hash(), true);
+        _chat_screen->update_message_status(message.hash(), true, false,
+            message.method() == ::LXMF::Type::Message::PROPAGATED);
+    }
+}
+
+void UIManager::on_message_sent(::LXMF::LXMessage& message) {
+    LVGL_LOCK();
+    std::string hash_hex = message.hash().toHex().substr(0, 8);
+    std::string msg = "Message sent: " + hash_hex + "...";
+    INFO(msg.c_str());
+
+    if (_current_screen == SCREEN_CHAT && _current_peer_hash == message.destination_hash()) {
+        _chat_screen->update_message_status(message.hash(), false, false,
+            message.method() == ::LXMF::Type::Message::PROPAGATED);
     }
 }
 
@@ -939,7 +955,7 @@ void UIManager::on_message_failed(::LXMF::LXMessage& message) {
 
     // Update UI if we're viewing this conversation
     if (_current_screen == SCREEN_CHAT && _current_peer_hash == message.destination_hash()) {
-        _chat_screen->update_message_status(message.hash(), false);
+        _chat_screen->update_message_status(message.hash(), false, true, false);
     }
 }
 

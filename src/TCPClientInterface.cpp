@@ -1,15 +1,18 @@
 #include "TCPClientInterface.h"
 #include "HDLC.h"
+#include <tdeck_ui/Hardware/TDeck/Display.h>
 
 #include <Transport.h>
 #include <Log.h>
 
+#include <algorithm>
 #include <memory>
 
 #ifdef ARDUINO
 // ESP32 lwIP socket headers
 #include <lwip/sockets.h>
 #include <lwip/netdb.h>
+#include <esp_task_wdt.h>
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -260,6 +263,18 @@ void TCPClientInterface::handle_disconnect() {
         loop_count = 0;
     }
 
+    if (_frame_buffer.size() >= FRAME_BUFFER_HIGH_WATER) {
+        _read_throttled = true;
+    } else if (_read_throttled && _frame_buffer.size() <= FRAME_BUFFER_LOW_WATER) {
+        _read_throttled = false;
+    }
+
+    if (_frame_buffer.size() > FRAME_BUFFER_HARD_LIMIT) {
+        Serial.printf("[TCP] Frame buffer exceeded hard limit (%d), reconnecting\n", (int)_frame_buffer.size());
+        handle_disconnect();
+        return;
+    }
+
     // Handle reconnection if not connected
     if (!_online) {
         if (_initiator) {
@@ -304,27 +319,43 @@ void TCPClientInterface::handle_disconnect() {
 
     // Read available data
     int avail = _client.available();
-    if (avail > 0) {
-        Serial.printf("[TCP] Reading %d bytes\n", avail);
+    if (_read_throttled && avail > 0) {
+        if (now - _last_backpressure_log_ms >= PRESSURE_LOG_INTERVAL_MS) {
+            _last_backpressure_log_ms = now;
+            Serial.printf("[TCP] Backpressure active, skipping read with %d buffered bytes and %d pending bytes\n",
+                          (int)_frame_buffer.size(), avail);
+        }
+    } else if (avail > 0) {
         total_rx += avail;
         _last_data_received = now;  // Update stale timer on any data receipt
         size_t start_pos = _frame_buffer.size();
-        while (_client.available() > 0) {
+        size_t bytes_read = 0;
+        while (_client.available() > 0 && bytes_read < READ_BUDGET_BYTES) {
             uint8_t byte = _client.read();
             _frame_buffer.append(byte);
+            bytes_read++;
         }
-        // Dump first 20 bytes of new data
-        Serial.printf("[TCP] First bytes: ");
-        size_t dump_len = (_frame_buffer.size() - start_pos);
-        if (dump_len > 20) dump_len = 20;
-        for (size_t i = 0; i < dump_len; ++i) {
-            Serial.printf("%02x ", _frame_buffer.data()[start_pos + i]);
+        if (_client.available() > 0) {
+            if (now - _last_read_budget_log_ms >= PRESSURE_LOG_INTERVAL_MS) {
+                _last_read_budget_log_ms = now;
+                Serial.printf("[TCP] Read budget exhausted, deferring %d bytes\n", _client.available());
+            }
         }
-        Serial.printf("\n");
+        if (now - _last_read_detail_log_ms >= READ_DETAIL_LOG_INTERVAL_MS) {
+            _last_read_detail_log_ms = now;
+            Serial.printf("[TCP] Reading %d bytes\n", avail);
+            Serial.printf("[TCP] First bytes: ");
+            size_t dump_len = (_frame_buffer.size() - start_pos);
+            if (dump_len > 20) dump_len = 20;
+            for (size_t i = 0; i < dump_len; ++i) {
+                Serial.printf("%02x ", _frame_buffer.data()[start_pos + i]);
+            }
+            Serial.printf("\n");
+        }
     }
 #else
     // Non-blocking read
-    uint8_t buf[4096];
+    uint8_t buf[READ_BUDGET_BYTES];
     ssize_t len = recv(_socket, buf, sizeof(buf), MSG_DONTWAIT);
     if (len > 0) {
         DEBUG("TCPClientInterface: Received " + std::to_string(len) + " bytes");
@@ -347,14 +378,50 @@ void TCPClientInterface::handle_disconnect() {
 #endif
 
     // Process any complete frames
-    extract_and_process_frames();
+    size_t frame_budget = FRAME_BUDGET_PER_LOOP;
+    uint32_t process_budget = PROCESS_BUDGET_MS;
+    uint32_t last_flush_ms = Hardware::TDeck::Display::last_flush_ms();
+    bool display_stalled = (last_flush_ms > 0 && (now - last_flush_ms) > 1000);
+    if (_read_throttled) {
+        frame_budget = FRAME_BUDGET_PER_LOOP * 4;
+        process_budget = PROCESS_BUDGET_MS * 3;
+    }
+    if (display_stalled) {
+        frame_budget = std::min<size_t>(frame_budget, FRAME_BUDGET_PER_LOOP * 2);
+        process_budget = std::min<uint32_t>(process_budget, PROCESS_BUDGET_MS);
+    }
+    extract_and_process_frames(frame_budget, now, process_budget);
+
+#ifdef ARDUINO
+    if (_read_throttled || display_stalled) {
+        taskYIELD();
+    }
+#endif
 }
 
-void TCPClientInterface::extract_and_process_frames() {
+void TCPClientInterface::extract_and_process_frames(size_t max_frames, uint32_t start_ms, uint32_t budget_ms) {
     // Find and process complete HDLC frames: [FLAG][data][FLAG]
     static uint32_t frame_count = 0;
+    size_t frames_processed = 0;
 
     while (true) {
+        if (frames_processed >= max_frames) {
+            uint32_t now = millis();
+            if (now - _last_process_budget_log_ms >= PRESSURE_LOG_INTERVAL_MS) {
+                _last_process_budget_log_ms = now;
+                Serial.printf("[HDLC] Frame budget exhausted with %d buffered bytes remaining\n", (int)_frame_buffer.size());
+            }
+            break;
+        }
+        if (millis() - start_ms >= budget_ms) {
+            uint32_t now = millis();
+            if (now - _last_process_budget_log_ms >= PRESSURE_LOG_INTERVAL_MS) {
+                _last_process_budget_log_ms = now;
+                Serial.printf("[HDLC] Time budget exhausted with %d buffered bytes remaining\n", (int)_frame_buffer.size());
+            }
+            break;
+        }
+
         if (_frame_buffer.size() == 0) break;
 
         // Find first FLAG byte
@@ -425,6 +492,10 @@ void TCPClientInterface::extract_and_process_frames() {
         Serial.printf("[TCP] Processing frame: %d bytes\n", (int)unescaped.size());
         DEBUG(toString() + ": Received frame, " + std::to_string(unescaped.size()) + " bytes");
         InterfaceImpl::handle_incoming(unescaped);
+        frames_processed++;
+#ifdef ARDUINO
+        esp_task_wdt_reset();
+#endif
     }
 }
 

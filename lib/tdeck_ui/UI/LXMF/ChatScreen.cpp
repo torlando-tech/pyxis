@@ -254,6 +254,7 @@ void ChatScreen::refresh() {
         item.outgoing = !meta.incoming;
         item.delivered = (meta.state == static_cast<int>(::LXMF::Type::Message::DELIVERED));
         item.failed = (meta.state == static_cast<int>(::LXMF::Type::Message::FAILED));
+        item.propagated = meta.propagated;
 
         _messages.push_back(item);
         create_message_bubble(item);
@@ -305,6 +306,7 @@ void ChatScreen::load_more_messages() {
         item.outgoing = !meta.incoming;
         item.delivered = (meta.state == static_cast<int>(::LXMF::Type::Message::DELIVERED));
         item.failed = (meta.state == static_cast<int>(::LXMF::Type::Message::FAILED));
+        item.propagated = meta.propagated;
 
         // Create bubble at index 0 (top of list)
         create_message_bubble(item);
@@ -376,7 +378,7 @@ void ChatScreen::create_message_bubble(const MessageItem& item) {
     // Build status text using char buffer to avoid String fragmentation
     char status_text[32];
     build_status_text(status_text, sizeof(status_text), item.timestamp_str,
-                      item.outgoing, item.delivered, item.failed);
+                      item.outgoing, item.delivered, item.failed, item.propagated);
 
     // Calculate text widths to decide layout
     // Bubble is 80% of 320 = 256px, minus 16px padding = 240px usable
@@ -440,6 +442,7 @@ void ChatScreen::add_message(const ::LXMF::LXMessage& message, bool outgoing) {
     item.outgoing = outgoing;
     item.delivered = false;
     item.failed = false;
+    item.propagated = false;
 
     // Remove oldest messages if we exceed the limit
     while (_messages.size() >= MAX_DISPLAYED_MESSAGES) {
@@ -460,13 +463,14 @@ void ChatScreen::add_message(const ::LXMF::LXMessage& message, bool outgoing) {
     lv_obj_scroll_to_y(_message_list, LV_COORD_MAX, LV_ANIM_ON);
 }
 
-void ChatScreen::update_message_status(const Bytes& message_hash, bool delivered) {
+void ChatScreen::update_message_status(const Bytes& message_hash, bool delivered, bool failed, bool propagated) {
     LVGL_LOCK();
     // Find message and update status in our data
     for (auto& msg : _messages) {
         if (msg.message_hash == message_hash) {
             msg.delivered = delivered;
-            msg.failed = !delivered;
+            msg.failed = failed;
+            msg.propagated = propagated;
 
             // Update just the status label instead of full refresh
             auto row_it = _message_rows.find(message_hash);
@@ -482,7 +486,7 @@ void ChatScreen::update_message_status(const Bytes& message_hash, bool delivered
                         if (status_label) {
                             char status_text[32];
                             build_status_text(status_text, sizeof(status_text), msg.timestamp_str,
-                                              msg.outgoing, msg.delivered, msg.failed);
+                                              msg.outgoing, msg.delivered, msg.failed, msg.propagated);
                             lv_label_set_text(status_label, status_text);
                         }
                     }
@@ -649,7 +653,7 @@ void ChatScreen::format_timestamp(double timestamp, char* buf, size_t buf_size) 
     strftime(buf, buf_size, "%I:%M %p", timeinfo);
 }
 
-const char* ChatScreen::get_delivery_indicator(bool outgoing, bool delivered, bool failed) {
+const char* ChatScreen::get_delivery_indicator(bool outgoing, bool delivered, bool failed, bool propagated) {
     if (!outgoing) {
         return "";  // No indicator for incoming messages
     }
@@ -658,14 +662,16 @@ const char* ChatScreen::get_delivery_indicator(bool outgoing, bool delivered, bo
         return LV_SYMBOL_CLOSE;  // X for failed
     } else if (delivered) {
         return LV_SYMBOL_OK LV_SYMBOL_OK;  // Double check for delivered
+    } else if (propagated) {
+        return LV_SYMBOL_UPLOAD;  // Accepted by propagation node
     } else {
         return LV_SYMBOL_OK;  // Single check for sent
     }
 }
 
 void ChatScreen::build_status_text(char* buf, size_t buf_size, const char* timestamp,
-                                   bool outgoing, bool delivered, bool failed) {
-    const char* indicator = get_delivery_indicator(outgoing, delivered, failed);
+                                   bool outgoing, bool delivered, bool failed, bool propagated) {
+    const char* indicator = get_delivery_indicator(outgoing, delivered, failed, propagated);
     if (indicator[0] != '\0') {
         snprintf(buf, buf_size, "%s %s", timestamp, indicator);
     } else {

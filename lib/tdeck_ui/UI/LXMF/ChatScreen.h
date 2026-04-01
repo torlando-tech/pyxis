@@ -54,6 +54,7 @@ public:
         bool outgoing;      // true if sent by us
         bool delivered;     // true if delivery confirmed
         bool failed;        // true if delivery failed
+        bool propagated;    // true if accepted by propagation node
     };
 
     /**
@@ -94,7 +95,7 @@ public:
      * @param message_hash Hash of message to update
      * @param delivered true if delivered, false if failed
      */
-    void update_message_status(const RNS::Bytes& message_hash, bool delivered);
+    void update_message_status(const RNS::Bytes& message_hash, bool delivered, bool failed, bool propagated);
 
     /**
      * Refresh message list (reload from store)
@@ -204,10 +205,10 @@ private:
 
     // Utility
     static void format_timestamp(double timestamp, char* buf, size_t buf_size);
-    static const char* get_delivery_indicator(bool outgoing, bool delivered, bool failed);
+    static const char* get_delivery_indicator(bool outgoing, bool delivered, bool failed, bool propagated);
     static String parse_display_name(const RNS::Bytes& app_data);
     static void build_status_text(char* buf, size_t buf_size, const char* timestamp,
-                                  bool outgoing, bool delivered, bool failed);
+                                  bool outgoing, bool delivered, bool failed, bool propagated);
 };
 
 } // namespace LXMF
