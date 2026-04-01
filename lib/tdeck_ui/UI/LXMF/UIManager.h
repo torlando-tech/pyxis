@@ -233,6 +233,7 @@ private:
     Telemetry::TelemetryManager _telemetry_manager;
 
     bool _initialized;
+    bool _conversation_list_dirty;
 
     // Screen navigation handlers
     void on_conversation_selected(const RNS::Bytes& peer_hash);

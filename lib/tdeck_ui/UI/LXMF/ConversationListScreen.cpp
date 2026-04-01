@@ -12,6 +12,7 @@
 #include "../../Hardware/TDeck/Config.h"
 #include "../LVGL/LVGLInit.h"
 #include "../LVGL/LVGLLock.h"
+#include <cstring>
 #include <WiFi.h>
 #include <MsgPack.h>
 #include <TinyGPSPlus.h>
@@ -21,6 +22,69 @@ using namespace Hardware::TDeck;
 
 namespace UI {
 namespace LXMF {
+
+namespace {
+void set_label_text_if_changed(lv_obj_t* label, const char* text) {
+    if (!label || !text) {
+        return;
+    }
+
+    const char* current = lv_label_get_text(label);
+    if (!current || std::strcmp(current, text) != 0) {
+        lv_label_set_text(label, text);
+    }
+}
+
+void populate_conversation_item(lv_obj_t* container, const ConversationListScreen::ConversationItem& item) {
+    if (!container) {
+        return;
+    }
+
+    lv_obj_t* label_peer = lv_label_create(container);
+    lv_label_set_text(label_peer, item.peer_name.c_str());
+    lv_obj_align(label_peer, LV_ALIGN_TOP_LEFT, 6, 4);
+    lv_obj_set_style_text_color(label_peer, Theme::info(), 0);
+    lv_obj_set_style_text_font(label_peer, &lv_font_montserrat_14, 0);
+
+    lv_obj_t* label_preview = lv_label_create(container);
+    lv_label_set_text(label_preview, item.last_message.c_str());
+    lv_obj_align(label_preview, LV_ALIGN_BOTTOM_LEFT, 6, -4);
+    lv_obj_set_style_text_color(label_preview, Theme::textTertiary(), 0);
+    lv_obj_set_width(label_preview, 220);
+    lv_label_set_long_mode(label_preview, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_max_height(label_preview, 16, 0);
+
+    lv_obj_t* label_time = lv_label_create(container);
+    lv_label_set_text(label_time, item.timestamp_str.c_str());
+    lv_obj_align(label_time, LV_ALIGN_BOTTOM_RIGHT, -6, -4);
+    lv_obj_set_style_text_color(label_time, Theme::textMuted(), 0);
+
+    if (item.unread_count > 0) {
+        lv_obj_t* badge = lv_obj_create(container);
+        lv_obj_set_size(badge, 20, 20);
+        lv_obj_align(badge, LV_ALIGN_BOTTOM_RIGHT, -6, -4);
+        lv_obj_set_style_bg_color(badge, Theme::error(), 0);
+        lv_obj_set_style_radius(badge, LV_RADIUS_CIRCLE, 0);
+        lv_obj_set_style_border_width(badge, 0, 0);
+        lv_obj_set_style_pad_all(badge, 0, 0);
+
+        lv_obj_t* label_count = lv_label_create(badge);
+        lv_label_set_text_fmt(label_count, "%u", static_cast<unsigned>(item.unread_count));
+        lv_obj_center(label_count);
+        lv_obj_set_style_text_color(label_count, lv_color_white(), 0);
+    }
+}
+
+size_t find_conversation_index(const std::vector<ConversationListScreen::ConversationItem>& conversations,
+                               const Bytes& peer_hash) {
+    for (size_t i = 0; i < conversations.size(); ++i) {
+        if (conversations[i].peer_hash == peer_hash) {
+            return i;
+        }
+    }
+    return static_cast<size_t>(-1);
+}
+}  // namespace
 
 ConversationListScreen::ConversationListScreen(lv_obj_t* parent)
     : _screen(nullptr), _header(nullptr), _list(nullptr), _bottom_nav(nullptr),
@@ -177,84 +241,91 @@ void ConversationListScreen::create_bottom_nav() {
 }
 
 void ConversationListScreen::load_conversations(::LXMF::MessageStore& store) {
-    LVGL_LOCK();
     _message_store = &store;
     refresh();
 }
 
 void ConversationListScreen::refresh() {
-    LVGL_LOCK();
     if (!_message_store) {
         return;
     }
 
+    {
+        LVGL_LOCK();
+        if (_screen && lv_obj_has_flag(_screen, LV_OBJ_FLAG_HIDDEN)) {
+            _dirty = true;
+            return;
+        }
+    }
+
     INFO("Refreshing conversation list");
-
-    // Clear existing items (also removes from focus group when deleted)
-    lv_obj_clean(_list);
-    _conversations.clear();
-    _conversation_containers.clear();
-    _peer_hash_pool.clear();
-    _has_unresolved_names = false;
-
-    // Load conversations from store
-    std::vector<Bytes> peer_hashes = _message_store->get_conversations();
-
-    // Reserve capacity to avoid reallocations during population
-    _peer_hash_pool.reserve(peer_hashes.size());
-    _conversations.reserve(peer_hashes.size());
-    _conversation_containers.reserve(peer_hashes.size());
+    std::vector<ConversationItem> refreshed_conversations;
+    bool has_unresolved_names = false;
+    std::vector<::LXMF::MessageStore::ConversationSummary> summaries = _message_store->get_conversation_summaries();
+    refreshed_conversations.reserve(summaries.size());
 
     {
         char log_buf[48];
-        snprintf(log_buf, sizeof(log_buf), "  Found %zu conversations", peer_hashes.size());
+        snprintf(log_buf, sizeof(log_buf), "  Found %zu conversations", summaries.size());
         INFO(log_buf);
     }
 
-    for (const auto& peer_hash : peer_hashes) {
-        std::vector<Bytes> messages = _message_store->get_messages_for_conversation(peer_hash);
-
-        if (messages.empty()) {
-            continue;
-        }
-
-        // Load last message for preview
-        Bytes last_msg_hash = messages.back();
-        ::LXMF::LXMessage last_msg = _message_store->load_message(last_msg_hash);
-
-        // Create conversation item
+    for (const auto& summary : summaries) {
         ConversationItem item;
-        item.peer_hash = peer_hash;
+        item.peer_hash = summary.peer_hash;
 
         // Try to get display name from app_data, fall back to hash
         bool resolved = false;
-        Bytes app_data = Identity::recall_app_data(peer_hash);
+        Bytes app_data = Identity::recall_app_data(summary.peer_hash);
         if (app_data && app_data.size() > 0) {
             String display_name = parse_display_name(app_data);
             if (display_name.length() > 0) {
                 item.peer_name = display_name;
                 resolved = true;
             } else {
-                item.peer_name = truncate_hash(peer_hash);
+                item.peer_name = truncate_hash(summary.peer_hash);
             }
         } else {
-            item.peer_name = truncate_hash(peer_hash);
+            item.peer_name = truncate_hash(summary.peer_hash);
         }
         if (!resolved) {
-            _has_unresolved_names = true;
+            has_unresolved_names = true;
         }
 
-        // Get message content for preview
-        String content((const char*)last_msg.content().data(), last_msg.content().size());
+        String content(summary.last_message_preview.c_str());
         item.last_message = content.substring(0, 30);  // Truncate to 30 chars
         if (content.length() > 30) {
             item.last_message += "...";
         }
 
-        item.timestamp = (uint32_t)last_msg.timestamp();
+        item.timestamp = static_cast<uint32_t>(summary.last_activity);
         item.timestamp_str = format_timestamp(item.timestamp);
-        item.unread_count = 0;  // TODO: Track unread count
+        item.unread_count = summary.unread_count;
 
+        refreshed_conversations.push_back(item);
+    }
+
+    LVGL_LOCK();
+    if (_screen && lv_obj_has_flag(_screen, LV_OBJ_FLAG_HIDDEN)) {
+        _dirty = true;
+        return;
+    }
+
+    _dirty = false;
+
+    // Clear existing items (also removes from focus group when deleted)
+    lv_obj_clean(_list);
+    _conversations.clear();
+    _conversation_containers.clear();
+    _peer_hash_pool.clear();
+    _has_unresolved_names = has_unresolved_names;
+
+    // Reserve capacity to avoid reallocations during population
+    _peer_hash_pool.reserve(refreshed_conversations.size());
+    _conversations.reserve(refreshed_conversations.size());
+    _conversation_containers.reserve(refreshed_conversations.size());
+
+    for (const auto& item : refreshed_conversations) {
         _conversations.push_back(item);
         create_conversation_item(item);
     }
@@ -286,54 +357,37 @@ void ConversationListScreen::create_conversation_item(const ConversationItem& it
 
     // Track container for focus group management
     _conversation_containers.push_back(container);
-
-    // Row 1: Peer hash
-    lv_obj_t* label_peer = lv_label_create(container);
-    lv_label_set_text(label_peer, item.peer_name.c_str());
-    lv_obj_align(label_peer, LV_ALIGN_TOP_LEFT, 6, 4);
-    lv_obj_set_style_text_color(label_peer, Theme::info(), 0);
-    lv_obj_set_style_text_font(label_peer, &lv_font_montserrat_14, 0);
-
-    // Row 2: Message preview (left) + Timestamp (right)
-    lv_obj_t* label_preview = lv_label_create(container);
-    lv_label_set_text(label_preview, item.last_message.c_str());
-    lv_obj_align(label_preview, LV_ALIGN_BOTTOM_LEFT, 6, -4);
-    lv_obj_set_style_text_color(label_preview, Theme::textTertiary(), 0);
-    lv_obj_set_width(label_preview, 220);  // Limit width to leave room for timestamp
-    lv_label_set_long_mode(label_preview, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_max_height(label_preview, 16, 0);  // Force single line
-
-    lv_obj_t* label_time = lv_label_create(container);
-    lv_label_set_text(label_time, item.timestamp_str.c_str());
-    lv_obj_align(label_time, LV_ALIGN_BOTTOM_RIGHT, -6, -4);
-    lv_obj_set_style_text_color(label_time, Theme::textMuted(), 0);
-
-    // Unread count badge
-    if (item.unread_count > 0) {
-        lv_obj_t* badge = lv_obj_create(container);
-        lv_obj_set_size(badge, 20, 20);
-        lv_obj_align(badge, LV_ALIGN_BOTTOM_RIGHT, -6, -4);
-        lv_obj_set_style_bg_color(badge, Theme::error(), 0);
-        lv_obj_set_style_radius(badge, LV_RADIUS_CIRCLE, 0);
-        lv_obj_set_style_border_width(badge, 0, 0);
-        lv_obj_set_style_pad_all(badge, 0, 0);
-
-        lv_obj_t* label_count = lv_label_create(badge);
-        lv_label_set_text_fmt(label_count, "%d", item.unread_count);
-        lv_obj_center(label_count);
-        lv_obj_set_style_text_color(label_count, lv_color_white(), 0);
-    }
+    populate_conversation_item(container, item);
 }
 
 void ConversationListScreen::update_unread_count(const Bytes& peer_hash, uint16_t unread_count) {
-    LVGL_LOCK();
-    // Find conversation and update
-    for (auto& conv : _conversations) {
-        if (conv.peer_hash == peer_hash) {
-            conv.unread_count = unread_count;
-            refresh();  // Redraw list
-            break;
+    bool refresh_needed = false;
+    {
+        LVGL_LOCK();
+        size_t index = find_conversation_index(_conversations, peer_hash);
+        if (index == static_cast<size_t>(-1)) {
+            return;
         }
+
+        _conversations[index].unread_count = unread_count;
+
+        if (_screen && lv_obj_has_flag(_screen, LV_OBJ_FLAG_HIDDEN)) {
+            _dirty = true;
+            return;
+        }
+
+        if (index < _conversation_containers.size() && _conversation_containers[index]) {
+            lv_obj_t* container = _conversation_containers[index];
+            lv_obj_clean(container);
+            populate_conversation_item(container, _conversations[index]);
+        } else {
+            _dirty = true;
+            refresh_needed = true;
+        }
+    }
+
+    if (refresh_needed) {
+        refresh();
     }
 }
 
@@ -366,28 +420,39 @@ void ConversationListScreen::set_map_callback(MapCallback callback) {
 }
 
 void ConversationListScreen::show() {
-    LVGL_LOCK();
-    lv_obj_clear_flag(_screen, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(_screen);  // Bring to front for touch events
+    bool refresh_needed = false;
+    {
+        LVGL_LOCK();
+        lv_obj_clear_flag(_screen, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(_screen);  // Bring to front for touch events
+        refresh_needed = _dirty;
+    }
 
-    // Add widgets to focus group for trackball navigation
-    lv_group_t* group = LVGL::LVGLInit::get_default_group();
-    if (group) {
-        // Add conversation containers first (so they come before New button in nav order)
-        for (lv_obj_t* container : _conversation_containers) {
-            lv_group_add_obj(group, container);
-        }
+    if (refresh_needed) {
+        refresh();
+    }
 
-        // Add New button last
-        if (_btn_new) {
-            lv_group_add_obj(group, _btn_new);
-        }
+    {
+        LVGL_LOCK();
+        // Add widgets to focus group for trackball navigation
+        lv_group_t* group = LVGL::LVGLInit::get_default_group();
+        if (group) {
+            // Add conversation containers first (so they come before New button in nav order)
+            for (lv_obj_t* container : _conversation_containers) {
+                lv_group_add_obj(group, container);
+            }
 
-        // Focus first conversation if available, otherwise New button
-        if (!_conversation_containers.empty()) {
-            lv_group_focus_obj(_conversation_containers[0]);
-        } else if (_btn_new) {
-            lv_group_focus_obj(_btn_new);
+            // Add New button last
+            if (_btn_new) {
+                lv_group_add_obj(group, _btn_new);
+            }
+
+            // Focus first conversation if available, otherwise New button
+            if (!_conversation_containers.empty()) {
+                lv_group_focus_obj(_conversation_containers[0]);
+            } else if (_btn_new) {
+                lv_group_focus_obj(_btn_new);
+            }
         }
     }
 }
@@ -416,12 +481,17 @@ lv_obj_t* ConversationListScreen::get_object() {
 
 void ConversationListScreen::update_status() {
     LVGL_LOCK();
+    if (_screen && lv_obj_has_flag(_screen, LV_OBJ_FLAG_HIDDEN)) {
+        _dirty = true;
+        return;
+    }
+
     // Update WiFi RSSI
     if (WiFi.status() == WL_CONNECTED) {
         int rssi = WiFi.RSSI();
         char wifi_text[32];
         snprintf(wifi_text, sizeof(wifi_text), "%s %d", LV_SYMBOL_WIFI, rssi);
-        lv_label_set_text(_label_wifi, wifi_text);
+        set_label_text_if_changed(_label_wifi, wifi_text);
 
         // Color based on signal strength
         if (rssi > -50) {
@@ -432,7 +502,7 @@ void ConversationListScreen::update_status() {
             lv_obj_set_style_text_color(_label_wifi, Theme::error(), 0);  // Red
         }
     } else {
-        lv_label_set_text(_label_wifi, LV_SYMBOL_WIFI " --");
+        set_label_text_if_changed(_label_wifi, LV_SYMBOL_WIFI " --");
         lv_obj_set_style_text_color(_label_wifi, Theme::textMuted(), 0);
     }
 
@@ -445,7 +515,7 @@ void ConversationListScreen::update_status() {
         if (rssi_f != 0.0f) {
             char lora_text[32];
             snprintf(lora_text, sizeof(lora_text), "%s%d", LV_SYMBOL_CALL, rssi);
-            lv_label_set_text(_label_lora, lora_text);
+            set_label_text_if_changed(_label_lora, lora_text);
 
             // Color based on signal strength (LoRa typically has weaker signals)
             if (rssi > -80) {
@@ -457,11 +527,11 @@ void ConversationListScreen::update_status() {
             }
         } else {
             // RSSI of 0 means no recent packet
-            lv_label_set_text(_label_lora, LV_SYMBOL_CALL"--");
+            set_label_text_if_changed(_label_lora, LV_SYMBOL_CALL"--");
             lv_obj_set_style_text_color(_label_lora, Theme::textMuted(), 0);
         }
     } else {
-        lv_label_set_text(_label_lora, LV_SYMBOL_CALL"--");
+        set_label_text_if_changed(_label_lora, LV_SYMBOL_CALL"--");
         lv_obj_set_style_text_color(_label_lora, Theme::textMuted(), 0);
     }
 
@@ -470,7 +540,7 @@ void ConversationListScreen::update_status() {
         int sats = _gps->satellites.value();
         char gps_text[32];
         snprintf(gps_text, sizeof(gps_text), "%s %d", LV_SYMBOL_GPS, sats);
-        lv_label_set_text(_label_gps, gps_text);
+        set_label_text_if_changed(_label_gps, gps_text);
 
         // Color based on satellite count
         if (sats >= 6) {
@@ -481,7 +551,7 @@ void ConversationListScreen::update_status() {
             lv_obj_set_style_text_color(_label_gps, Theme::error(), 0);  // Red
         }
     } else {
-        lv_label_set_text(_label_gps, LV_SYMBOL_GPS " --");
+        set_label_text_if_changed(_label_gps, LV_SYMBOL_GPS " --");
         lv_obj_set_style_text_color(_label_gps, Theme::textMuted(), 0);
     }
 
@@ -501,7 +571,7 @@ void ConversationListScreen::update_status() {
 
         char ble_text[32];
         snprintf(ble_text, sizeof(ble_text), "%s %d|%d", LV_SYMBOL_BLUETOOTH, central_count, peripheral_count);
-        lv_label_set_text(_label_ble, ble_text);
+        set_label_text_if_changed(_label_ble, ble_text);
 
         // Color based on connection status
         int total = central_count + peripheral_count;
@@ -511,7 +581,7 @@ void ConversationListScreen::update_status() {
             lv_obj_set_style_text_color(_label_ble, Theme::textMuted(), 0);  // Gray - no connections
         }
     } else {
-        lv_label_set_text(_label_ble, LV_SYMBOL_BLUETOOTH " -|-");
+        set_label_text_if_changed(_label_ble, LV_SYMBOL_BLUETOOTH " -|-");
         lv_obj_set_style_text_color(_label_ble, Theme::textMuted(), 0);
     }
 
@@ -529,18 +599,18 @@ void ConversationListScreen::update_status() {
     // Update icon and percentage display
     if (charging) {
         // When charging: show charge icon centered, hide percentage (voltage doesn't reflect battery state)
-        lv_label_set_text(_label_battery_icon, LV_SYMBOL_CHARGE);
+        set_label_text_if_changed(_label_battery_icon, LV_SYMBOL_CHARGE);
         lv_obj_align(_label_battery_icon, LV_ALIGN_CENTER, 0, 0);
         lv_obj_add_flag(_label_battery_pct, LV_OBJ_FLAG_HIDDEN);
         lv_obj_set_style_text_color(_label_battery_icon, Theme::charging(), 0);  // Cyan
     } else {
         // When on battery: show icon at top with percentage below
-        lv_label_set_text(_label_battery_icon, LV_SYMBOL_BATTERY_FULL);
+        set_label_text_if_changed(_label_battery_icon, LV_SYMBOL_BATTERY_FULL);
         lv_obj_align(_label_battery_icon, LV_ALIGN_TOP_MID, 0, 0);
         lv_obj_clear_flag(_label_battery_pct, LV_OBJ_FLAG_HIDDEN);
         char pct_text[16];
         snprintf(pct_text, sizeof(pct_text), "%d%%", percent);
-        lv_label_set_text(_label_battery_pct, pct_text);
+        set_label_text_if_changed(_label_battery_pct, pct_text);
 
         // Color based on battery level
         lv_color_t battery_color;
@@ -555,20 +625,52 @@ void ConversationListScreen::update_status() {
         lv_obj_set_style_text_color(_label_battery_pct, battery_color, 0);
     }
 
-    // Check if any unresolved display names can now be resolved
-    // (announces may have arrived since the list was last refreshed)
+    // Check if any unresolved display names can now be resolved.
+    // Update only the affected row to avoid a full list rebuild.
     if (_has_unresolved_names && _message_store) {
-        for (const auto& item : _conversations) {
-            Bytes app_data = Identity::recall_app_data(item.peer_hash);
-            if (app_data && app_data.size() > 0) {
-                String name = parse_display_name(app_data);
-                if (name.length() > 0 && item.peer_name != name) {
-                    // A name has become available — refresh the whole list
-                    DEBUG("Display name resolved, refreshing conversation list");
-                    refresh();
-                    return;
-                }
+        bool any_still_unresolved = false;
+        bool updated_any_name = false;
+
+        for (size_t i = 0; i < _conversations.size(); ++i) {
+            auto& item = _conversations[i];
+            String fallback_hash = truncate_hash(item.peer_hash);
+
+            if (item.peer_name != fallback_hash) {
+                continue;
             }
+
+            Bytes app_data = Identity::recall_app_data(item.peer_hash);
+            if (!(app_data && app_data.size() > 0)) {
+                any_still_unresolved = true;
+                continue;
+            }
+
+            String name = parse_display_name(app_data);
+            if (name.length() == 0) {
+                any_still_unresolved = true;
+                continue;
+            }
+
+            if (item.peer_name == name) {
+                continue;
+            }
+
+            item.peer_name = name;
+            if (i < _conversation_containers.size() && _conversation_containers[i]) {
+                lv_obj_t* container = _conversation_containers[i];
+                lv_obj_clean(container);
+                populate_conversation_item(container, item);
+            } else {
+                any_still_unresolved = true;
+            }
+
+            updated_any_name = true;
+        }
+
+        _has_unresolved_names = any_still_unresolved;
+
+        if (updated_any_name) {
+            DEBUG("Display name resolved, updating conversation rows");
         }
     }
 }
@@ -753,3 +855,4 @@ String ConversationListScreen::parse_display_name(const Bytes& app_data) {
 } // namespace UI
 
 #endif // ARDUINO
+

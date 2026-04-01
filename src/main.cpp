@@ -123,6 +123,9 @@ Interface* auto_interface = nullptr;
 BLEInterface* ble_interface_impl = nullptr;
 Interface* ble_interface = nullptr;
 
+static void udp_log_init();
+void start_tcp_interface();
+
 static void refresh_outbound_propagation_node() {
     if (!router || !propagation_manager) {
         return;
@@ -173,12 +176,125 @@ volatile bool wifi_reconnect_pending = false;
 String pending_wifi_ssid;
 String pending_wifi_password;
 
+enum class WifiReconnectStage : uint8_t {
+    IDLE = 0,
+    DISCONNECTING,
+    WAITING_FOR_CONNECT,
+};
+
+WifiReconnectStage wifi_reconnect_stage = WifiReconnectStage::IDLE;
+uint32_t wifi_reconnect_stage_started = 0;
+
+bool persist_cycle_active = false;
+uint8_t persist_cycle_stage = 0;
+
 // UDP log broadcasting (POSIX socket — no per-packet heap allocation)
 // WiFiUDP::beginPacket() does new char[1460] on every call, causing severe
 // heap fragmentation over time. A raw POSIX socket with sendto() avoids this.
 static int udp_log_sock = -1;
 static struct sockaddr_in udp_log_dest;
 static bool udp_log_ready = false;
+
+static void queue_wifi_reconnect(const String& ssid, const String& password) {
+    if (ssid.isEmpty()) {
+        WARNING("WiFi reconnect skipped: SSID is empty");
+        return;
+    }
+
+    pending_wifi_ssid = ssid;
+    pending_wifi_password = password;
+    wifi_reconnect_pending = true;
+    INFO(("WiFi reconnect queued for: " + ssid).c_str());
+}
+
+static void pump_wifi_reconnect() {
+    uint32_t now = millis();
+
+    if (wifi_reconnect_stage == WifiReconnectStage::IDLE && wifi_reconnect_pending) {
+        wifi_reconnect_pending = false;
+        udp_log_ready = false;
+        WiFi.disconnect();
+        wifi_reconnect_stage = WifiReconnectStage::DISCONNECTING;
+        wifi_reconnect_stage_started = now;
+        INFO(("Reconnecting WiFi to: " + pending_wifi_ssid).c_str());
+        return;
+    }
+
+    if (wifi_reconnect_stage == WifiReconnectStage::DISCONNECTING) {
+        if (now - wifi_reconnect_stage_started < 100) {
+            return;
+        }
+
+        WiFi.begin(pending_wifi_ssid.c_str(), pending_wifi_password.c_str());
+        wifi_reconnect_stage = WifiReconnectStage::WAITING_FOR_CONNECT;
+        wifi_reconnect_stage_started = now;
+        return;
+    }
+
+    if (wifi_reconnect_stage == WifiReconnectStage::WAITING_FOR_CONNECT) {
+        if (WiFi.status() == WL_CONNECTED) {
+            udp_log_init();
+            udp_log_ready = true;
+            INFO(("WiFi connected! IP: " + WiFi.localIP().toString()).c_str());
+
+            if (app_settings.tcp_enabled) {
+                if (tcp_interface_impl) {
+                    tcp_interface_impl->start();
+                } else {
+                    start_tcp_interface();
+                }
+            }
+
+            pending_wifi_ssid = "";
+            pending_wifi_password = "";
+            wifi_reconnect_stage = WifiReconnectStage::IDLE;
+            wifi_reconnect_stage_started = 0;
+            return;
+        }
+
+        if (now - wifi_reconnect_stage_started >= 10000) {
+            WARNING("WiFi reconnection failed");
+            pending_wifi_ssid = "";
+            pending_wifi_password = "";
+            wifi_reconnect_stage = WifiReconnectStage::IDLE;
+            wifi_reconnect_stage_started = 0;
+        }
+    }
+}
+
+static void pump_persistence() {
+    uint32_t now = millis();
+    uint32_t last_flush_ms = Hardware::TDeck::Display::last_flush_ms();
+    bool ui_under_pressure = (last_flush_ms > 0 && (now - last_flush_ms) > 1000);
+    bool tcp_under_pressure = tcp_interface_impl && tcp_interface_impl->under_backpressure();
+    bool forced = (now - last_persist_run >= PERSIST_FORCE_INTERVAL_MS);
+
+    if (!persist_cycle_active) {
+        if ((ui_under_pressure || tcp_under_pressure) && !forced) {
+            if (now - last_persist_defer_log >= 5000) {
+                last_persist_defer_log = now;
+                INFO("Deferring persistence while UI/TCP are under pressure");
+            }
+            return;
+        }
+
+        persist_cycle_active = true;
+        persist_cycle_stage = 0;
+    }
+
+    if (persist_cycle_stage == 0) {
+        reticulum->should_persist_data();
+        esp_task_wdt_reset();
+        persist_cycle_stage = 1;
+        return;
+    }
+
+    Identity::should_persist_data();
+    esp_task_wdt_reset();
+    persist_cycle_stage = 0;
+    persist_cycle_active = false;
+    last_persist_run = now;
+}
 
 static void udp_log_init() {
     if (udp_log_sock >= 0) close(udp_log_sock);  // Re-init safe
@@ -997,14 +1113,7 @@ void setup_ui_manager() {
 
         // Set WiFi reconnect callback (deferred to main loop to avoid blocking LVGL task)
         settings->set_wifi_reconnect_callback([](const String& ssid, const String& password) {
-            if (ssid.isEmpty()) {
-                WARNING("WiFi reconnect skipped: SSID is empty");
-                return;
-            }
-            pending_wifi_ssid = ssid;
-            pending_wifi_password = password;
-            wifi_reconnect_pending = true;
-            INFO(("WiFi reconnect queued for: " + ssid).c_str());
+            queue_wifi_reconnect(ssid, password);
         });
 
         // Set save callback (update app_settings and apply)
@@ -1028,25 +1137,8 @@ void setup_ui_manager() {
 
             // Handle WiFi credential changes - auto reconnect
             if (wifi_settings_changed && new_settings.wifi_ssid.length() > 0) {
-                INFO(("WiFi credentials changed, reconnecting to: " + new_settings.wifi_ssid).c_str());
-                udp_log_ready = false;  // Suspend UDP logging during WiFi transition
-                WiFi.disconnect();
-                delay(100);
-                WiFi.begin(new_settings.wifi_ssid.c_str(), new_settings.wifi_password.c_str());
-
-                // Wait for connection (with timeout)
-                uint32_t start = millis();
-                while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
-                    delay(100);
-                }
-
-                if (WiFi.status() == WL_CONNECTED) {
-                    udp_log_init();  // Rebind to new WiFi interface IP
-                    udp_log_ready = true;  // Resume UDP logging
-                    INFO(("WiFi connected! IP: " + WiFi.localIP().toString()).c_str());
-                } else {
-                    WARNING("WiFi connection failed");
-                }
+                INFO(("WiFi credentials changed, queueing reconnect to: " + new_settings.wifi_ssid).c_str());
+                queue_wifi_reconnect(new_settings.wifi_ssid, new_settings.wifi_password);
             }
 
             // Update router display name
@@ -1577,30 +1669,7 @@ void loop() {
 
     // Handle deferred WiFi reconnect (from LVGL task)
     LOOP_STEP(3);  // WiFi reconnect check
-    if (wifi_reconnect_pending) {
-        wifi_reconnect_pending = false;
-        INFO(("Reconnecting WiFi to: " + pending_wifi_ssid).c_str());
-        udp_log_ready = false;  // Suspend UDP logging during WiFi transition
-        WiFi.disconnect();
-        delay(100);
-        WiFi.begin(pending_wifi_ssid.c_str(), pending_wifi_password.c_str());
-
-        uint32_t start = millis();
-        while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
-            esp_task_wdt_reset();
-            delay(100);
-        }
-
-        if (WiFi.status() == WL_CONNECTED) {
-            udp_log_init();  // Rebind to new WiFi interface IP
-            udp_log_ready = true;  // Resume UDP logging
-            INFO(("WiFi connected! IP: " + WiFi.localIP().toString()).c_str());
-        } else {
-            WARNING("WiFi reconnection failed");
-        }
-        pending_wifi_ssid = "";
-        pending_wifi_password = "";
-    }
+    pump_wifi_reconnect();
 
     // Process Reticulum
     LOOP_STEP(4);  // reticulum->loop()
@@ -1617,25 +1686,7 @@ void loop() {
     // involves sector erases (100ms each) and can take 5-15s total.
     // WDT feeds between calls prevent timeout during heavy flash I/O.
     LOOP_STEP(5);  // persist data
-    {
-        uint32_t now = millis();
-        uint32_t last_flush_ms = Hardware::TDeck::Display::last_flush_ms();
-        bool ui_under_pressure = (last_flush_ms > 0 && (now - last_flush_ms) > 1000);
-        bool tcp_under_pressure = tcp_interface_impl && tcp_interface_impl->under_backpressure();
-        bool allow_persist = (!ui_under_pressure && !tcp_under_pressure) ||
-                             (now - last_persist_run >= PERSIST_FORCE_INTERVAL_MS);
-        if (allow_persist) {
-            reticulum->should_persist_data();
-            esp_task_wdt_reset();
-            // Fast-persist known destinations (5s after dirty) to survive crashes
-            Identity::should_persist_data();
-            esp_task_wdt_reset();
-            last_persist_run = now;
-        } else if (now - last_persist_defer_log >= 5000) {
-            last_persist_defer_log = now;
-            INFO("Deferring persistence while UI/TCP are under pressure");
-        }
-    }
+    pump_persistence();
 
     // Process TCP interface
     LOOP_STEP(6);  // TCP loop
@@ -1719,17 +1770,14 @@ void loop() {
                 router->request_messages_from_propagation_node();
                 last_sync = now;
                 INFO("Periodic propagation sync (interval: " + std::to_string(app_settings.sync_interval / 60) + " min)");
+            }
         }
     }
-
-    delay(1);
-}
 
     // Check for TCP reconnection (handles rapid disconnect/reconnect)
     if (tcp_interface_impl && tcp_interface_impl->check_reconnected()) {
         INFO("TCP interface reconnected - sending announce");
         if (router) {
-            delay(500);  // Brief stabilization delay
             router->announce();
             last_announce = millis();
         }
@@ -1962,6 +2010,7 @@ void loop() {
         last_free_heap = free_heap;
     }
 
-    // Small delay to prevent tight loop
+    // Small delay to prevent tight loop while still letting lower-priority tasks run.
+    taskYIELD();
     delay(5);
 }

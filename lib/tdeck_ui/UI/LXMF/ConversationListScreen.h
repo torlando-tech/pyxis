@@ -208,6 +208,7 @@ private:
     std::vector<RNS::Bytes> _peer_hash_pool;  // Object pool to avoid per-item allocations
     RNS::Bytes _pending_delete_hash;  // Hash of conversation pending deletion
     bool _has_unresolved_names = false;  // True if any conversation shows hash instead of name
+    bool _dirty = false;
 
     ConversationSelectedCallback _conversation_selected_callback;
     ComposeCallback _compose_callback;

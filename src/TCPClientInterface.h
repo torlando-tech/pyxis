@@ -3,7 +3,10 @@
 #include "Interface.h"
 #include "Bytes.h"
 #include "Type.h"
+#include "PSRAMAllocator.h"
 
+#include <array>
+#include <vector>
 #ifdef ARDUINO
 #include <WiFi.h>
 #include <WiFiClient.h>
@@ -71,8 +74,8 @@ public:
     virtual bool start();
     virtual void stop();
     virtual void loop();
-    size_t buffered_bytes() const { return _frame_buffer.size(); }
-    bool under_backpressure() const { return _read_throttled || _frame_buffer.size() >= FRAME_BUFFER_HIGH_WATER; }
+    size_t buffered_bytes() const { return active_buffered_bytes(); }
+    bool under_backpressure() const { return _read_throttled || active_buffered_bytes() >= FRAME_BUFFER_HIGH_WATER; }
 
     virtual inline std::string toString() const {
         return "TCPClientInterface[" + _name + "/" + _target_host + ":" + std::to_string(_target_port) + "]";
@@ -87,6 +90,12 @@ private:
     void disconnect();
     void configure_socket();
     void handle_disconnect();
+    void reserve_buffers();
+    void reset_buffers();
+    void compact_rx_buffer();
+    bool append_rx_bytes(const uint8_t* data, size_t len);
+    bool decode_hdlc_payload(size_t start, size_t end);
+    size_t active_buffered_bytes() const;
 
     // HDLC frame processing
     void process_incoming();
@@ -120,11 +129,14 @@ public:
 
 private:
 
-    // HDLC frame buffer for partial frame reassembly
-    RNS::Bytes _frame_buffer;
+    // HDLC frame buffer for partial frame reassembly. Uses PSRAM-backed storage
+    // with an explicit head index so consumed bytes do not trigger tail copies.
+    std::vector<uint8_t, PSRAMAllocator<uint8_t>> _frame_buffer;
+    size_t _frame_start = 0;
 
-    // Read buffer for incoming data
-    RNS::Bytes _read_buffer;
+    // Reusable scratch buffers for chunk reads and HDLC unescaping.
+    std::array<uint8_t, READ_BUDGET_BYTES> _read_buffer{};
+    std::vector<uint8_t, PSRAMAllocator<uint8_t>> _frame_scratch;
 
     // Platform-specific socket
 #ifdef ARDUINO

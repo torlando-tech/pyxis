@@ -11,12 +11,26 @@
 #include "../LVGL/LVGLInit.h"
 #include "../LVGL/LVGLLock.h"
 #include "../Clipboard.h"
+#include <cstring>
 #include <MsgPack.h>
 
 using namespace RNS;
 
 namespace UI {
 namespace LXMF {
+
+namespace {
+void set_label_text_if_changed(lv_obj_t* label, const char* text) {
+    if (!label || !text) {
+        return;
+    }
+
+    const char* current = lv_label_get_text(label);
+    if (!current || std::strcmp(current, text) != 0) {
+        lv_label_set_text(label, text);
+    }
+}
+}  // namespace
 
 ChatScreen::ChatScreen(lv_obj_t* parent)
     : _screen(nullptr), _header(nullptr), _message_list(nullptr), _input_area(nullptr),
@@ -210,7 +224,13 @@ void ChatScreen::refresh() {
         return;
     }
 
+    if (_screen && lv_obj_has_flag(_screen, LV_OBJ_FLAG_HIDDEN)) {
+        _dirty = true;
+        return;
+    }
+
     INFO("Refreshing chat messages");
+    _dirty = false;
 
     // Clear existing messages and row tracking
     lv_obj_clean(_message_list);
@@ -468,6 +488,10 @@ void ChatScreen::update_message_status(const Bytes& message_hash, bool delivered
     // Find message and update status in our data
     for (auto& msg : _messages) {
         if (msg.message_hash == message_hash) {
+            if (msg.delivered == delivered && msg.failed == failed && msg.propagated == propagated) {
+                break;
+            }
+
             msg.delivered = delivered;
             msg.failed = failed;
             msg.propagated = propagated;
@@ -487,7 +511,7 @@ void ChatScreen::update_message_status(const Bytes& message_hash, bool delivered
                             char status_text[32];
                             build_status_text(status_text, sizeof(status_text), msg.timestamp_str,
                                               msg.outgoing, msg.delivered, msg.failed, msg.propagated);
-                            lv_label_set_text(status_label, status_text);
+                            set_label_text_if_changed(status_label, status_text);
                         }
                     }
                 }
@@ -515,6 +539,9 @@ void ChatScreen::set_location_share_callback(LocationShareCallback callback) {
 
 void ChatScreen::set_sharing_state(bool active) {
     LVGL_LOCK();
+    if (_sharing_active == active) {
+        return;
+    }
     _sharing_active = active;
     if (_btn_location) {
         if (active) {
@@ -526,23 +553,31 @@ void ChatScreen::set_sharing_state(bool active) {
 }
 
 void ChatScreen::show() {
-    LVGL_LOCK();
-    lv_obj_clear_flag(_screen, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(_screen);  // Bring to front for touch events
+    bool refresh_needed = false;
+    {
+        LVGL_LOCK();
+        lv_obj_clear_flag(_screen, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(_screen);  // Bring to front for touch events
+        refresh_needed = _dirty;
 
-    // Add buttons to default group for trackball navigation
-    // Note: text area not included since edit mode consumes arrow keys
-    lv_group_t* group = LVGL::LVGLInit::get_default_group();
-    if (group) {
-        if (_btn_back) lv_group_add_obj(group, _btn_back);
-        if (_btn_location) lv_group_add_obj(group, _btn_location);
-        if (_btn_call) lv_group_add_obj(group, _btn_call);
-        if (_btn_send) lv_group_add_obj(group, _btn_send);
+        // Add buttons to default group for trackball navigation
+        // Note: text area not included since edit mode consumes arrow keys
+        lv_group_t* group = LVGL::LVGLInit::get_default_group();
+        if (group) {
+            if (_btn_back) lv_group_add_obj(group, _btn_back);
+            if (_btn_location) lv_group_add_obj(group, _btn_location);
+            if (_btn_call) lv_group_add_obj(group, _btn_call);
+            if (_btn_send) lv_group_add_obj(group, _btn_send);
 
-        // Focus on back button
-        if (_btn_back) {
-            lv_group_focus_obj(_btn_back);
+            // Focus on back button
+            if (_btn_back) {
+                lv_group_focus_obj(_btn_back);
+            }
         }
+    }
+
+    if (refresh_needed) {
+        refresh();
     }
 }
 

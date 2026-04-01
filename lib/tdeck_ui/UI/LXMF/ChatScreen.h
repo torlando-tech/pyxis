@@ -198,6 +198,7 @@ private:
     static constexpr size_t MESSAGES_PER_PAGE = 20;
     static constexpr size_t MAX_DISPLAYED_MESSAGES = 50;  // Cap to prevent memory exhaustion
     bool _loading_more;                            // Prevent concurrent loads
+    bool _dirty = false;
 
     // Load more messages (for infinite scroll)
     void load_more_messages();

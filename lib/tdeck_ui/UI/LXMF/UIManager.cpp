@@ -61,6 +61,7 @@ UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::Me
       _ble_interface(nullptr),
       _gps(nullptr),
       _initialized(false),
+      _conversation_list_dirty(true),
       _call_state(CallState::IDLE),
       _lxst_audio(nullptr),
       _call_start_ms(0),
@@ -322,15 +323,9 @@ bool UIManager::init() {
 }
 
 void UIManager::update() {
-    LVGL_LOCK();
-    // Process outbound LXMF messages
-    _router.process_outbound();
-
-    // Process inbound LXMF messages
-    _router.process_inbound();
-
     // Pump voice call state machine
     if (_call_state != CallState::IDLE) {
+        LVGL_LOCK();
         call_update();
     }
 
@@ -339,15 +334,20 @@ void UIManager::update() {
     uint32_t now = millis();
     if (now - last_status_update > 3000) {  // Update every 3 seconds
         last_status_update = now;
-        if (_conversation_list_screen) {
+        if (_current_screen == SCREEN_CONVERSATION_LIST && _conversation_list_screen) {
+            LVGL_LOCK();
             _conversation_list_screen->update_status();
         }
+
         // Update status screen if visible
         if (_current_screen == SCREEN_STATUS && _status_screen) {
+            LVGL_LOCK();
             _status_screen->refresh();
         }
+
         // Update map GPS position if visible
         if (_current_screen == SCREEN_MAP && _map_screen) {
+            LVGL_LOCK();
             _map_screen->update_gps_position();
             update_map_peer_markers();
         }
@@ -374,6 +374,7 @@ void UIManager::update() {
             snprintf(log_buf, sizeof(log_buf), "[TELEM] %zu peers need send", peers_to_send.size());
             pyxis_log(log_buf);
         }
+
         for (const auto& peer : peers_to_send) {
             send_telemetry(peer);
         }
@@ -381,10 +382,15 @@ void UIManager::update() {
 }
 
 void UIManager::show_conversation_list() {
-    LVGL_LOCK();
     INFO("Showing conversation list");
 
-    _conversation_list_screen->refresh();
+    bool refresh_needed = _conversation_list_dirty;
+    if (refresh_needed) {
+        _conversation_list_screen->refresh();
+        _conversation_list_dirty = false;
+    }
+
+    LVGL_LOCK();
     _conversation_list_screen->show();
     _chat_screen->hide();
     _compose_screen->hide();
@@ -814,6 +820,7 @@ void UIManager::send_message(const Bytes& dest_hash, const String& content) {
 
     // Save to store (now has valid hash from pack())
     _store.save_message(message);
+    _conversation_list_dirty = true;
 
     // Queue for sending (pack already called, will use cached packed data)
     _router.handle_outbound(message);
@@ -822,7 +829,6 @@ void UIManager::send_message(const Bytes& dest_hash, const String& content) {
 }
 
 void UIManager::on_message_received(::LXMF::LXMessage& message) {
-    LVGL_LOCK();
     std::string source_hex = message.source_hash().toHex().substr(0, 8);
     std::string msg = "Message received from " + source_hex + "...";
     INFO(msg.c_str());
@@ -902,10 +908,15 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
 
     // Normal message flow: save, display, notify
     _store.save_message(message);
+    _conversation_list_dirty = true;
 
     bool viewing_this_chat = (_current_screen == SCREEN_CHAT && _current_peer_hash == message.source_hash());
     if (viewing_this_chat) {
+        LVGL_LOCK();
         _chat_screen->add_message(message, false);
+    } else if (_current_screen == SCREEN_CONVERSATION_LIST) {
+        _conversation_list_screen->refresh();
+        _conversation_list_dirty = false;
     }
 
     if (_settings_screen) {
@@ -914,10 +925,6 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
             Notification::tone_play(1000, 100, settings.notification_volume);  // 1kHz beep, 100ms
         }
     }
-
-    // Update conversation list unread count
-    // TODO: Track unread counts
-    _conversation_list_screen->refresh();
 
     INFO("  Message processed");
 }
@@ -960,7 +967,6 @@ void UIManager::on_message_failed(::LXMF::LXMessage& message) {
 }
 
 void UIManager::refresh_current_screen() {
-    LVGL_LOCK();
     switch (_current_screen) {
         case SCREEN_CONVERSATION_LIST:
             _conversation_list_screen->refresh();
