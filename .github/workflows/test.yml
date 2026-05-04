@@ -52,6 +52,11 @@ jobs:
       - name: Install PlatformIO
         run: pip install --upgrade platformio
 
+      # microReticulum native17 vendors libbz2 sources but link_bz2.py
+      # links against system libbz2 — needs libbz2-dev on Ubuntu.
+      - name: Install libbz2-dev
+        run: sudo apt-get install -y libbz2-dev
+
       # Run only suites that build cleanly under native17 in the fork.
       # Erroring suites (test_ble, test_tdeck, test_lxmf, test_ratchets, etc.)
       # are tracked separately — see pyxis MEMORY.md.

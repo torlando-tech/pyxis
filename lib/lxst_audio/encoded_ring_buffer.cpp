@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include "encoded_ring_buffer.h"
+
+#include <cstdlib>     // malloc, free — needed on Linux clang; macOS leaks via header transitivity
 #include <cstring>
 
 #ifdef ARDUINO
