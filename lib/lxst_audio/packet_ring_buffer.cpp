@@ -3,6 +3,8 @@
 
 #include "packet_ring_buffer.h"
 
+#include <cstdlib>     // malloc, free — needed on Linux clang; macOS leaks via header transitivity
+
 #ifdef ARDUINO
 #include <esp_heap_caps.h>
 #endif
