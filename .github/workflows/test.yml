@@ -1,0 +1,71 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pyxis-pytest:
+    name: Pyxis pytest suite (build_scripts + native)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pytest
+        run: pip install pytest
+
+      - name: Run pytest
+        run: pytest tests/build_scripts tests/native -v
+
+  microreticulum-native:
+    name: microReticulum native unit tests (PlatformIO native17)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.platformio/.cache
+          key: ${{ runner.os }}-pio-mrn
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      # Run only suites that build cleanly under native17 in the fork.
+      # Erroring suites (test_ble, test_tdeck, test_lxmf, test_ratchets, etc.)
+      # are tracked separately — see pyxis MEMORY.md.
+      - name: Run native17 tests
+        working-directory: deps/microReticulum
+        run: |
+          pio test -e native17 -f test_os
+          pio test -e native17 -f test_bytes
+          pio test -e native17 -f test_msgpack
+          pio test -e native17 -f test_crypto
+          pio test -e native17 -f test_filesystem
+          pio test -e native17 -f test_objects
+          pio test -e native17 -f test_general
+          pio test -e native17 -f test_reference
+          pio test -e native17 -f test_example
+          pio test -e native17 -f test_collections
+          pio test -e native17 -f test_interop
