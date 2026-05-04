@@ -47,7 +47,7 @@ jobs:
           path: |
             ~/.cache/pip
             ~/.platformio/.cache
-          key: ${{ runner.os }}-pio-mrn
+          key: ${{ runner.os }}-pio-mrn-${{ hashFiles('deps/microReticulum/platformio.ini') }}
 
       - name: Install PlatformIO
         run: pip install --upgrade platformio

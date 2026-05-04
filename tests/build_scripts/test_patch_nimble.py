@@ -15,6 +15,7 @@ What we verify:
 import io
 import os
 import subprocess
+import sys
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -148,7 +149,12 @@ def test_pristine_source_applies_all_patches(fresh_tree, patches):
         assert p["label"] in stdout, (
             f"patch {p['label']!r} did not run\n--- stdout ---\n{stdout}"
         )
-        assert f"already applied" not in stdout.split(p["label"])[0].splitlines()[-1] if False else True
+        # On first run, the patch's label line must not say "already applied".
+        label_line = stdout.split(p["label"])[1].split("\n")[0]
+        assert "already applied" not in label_line, (
+            f"first run of {p['label']!r} should not report already-applied\n"
+            f"--- stdout ---\n{stdout}"
+        )
         # File should now contain `new` and not `old`
         content = Path(p["filepath"]).read_text()
         assert p["new"] in content, f"new content missing from {p['filepath']}"
@@ -239,8 +245,10 @@ def test_script_is_executable_via_python(tmp_path):
         f"builtins.env = _Env()\n"
         f"exec(open({str(PATCH_SCRIPT)!r}).read())\n"
     )
+    # Use the same interpreter that runs the test suite (sys.executable),
+    # not /usr/bin/python3 — under setup-python on CI the two diverge.
     result = subprocess.run(
-        ["/usr/bin/python3", str(shim)],
+        [sys.executable, str(shim)],
         capture_output=True,
         text=True,
         timeout=10,

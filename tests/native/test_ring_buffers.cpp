@@ -204,6 +204,9 @@ static void prb_spsc_threaded_stress() {
 static void erb_zero_length_rejected() {
     EncodedRingBuffer eb(4, 64);
     uint8_t data[1] = {0xAA};
+    // EncodedRingBuffer::write() takes `int length` (signed) and rejects
+    // `length <= 0`. Both 0 and -1 hit the same branch — we exercise both
+    // to lock that contract in case the param ever migrates to size_t.
     EXPECT_TRUE(!eb.write(data, 0));
     EXPECT_TRUE(!eb.write(data, -1));
 }
