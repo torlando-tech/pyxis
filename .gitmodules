@@ -1,4 +1,6 @@
 [submodule "deps/microReticulum"]
 	path = deps/microReticulum
-	url = https://github.com/torlando-tech/microReticulum.git
-	branch = feat/t-deck
+	url = https://github.com/attermann/microReticulum.git
+	# Pinned at the 0.3.0 release tag so the build is reproducible. Bump
+	# the pin deliberately when we want a newer microReticulum (and re-run
+	# the conformance suite to catch any drift).
