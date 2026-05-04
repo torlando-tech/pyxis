@@ -1,0 +1,22 @@
+{
+    "name": "libbz2",
+    "version": "1.0.8",
+    "description": "bzip2 compression library for embedded systems",
+    "keywords": "compression, bzip2, bz2",
+    "license": "BSD-4-Clause",
+    "build": {
+        "flags": [
+            "-DBZ_NO_STDIO"
+        ],
+        "srcFilter": [
+            "+<blocksort.c>",
+            "+<bzlib.c>",
+            "+<bz_error.c>",
+            "+<compress.c>",
+            "+<crctable.c>",
+            "+<decompress.c>",
+            "+<huffman.c>",
+            "+<randtable.c>"
+        ]
+    }
+}
