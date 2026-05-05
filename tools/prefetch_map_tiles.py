@@ -171,8 +171,13 @@ def tile_intersects_radius(
 ) -> bool:
     south, west, north, east = tile_bounds(tile_x, tile_y, zoom)
     clamped_lat = min(max(center_lat, south), north)
-    clamped_lon = min(max(center_lon, west), east)
-    return haversine_km(center_lat, center_lon, clamped_lat, clamped_lon) <= radius_km
+
+    for shifted_center_lon in (center_lon, center_lon - 360.0, center_lon + 360.0):
+        clamped_lon = min(max(shifted_center_lon, west), east)
+        if haversine_km(center_lat, shifted_center_lon, clamped_lat, clamped_lon) <= radius_km:
+            return True
+
+    return False
 
 
 def bounding_box(center_lat: float, center_lon: float, radius_km: float) -> tuple[float, float, float, float]:
