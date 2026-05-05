@@ -243,19 +243,25 @@ static void static_delivery_link_established_callback(Link& link) {
 	}
 }
 
-// Static callback for resource concluded on delivery links (receiving)
+// Static callback for resource concluded on delivery links (receiving).
+//
+// Pre-graft: the fork's Resource exposed `link()` returning the Link the
+// resource was transferred over, used here to find the router that owns
+// the link's destination. Vanilla upstream microReticulum @ 0.3.0 doesn't
+// expose this getter — Resource is heavily refactored and Link tracking
+// is internal.
+//
+// SPIKE STATE: this callback is a no-op. Inbound RESOURCE-form LXMF
+// messages will not be dispatched to any router until either (a)
+// Resource::link() is restored on upstream, or (b) LXMF is ported to
+// upstream's new Resource API (which probably wires the link through
+// a different callback path). Tracked in
+// pyxis_microReticulum_graft_spike_findings.md.
 static void static_resource_concluded_callback(const Resource& resource) {
-	Link link = resource.link();
-	if (!link) {
-		ERROR("static_resource_concluded_callback: Resource has no link");
-		return;
-	}
-
-	// Find router that owns this link's destination
-	RouterRegistrySlot* slot = find_router_registry_slot(link.destination().hash());
-	if (slot) {
-		slot->router->on_resource_concluded(resource);
-	}
+	(void)resource;
+	ERROR("static_resource_concluded_callback: pyxis spike — Resource::link() "
+	      "not exposed on vanilla upstream microReticulum @ 0.3.0; "
+	      "resource-form delivery is currently disabled.");
 }
 
 // Static callback for outbound resource concluded (sending)
@@ -1619,9 +1625,12 @@ void LXMRouter::process_sync() {
 			if (elapsed_int != last_logged) {
 				last_logged = elapsed_int;
 				char buf[96];
+				// Pre-graft: Link::pending_requests_count() (size_t).
+				// Upstream exposes pending_requests() returning std::set&,
+				// which we .size() here for the same value.
 				snprintf(buf, sizeof(buf), "  Sync waiting: state=%d, link_status=%d, pending_reqs=%zu, elapsed=%ds",
 					(int)_sync_state, (int)_outbound_propagation_link.status(),
-					_outbound_propagation_link.pending_requests_count(), elapsed_int);
+					_outbound_propagation_link.pending_requests().size(), elapsed_int);
 				INFO(buf);
 			}
 		}

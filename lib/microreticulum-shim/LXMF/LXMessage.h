@@ -369,9 +369,12 @@ namespace LXMF {
 		FieldEntry _fields_pool[MAX_FIELDS];
 		size_t _fields_count = 0;
 
-		// Destination/Source objects (may be {Type::NONE} if creating from hashes)
-		RNS::Destination _destination;
-		RNS::Destination _source;
+		// Destination/Source objects (may be {Type::NONE} if creating from hashes).
+		// Default-initialize to NONE so the LXMessage default ctor isn't
+		// implicitly deleted (vanilla upstream RNS::Destination has no default
+		// ctor — needs Type::NoneConstructor).
+		RNS::Destination _destination{RNS::Type::NONE};
+		RNS::Destination _source{RNS::Type::NONE};
 
 		// Message metadata
 		RNS::Bytes _hash;           // Message ID (SHA256 of hashed_part)
