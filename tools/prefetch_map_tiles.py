@@ -33,14 +33,17 @@ DEFAULT_LON = -66.143359
 DEFAULT_RADIUS_KM = 200.0
 DEFAULT_MIN_ZOOM = 8
 DEFAULT_MAX_ZOOM = 14
-DEFAULT_URL_TEMPLATE = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 DEFAULT_USER_AGENT = "PyxisOfflinePrefetch/1.0"
 EARTH_RADIUS_KM = 6371.0088
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Download Pyxis-compatible XYZ tiles into tiles/{z}/{x}/{y}.png."
+        description=(
+            "Download Pyxis-compatible XYZ tiles into tiles/{z}/{x}/{y}.png. "
+            "You must provide a tile URL template for a provider that explicitly "
+            "permits bulk and offline downloads."
+        )
     )
     parser.add_argument("--lat", type=float, default=DEFAULT_LAT, help="Center latitude.")
     parser.add_argument("--lon", type=float, default=DEFAULT_LON, help="Center longitude.")
@@ -70,8 +73,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--url-template",
-        default=DEFAULT_URL_TEMPLATE,
-        help="XYZ tile URL template with {z}, {x}, {y} placeholders.",
+        help=(
+            "Required XYZ tile URL template with {z}, {x}, {y} placeholders. "
+            "Do not use OpenStreetMap's public tile service for offline prefetching."
+        ),
     )
     parser.add_argument(
         "--user-agent",
@@ -116,7 +121,7 @@ def clamp_lat(lat: float) -> float:
 def normalize_lon(lon: float) -> float:
     while lon < -180.0:
         lon += 360.0
-    while lon > 180.0:
+    while lon >= 180.0:
         lon -= 360.0
     return lon
 
@@ -184,21 +189,36 @@ def bounding_box(center_lat: float, center_lon: float, radius_km: float) -> tupl
     return south, west, north, east
 
 
+def tile_x_ranges(west: float, east: float, zoom: int) -> list[tuple[int, int]]:
+    max_index = (1 << zoom) - 1
+
+    if west <= east:
+        x_start, _ = latlon_to_tile(0.0, west, zoom)
+        x_end, _ = latlon_to_tile(0.0, east, zoom)
+        return [(max(0, x_start), min(max_index, x_end))]
+
+    x_wrap_start, _ = latlon_to_tile(0.0, west, zoom)
+    x_wrap_end, _ = latlon_to_tile(0.0, east, zoom)
+    return [
+        (max(0, x_wrap_start), max_index),
+        (0, min(max_index, x_wrap_end)),
+    ]
+
+
 def enumerate_tiles(center_lat: float, center_lon: float, radius_km: float, zoom: int) -> list[tuple[int, int]]:
     south, west, north, east = bounding_box(center_lat, center_lon, radius_km)
-    x0, y1 = latlon_to_tile(north, west, zoom)
-    x1, y0 = latlon_to_tile(south, east, zoom)
+    _, y1 = latlon_to_tile(north, west, zoom)
+    _, y0 = latlon_to_tile(south, east, zoom)
     max_index = (1 << zoom) - 1
-    x_start = max(0, min(x0, x1))
-    x_end = min(max_index, max(x0, x1))
     y_start = max(0, min(y0, y1))
     y_end = min(max_index, max(y0, y1))
 
     tiles: list[tuple[int, int]] = []
-    for tile_x in range(x_start, x_end + 1):
-        for tile_y in range(y_start, y_end + 1):
-            if tile_intersects_radius(center_lat, center_lon, radius_km, tile_x, tile_y, zoom):
-                tiles.append((tile_x, tile_y))
+    for x_start, x_end in tile_x_ranges(west, east, zoom):
+        for tile_x in range(x_start, x_end + 1):
+            for tile_y in range(y_start, y_end + 1):
+                if tile_intersects_radius(center_lat, center_lon, radius_km, tile_x, tile_y, zoom):
+                    tiles.append((tile_x, tile_y))
     return tiles
 
 
@@ -250,6 +270,12 @@ def main() -> int:
         return 2
     if args.min_zoom < 0 or args.max_zoom < 0 or args.min_zoom > args.max_zoom:
         print("invalid zoom range", file=sys.stderr)
+        return 2
+    if not args.dry_run and not args.url_template:
+        print(
+            "--url-template is required for downloads. Use a provider that explicitly permits offline/bulk access.",
+            file=sys.stderr,
+        )
         return 2
 
     center_lat = clamp_lat(args.lat)
