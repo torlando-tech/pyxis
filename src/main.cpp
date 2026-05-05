@@ -371,6 +371,26 @@ int calculate_timezone_offset_hours(double longitude) {
     return offset;
 }
 
+static bool uses_north_america_dst(double latitude, double longitude) {
+    return latitude >= 24.0 && latitude <= 70.0 &&
+           longitude >= -127.5 && longitude < -52.5;
+}
+
+static const char* build_timezone_string(double latitude, double longitude) {
+    static char tz_buf[40];
+
+    const int utc_offset = calculate_timezone_offset_hours(longitude);
+    const int posix_offset = -utc_offset;
+
+    if (uses_north_america_dst(latitude, longitude)) {
+        snprintf(tz_buf, sizeof(tz_buf), "LCL%dLDT,M3.2.0,M11.1.0", posix_offset);
+    } else {
+        snprintf(tz_buf, sizeof(tz_buf), "LCL%d", posix_offset);
+    }
+
+    return tz_buf;
+}
+
 /**
  * Try to sync time from GPS
  * Returns true if successful, false if no valid fix
@@ -422,39 +442,21 @@ bool sync_time_from_gps(uint32_t timeout_ms = 30000) {
     tv.tv_usec = 0;
     settimeofday(&tv, nullptr);
 
-    // Set timezone based on location if available
-    // Use US timezone with DST rules when in continental US longitude range,
-    // otherwise fall back to a simple offset without DST.
-    const char* tz_str = "EST5EDT,M3.2.0,M11.1.0";  // default
+    // Set timezone from coordinates when location is available.
+    // Without a timezone database we use a bounded longitude-based UTC offset,
+    // and apply North American DST rules only inside a broad regional box.
+    const char* tz_str = "UTC0";
     if (got_location) {
+        double latitude = gps.location.lat();
         double longitude = gps.location.lng();
-        if (longitude >= -67.0 && longitude < -67.0)       // Atlantic: not continental US
-            tz_str = "AST4ADT,M3.2.0,M11.1.0";
-        else if (longitude >= -82.5 && longitude < -67.0)   // Eastern
-            tz_str = "EST5EDT,M3.2.0,M11.1.0";
-        else if (longitude >= -97.5 && longitude < -82.5)   // Central
-            tz_str = "CST6CDT,M3.2.0,M11.1.0";
-        else if (longitude >= -112.5 && longitude < -97.5)  // Mountain
-            tz_str = "MST7MDT,M3.2.0,M11.1.0";
-        else if (longitude >= -127.5 && longitude < -112.5) // Pacific
-            tz_str = "PST8PDT,M3.2.0,M11.1.0";
-        else {
-            // Outside US — use simple offset from longitude (no DST)
-            int tz_offset = calculate_timezone_offset_hours(longitude);
-            static char tz_buf[32];
-            if (tz_offset >= 0)
-                snprintf(tz_buf, sizeof(tz_buf), "GPS%d", -tz_offset);
-            else
-                snprintf(tz_buf, sizeof(tz_buf), "GPS+%d", -tz_offset);
-            tz_str = tz_buf;
-        }
+        tz_str = build_timezone_string(latitude, longitude);
 
-        String msg = "  GPS location: " + String(gps.location.lat(), 4) + ", " + String(gps.location.lng(), 4);
+        String msg = "  GPS location: " + String(latitude, 4) + ", " + String(longitude, 4);
         INFO(msg.c_str());
         msg = "  Timezone: " + String(tz_str);
         INFO(msg.c_str());
     } else {
-        WARNING("GPS location not available, using Eastern Time");
+        WARNING("GPS location not available, using UTC timezone");
     }
     setenv("TZ", tz_str, 1);
     tzset();
@@ -666,9 +668,9 @@ void setup_wifi() {
             // Fallback to NTP if GPS didn't work
             INFO("Syncing time via NTP (GPS not available)...");
 
-            // Use configTzTime for proper timezone handling on ESP32
-            // Eastern Time: EST5EDT = UTC-5, DST starts 2nd Sunday March, ends 1st Sunday Nov
-            configTzTime("EST5EDT,M3.2.0,M11.1.0", "pool.ntp.org", "time.nist.gov");
+            // Without a valid GPS location we cannot infer a local timezone.
+            // Keep NTP fallback in UTC until coordinates are available.
+            configTzTime("UTC0", "pool.ntp.org", "time.nist.gov");
 
             // Wait for time to be set (max 10 seconds)
             struct tm timeinfo;
