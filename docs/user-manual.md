@@ -30,7 +30,7 @@ Recommended extras:
 
 ## Installing or Updating Firmware
 
-The repository includes a web flasher at [`docs/flasher/index.html`](/Users/broth/Documents/work/ATAK/src/pyxis/docs/flasher/index.html).
+The repository includes a web flasher at [`docs/flasher/index.html`](flasher/index.html).
 
 ### Requirements
 
@@ -162,7 +162,7 @@ The status screen is the main diagnostics view. It shows:
 - device identity hash
 - LXMF delivery address
 - Wi-Fi connection state, IP, and RSSI
-- LORA connections status
+- LoRa connection status
 - Reticulum connection state
 - currently selected propagation node
 - BLE peer details when BLE is enabled
@@ -195,6 +195,38 @@ Important behavior:
 - Downloaded tiles are written to the SD card.
 - If there is no SD card or no Wi-Fi, the map can only show tiles that are already available locally.
 - Manual panning disables follow-GPS mode until you re-center.
+
+#### First-Time Map Setup
+
+For the map to work as expected on a new device:
+
+1. Insert a microSD card before opening the map.
+2. Configure Wi-Fi in `Settings`, save, and reconnect if needed.
+3. Wait for a GPS fix so Pyxis knows where to center the map.
+4. Open the map screen and let it download the visible tiles for your current area.
+
+Pyxis stores tiles at `S:tiles/{z}/{x}/{y}.png` on the SD card. The map does not preload a world basemap. It only downloads the tiles for the area and zoom levels you actually view.
+
+#### What You Need To See Maps
+
+The map view depends on these conditions:
+
+- Wi-Fi connected for first-time tile downloads
+- SD card inserted and mounted for tile storage
+- GPS fix available if you want the map centered on your position
+
+If one of those conditions is missing, the map may open but stay blank except for the background color.
+
+#### Peer Markers
+
+Peer markers only appear after Pyxis receives telemetry from another device. Regular text messages do not create map markers by themselves.
+
+To test peer markers:
+
+1. Open a chat with the peer.
+2. Start location sharing from the `GPS` button in chat.
+3. Wait for the peer to send telemetry.
+4. Open the map screen again if needed.
 
 ### Settings
 
@@ -347,7 +379,7 @@ Without Wi-Fi, these features will not work:
 Verify:
 
 - LoRa Interface is enabled
-- frequency and bandwidth match other on your network
+- frequency and bandwidth match others on your network
 - spreading factor, coding rate, and TX power are valid for your deployment
 
 ### BLE is unstable
@@ -368,9 +400,11 @@ If voice is unreliable, messaging is the safer fallback.
 
 Check:
 
-- GPS has a fix
-- an SD card is inserted
-- Wi-Fi is available for first-time tile downloads
+- Wi-Fi is configured and connected
+- an SD card is inserted and mounted
+- GPS has a fix if you expect the map to center on your location
+- you have opened the map while Wi-Fi was available so tiles could be downloaded
+- the peer has actually sent telemetry if you expect peer markers
 
 ## Known Limitations
 
