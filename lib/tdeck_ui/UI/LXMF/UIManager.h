@@ -275,7 +275,10 @@ private:
     CallState _call_state;
     RNS::Bytes _call_peer_hash;
     RNS::Bytes _call_dest_hash;   // LXST destination hash (for deferred link creation)
-    RNS::Link _call_link;
+    // Vanilla upstream Link's default ctor crashes in load_private_key()
+    // when constructed without a real Destination — explicit Type::NONE
+    // takes the safe NoneConstructor branch. Same fix as DirectLinkSlot.
+    RNS::Link _call_link{RNS::Type::NONE};
     LXSTAudio* _lxst_audio;
     uint32_t _call_start_ms;       // millis() when call became ACTIVE
     uint32_t _call_timeout_ms;     // millis() deadline for current wait state

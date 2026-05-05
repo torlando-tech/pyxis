@@ -553,7 +553,13 @@ namespace LXMF {
 		struct DirectLinkSlot {
 			bool in_use = false;
 			uint8_t destination_hash[DEST_HASH_SIZE];
-			RNS::Link link;
+			// Vanilla upstream Link's all-defaults ctor (Link()) hits a null
+			// _prv shared_ptr in load_private_key — see decoded backtrace
+			// in pyxis_microReticulum_graft_spike_findings.md (StoreProhibited
+			// at Bytes::assign during Ed25519PrivateKey::public_key()). The
+			// explicit Type::NoneConstructor branch leaves _object null and
+			// is safe for pool default-init.
+			RNS::Link link{RNS::Type::NONE};
 			double creation_time = 0;
 			RNS::Bytes destination_hash_bytes() const { return RNS::Bytes(destination_hash, DEST_HASH_SIZE); }
 			void set_destination_hash(const RNS::Bytes& b) {
