@@ -287,7 +287,7 @@ inline LocationData decode_telemetry(const RNS::Bytes& data) {
             loc.valid = true;
         } else {
             // Skip unknown key's value
-            unpacker.unpackNil();
+            if (!skip_msgpack_value(unpacker)) return loc;
         }
     }
 

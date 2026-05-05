@@ -239,6 +239,8 @@ bool MapScreen::stop_download_task(uint32_t timeout_ms) {
 }
 
 void MapScreen::update_gps_position() {
+    LVGL_LOCK();
+
     // Reload tiles after background downloads complete
     if (_download_complete) {
         _download_complete = false;
