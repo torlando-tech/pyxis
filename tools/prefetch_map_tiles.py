@@ -277,6 +277,9 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    if args.url_template and not all(token in args.url_template for token in ("{z}", "{x}", "{y}")):
+        print("--url-template must contain {z}, {x}, and {y} placeholders.", file=sys.stderr)
+        return 2
 
     center_lat = clamp_lat(args.lat)
     center_lon = normalize_lon(args.lon)
