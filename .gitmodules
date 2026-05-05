@@ -1,6 +1,10 @@
 [submodule "deps/microReticulum"]
 	path = deps/microReticulum
-	url = https://github.com/attermann/microReticulum.git
-	# Pinned at the 0.3.0 release tag so the build is reproducible. Bump
-	# the pin deliberately when we want a newer microReticulum (and re-run
-	# the conformance suite to catch any drift).
+	url = https://github.com/torlando-tech/microReticulum.git
+	branch = pyxis-fixes-on-0.3.0
+	# torlando-tech/microReticulum's pyxis-fixes-on-0.3.0 = upstream
+	# attermann/microReticulum @ 0.3.0 + a small focused commit series of
+	# interop fixes (PKCS7 spec-correct padding, HMAC double-update,
+	# X25519 RFC 7748 scalar clamping). Each commit is upstream-PR-ready;
+	# the branch will roll forward as new fixes are surfaced and fold
+	# back into upstream once the PRs land.
