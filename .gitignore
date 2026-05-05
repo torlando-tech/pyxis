@@ -1,5 +1,9 @@
 .pio/
 .vscode/
 *.pyc
+crash_watch_*.txt
+monitor_*.txt
+postflash_*.txt
+tcp_reply_*.txt
 docs/flasher/firmware/
 lib/tdeck_ui/Hardware/TDeck/SplashImage.h

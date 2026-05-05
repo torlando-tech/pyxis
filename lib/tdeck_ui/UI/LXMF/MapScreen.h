@@ -133,6 +133,8 @@ private:
     volatile bool _download_complete;
     volatile bool _task_should_stop;
 
+    bool stop_download_task(uint32_t timeout_ms);
+
     static void download_task_func(void* param);
 
     // Event handlers

@@ -88,6 +88,7 @@ private:
     std::vector<SharingSession> _sessions;
     std::vector<ReceivedLocation> _received;
 
+    static const size_t MAX_SESSIONS = 255;
     static const int MAX_RECEIVED = 32;
     static const uint32_t SEND_INTERVAL = 60;   // Send telemetry every 60s
     static const uint32_t SAVE_INTERVAL = 60;    // Save at most every 60s

@@ -47,6 +47,15 @@ void TelemetryManager::start_sharing(const Bytes& peer_hash, ShareDuration durat
         }
     }
 
+    if (_sessions.size() >= MAX_SESSIONS) {
+        char log_buf[96];
+        snprintf(log_buf, sizeof(log_buf),
+                 "Telemetry: Session limit reached (%u), refusing %.8s",
+                 static_cast<unsigned>(MAX_SESSIONS), peer_hash.toHex().c_str());
+        WARNING(log_buf);
+        return;
+    }
+
     // Create new session
     SharingSession session;
     session.peer_hash = peer_hash;
@@ -204,9 +213,20 @@ void TelemetryManager::save() {
     {
         File f = SPIFFS.open(SESSIONS_FILE, FILE_WRITE);
         if (f) {
-            uint8_t count = (uint8_t)_sessions.size();
+            const size_t session_count = _sessions.size() > MAX_SESSIONS ? MAX_SESSIONS : _sessions.size();
+            if (session_count != _sessions.size()) {
+                char log_buf[96];
+                snprintf(log_buf, sizeof(log_buf),
+                         "Telemetry: Truncating persisted sessions from %u to %u",
+                         static_cast<unsigned>(_sessions.size()),
+                         static_cast<unsigned>(session_count));
+                WARNING(log_buf);
+            }
+
+            uint8_t count = static_cast<uint8_t>(session_count);
             f.write(&count, 1);
-            for (const auto& s : _sessions) {
+            for (size_t i = 0; i < session_count; ++i) {
+                const auto& s = _sessions[i];
                 uint8_t hash_len = (uint8_t)s.peer_hash.size();
                 f.write(&hash_len, 1);
                 f.write(s.peer_hash.data(), hash_len);
@@ -256,6 +276,10 @@ void TelemetryManager::load() {
             uint8_t count = 0;
             f.read(&count, 1);
             for (uint8_t i = 0; i < count; i++) {
+                if (_sessions.size() >= MAX_SESSIONS) {
+                    WARNING("Telemetry: Reached session load limit, skipping remaining entries");
+                    break;
+                }
                 SharingSession s;
                 uint8_t hash_len = 0;
                 f.read(&hash_len, 1);

@@ -66,15 +66,10 @@ MapScreen::MapScreen(lv_obj_t* parent)
 }
 
 MapScreen::~MapScreen() {
-    // Stop download task if running
-    if (_download_task) {
-        _task_should_stop = true;
-        TileRequest dummy = {0, 0, 0};
-        xQueueSend(_download_queue, &dummy, 0);
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
+    stop_download_task(0);
     if (_download_queue) {
         vQueueDelete(_download_queue);
+        _download_queue = nullptr;
     }
 
     LVGL_LOCK();
@@ -209,18 +204,8 @@ void MapScreen::show() {
 }
 
 void MapScreen::hide() {
-    // Stop download task to free 16KB internal RAM
-    if (_download_task) {
-        _task_should_stop = true;
-        // Send dummy request to wake the task from xQueueReceive
-        TileRequest dummy = {0, 0, 0};
-        xQueueSend(_download_queue, &dummy, 0);
-        // Wait for task to exit (up to 2s)
-        for (int i = 0; i < 200 && _download_task; i++) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
-        _download_task = nullptr;
-    }
+    // Stop download task to free 16KB internal RAM.
+    stop_download_task(2000);
 
     LVGL_LOCK();
     lv_group_t* group = LVGL::LVGLInit::get_default_group();
@@ -228,6 +213,29 @@ void MapScreen::hide() {
         lv_group_remove_obj(_viewport);
     }
     lv_obj_add_flag(_screen, LV_OBJ_FLAG_HIDDEN);
+}
+
+bool MapScreen::stop_download_task(uint32_t timeout_ms) {
+    if (!_download_task) {
+        return true;
+    }
+
+    _task_should_stop = true;
+    if (_download_queue) {
+        TileRequest dummy = {0, 0, 0};
+        xQueueSend(_download_queue, &dummy, 0);
+    }
+
+    uint32_t start = millis();
+    while (_download_task) {
+        if (timeout_ms > 0 && (millis() - start) >= timeout_ms) {
+            WARNING("MapScreen: timed out waiting for tile download task to exit");
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    return true;
 }
 
 void MapScreen::update_gps_position() {

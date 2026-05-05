@@ -12,6 +12,95 @@
 
 namespace Telemetry {
 
+inline bool skip_msgpack_value(MsgPack::Unpacker& unpacker) {
+    switch (unpacker.getType()) {
+        case MsgPack::Type::NIL:
+            return unpacker.unpackNil();
+
+        case MsgPack::Type::BOOL: {
+            bool value = false;
+            return unpacker.deserialize(value);
+        }
+
+        case MsgPack::Type::UINT7:
+        case MsgPack::Type::UINT8:
+        case MsgPack::Type::UINT16:
+        case MsgPack::Type::UINT32:
+        case MsgPack::Type::UINT64: {
+            uint64_t value = 0;
+            return unpacker.deserialize(value);
+        }
+
+        case MsgPack::Type::INT5:
+        case MsgPack::Type::INT8:
+        case MsgPack::Type::INT16:
+        case MsgPack::Type::INT32:
+        case MsgPack::Type::INT64: {
+            int64_t value = 0;
+            return unpacker.deserialize(value);
+        }
+
+        case MsgPack::Type::FLOAT32:
+        case MsgPack::Type::FLOAT64: {
+            double value = 0.0;
+            return unpacker.deserialize(value);
+        }
+
+        case MsgPack::Type::STR5:
+        case MsgPack::Type::STR8:
+        case MsgPack::Type::STR16:
+        case MsgPack::Type::STR32: {
+            MsgPack::str_t value;
+            return unpacker.deserialize(value);
+        }
+
+        case MsgPack::Type::BIN8:
+        case MsgPack::Type::BIN16:
+        case MsgPack::Type::BIN32: {
+            MsgPack::bin_t<uint8_t> value;
+            return unpacker.deserialize(value);
+        }
+
+        case MsgPack::Type::ARRAY4:
+        case MsgPack::Type::ARRAY16:
+        case MsgPack::Type::ARRAY32: {
+            MsgPack::arr_size_t size;
+            if (!unpacker.deserialize(size)) return false;
+            for (size_t i = 0; i < size.size(); ++i) {
+                if (!skip_msgpack_value(unpacker)) return false;
+            }
+            return true;
+        }
+
+        case MsgPack::Type::MAP4:
+        case MsgPack::Type::MAP16:
+        case MsgPack::Type::MAP32: {
+            MsgPack::map_size_t size;
+            if (!unpacker.deserialize(size)) return false;
+            for (size_t i = 0; i < size.size(); ++i) {
+                if (!skip_msgpack_value(unpacker)) return false;
+                if (!skip_msgpack_value(unpacker)) return false;
+            }
+            return true;
+        }
+
+        case MsgPack::Type::FIXEXT1:
+        case MsgPack::Type::FIXEXT2:
+        case MsgPack::Type::FIXEXT4:
+        case MsgPack::Type::FIXEXT8:
+        case MsgPack::Type::FIXEXT16:
+        case MsgPack::Type::EXT8:
+        case MsgPack::Type::EXT16:
+        case MsgPack::Type::EXT32: {
+            MsgPack::object::ext value;
+            return unpacker.deserialize(value);
+        }
+
+        default:
+            return false;
+    }
+}
+
 // LXMF field key constants
 static const uint8_t FIELD_TELEMETRY = 0x02;
 static const uint8_t FIELD_ICON_APPEARANCE = 0x04;
@@ -272,7 +361,7 @@ inline bool decode_columba_cease(const RNS::Bytes& data) {
             if (unpacker.deserialize(val)) return val;
             return false;
         } else {
-            unpacker.unpackNil();
+            if (!skip_msgpack_value(unpacker)) return false;
         }
     }
     return false;
