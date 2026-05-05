@@ -246,12 +246,12 @@ def download_tile(
     timeout: float,
     retries: int,
 ) -> bool:
-    destination.parent.mkdir(parents=True, exist_ok=True)
     request = urllib.request.Request(url, headers={"User-Agent": user_agent})
 
     attempts = retries + 1
     for attempt in range(1, attempts + 1):
         try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 status = getattr(response, "status", 200)
                 if status != 200:
@@ -259,7 +259,9 @@ def download_tile(
                 data = response.read()
             destination.write_bytes(data)
             return True
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
+            if destination.exists():
+                destination.unlink()
             if attempt >= attempts:
                 print(f"FAIL {url} -> {destination} ({exc})", file=sys.stderr)
                 return False

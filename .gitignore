@@ -6,4 +6,3 @@ prefetch_map_tiles.stderr.log
 prefetch_map_tiles.stdout.log
 docs/flasher/firmware/
 lib/tdeck_ui/Hardware/TDeck/SplashImage.h
-deps/microReticulum
