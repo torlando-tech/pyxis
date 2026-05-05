@@ -573,7 +573,8 @@ void setup_wifi() {
         // Initialize UDP log broadcasting (multicast group 239.0.99.99:9999)
         udp_log_init();
         udp_log_ready = true;
-        RNS::setLogCallback([](const char* msg, RNS::LogLevel level) {
+        // Renamed upstream (microReticulum @ 0.3.0): setLogCallback -> set_log_callback.
+        RNS::set_log_callback([](const char* msg, RNS::LogLevel level) {
             // Suppress noisy per-packet LoRa/transport trace lines on UDP
             // (still send to Serial for wired debugging)
             bool suppress_udp = false;
@@ -1409,8 +1410,13 @@ void setup() {
     esp_task_wdt_add(NULL);       // Subscribe loopTask
     INFO("Task Watchdog: loopTask subscribed (30s timeout)");
 
-    // Feed WDT during long Identity persistence (71+ entries to SPIFFS can take >30s)
-    Identity::set_persist_yield_callback([]() { esp_task_wdt_reset(); });
+    // Feed WDT during long persistence + clean_cache operations (71+ entries
+    // to SPIFFS can take >30s). Upstream microReticulum @ 0.3.0 moved the
+    // per-Identity yield hook to a global RNS::Utilities::OS::_on_loop
+    // callback (set via set_loop_callback), invoked during long operations
+    // like clean_caches, identity persistence, and the path-table flush.
+    // Was: Identity::set_persist_yield_callback (fork-only).
+    RNS::Utilities::OS::set_loop_callback([]() { esp_task_wdt_reset(); });
 
     // Show startup message
     INFO("Press any key to start messaging");
@@ -1499,14 +1505,21 @@ void loop() {
     }
 
     // Periodically persist identity/transport data (display names, paths, etc.)
-    // NOTE: Identity persistence writes 40-50 entries to SPIFFS flash, which
-    // involves sector erases (100ms each) and can take 5-15s total.
-    // WDT feeds between calls prevent timeout during heavy flash I/O.
+    // NOTE: Persistence writes 40-50 entries via microStore (which routes
+    // through the new microStore::FileSystem to SPIFFS or whichever backend
+    // is configured). Sector erases (100ms each) can stretch the call to
+    // 5-15s; the OS::set_loop_callback above feeds the WDT between entries.
+    //
+    // Upstream microReticulum @ 0.3.0 unified persistence into a single
+    // Reticulum::should_persist_data() entry point — the fork had a
+    // separate Identity::should_persist_data() for a 5s fast-flush of known
+    // destinations. That fast cadence is folded into microStore's dirty-
+    // tracking; the explicit Identity::should_persist_data() call has been
+    // dropped here. (If we observe excessive lost-known-destinations after
+    // crashes, revisit microStore's flush cadence rather than re-adding
+    // the fork-only Identity API.)
     LOOP_STEP(5);  // persist data
     reticulum->should_persist_data();
-    esp_task_wdt_reset();
-    // Fast-persist known destinations (5s after dirty) to survive crashes
-    Identity::should_persist_data();
     esp_task_wdt_reset();
 
     // Process TCP interface
@@ -1757,35 +1770,24 @@ void loop() {
                 Serial.println(crit);
                 udp_send(crit, strlen(crit));
             }
-            // Print Transport table sizes for debugging
+            // Print Transport table sizes for debugging.
+            //
+            // Vanilla upstream microReticulum @ 0.3.0 doesn't expose the
+            // *_count() getter family the fork added. The fork's commit
+            // 4d6f0b9 (PSRAM/TLSF allocator) replaced these with allocator-
+            // stats getters, but pyxis hasn't been ported to those yet.
+            //
+            // Drop the diagnostic for now — it's a developer-debugging tool,
+            // not load-bearing for runtime behavior. To restore: either (a)
+            // upstream PR adding the *_count getters back to Transport, or
+            // (b) port the diagnostic to use Reticulum::get_path_table().size()
+            // and friends, plus heap-stats from the new allocator.
+            //
+            // Tracked in pyxis_microReticulum_graft_spike_findings.md.
             {
-                char tbl[192];
-                int n = snprintf(tbl, sizeof(tbl),
-                    "[TABLES] ann=%zu dest=%zu rev=%zu link=%zu held=%zu rate=%zu path=%zu",
-                    RNS::Transport::announce_table_count(),
-                    RNS::Transport::destination_table_count(),
-                    RNS::Transport::reverse_table_count(),
-                    RNS::Transport::link_table_count(),
-                    RNS::Transport::held_announces_count(),
-                    RNS::Transport::announce_rate_table_count(),
-                    RNS::Transport::path_requests_count());
-                Serial.println(tbl);
-                udp_send(tbl, n);
-                n = snprintf(tbl, sizeof(tbl),
-                    "[TABLES] pend_link=%zu act_link=%zu rcpt=%zu pkt_hash=%zu iface=%zu dest_pool=%zu",
-                    RNS::Transport::pending_links_count(),
-                    RNS::Transport::active_links_count(),
-                    RNS::Transport::receipts_count(),
-                    RNS::Transport::packet_hashlist_count(),
-                    RNS::Transport::interfaces_count(),
-                    RNS::Transport::destinations_count());
-                Serial.println(tbl);
-                udp_send(tbl, n);
-                n = snprintf(tbl, sizeof(tbl), "[IDENTITY] known_dest=%zu known_ratch=%zu",
-                    RNS::Identity::known_destinations_count(),
-                    RNS::Identity::known_ratchets_count());
-                Serial.println(tbl);
-                udp_send(tbl, n);
+                const char* note = "[TABLES] (size diagnostics disabled — see graft notes)";
+                Serial.println(note);
+                udp_send(note, strlen(note));
             }
         } else if (free_heap < 50000) {
             const char* warn = "[HEAP] WARNING: Free heap below 50KB";
@@ -1803,23 +1805,12 @@ void loop() {
             udp_send(frag, n);
         }
 
-        // Periodic table diagnostics (every 30 seconds)
-        if (millis() - last_table_check > 30000) {
-            last_table_check = millis();
-            char diag[192];
-            int n = snprintf(diag, sizeof(diag),
-                "[DIAG] ikd=%zu ikr=%zu ann=%zu dest=%zu pkt=%zu held=%zu rev=%zu link=%zu",
-                RNS::Identity::known_destinations_count(),
-                RNS::Identity::known_ratchets_count(),
-                RNS::Transport::announce_table_count(),
-                RNS::Transport::destination_table_count(),
-                RNS::Transport::packet_hashlist_count(),
-                RNS::Transport::held_announces_count(),
-                RNS::Transport::reverse_table_count(),
-                RNS::Transport::link_table_count());
-            Serial.println(diag);
-            udp_send(diag, n);
-        }
+        // Periodic table diagnostics — disabled post-graft. Same reason as
+        // the in-CRITICAL-heap [TABLES] block above: vanilla upstream
+        // microReticulum @ 0.3.0 doesn't expose Identity::*_count or
+        // Transport::*_count getters. Restore by porting to upstream's
+        // get_path_table().size() etc., or PR the getters back upstream.
+        (void)last_table_check;
 
         last_free_heap = free_heap;
     }

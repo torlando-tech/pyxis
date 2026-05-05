@@ -107,8 +107,14 @@ public:
     /**
      * @brief Get interface statistics
      * @return Map with central_connections and peripheral_connections counts
+     *
+     * NOT a virtual override post-graft to attermann/microReticulum @ 0.3.0:
+     * vanilla upstream's `Interface` base class doesn't declare get_stats().
+     * The fork added it for memory diagnostics. Callers that wanted
+     * polymorphic stats access have to downcast to BLEInterface, or we
+     * propose a PR adding it to upstream's Interface API.
      */
-    virtual std::map<std::string, float> get_stats() const override;
+    std::map<std::string, float> get_stats() const;
 
     //=========================================================================
     // Status
