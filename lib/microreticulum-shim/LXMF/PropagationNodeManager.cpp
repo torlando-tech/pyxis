@@ -132,24 +132,21 @@ PropagationNodeInfo PropagationNodeManager::parse_announce_data(const Bytes& app
 			unpacker.deserialize(key);
 
 			if (key == PN_META_NAME) {
-				// Name is a binary/string
+				// Python packs name as bytes (bin type via str.encode("utf-8"))
 				MsgPack::bin_t<uint8_t> name_bin;
 				unpacker.deserialize(name_bin);
-				info.name = std::string(name_bin.begin(), name_bin.end());
-			} else {
-				// Skip other metadata fields by reading and discarding
-				// Try to read as binary first (most common), fall back to int
-				try {
-					MsgPack::bin_t<uint8_t> skip_bin;
-					unpacker.deserialize(skip_bin);
-				} catch (...) {
-					try {
-						int64_t skip_int;
-						unpacker.deserialize(skip_int);
-					} catch (...) {
-						// Give up - might be complex type
-					}
+				if (!name_bin.empty()) {
+					info.name = std::string(name_bin.begin(), name_bin.end());
 				}
+				// On type mismatch (e.g. str type from non-standard node),
+				// type_error() silently advances curr_index past the element.
+				// Name stays empty and will use default fallback below.
+			} else {
+				// Skip unknown metadata value: deserialize as int64_t.
+				// On type mismatch, type_error() increments curr_index by 1,
+				// which correctly skips to the next element regardless of type.
+				int64_t skip_val;
+				unpacker.deserialize(skip_val);
 			}
 		}
 

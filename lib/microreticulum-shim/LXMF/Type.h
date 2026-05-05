@@ -1,6 +1,6 @@
 #pragma once
 
-#include <Type.h>   // microReticulum's Type.h, resolved via -I deps/microReticulum/src
+#include <Type.h>
 
 #include <stdint.h>
 
@@ -43,7 +43,7 @@ namespace LXMF {
 			 */
 			enum Method : uint8_t {
 				OPPORTUNISTIC = 0x01,  ///< Single packet, fire-and-forget
-				DIRECT        = 0x02,  ///< Via established link (Phase 1 MVP)
+				DIRECT        = 0x02,  ///< Via established link
 				PROPAGATED    = 0x03,  ///< Store-and-forward via propagation nodes
 				PAPER         = 0x05   ///< QR code / paper-based transfer
 			};
@@ -96,6 +96,13 @@ namespace LXMF {
 			// With an MTU of 500, encrypted packet MDU is 391 bytes
 			static const uint16_t ENCRYPTED_PACKET_MDU = RNS::Type::Packet::ENCRYPTED_MDU + TIMESTAMP_SIZE;  // 391 bytes
 
+			// LoRa-constrained ENCRYPTED_PACKET_MDU (for devices with LoRa interfaces)
+			// LoRa wire MTU=255, SINGLE header=19, IFAC=1 → max encrypted payload=235
+			// Subtract ephemeral key(32) + IV(16) + HMAC(32) = 155 bytes for ciphertext
+			// Max AES blocks: floor(155/16)=9 → max padded plaintext=144 → max plaintext=143
+			// Add back destination hash(16) stripped in OPPORTUNISTIC: max packed_size=159
+			static const uint16_t LORA_ENCRYPTED_PACKET_MDU = 159;
+
 			/**
 			 * @brief Max content in single encrypted packet: 295 bytes
 			 *
@@ -111,13 +118,26 @@ namespace LXMF {
 			 */
 			static const uint16_t LINK_PACKET_MDU = RNS::Type::Link::MDU;
 
+			// LoRa-constrained LINK_PACKET_MDU (for devices with LoRa interfaces)
+			// LoRa wire MTU=255, SX1262 adds 1 IFAC byte → max at transmit=254
+			// Link header=19 bytes (2 flags + 1 context + 16 link_id)
+			// Max Token output = 254 - 19 = 235 bytes
+			// Token = IV(16) + ciphertext + HMAC(32), max ciphertext = 235 - 48 = 187
+			// Max AES blocks: floor(187/16)=11 → max padded ciphertext=176
+			// Max plaintext: 175 (PKCS7: 175 mod 16 = 15, pad 1 → 176)
+			static const uint16_t LORA_LINK_PACKET_MDU = 175;
+
 			/**
-			 * @brief Max content in single link packet: 319 bytes (Phase 1 MVP limit)
+			 * @brief Max content in single link packet: 319 bytes
 			 *
 			 * Calculation: LINK_PACKET_MDU - LXMF_OVERHEAD
 			 * Messages larger than 319 bytes will use Resource transfer.
 			 */
 			static const uint16_t LINK_PACKET_MAX_CONTENT = LINK_PACKET_MDU - LXMF_OVERHEAD;
+
+			// LoRa-constrained: max content in single link packet = 175 - 112 = 63 bytes
+			// Messages with content > 63 bytes sent over links will use Resource transfer
+			static const uint16_t LORA_LINK_PACKET_MAX_CONTENT = LORA_LINK_PACKET_MDU - LXMF_OVERHEAD;
 
 			// Plain (unencrypted) packet MDU
 			static const uint16_t PLAIN_PACKET_MDU = RNS::Type::Packet::PLAIN_MDU;

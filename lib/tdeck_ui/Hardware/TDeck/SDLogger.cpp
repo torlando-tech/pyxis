@@ -60,7 +60,7 @@ bool SDLogger::init() {
     _active = true;
 
     // Set log callback to capture all logs
-    RNS::setLogCallback(logCallback);
+    RNS::set_log_callback(logCallback);
 
     Serial.println("[SDLogger] SD card logging active");
 
@@ -192,7 +192,7 @@ void SDLogger::close() {
         _active = false;
     }
     // Restore default logging
-    RNS::setLogCallback(nullptr);
+    RNS::set_log_callback(nullptr);
 }
 
 #else

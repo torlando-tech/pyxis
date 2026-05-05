@@ -219,6 +219,9 @@ namespace LXMF {
 		 */
 		inline void state(Type::Message::State state) { _state = state; }
 
+		inline int delivery_attempts() const { return _delivery_attempts; }
+		inline void increment_delivery_attempts() { _delivery_attempts++; }
+
 		/**
 		 * @brief Get message hash (ID)
 		 */
@@ -386,6 +389,7 @@ namespace LXMF {
 
 		// Message state
 		Type::Message::State _state = Type::Message::GENERATING;
+		int _delivery_attempts = 0;
 
 		// Signature validation
 		bool _signature_validated = false;

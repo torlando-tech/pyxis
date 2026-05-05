@@ -15,14 +15,11 @@
 
 namespace LXMF {
 
-	// Forward declarations
-	class PropagationNodeManager;
-
 	/**
 	 * @brief LXMF Router - Message delivery orchestration
 	 *
 	 * Manages message queues, link establishment, and delivery for LXMF messages.
-	 * Supports DIRECT delivery method (via established links) for Phase 1 MVP.
+	 * Supports DIRECT, OPPORTUNISTIC, and PROPAGATED delivery methods.
 	 *
 	 * Usage:
 	 *   LXMRouter router(identity, "/path/to/storage");
@@ -255,11 +252,19 @@ namespace LXMF {
 		// ============== Propagation Node Support ==============
 
 		/**
-		 * @brief Set the propagation node manager
+		 * @brief Set the stamp cost required by the outbound propagation node
 		 *
-		 * @param manager Pointer to PropagationNodeManager (not owned)
+		 * When set to a non-zero value, stamps will be generated before sending
+		 * messages through the propagation node.
+		 *
+		 * @param cost Required stamp cost (0 = no stamp needed)
 		 */
-		void set_propagation_node_manager(PropagationNodeManager* manager);
+		void set_outbound_propagation_stamp_cost(uint8_t cost) { _outbound_propagation_stamp_cost = cost; }
+
+		/**
+		 * @brief Get the stamp cost for the outbound propagation node
+		 */
+		uint8_t outbound_propagation_stamp_cost() const { return _outbound_propagation_stamp_cost; }
 
 		/**
 		 * @brief Set the outbound propagation node
@@ -316,6 +321,14 @@ namespace LXMF {
 		 * retrieve any pending messages.
 		 */
 		void request_messages_from_propagation_node();
+
+		/**
+		 * @brief Advance propagation sync state machine
+		 *
+		 * Call periodically (e.g., in main loop) to advance sync after
+		 * path arrival or link establishment.
+		 */
+		void process_sync();
 
 		/**
 		 * @brief Get the current sync state
@@ -469,16 +482,26 @@ namespace LXMF {
 		 */
 		bool send_propagated(LXMessage& message);
 
+	public:
 		/**
 		 * @brief Handle message list response from propagation node
+		 * NOTE: Public for static callback access, not intended for direct use.
 		 */
 		void on_message_list_response(const RNS::Bytes& response);
 
 		/**
 		 * @brief Handle message get response from propagation node
+		 * NOTE: Public for static callback access, not intended for direct use.
 		 */
 		void on_message_get_response(const RNS::Bytes& response);
 
+		/**
+		 * @brief Handle sync failure
+		 * NOTE: Public for static callback access, not intended for direct use.
+		 */
+		void on_sync_failed();
+
+	private:
 		/**
 		 * @brief Process received propagated LXMF data
 		 */
@@ -614,12 +637,14 @@ namespace LXMF {
 
 		// Retry backoff
 		double _next_outbound_process_time = 0.0;  // Next time to process outbound queue
-		static constexpr double OUTBOUND_RETRY_DELAY = 5.0;  // Seconds between retries
-		static constexpr double PATH_REQUEST_WAIT = 3.0;     // Seconds to wait after path request
+		static constexpr double OUTBOUND_RETRY_DELAY = 10.0; // Seconds between retries (Python: DELIVERY_RETRY_WAIT = 10)
+		static constexpr double PATH_REQUEST_WAIT = 15.0;    // Seconds to wait after path request (Python: 7s, but LoRa needs more RX window)
+		static constexpr int MAX_DELIVERY_ATTEMPTS = 5;      // Max attempts before failing (Python: 5)
+		static constexpr int MAX_PATHLESS_TRIES = 1;          // Attempts before requesting path (Python: 1)
 
 		// Propagation node support
-		PropagationNodeManager* _propagation_manager = nullptr;
 		RNS::Bytes _outbound_propagation_node;
+		uint8_t _outbound_propagation_stamp_cost = 0;
 		RNS::Link _outbound_propagation_link{RNS::Type::NONE};
 		bool _fallback_to_propagation = true;
 		bool _propagation_only = false;
@@ -627,6 +652,7 @@ namespace LXMF {
 		// Propagation sync state
 		PropagationSyncState _sync_state = PR_IDLE;
 		float _sync_progress = 0.0f;
+		double _sync_start_time = 0.0;
 		SyncCompleteCallback _sync_complete_callback;
 
 		// Locally delivered transient IDs circular buffer (zero heap fragmentation)

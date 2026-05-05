@@ -1,5 +1,4 @@
 #include "LXMRouter.h"
-#include "PropagationNodeManager.h"
 #include <Log.h>
 #include <Utilities/OS.h>
 #include <Packet.h>
@@ -56,8 +55,9 @@ static RouterRegistrySlot* find_empty_router_registry_slot() {
 	return nullptr;
 }
 
-// Outbound resources fixed pool (zero heap fragmentation)
-// Fixed arrays eliminate ~0.8KB Bytes metadata overhead (16 slots × 2 Bytes × 24 bytes)
+// Outbound DIRECT delivery resources fixed pool (zero heap fragmentation)
+// Tracks resource transfers for DIRECT delivery via links to recipients.
+// Separate from PropResourceSlot (in header) which tracks PROPAGATED delivery resources.
 static constexpr size_t OUTBOUND_RESOURCES_SIZE = 16;
 static constexpr size_t OUTBOUND_HASH_SIZE = 32;  // SHA256 hash size
 struct OutboundResourceSlot {
@@ -207,6 +207,16 @@ static void static_packet_callback(const Bytes& data, const Packet& packet) {
 	}
 }
 
+// Static packet callback for link (uses link destination hash for router lookup)
+static void static_link_packet_callback(const Bytes& data, const Packet& packet) {
+	// For link packets, destination_hash() is the link_id, not the delivery destination.
+	// Look up the router via the link's destination hash instead.
+	RouterRegistrySlot* slot = find_router_registry_slot(packet.link().destination().hash());
+	if (slot) {
+		slot->router->on_packet(data, packet);
+	}
+}
+
 // Static link callbacks
 static void static_link_established_callback(Link& link) {
 	// Find router that owns this link destination
@@ -285,52 +295,24 @@ static void static_outbound_resource_concluded(const Resource& resource) {
 
 // Static proof callback - called when delivery proof is received
 void LXMRouter::static_proof_callback(const PacketReceipt& receipt) {
-	DEBUG(">>> PROOF CALLBACK ENTRY");
-#ifdef ARDUINO
-	Serial.flush();
-#endif
-
-	// Get packet hash from receipt
-	DEBUG(">>> Getting packet hash from receipt");
-#ifdef ARDUINO
-	Serial.flush();
-#endif
 	Bytes packet_hash = receipt.hash();
 	char buf[128];
-
-	DEBUG(">>> Looking up pending proof slot");
-#ifdef ARDUINO
-	Serial.flush();
-#endif
 
 	// Look up message hash for this packet
 	PendingProofSlot* slot = find_pending_proof_slot(packet_hash);
 	if (slot) {
-		DEBUG(">>> Found slot, getting message hash");
-#ifdef ARDUINO
-		Serial.flush();
-#endif
 		Bytes message_hash = slot->message_hash_bytes();
 		snprintf(buf, sizeof(buf), "Delivery proof received for message %.16s...", message_hash.toHex().c_str());
 		INFO(buf);
-#ifdef ARDUINO
-		Serial.flush();
-#endif
 
 		// Track notified routers to avoid duplicates (max ROUTER_REGISTRY_SIZE)
 		LXMRouter* notified_routers[ROUTER_REGISTRY_SIZE];
 		size_t notified_count = 0;
 
-		DEBUG(">>> Iterating router registry");
-#ifdef ARDUINO
-		Serial.flush();
-#endif
-
 		// Find the router that sent this message and call its delivered callback
 		for (size_t i = 0; i < ROUTER_REGISTRY_SIZE; i++) {
 			if (_router_registry_pool[i].in_use) {
 				LXMRouter* router = _router_registry_pool[i].router;
-				// Check if already notified
 				bool already_notified = false;
 				for (size_t j = 0; j < notified_count; j++) {
 					if (notified_routers[j] == router) {
@@ -339,48 +321,22 @@ void LXMRouter::static_proof_callback(const PacketReceipt& receipt) {
 					}
 				}
 				if (!already_notified && router && router->_delivered_callback) {
-					DEBUGF(">>> Calling delivered callback for router %zu", i);
-#ifdef ARDUINO
-					Serial.flush();
-#endif
 					notified_routers[notified_count++] = router;
 					// Create a minimal message with just the hash for the callback
-					// The callback can look up full message from storage if needed
 					Bytes empty_hash;
 					LXMessage msg(empty_hash, empty_hash);
 					msg.hash(message_hash);
 					msg.state(Type::Message::DELIVERED);
-					DEBUG(">>> About to invoke callback");
-#ifdef ARDUINO
-					Serial.flush();
-#endif
 					router->_delivered_callback(msg);
-					DEBUG(">>> Callback returned");
-#ifdef ARDUINO
-					Serial.flush();
-#endif
 				}
 			}
 		}
 
-		// Remove from pending proofs
-		DEBUG(">>> Clearing slot");
-#ifdef ARDUINO
-		Serial.flush();
-#endif
 		slot->clear();
-		DEBUG(">>> Slot cleared");
-#ifdef ARDUINO
-		Serial.flush();
-#endif
 	} else {
 		snprintf(buf, sizeof(buf), "Received proof for unknown packet: %.16s...", packet_hash.toHex().c_str());
 		DEBUG(buf);
 	}
-	DEBUG(">>> PROOF CALLBACK EXIT");
-#ifdef ARDUINO
-	Serial.flush();
-#endif
 }
 
 // Constructor
@@ -564,12 +520,12 @@ void LXMRouter::handle_outbound(LXMessage& message) {
 	// Pack the message
 	message.pack();
 
-	// Check if message fits in a single packet - use OPPORTUNISTIC if so
-	// OPPORTUNISTIC is simpler (no link needed) and works when identity is known
-	if (message.packed_size() <= Type::Constants::ENCRYPTED_PACKET_MDU) {
-		INFO("  Message fits in single packet, will use OPPORTUNISTIC delivery");
+	// Check if message fits in a single LoRa packet - use OPPORTUNISTIC if so
+	// Use LORA_ENCRYPTED_PACKET_MDU (159) to ensure packet fits within LoRa wire MTU (255)
+	if (message.packed_size() <= Type::Constants::LORA_ENCRYPTED_PACKET_MDU) {
+		INFO("  Message fits in single LoRa packet, will use OPPORTUNISTIC delivery");
 	} else {
-		INFO("  Message too large for single packet, will use DIRECT (link) delivery");
+		INFO("  Message too large for single LoRa packet, will use DIRECT (link) delivery");
 	}
 
 	// Set state to outbound
@@ -604,6 +560,20 @@ void LXMRouter::process_outbound() {
 	DEBUG(buf);
 
 	try {
+		// Check max delivery attempts
+		if (message.delivery_attempts() >= MAX_DELIVERY_ATTEMPTS) {
+			WARNING("Max delivery attempts reached for message to " + message.destination_hash().toHex());
+			message.state(Type::Message::FAILED);
+			if (_failed_callback) {
+				_failed_callback(message);
+			}
+			failed_outbound_push(message);
+			LXMessage dummy;
+			pending_outbound_pop(dummy);
+			return;
+		}
+		message.increment_delivery_attempts();
+
 		// If propagation-only mode is enabled, send via propagation node
 		if (_propagation_only) {
 			DEBUG("  Using PROPAGATED delivery (propagation-only mode)");
@@ -623,28 +593,20 @@ void LXMRouter::process_outbound() {
 			return;
 		}
 
-		// Determine delivery method based on message size
-		bool use_opportunistic = (message.packed_size() <= Type::Constants::ENCRYPTED_PACKET_MDU);
+		// Determine delivery method based on message size (LoRa-constrained threshold)
+		bool use_opportunistic = (message.packed_size() <= Type::Constants::LORA_ENCRYPTED_PACKET_MDU);
 
 		if (use_opportunistic) {
 			// OPPORTUNISTIC delivery - send as single encrypted packet
 			DEBUG("  Using OPPORTUNISTIC delivery (single packet)");
 
-			// Check if we have a path to the destination
-			if (!Transport::has_path(message.destination_hash())) {
-				// Request path from network
-				INFO("  No path to destination, requesting...");
-				Transport::request_path(message.destination_hash());
-				_next_outbound_process_time = now + PATH_REQUEST_WAIT;
-				return;
-			}
-
-			// Try to recall the destination identity
+			// Try to recall the destination identity (needed to encrypt the packet)
 			Identity dest_identity = Identity::recall(message.destination_hash());
 			if (!dest_identity) {
-				// Path exists but identity not cached yet - wait for announce
-				INFO("  Path exists but identity not known, waiting for announce...");
-				_next_outbound_process_time = now + OUTBOUND_RETRY_DELAY;
+				// Identity not known - request path which may trigger an announce
+				INFO("  Destination identity not known, requesting path...");
+				Transport::request_path(message.destination_hash());
+				_next_outbound_process_time = now + PATH_REQUEST_WAIT;
 				return;
 			}
 
@@ -949,8 +911,8 @@ void LXMRouter::on_packet(const Bytes& data, const Packet& packet) {
 			snprintf(buf, sizeof(buf), "  Unverified reason: %u", (uint8_t)message.unverified_reason());
 			DEBUG(buf);
 
-			// For Phase 1 MVP, we'll still accept messages with unknown source
-			// (signature will be validated later if source identity is learned)
+			// Accept messages with unknown source — signature will be validated
+			// later if the source identity is learned via announce
 			if (message.unverified_reason() != Type::Message::SOURCE_UNKNOWN) {
 				WARNING("  Rejecting message with invalid signature");
 				return;
@@ -1286,9 +1248,11 @@ void LXMRouter::on_incoming_link_established(Link& link) {
 	snprintf(buf, sizeof(buf), "  Link ID: %s", link.link_id().toHex().c_str());
 	DEBUG(buf);
 
-	// Set up resource concluded callback to receive LXMF messages over this link
+	// Set up packet callback for single-packet LXMF messages (CONTEXT_NONE)
+	link.set_packet_callback(static_link_packet_callback);
+	// Set up resource concluded callback for multi-packet LXMF messages
 	link.set_resource_concluded_callback(static_resource_concluded_callback);
-	DEBUG("  Resource callback registered for incoming LXMF messages");
+	DEBUG("  Packet and resource callbacks registered for incoming LXMF messages");
 }
 
 // Resource concluded callback (LXMF message received via DIRECT delivery)
@@ -1368,11 +1332,6 @@ void LXMRouter::on_resource_concluded(const RNS::Resource& resource) {
 
 // ============== Propagation Node Support ==============
 
-void LXMRouter::set_propagation_node_manager(PropagationNodeManager* manager) {
-	_propagation_manager = manager;
-	INFO("Propagation node manager set");
-}
-
 void LXMRouter::set_outbound_propagation_node(const Bytes& node_hash) {
 	if (node_hash.size() == 0) {
 		_outbound_propagation_node = {};
@@ -1391,8 +1350,9 @@ void LXMRouter::set_outbound_propagation_node(const Bytes& node_hash) {
 	}
 
 	_outbound_propagation_node = node_hash;
-	char buf[64];
-	snprintf(buf, sizeof(buf), "Set outbound propagation node to %.16s...", node_hash.toHex().c_str());
+	char buf[96];
+	snprintf(buf, sizeof(buf), "Set outbound propagation node (%d bytes): %s",
+		(int)node_hash.size(), node_hash.toHex().c_str());
 	INFO(buf);
 }
 
@@ -1461,13 +1421,6 @@ bool LXMRouter::send_propagated(LXMessage& message) {
 
 	// Get propagation node
 	Bytes prop_node = _outbound_propagation_node;
-	if (prop_node.size() == 0 && _propagation_manager) {
-		DEBUG("  Looking for propagation node via manager...");
-		auto nodes = _propagation_manager->get_nodes();
-		snprintf(buf, sizeof(buf), "  Manager has %zu nodes", nodes.size());
-		DEBUG(buf);
-		prop_node = _propagation_manager->get_effective_node();
-	}
 
 	if (prop_node.size() == 0) {
 		WARNING("No propagation node available for PROPAGATED delivery");
@@ -1517,15 +1470,12 @@ bool LXMRouter::send_propagated(LXMessage& message) {
 	}
 
 	// Generate propagation stamp if required by node
-	if (_propagation_manager) {
-		auto node_info = _propagation_manager->get_node(prop_node);
-		if (node_info && node_info.stamp_cost > 0) {
-			snprintf(buf, sizeof(buf), "  Generating propagation stamp (cost=%u)...", node_info.stamp_cost);
-			DEBUG(buf);
-			Bytes stamp = message.generate_propagation_stamp(node_info.stamp_cost);
-			if (stamp.size() == 0) {
-				WARNING("  Failed to generate propagation stamp, sending anyway");
-			}
+	if (_outbound_propagation_stamp_cost > 0) {
+		snprintf(buf, sizeof(buf), "  Generating propagation stamp (cost=%u)...", _outbound_propagation_stamp_cost);
+		DEBUG(buf);
+		Bytes stamp = message.generate_propagation_stamp(_outbound_propagation_stamp_cost);
+		if (stamp.size() == 0) {
+			WARNING("  Failed to generate propagation stamp, sending anyway");
 		}
 	}
 
@@ -1561,6 +1511,46 @@ bool LXMRouter::send_propagated(LXMessage& message) {
 	return true;
 }
 
+// Static router pointer for sync callbacks (raw function pointers required by RequestReceipt)
+static LXMRouter* _active_sync_router = nullptr;
+
+// Static callback wrappers for sync protocol
+static void static_list_response_cb(const RequestReceipt& receipt) {
+	if (_active_sync_router) {
+		_active_sync_router->on_message_list_response(receipt.get_response());
+	} else {
+		WARNING("list_response_cb: no active sync router!");
+	}
+}
+
+static void static_list_failed_cb(const RequestReceipt& receipt) {
+	WARNING("Propagation node list request failed");
+	if (_active_sync_router) {
+		_active_sync_router->on_sync_failed();
+	}
+}
+
+static void static_get_response_cb(const RequestReceipt& receipt) {
+	if (_active_sync_router) {
+		_active_sync_router->on_message_get_response(receipt.get_response());
+	} else {
+		WARNING("get_response_cb: no active sync router!");
+	}
+}
+
+static void static_get_failed_cb(const RequestReceipt& receipt) {
+	WARNING("Propagation node get request failed");
+	if (_active_sync_router) {
+		_active_sync_router->on_sync_failed();
+	}
+}
+
+void LXMRouter::on_sync_failed() {
+	_sync_state = PR_FAILED;
+	_sync_progress = 0.0f;
+	_active_sync_router = nullptr;
+}
+
 void LXMRouter::request_messages_from_propagation_node() {
 	if (_sync_state != PR_IDLE && _sync_state != PR_COMPLETE && _sync_state != PR_FAILED) {
 		char buf[64];
@@ -1571,9 +1561,6 @@ void LXMRouter::request_messages_from_propagation_node() {
 
 	// Get propagation node
 	Bytes prop_node = _outbound_propagation_node;
-	if (!prop_node && _propagation_manager) {
-		prop_node = _propagation_manager->get_effective_node();
-	}
 
 	if (!prop_node) {
 		WARNING("No propagation node available for sync");
@@ -1586,57 +1573,309 @@ void LXMRouter::request_messages_from_propagation_node() {
 	INFO(buf);
 	_sync_progress = 0.0f;
 
-	// Check if link exists and is active
+	// Request path if we don't have one
+	if (!Transport::has_path(prop_node)) {
+		INFO("  No path to propagation node, requesting...");
+		Transport::request_path(prop_node);
+	}
+
+	_sync_state = PR_PATH_REQUESTED;  // Enter state machine; process_sync() advances it
+	_sync_start_time = Utilities::OS::time();
+	process_sync();
+}
+
+void LXMRouter::process_sync() {
+	if (_sync_state == PR_IDLE || _sync_state == PR_COMPLETE || _sync_state == PR_FAILED) {
+		return;  // Nothing to advance
+	}
+
+	// Global timeout: 60s for entire sync operation
+	double elapsed = Utilities::OS::time() - _sync_start_time;
+	if (elapsed > 60.0) {
+		WARNING("  Propagation sync timed out");
+		on_sync_failed();
+		return;
+	}
+
+	Bytes prop_node = _outbound_propagation_node;
+	if (!prop_node) {
+		_sync_state = PR_FAILED;
+		return;
+	}
+
+	// For states that depend on an active link, check link health
+	if (_sync_state == PR_REQUEST_SENT || _sync_state == PR_RECEIVING ||
+	    _sync_state == PR_LINK_ESTABLISHED) {
+		if (!_outbound_propagation_link ||
+		    _outbound_propagation_link.status() == RNS::Type::Link::CLOSED) {
+			WARNING("  Propagation link lost during sync");
+			on_sync_failed();
+			return;
+		}
+		// Log status every ~10s
+		int elapsed_int = (int)elapsed;
+		if (elapsed_int > 0 && elapsed_int % 10 == 0) {
+			static int last_logged = -1;
+			if (elapsed_int != last_logged) {
+				last_logged = elapsed_int;
+				char buf[96];
+				snprintf(buf, sizeof(buf), "  Sync waiting: state=%d, link_status=%d, pending_reqs=%zu, elapsed=%ds",
+					(int)_sync_state, (int)_outbound_propagation_link.status(),
+					_outbound_propagation_link.pending_requests_count(), elapsed_int);
+				INFO(buf);
+			}
+		}
+		return;  // Waiting for response callbacks
+	}
+
+	// Check if link is already active (fast path for PR_PATH_REQUESTED / PR_LINK_ESTABLISHING)
 	if (_outbound_propagation_link && _outbound_propagation_link.status() == RNS::Type::Link::ACTIVE) {
 		_sync_state = PR_LINK_ESTABLISHED;
 
-		// TODO: Implement link.identify() and link.request() for full sync protocol
-		// For now, we log that sync would happen here
-		INFO("  Link active - sync protocol not yet implemented");
-		INFO("  (Requires Link.identify() and Link.request() support)");
+		_active_sync_router = this;
 
-		_sync_state = PR_COMPLETE;
-		_sync_progress = 1.0f;
-		if (_sync_complete_callback) {
-			_sync_complete_callback(0);
+		// Identify ourselves to the propagation node
+		_outbound_propagation_link.identify(_identity);
+
+		// Build initial request: [nil, nil] — request message list
+		MsgPack::Packer packer;
+		packer.packArraySize(2);
+		packer.packNil();
+		packer.packNil();
+		Bytes request_data(packer.data(), packer.size());
+
+		// Request message list via "/get" path
+		Bytes path((uint8_t*)"/get", 4);
+		RequestReceipt receipt = _outbound_propagation_link.request(
+			path, request_data,
+			static_list_response_cb,
+			static_list_failed_cb
+		);
+
+		if (!receipt) {
+			WARNING("  Sync request failed - request not sent");
+			on_sync_failed();
+			return;
 		}
-	} else {
-		// Need to establish link first
+
+		_sync_state = PR_REQUEST_SENT;
+		_sync_progress = 0.1f;
+		INFO("  Sync request sent to propagation node");
+		return;
+	}
+
+	// PR_PATH_REQUESTED: wait for path, then advance to link establishing
+	if (_sync_state == PR_PATH_REQUESTED) {
 		if (!Transport::has_path(prop_node)) {
-			INFO("  No path to propagation node, requesting...");
-			Transport::request_path(prop_node);
-			_sync_state = PR_PATH_REQUESTED;
-		} else {
-			Identity node_identity = Identity::recall(prop_node);
-			if (!node_identity) {
-				INFO("  Propagation node identity not known");
-				_sync_state = PR_FAILED;
-				return;
-			}
-
-			Destination prop_dest(
-				node_identity,
-				RNS::Type::Destination::OUT,
-				RNS::Type::Destination::SINGLE,
-				"lxmf",
-				"propagation"
-			);
-
-			_outbound_propagation_link = Link(prop_dest);
-			_sync_state = PR_LINK_ESTABLISHING;
-			INFO("  Establishing link for sync...");
+			return;  // Still waiting for path
 		}
+
+		Identity node_identity = Identity::recall(prop_node);
+		if (!node_identity) {
+			INFO("  Propagation node identity not known");
+			_sync_state = PR_FAILED;
+			return;
+		}
+
+		Destination prop_dest(
+			node_identity,
+			RNS::Type::Destination::OUT,
+			RNS::Type::Destination::SINGLE,
+			"lxmf",
+			"propagation"
+		);
+
+		_outbound_propagation_link = Link(prop_dest);
+		_sync_state = PR_LINK_ESTABLISHING;
+		INFO("  Path arrived, establishing link for sync...");
+		return;
+	}
+
+	// PR_LINK_ESTABLISHING: link not yet active, check for failure
+	if (_sync_state == PR_LINK_ESTABLISHING) {
+		if (_outbound_propagation_link.status() == RNS::Type::Link::CLOSED) {
+			WARNING("  Propagation link closed before establishing");
+			_sync_state = PR_FAILED;
+		}
+		// Otherwise still waiting for link to become ACTIVE
 	}
 }
 
 void LXMRouter::on_message_list_response(const Bytes& response) {
-	// TODO: Implement when Link.request() is available
-	DEBUG("on_message_list_response: Not yet implemented");
+	char buf[128];
+	INFO("Received message list from propagation node");
+
+	if (!response || response.size() == 0) {
+		INFO("  Empty response — no messages available");
+		_sync_state = PR_COMPLETE;
+		_sync_progress = 1.0f;
+		_active_sync_router = nullptr;
+		if (_sync_complete_callback) {
+			_sync_complete_callback(0);
+		}
+		return;
+	}
+
+	try {
+		// Parse response: array of transient_id bytes
+		MsgPack::Unpacker unpacker;
+		unpacker.feed(response.data(), response.size());
+
+		MsgPack::arr_size_t arr_size;
+		unpacker.deserialize(arr_size);
+
+		snprintf(buf, sizeof(buf), "  Propagation node has %u messages", (unsigned)arr_size.size());
+		INFO(buf);
+
+		// Filter out already-seen transient IDs
+		// Build "wants" list
+		size_t wants_count = 0;
+
+		std::vector<Bytes> available_ids;
+		for (size_t i = 0; i < arr_size.size(); i++) {
+			MsgPack::bin_t<uint8_t> id_bin;
+			unpacker.deserialize(id_bin);
+			Bytes transient_id(id_bin);
+			if (!transient_ids_contains(transient_id)) {
+				available_ids.push_back(transient_id);
+				wants_count++;
+			}
+		}
+
+		snprintf(buf, sizeof(buf), "  Want %zu new messages (filtered %u already seen)",
+				 wants_count, (unsigned)(arr_size.size() - wants_count));
+		INFO(buf);
+
+		if (wants_count == 0) {
+			INFO("  No new messages to download");
+			_sync_state = PR_COMPLETE;
+			_sync_progress = 1.0f;
+			_active_sync_router = nullptr;
+			if (_sync_complete_callback) {
+				_sync_complete_callback(0);
+			}
+			return;
+		}
+
+		// Build request: [wants, [], 0]
+		// wants = array of transient IDs we want
+		// [] = empty "have" list (we're not a peer)
+		// 0 = message limit (0 = no limit)
+		MsgPack::Packer req_packer;
+		req_packer.packArraySize(3);
+
+		// wants array
+		req_packer.packArraySize(wants_count);
+		for (const auto& id : available_ids) {
+			req_packer.packBinary(id.data(), id.size());
+		}
+
+		// empty haves array
+		req_packer.packArraySize(0);
+
+		// no limit (must be nil, not 0 — Python server treats 0 as "0 KB limit")
+		req_packer.packNil();
+
+		Bytes request_data(req_packer.data(), req_packer.size());
+
+		// Request the messages
+		Bytes path((uint8_t*)"/get", 4);
+		_outbound_propagation_link.request(
+			path, request_data,
+			static_get_response_cb,
+			static_get_failed_cb
+		);
+
+		_sync_state = PR_RECEIVING;
+		_sync_progress = 0.3f;
+
+	} catch (const std::exception& e) {
+		snprintf(buf, sizeof(buf), "Failed to parse message list: %s", e.what());
+		ERROR(buf);
+		_sync_state = PR_FAILED;
+		_active_sync_router = nullptr;
+	}
 }
 
 void LXMRouter::on_message_get_response(const Bytes& response) {
-	// TODO: Implement when Link.request() is available
-	DEBUG("on_message_get_response: Not yet implemented");
+	char buf[128];
+	INFO("Received messages from propagation node");
+
+	if (!response || response.size() == 0) {
+		INFO("  Empty response");
+		_sync_state = PR_COMPLETE;
+		_sync_progress = 1.0f;
+		_active_sync_router = nullptr;
+		if (_sync_complete_callback) {
+			_sync_complete_callback(0);
+		}
+		return;
+	}
+
+	size_t messages_received = 0;
+
+	try {
+		// Parse response: array of lxmf_data bytes
+		MsgPack::Unpacker unpacker;
+		unpacker.feed(response.data(), response.size());
+
+		MsgPack::arr_size_t arr_size;
+		unpacker.deserialize(arr_size);
+
+		snprintf(buf, sizeof(buf), "  Processing %u messages from propagation node", (unsigned)arr_size.size());
+		INFO(buf);
+
+		// Collect received transient IDs for ack
+		std::vector<Bytes> received_ids;
+
+		for (size_t i = 0; i < arr_size.size(); i++) {
+			MsgPack::bin_t<uint8_t> data_bin;
+			unpacker.deserialize(data_bin);
+			Bytes lxmf_data(data_bin);
+
+			// Process the message
+			process_propagated_lxmf(lxmf_data);
+			messages_received++;
+
+			// Track transient ID
+			Bytes transient_id = Identity::full_hash(lxmf_data);
+			received_ids.push_back(transient_id);
+
+			_sync_progress = 0.3f + 0.6f * ((float)(i + 1) / (float)arr_size.size());
+		}
+
+		// Send ack: [nil, haves] — acknowledge received messages
+		if (!received_ids.empty() && _outbound_propagation_link &&
+			_outbound_propagation_link.status() == RNS::Type::Link::ACTIVE) {
+			MsgPack::Packer ack_packer;
+			ack_packer.packArraySize(2);
+			ack_packer.packNil();
+
+			ack_packer.packArraySize(received_ids.size());
+			for (const auto& id : received_ids) {
+				ack_packer.packBinary(id.data(), id.size());
+			}
+
+			Bytes ack_data(ack_packer.data(), ack_packer.size());
+			Bytes path((uint8_t*)"/get", 4);
+			_outbound_propagation_link.request(path, ack_data);
+		}
+
+	} catch (const std::exception& e) {
+		snprintf(buf, sizeof(buf), "Failed to process messages from propagation node: %s", e.what());
+		ERROR(buf);
+	}
+
+	snprintf(buf, sizeof(buf), "Sync complete: received %zu messages", messages_received);
+	INFO(buf);
+
+	_sync_state = PR_COMPLETE;
+	_sync_progress = 1.0f;
+	_active_sync_router = nullptr;
+
+	if (_sync_complete_callback) {
+		_sync_complete_callback(messages_received);
+	}
 }
 
 void LXMRouter::process_propagated_lxmf(const Bytes& lxmf_data) {

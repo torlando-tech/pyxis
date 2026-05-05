@@ -125,14 +125,12 @@ const Bytes& LXMessage::pack() {
 		_timestamp = Utilities::OS::time();
 	}
 
-	// 2. Create payload array: [timestamp, title, content, fields, stamp?] - matches Python LXMF exactly
-	// Python: msgpack.packb([self.timestamp, self.title, self.content, self.fields])
-	// If stamp is present, it's appended as 5th element
+	// 2. Pack 4-element payload (without stamp) for hash/signature computation.
+	// Per Python LXMF: hash and signature are ALWAYS computed over the 4-element
+	// payload [timestamp, title, content, fields], even when a stamp is present.
+	// The stamp is only appended as a 5th element in the wire format.
 	MsgPack::Packer packer;
-
-	// Pack as array with 4 or 5 elements (5 if stamp present)
-	bool has_stamp = (_stamp.size() == LXStamper::STAMP_SIZE);
-	packer.packArraySize(has_stamp ? 5 : 4);
+	packer.packArraySize(4);
 
 	// Element 0: timestamp (float64)
 	packer.pack(_timestamp);
@@ -152,19 +150,14 @@ const Bytes& LXMessage::pack() {
 		}
 	}
 
-	// Element 4 (optional): stamp - 32 bytes
-	if (has_stamp) {
-		packer.packBinary(_stamp.data(), _stamp.size());
-		DEBUG("  Stamp included in payload (" + std::to_string(_stamp.size()) + " bytes)");
-	}
+	Bytes payload_without_stamp(packer.data(), packer.size());
 
-	Bytes packed_payload(packer.data(), packer.size());
-
-	// 3. Calculate hash: SHA256(dest_hash + source_hash + packed_payload)
+	// 3. Calculate hash: SHA256(dest_hash + source_hash + payload_without_stamp)
+	// Hash is always over the 4-element payload (matching Python LXMF)
 	Bytes hashed_part;
 	hashed_part << _destination_hash;
 	hashed_part << _source_hash;
-	hashed_part << packed_payload;
+	hashed_part << payload_without_stamp;
 
 	_hash = Identity::full_hash(hashed_part);
 
@@ -185,21 +178,44 @@ const Bytes& LXMessage::pack() {
 		throw std::runtime_error("Cannot sign message without source destination");
 	}
 
-	// 6. Pack final message: dest_hash + source_hash + signature + packed_payload
+	// 6. Build wire payload — append stamp as 5th element if present
+	bool has_stamp = (_stamp.size() == LXStamper::STAMP_SIZE);
+	Bytes wire_payload;
+	if (has_stamp) {
+		MsgPack::Packer wire_packer;
+		wire_packer.packArraySize(5);
+		wire_packer.pack(_timestamp);
+		wire_packer.packBinary(_title.data(), _title.size());
+		wire_packer.packBinary(_content.data(), _content.size());
+		wire_packer.packMapSize(_fields_count);
+		for (size_t i = 0; i < MAX_FIELDS; ++i) {
+			if (_fields_pool[i].in_use) {
+				wire_packer.packBinary(_fields_pool[i].key.data(), _fields_pool[i].key.size());
+				wire_packer.packBinary(_fields_pool[i].value.data(), _fields_pool[i].value.size());
+			}
+		}
+		wire_packer.packBinary(_stamp.data(), _stamp.size());
+		wire_payload = Bytes(wire_packer.data(), wire_packer.size());
+		DEBUG("  Stamp included in wire payload (" + std::to_string(_stamp.size()) + " bytes)");
+	} else {
+		wire_payload = payload_without_stamp;
+	}
+
+	// 7. Pack final message: dest_hash + source_hash + signature + wire_payload
 	_packed.clear();
 	_packed << _destination_hash;
 	_packed << _source_hash;
 	_packed << _signature;
-	_packed << packed_payload;
+	_packed << wire_payload;
 
 	_packed_valid = true;
 
-	// 7. Determine delivery method and representation
-	size_t content_size = packed_payload.size() - Type::Constants::TIMESTAMP_SIZE - Type::Constants::STRUCT_OVERHEAD;
+	// 8. Determine delivery method and representation
+	size_t content_size = wire_payload.size() - Type::Constants::TIMESTAMP_SIZE - Type::Constants::STRUCT_OVERHEAD;
 
-	// For Phase 1 MVP, we only support DIRECT delivery
 	if (_desired_method == Type::Message::DIRECT) {
-		if (content_size <= Type::Constants::LINK_PACKET_MAX_CONTENT) {
+		// Use LoRa-constrained limit (63 bytes content) to ensure link packets fit within LoRa wire MTU
+		if (content_size <= Type::Constants::LORA_LINK_PACKET_MAX_CONTENT) {
 			_method = Type::Message::DIRECT;
 			_representation = Type::Message::PACKET;
 			INFO("  Message will be sent as single packet (" + std::to_string(_packed.size()) + " bytes)");
@@ -208,8 +224,25 @@ const Bytes& LXMessage::pack() {
 			_representation = Type::Message::RESOURCE;
 			INFO("  Message will be sent as resource (" + std::to_string(_packed.size()) + " bytes)");
 		}
+	} else if (_desired_method == Type::Message::PROPAGATED) {
+		// PROPAGATED: always use resource transfer to propagation node
+		_method = Type::Message::PROPAGATED;
+		_representation = Type::Message::RESOURCE;
+		INFO("  Message will be sent via propagation (" + std::to_string(_packed.size()) + " bytes)");
+	} else if (_desired_method == Type::Message::OPPORTUNISTIC) {
+		// OPPORTUNISTIC: single encrypted packet, no link required
+		if (_packed.size() <= Type::Constants::LORA_ENCRYPTED_PACKET_MDU) {
+			_method = Type::Message::OPPORTUNISTIC;
+			_representation = Type::Message::PACKET;
+			INFO("  Message will be sent opportunistically (" + std::to_string(_packed.size()) + " bytes)");
+		} else {
+			// Too large for single packet, fall back to DIRECT
+			_method = Type::Message::DIRECT;
+			_representation = Type::Message::RESOURCE;
+			INFO("  Message too large for OPPORTUNISTIC, using DIRECT resource (" + std::to_string(_packed.size()) + " bytes)");
+		}
 	} else {
-		WARNING("Only DIRECT delivery method is supported in Phase 1 MVP");
+		// Default fallback
 		_method = Type::Message::DIRECT;
 		_representation = Type::Message::PACKET;
 	}
@@ -218,7 +251,7 @@ const Bytes& LXMessage::pack() {
 
 	INFO("Message packed successfully (" + std::to_string(_packed.size()) + " bytes total)");
 	DEBUG("  Overhead: " + std::to_string(Type::Constants::LXMF_OVERHEAD) + " bytes");
-	DEBUG("  Payload: " + std::to_string(packed_payload.size()) + " bytes");
+	DEBUG("  Payload: " + std::to_string(wire_payload.size()) + " bytes");
 
 	return _packed;
 }
@@ -367,10 +400,29 @@ LXMessage LXMessage::unpack_from_bytes(const Bytes& lxmf_bytes, Type::Message::M
 	}
 
 	// 4. Calculate hash for verification
+	// Per Python LXMF: hash is computed over 4-element payload (without stamp).
+	// If stamp was present, re-pack without it.
+	Bytes payload_for_hash;
+	if (stamp.size() == LXStamper::STAMP_SIZE) {
+		MsgPack::Packer repacker;
+		repacker.packArraySize(4);
+		repacker.pack(timestamp);
+		repacker.packBinary(title.data(), title.size());
+		repacker.packBinary(content.data(), content.size());
+		repacker.packMapSize(temp_fields_count);
+		for (size_t i = 0; i < temp_fields_count; ++i) {
+			repacker.packBinary(temp_fields[i].key.data(), temp_fields[i].key.size());
+			repacker.packBinary(temp_fields[i].value.data(), temp_fields[i].value.size());
+		}
+		payload_for_hash = Bytes(repacker.data(), repacker.size());
+	} else {
+		payload_for_hash = packed_payload;
+	}
+
 	Bytes hashed_part;
 	hashed_part << destination_hash;
 	hashed_part << source_hash;
-	hashed_part << packed_payload;
+	hashed_part << payload_for_hash;
 
 	message._hash = Identity::full_hash(hashed_part);
 
@@ -438,21 +490,22 @@ bool LXMessage::validate_signature() {
 		}
 	}
 
-	// Reconstruct signed part
+	// Reconstruct signed part — must match pack() exactly
 	Bytes hashed_part;
 	hashed_part << _destination_hash;
 	hashed_part << _source_hash;
 
-	// Need to repack payload for hashed_part
+	// Repack 4-element payload for hash/sig (without stamp, matching Python LXMF)
 	MsgPack::Packer packer;
-	packer.serialize(_timestamp);
-	packer.serialize(_title);
-	packer.serialize(_content);
-	packer.serialize((uint32_t)_fields_count);
+	packer.packArraySize(4);
+	packer.pack(_timestamp);
+	packer.packBinary(_title.data(), _title.size());
+	packer.packBinary(_content.data(), _content.size());
+	packer.packMapSize(_fields_count);
 	for (size_t i = 0; i < MAX_FIELDS; ++i) {
 		if (_fields_pool[i].in_use) {
-			packer.serialize(_fields_pool[i].key);
-			packer.serialize(_fields_pool[i].value);
+			packer.packBinary(_fields_pool[i].key.data(), _fields_pool[i].key.size());
+			packer.packBinary(_fields_pool[i].value.data(), _fields_pool[i].value.size());
 		}
 	}
 	Bytes packed_payload(packer.data(), packer.size());

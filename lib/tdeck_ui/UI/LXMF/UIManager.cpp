@@ -42,6 +42,10 @@ static std::shared_ptr<LXSTAnnounceHandler> s_lxst_announce_handler;
 
 UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::MessageStore& store)
     : _reticulum(reticulum), _router(router), _store(store),
+      // Vanilla upstream RNS::Destination has no default ctor; construct in
+      // a Type::NONE state, then assign a real Destination later. (The fork
+      // had a default ctor that pyxis was implicitly relying on.)
+      _lxst_destination(RNS::Type::NONE),
       _current_screen(SCREEN_CONVERSATION_LIST),
       _conversation_list_screen(nullptr),
       _chat_screen(nullptr),
@@ -680,8 +684,12 @@ void UIManager::send_message(const Bytes& dest_hash, const String& content) {
     std::string msg = "Sending message to " + hash_hex + "...";
     INFO(msg.c_str());
 
-    // Mark recipient as a persistent contact (survives reboot)
-    Identity::mark_persistent(dest_hash);
+    // Pre-graft: Identity::mark_persistent(dest_hash) — fork-only API for
+    // the 5s fast-flush semantics. Vanilla upstream relies on microStore's
+    // dirty-tracking + reticulum->should_persist_data() to decide what
+    // gets written. If we observe lost contacts after crashes, revisit
+    // microStore flush cadence rather than re-adding the fork API.
+    // (void)Identity::mark_persistent(dest_hash);
 
     // Get our source destination (needed for signing)
     Destination source = _router.delivery_destination();
@@ -735,8 +743,8 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
     std::string msg = "Message received from " + source_hex + "...";
     INFO(msg.c_str());
 
-    // Mark sender as a persistent contact (survives reboot)
-    RNS::Identity::mark_persistent(message.source_hash());
+    // Pre-graft: RNS::Identity::mark_persistent — fork-only. See note above.
+    // (void)RNS::Identity::mark_persistent(message.source_hash());
 
     // Save to store
     _store.save_message(message);

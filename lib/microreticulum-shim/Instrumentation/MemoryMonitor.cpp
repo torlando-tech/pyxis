@@ -38,6 +38,7 @@ static size_t _task_count = 0;
 // Static member initialization
 TimerHandle_t MemoryMonitor::_timer = nullptr;
 bool MemoryMonitor::_verbose = false;
+volatile bool MemoryMonitor::_pending = false;
 
 // Static buffer for log formatting (avoid stack allocation in callbacks)
 static char _log_buffer[256];
@@ -152,13 +153,22 @@ void MemoryMonitor::logNow() {
 }
 
 
-void MemoryMonitor::timerCallback(TimerHandle_t timer) {
-    (void)timer;  // Unused parameter
+void MemoryMonitor::poll() {
+    if (!_pending) return;
+    _pending = false;
 
     logHeapStats();
     if (_task_count > 0) {
         logTaskStacks();
     }
+}
+
+
+void MemoryMonitor::timerCallback(TimerHandle_t timer) {
+    (void)timer;
+    // Only set flag — heavy logging is done in poll() on the main loop stack
+    // to avoid overflowing the small FreeRTOS timer task stack (3120 bytes)
+    _pending = true;
 }
 
 

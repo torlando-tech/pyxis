@@ -1,0 +1,7 @@
+{
+  "name": "microreticulum-shim",
+  "description": "Fork-only files vendored into pyxis to overlay on top of vanilla attermann/microReticulum @ 0.3.0. Eventual home: standalone microLXMF library + upstream PRs for the cross-cutting pieces. See pyxis_microReticulum_graft_spike_findings.md.",
+  "version": "0.0.0",
+  "frameworks": ["arduino"],
+  "platforms": "*"
+}

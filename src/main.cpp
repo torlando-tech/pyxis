@@ -18,7 +18,10 @@
 #include <Utilities/OS.h>
 
 // Filesystem
-#include <UniversalFileSystem.h>
+// Was: <UniversalFileSystem.h> (pyxis-provided RNS::FileSystem wrapper).
+// Post-graft: microStore ships its own SPIFFS adapter, activated via
+// -DUSTORE_USE_SPIFFS in platformio.ini.
+#include <microStore/Adapters/SPIFFSFileSystem.h>
 #include <Identity.h>
 #include <Destination.h>
 #include <Transport.h>
@@ -620,9 +623,17 @@ void setup_wifi() {
 void setup_hardware() {
     INFO("\n=== Hardware Initialization ===");
 
-    // Initialize SPIFFS for persistence via UniversalFileSystem
-    // NOTE: Do NOT call SPIFFS.begin() here - UniversalFileSystem::init() handles it
-    static RNS::FileSystem fs = new UniversalFileSystem();
+    // Initialize SPIFFS for persistence.
+    //
+    // Pre-graft: pyxis used its own RNS::FileSystem(new UniversalFileSystem())
+    // wrapper. Vanilla upstream microReticulum @ 0.3.0 deleted RNS::FileSystem
+    // entirely and replaced it with microStore (an out-of-tree dep). microStore
+    // ships an SPIFFS adapter activated by -DUSTORE_USE_SPIFFS that does the
+    // exact same thing pyxis's UniversalFileSystem did, so we use it directly.
+    //
+    // Pyxis's lib/universal_filesystem/ is now dead code on this build path and
+    // can be deleted once the graft lands.
+    static microStore::Adapters::SPIFFSFileSystem fs;
     if (!fs.init()) {
         ERROR("FileSystem mount failed!");
     } else {

@@ -91,11 +91,21 @@ public:
      */
     static void logNow();
 
+    /**
+     * Poll for pending log output (call from main loop)
+     *
+     * The timer callback only sets a flag; this method does the actual
+     * logging on the caller's stack (main loop) to avoid overflowing
+     * the small FreeRTOS timer task stack.
+     */
+    static void poll();
+
 private:
     /**
      * FreeRTOS timer callback
      *
      * Called by the timer daemon task at each interval.
+     * Only sets _pending flag — actual work is done in poll().
      */
     static void timerCallback(TimerHandle_t timer);
 
@@ -112,6 +122,7 @@ private:
     // Static members
     static TimerHandle_t _timer;
     static bool _verbose;
+    static volatile bool _pending;
 };
 
 }} // namespace RNS::Instrumentation
@@ -121,6 +132,7 @@ private:
 #define MEMORY_MONITOR_REGISTER_TASK(handle, name) RNS::Instrumentation::MemoryMonitor::registerTask(handle, name)
 #define MEMORY_MONITOR_UNREGISTER_TASK(handle) RNS::Instrumentation::MemoryMonitor::unregisterTask(handle)
 #define MEMORY_MONITOR_LOG_NOW() RNS::Instrumentation::MemoryMonitor::logNow()
+#define MEMORY_MONITOR_POLL() RNS::Instrumentation::MemoryMonitor::poll()
 #define MEMORY_MONITOR_STOP() RNS::Instrumentation::MemoryMonitor::stop()
 
 #else // MEMORY_INSTRUMENTATION_ENABLED not defined
@@ -130,6 +142,7 @@ private:
 #define MEMORY_MONITOR_REGISTER_TASK(handle, name) ((void)0)
 #define MEMORY_MONITOR_UNREGISTER_TASK(handle) ((void)0)
 #define MEMORY_MONITOR_LOG_NOW() ((void)0)
+#define MEMORY_MONITOR_POLL() ((void)0)
 #define MEMORY_MONITOR_STOP() ((void)0)
 
 #endif // MEMORY_INSTRUMENTATION_ENABLED

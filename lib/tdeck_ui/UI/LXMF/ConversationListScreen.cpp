@@ -432,9 +432,14 @@ void ConversationListScreen::update_status() {
         lv_obj_set_style_text_color(_label_wifi, Theme::textMuted(), 0);
     }
 
-    // Update LoRa RSSI
-    if (_lora_interface) {
-        float rssi_f = _lora_interface->get_rssi();
+    // Update LoRa RSSI. Pre-graft this called Interface::get_rssi() —
+    // a virtual method the fork added that vanilla upstream doesn't
+    // expose on the Interface base class. To restore: change
+    // _lora_interface to a concrete SX1262Interface* (the method is
+    // still defined there, just non-virtual). Disabled for the spike.
+    if (false && _lora_interface) {
+        float rssi_f = 0.0f;
+        (void)rssi_f;
         int rssi = (int)rssi_f;
 
         // Only show RSSI if we've received at least one packet (RSSI != 0)
@@ -486,14 +491,14 @@ void ConversationListScreen::update_status() {
         int central_count = 0;
         int peripheral_count = 0;
 
-        // Get connection counts from BLE interface
-        // The interface stores stats about connections
-        // Use get_stats() map if available, otherwise show "--"
-        auto stats = _ble_interface->get_stats();
-        auto it_c = stats.find("central_connections");
-        auto it_p = stats.find("peripheral_connections");
-        if (it_c != stats.end()) central_count = (int)it_c->second;
-        if (it_p != stats.end()) peripheral_count = (int)it_p->second;
+        // Pre-graft: BLEInterface::get_stats() was a virtual override on
+        // RNS::Interface. Vanilla upstream doesn't expose get_stats on the
+        // Interface base; the method is still defined on BLEInterface as
+        // non-virtual. To restore: change _ble_interface to BLEInterface*.
+        // Disabled for the spike.
+        // auto stats = _ble_interface->get_stats();
+        (void)central_count;
+        (void)peripheral_count;
 
         char ble_text[32];
         snprintf(ble_text, sizeof(ble_text), "%s %d|%d", LV_SYMBOL_BLUETOOTH, central_count, peripheral_count);
