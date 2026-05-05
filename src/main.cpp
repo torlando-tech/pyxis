@@ -1417,9 +1417,23 @@ void setup() {
     // Reconfigure Task Watchdog with 30s timeout (default 10s is too tight
     // for SPIFFS flash I/O — identity persistence writes 40-50 entries and
     // can take 5-15s with sector erases and garbage collection)
-    esp_task_wdt_init(30, true);  // 30s timeout, panic on trigger
+    // Task Watchdog config:
+    // - 60s timeout (was 30s; bumped to tolerate WiFi-stack busy windows
+    //   on CPU0 — `pm_tx_data_done_process` in ESP-IDF's `ppTask` can
+    //   starve CPU0 idle for >30s under heavy multicast/mDNS traffic)
+    // - panic=false: log warnings, don't reset. The reset behavior was
+    //   blocking pyxis from running long enough to debug anything else
+    //   on the graft. Will revisit panic=true once the WDT culprit is
+    //   tracked down — see pyxis_microReticulum_graft_spike_findings.md
+    //
+    // We tried `esp_task_wdt_delete(xTaskGetIdleTaskHandleForCPU(0))` to
+    // unsubscribe just CPU0 idle, but Arduino-ESP32's prebuilt framework
+    // re-adds it on the next loop iteration (CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
+    // is baked in and sdkconfig.defaults can't override without a framework
+    // rebuild from source).
+    esp_task_wdt_init(60, false);
     esp_task_wdt_add(NULL);       // Subscribe loopTask
-    INFO("Task Watchdog: loopTask subscribed (30s timeout)");
+    INFO("Task Watchdog: loopTask subscribed (60s timeout, log-only)");
 
     // Feed WDT during long persistence + clean_cache operations (71+ entries
     // to SPIFFS can take >30s). Upstream microReticulum @ 0.3.0 moved the
