@@ -1,15 +1,19 @@
 #include "TCPClientInterface.h"
 #include "HDLC.h"
+#include <tdeck_ui/Hardware/TDeck/Display.h>
 
 #include <Transport.h>
 #include <Log.h>
 
+#include <algorithm>
+#include <cstring>
 #include <memory>
 
 #ifdef ARDUINO
 // ESP32 lwIP socket headers
 #include <lwip/sockets.h>
 #include <lwip/netdb.h>
+#include <esp_task_wdt.h>
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -30,6 +34,7 @@ TCPClientInterface::TCPClientInterface(const char* name /*= "TCPClientInterface"
     _OUT = true;
     _bitrate = BITRATE_GUESS;
     _HW_MTU = HW_MTU;
+    reserve_buffers();
 }
 
 /*virtual*/ TCPClientInterface::~TCPClientInterface() {
@@ -76,7 +81,7 @@ bool TCPClientInterface::connect() {
     _online = true;
     _reconnected = true;  // Signal that we (re)connected - main loop should announce
     _last_data_received = millis();  // Reset stale timer
-    _frame_buffer.clear();
+    reset_buffers();
     return true;
 
 #else
@@ -153,7 +158,7 @@ bool TCPClientInterface::connect() {
 
     INFO("TCPClientInterface: Connected to " + _target_host + ":" + std::to_string(_target_port));
     _online = true;
-    _frame_buffer.clear();
+    reset_buffers();
     return true;
 #endif
 }
@@ -229,7 +234,7 @@ void TCPClientInterface::disconnect() {
 #endif
 
     _online = false;
-    _frame_buffer.clear();
+    reset_buffers();
 }
 
 void TCPClientInterface::handle_disconnect() {
@@ -239,6 +244,107 @@ void TCPClientInterface::handle_disconnect() {
         // Reset connect attempt timer to enforce wait before reconnection
         _last_connect_attempt = millis();
     }
+}
+
+void TCPClientInterface::reserve_buffers() {
+    const size_t rx_capacity = FRAME_BUFFER_HARD_LIMIT + READ_BUDGET_BYTES;
+    if (_frame_buffer.capacity() < rx_capacity) {
+        _frame_buffer.reserve(rx_capacity);
+    }
+
+    const size_t scratch_capacity = HW_MTU * 2;
+    if (_frame_scratch.capacity() < scratch_capacity) {
+        _frame_scratch.reserve(scratch_capacity);
+    }
+}
+
+void TCPClientInterface::reset_buffers() {
+    _frame_buffer.clear();
+    _frame_start = 0;
+    _frame_scratch.clear();
+    reserve_buffers();
+}
+
+size_t TCPClientInterface::active_buffered_bytes() const {
+    if (_frame_buffer.size() <= _frame_start) {
+        return 0;
+    }
+    return _frame_buffer.size() - _frame_start;
+}
+
+void TCPClientInterface::compact_rx_buffer() {
+    if (_frame_start == 0) {
+        return;
+    }
+
+    const size_t active = active_buffered_bytes();
+    if (active == 0) {
+        _frame_buffer.clear();
+        _frame_start = 0;
+        return;
+    }
+
+    std::memmove(_frame_buffer.data(), _frame_buffer.data() + _frame_start, active);
+    _frame_buffer.resize(active);
+    _frame_start = 0;
+}
+
+bool TCPClientInterface::append_rx_bytes(const uint8_t* data, size_t len) {
+    if (!data || len == 0) {
+        return true;
+    }
+
+    const size_t active = active_buffered_bytes();
+    if (_frame_start > 0 && (_frame_buffer.size() + len > FRAME_BUFFER_HARD_LIMIT || active + len > FRAME_BUFFER_HARD_LIMIT)) {
+        compact_rx_buffer();
+    }
+
+    if (active_buffered_bytes() + len > FRAME_BUFFER_HARD_LIMIT) {
+        return false;
+    }
+
+    reserve_buffers();
+
+    try {
+        _frame_buffer.insert(_frame_buffer.end(), data, data + len);
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+bool TCPClientInterface::decode_hdlc_payload(size_t start, size_t end) {
+    if (end <= start) {
+        _frame_scratch.clear();
+        return true;
+    }
+
+    const size_t escaped_len = end - start;
+    _frame_scratch.clear();
+    if (_frame_scratch.capacity() < escaped_len) {
+        _frame_scratch.reserve(escaped_len);
+    }
+
+    bool in_escape = false;
+    const uint8_t* payload = _frame_buffer.data() + start;
+    for (size_t i = 0; i < escaped_len; ++i) {
+        uint8_t byte = payload[i];
+        if (in_escape) {
+            _frame_scratch.push_back(static_cast<uint8_t>(byte ^ HDLC::ESC_MASK));
+            in_escape = false;
+        } else if (byte == HDLC::ESC) {
+            in_escape = true;
+        } else {
+            _frame_scratch.push_back(byte);
+        }
+    }
+
+    if (in_escape) {
+        _frame_scratch.clear();
+        return false;
+    }
+
+    return true;
 }
 
 /*virtual*/ void TCPClientInterface::stop() {
@@ -256,8 +362,20 @@ void TCPClientInterface::handle_disconnect() {
         last_status_log = now;
         int avail = _client.available();
         Serial.printf("[TCP] connected=%d online=%d avail=%d loops=%u rx=%u buf=%d\n",
-                      _client.connected(), _online, avail, loop_count, total_rx, (int)_frame_buffer.size());
+                      _client.connected(), _online, avail, loop_count, total_rx, (int)active_buffered_bytes());
         loop_count = 0;
+    }
+
+    if (active_buffered_bytes() >= FRAME_BUFFER_HIGH_WATER) {
+        _read_throttled = true;
+    } else if (_read_throttled && active_buffered_bytes() <= FRAME_BUFFER_LOW_WATER) {
+        _read_throttled = false;
+    }
+
+    if (active_buffered_bytes() > FRAME_BUFFER_HARD_LIMIT) {
+        Serial.printf("[TCP] Frame buffer exceeded hard limit (%d), reconnecting\n", (int)active_buffered_bytes());
+        handle_disconnect();
+        return;
     }
 
     // Handle reconnection if not connected
@@ -304,31 +422,74 @@ void TCPClientInterface::handle_disconnect() {
 
     // Read available data
     int avail = _client.available();
-    if (avail > 0) {
-        Serial.printf("[TCP] Reading %d bytes\n", avail);
-        total_rx += avail;
-        _last_data_received = now;  // Update stale timer on any data receipt
-        size_t start_pos = _frame_buffer.size();
-        while (_client.available() > 0) {
-            uint8_t byte = _client.read();
-            _frame_buffer.append(byte);
+    if (_read_throttled && avail > 0) {
+        if (now - _last_backpressure_log_ms >= PRESSURE_LOG_INTERVAL_MS) {
+            _last_backpressure_log_ms = now;
+            Serial.printf("[TCP] Backpressure active, skipping read with %d buffered bytes and %d pending bytes\n",
+                          (int)active_buffered_bytes(), avail);
         }
-        // Dump first 20 bytes of new data
-        Serial.printf("[TCP] First bytes: ");
-        size_t dump_len = (_frame_buffer.size() - start_pos);
-        if (dump_len > 20) dump_len = 20;
-        for (size_t i = 0; i < dump_len; ++i) {
-            Serial.printf("%02x ", _frame_buffer.data()[start_pos + i]);
+    } else if (avail > 0) {
+        size_t bytes_read = 0;
+        while (_client.available() > 0 && bytes_read < READ_BUDGET_BYTES) {
+            size_t budget_left = READ_BUDGET_BYTES - bytes_read;
+            size_t chunk = std::min<size_t>(budget_left, static_cast<size_t>(_client.available()));
+            chunk = std::min<size_t>(chunk, _read_buffer.size());
+            if (chunk == 0) {
+                break;
+            }
+
+            int read_len = _client.read(_read_buffer.data(), chunk);
+            if (read_len <= 0) {
+                break;
+            }
+
+            if (!append_rx_bytes(_read_buffer.data(), static_cast<size_t>(read_len))) {
+                Serial.printf("[TCP] Frame buffer overflow while appending %d bytes, reconnecting\n", read_len);
+                handle_disconnect();
+                return;
+            }
+
+            total_rx += static_cast<uint32_t>(read_len);
+            bytes_read += static_cast<size_t>(read_len);
+            _last_data_received = now;  // Update stale timer on any data receipt
+
+            if (static_cast<size_t>(read_len) < chunk) {
+                break;
+            }
         }
-        Serial.printf("\n");
+
+        if (_client.available() > 0) {
+            if (now - _last_read_budget_log_ms >= PRESSURE_LOG_INTERVAL_MS) {
+                _last_read_budget_log_ms = now;
+                Serial.printf("[TCP] Read budget exhausted, deferring %d bytes\n", _client.available());
+            }
+        }
+#ifdef TCPCLIENT_VERBOSE_LOGGING
+        if (now - _last_read_detail_log_ms >= READ_DETAIL_LOG_INTERVAL_MS) {
+            _last_read_detail_log_ms = now;
+            Serial.printf("[TCP] Reading %u bytes\n", (unsigned)bytes_read);
+            Serial.printf("[TCP] First bytes: ");
+            size_t dump_len = bytes_read;
+            if (dump_len > 20) dump_len = 20;
+            for (size_t i = 0; i < dump_len; ++i) {
+                Serial.printf("%02x ", _read_buffer[i]);
+            }
+            Serial.printf("\n");
+        }
+#endif
     }
 #else
     // Non-blocking read
-    uint8_t buf[4096];
-    ssize_t len = recv(_socket, buf, sizeof(buf), MSG_DONTWAIT);
+    ssize_t len = recv(_socket, _read_buffer.data(), _read_buffer.size(), MSG_DONTWAIT);
     if (len > 0) {
+        if (!append_rx_bytes(_read_buffer.data(), static_cast<size_t>(len))) {
+            ERROR("TCPClientInterface: Frame buffer overflow, reconnecting");
+            handle_disconnect();
+            return;
+        }
+        total_rx += static_cast<uint32_t>(len);
+        _last_data_received = now;
         DEBUG("TCPClientInterface: Received " + std::to_string(len) + " bytes");
-        _frame_buffer.append(buf, len);
     } else if (len == 0) {
         // Connection closed by peer
         DEBUG("TCPClientInterface: recv returned 0 - connection closed");
@@ -347,90 +508,151 @@ void TCPClientInterface::handle_disconnect() {
 #endif
 
     // Process any complete frames
-    extract_and_process_frames();
+    size_t frame_budget = FRAME_BUDGET_PER_LOOP;
+    uint32_t process_budget = PROCESS_BUDGET_MS;
+    uint32_t last_flush_ms = Hardware::TDeck::Display::last_flush_ms();
+    bool display_stalled = (last_flush_ms > 0 && (now - last_flush_ms) > 1000);
+    if (_read_throttled) {
+        frame_budget = FRAME_BUDGET_PER_LOOP * 4;
+        process_budget = PROCESS_BUDGET_MS * 3;
+    }
+    if (display_stalled) {
+        frame_budget = std::min<size_t>(frame_budget, FRAME_BUDGET_PER_LOOP * 2);
+        process_budget = std::min<uint32_t>(process_budget, PROCESS_BUDGET_MS);
+    }
+    extract_and_process_frames(frame_budget, now, process_budget);
+
+#ifdef ARDUINO
+    if (_read_throttled || display_stalled) {
+        taskYIELD();
+    }
+#endif
 }
 
-void TCPClientInterface::extract_and_process_frames() {
+void TCPClientInterface::extract_and_process_frames(size_t max_frames, uint32_t start_ms, uint32_t budget_ms) {
     // Find and process complete HDLC frames: [FLAG][data][FLAG]
     static uint32_t frame_count = 0;
+    size_t frames_processed = 0;
 
     while (true) {
-        if (_frame_buffer.size() == 0) break;
-
-        // Find first FLAG byte
-        int start = -1;
-        for (size_t i = 0; i < _frame_buffer.size(); ++i) {
-            if (_frame_buffer.data()[i] == HDLC::FLAG) {
-                start = static_cast<int>(i);
-                break;
+        if (frames_processed >= max_frames) {
+            uint32_t now = millis();
+            if (now - _last_process_budget_log_ms >= PRESSURE_LOG_INTERVAL_MS) {
+                _last_process_budget_log_ms = now;
+                Serial.printf("[HDLC] Frame budget exhausted with %d buffered bytes remaining\n", (int)active_buffered_bytes());
             }
+            break;
         }
-
-        if (start < 0) {
-            // No FLAG found, discard buffer (garbage data before any frame)
-            Serial.printf("[HDLC] No FLAG in %d bytes, clearing\n", (int)_frame_buffer.size());
-            _frame_buffer.clear();
+        if (millis() - start_ms >= budget_ms) {
+            uint32_t now = millis();
+            if (now - _last_process_budget_log_ms >= PRESSURE_LOG_INTERVAL_MS) {
+                _last_process_budget_log_ms = now;
+                Serial.printf("[HDLC] Time budget exhausted with %d buffered bytes remaining\n", (int)active_buffered_bytes());
+            }
             break;
         }
 
-        // Discard data before first FLAG
-        if (start > 0) {
-            Serial.printf("[HDLC] Discarding %d bytes before FLAG\n", start);
-            _frame_buffer = _frame_buffer.mid(start);
+        const size_t active = active_buffered_bytes();
+        if (active == 0) {
+            break;
         }
 
-        // Find end FLAG (skip the start FLAG at position 0)
-        int end = -1;
-        for (size_t i = 1; i < _frame_buffer.size(); ++i) {
-            if (_frame_buffer.data()[i] == HDLC::FLAG) {
-                end = static_cast<int>(i);
-                break;
-            }
+        const uint8_t* base = _frame_buffer.data();
+        const uint8_t* start_ptr = static_cast<const uint8_t*>(
+            std::memchr(base + _frame_start, HDLC::FLAG, active));
+        if (!start_ptr) {
+            // No FLAG found, discard stale garbage so the buffer cannot grow forever.
+            Serial.printf("[HDLC] No FLAG in %d buffered bytes, clearing\n", (int)active);
+            reset_buffers();
+            break;
         }
 
-        if (end < 0) {
+        size_t start = static_cast<size_t>(start_ptr - base);
+        if (start > _frame_start) {
+#ifdef TCPCLIENT_VERBOSE_LOGGING
+            Serial.printf("[HDLC] Discarding %d bytes before FLAG\n", (int)(start - _frame_start));
+#endif
+            _frame_start = start;
+        }
+
+        const size_t remaining = _frame_buffer.size() - _frame_start;
+        if (remaining <= 1) {
+            break;
+        }
+
+        const uint8_t* end_ptr = static_cast<const uint8_t*>(
+            std::memchr(base + _frame_start + 1, HDLC::FLAG, remaining - 1));
+        if (!end_ptr) {
             // Incomplete frame, wait for more data
             break;
         }
 
-        // Extract frame content between FLAGS (excluding the FLAGS)
-        Bytes frame_content = _frame_buffer.mid(1, end - 1);
-        frame_count++;
-        Serial.printf("[HDLC] Frame #%u: %d escaped bytes\n", frame_count, (int)frame_content.size());
+        const size_t end = static_cast<size_t>(end_ptr - base);
+        const size_t escaped_start = _frame_start + 1;
 
-        // Remove processed frame from buffer (keep data after end FLAG)
-        _frame_buffer = _frame_buffer.mid(end);
-
-        // Skip empty frames (consecutive FLAGs)
-        if (frame_content.size() == 0) {
-            Serial.printf("[HDLC] Empty frame, skipping\n");
+        if (!decode_hdlc_payload(escaped_start, end)) {
+            Serial.printf("[HDLC] Unescape failed!\n");
+            DEBUG("TCPClientInterface: HDLC unescape error, discarding frame");
+            _frame_start = end + 1;
             continue;
         }
 
-        // Unescape frame
-        Bytes unescaped = HDLC::unescape(frame_content);
-        if (unescaped.size() == 0) {
-            Serial.printf("[HDLC] Unescape failed!\n");
-            DEBUG("TCPClientInterface: HDLC unescape error, discarding frame");
+        Bytes frame_content;
+        if (_frame_scratch.empty()) {
+            frame_content = Bytes();
+        } else {
+            frame_content = Bytes(_frame_scratch.data(), _frame_scratch.size());
+        }
+        frame_count++;
+        if (_frame_scratch.size() > 0) {
+#ifdef TCPCLIENT_VERBOSE_LOGGING
+            Serial.printf("[HDLC] Frame #%u: %d escaped bytes\n", frame_count, (int)_frame_scratch.size());
+#endif
+        }
+
+        // Skip empty frames (consecutive FLAGs)
+        if (_frame_scratch.size() == 0) {
+#ifdef TCPCLIENT_VERBOSE_LOGGING
+            Serial.printf("[HDLC] Empty frame, skipping\n");
+#endif
+            _frame_start = end + 1;
             continue;
         }
 
         // Validate minimum frame size (matches Python RNS HEADER_MINSIZE check)
-        if (unescaped.size() < Type::Reticulum::HEADER_MINSIZE) {
-            TRACE("TCPClientInterface: Frame too small (" + std::to_string(unescaped.size()) + " bytes), discarding");
+        if (frame_content.size() < Type::Reticulum::HEADER_MINSIZE) {
+            TRACE("TCPClientInterface: Frame too small (" + std::to_string(frame_content.size()) + " bytes), discarding");
+            _frame_start = end + 1;
             continue;
         }
 
         // Pass to transport layer
-        Serial.printf("[TCP] Processing frame: %d bytes\n", (int)unescaped.size());
-        DEBUG(toString() + ": Received frame, " + std::to_string(unescaped.size()) + " bytes");
-        InterfaceImpl::handle_incoming(unescaped);
+        #ifdef TCPCLIENT_VERBOSE_LOGGING
+        Serial.printf("[TCP] Processing frame: %d bytes\n", (int)frame_content.size());
+        #endif
+        DEBUG(toString() + ": Received frame, " + std::to_string(frame_content.size()) + " bytes");
+        InterfaceImpl::handle_incoming(frame_content);
+        frames_processed++;
+#ifdef ARDUINO
+        esp_task_wdt_reset();
+#endif
+
+        _frame_start = end + 1;
+        if (_frame_start >= _frame_buffer.size()) {
+            reset_buffers();
+            break;
+        }
+
+        if (_frame_start > FRAME_BUFFER_LOW_WATER && _frame_start > (_frame_buffer.size() / 2)) {
+            compact_rx_buffer();
+        }
     }
 }
 
 /*virtual*/ void TCPClientInterface::send_outgoing(const Bytes& data) {
     DEBUG(toString() + ".send_outgoing: data: " + std::to_string(data.size()) + " bytes");
 
+#ifdef TCPCLIENT_VERBOSE_LOGGING
     // Log first 50 bytes of raw packet (before HDLC framing)
     std::string hex_preview;
     size_t preview_len = (data.size() < 50) ? data.size() : 50;
@@ -441,6 +663,7 @@ void TCPClientInterface::extract_and_process_frames() {
     }
     if (data.size() > 50) hex_preview += "...";
     INFO("WIRE TX raw (" + std::to_string(data.size()) + " bytes): " + hex_preview);
+#endif
 
     if (!_online) {
         DEBUG("TCPClientInterface: Not connected, cannot send");
@@ -451,6 +674,7 @@ void TCPClientInterface::extract_and_process_frames() {
         // Frame with HDLC
         Bytes framed = HDLC::frame(data);
 
+#ifdef TCPCLIENT_VERBOSE_LOGGING
         // Log HDLC framed output for debugging
         std::string framed_hex;
         size_t flen = (framed.size() < 30) ? framed.size() : 30;
@@ -461,6 +685,7 @@ void TCPClientInterface::extract_and_process_frames() {
         }
         if (framed.size() > 30) framed_hex += "...";
         INFO("WIRE TX framed (" + std::to_string(framed.size()) + " bytes): " + framed_hex);
+#endif
 
 #ifdef ARDUINO
         size_t written = _client.write(framed.data(), framed.size());

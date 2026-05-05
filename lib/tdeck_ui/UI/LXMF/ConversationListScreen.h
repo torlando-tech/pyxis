@@ -67,6 +67,7 @@ public:
     using SettingsCallback = std::function<void()>;
     using AnnouncesCallback = std::function<void()>;
     using StatusCallback = std::function<void()>;
+    using MapCallback = std::function<void()>;
 
     /**
      * Create conversation list screen
@@ -134,6 +135,12 @@ public:
     void set_status_callback(StatusCallback callback);
 
     /**
+     * Set callback for map button
+     * @param callback Function to call when map button is pressed
+     */
+    void set_map_callback(MapCallback callback);
+
+    /**
      * Show the screen
      */
     void show();
@@ -173,6 +180,9 @@ public:
      */
     void set_gps(TinyGPSPlus* gps) { _gps = gps; }
 
+    /** Parse display name from LXMF announce app_data */
+    static String parse_display_name(const RNS::Bytes& app_data);
+
 private:
     lv_obj_t* _screen;
     lv_obj_t* _header;
@@ -198,6 +208,7 @@ private:
     std::vector<RNS::Bytes> _peer_hash_pool;  // Object pool to avoid per-item allocations
     RNS::Bytes _pending_delete_hash;  // Hash of conversation pending deletion
     bool _has_unresolved_names = false;  // True if any conversation shows hash instead of name
+    bool _dirty = false;
 
     ConversationSelectedCallback _conversation_selected_callback;
     ComposeCallback _compose_callback;
@@ -205,6 +216,7 @@ private:
     SettingsCallback _settings_callback;
     AnnouncesCallback _announces_callback;
     StatusCallback _status_callback;
+    MapCallback _map_callback;
 
     // UI construction
     void create_header();
@@ -224,7 +236,6 @@ private:
     // Utility
     static String format_timestamp(uint32_t timestamp);
     static String truncate_hash(const RNS::Bytes& hash);
-    static String parse_display_name(const RNS::Bytes& app_data);
 };
 
 } // namespace LXMF

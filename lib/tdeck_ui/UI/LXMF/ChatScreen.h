@@ -54,6 +54,7 @@ public:
         bool outgoing;      // true if sent by us
         bool delivered;     // true if delivery confirmed
         bool failed;        // true if delivery failed
+        bool propagated;    // true if accepted by propagation node
     };
 
     /**
@@ -62,6 +63,7 @@ public:
     using BackCallback = std::function<void()>;
     using SendMessageCallback = std::function<void(const String& content)>;
     using CallCallback = std::function<void()>;
+    using LocationShareCallback = std::function<void(int duration_index)>;
 
     /**
      * Create chat screen
@@ -93,7 +95,7 @@ public:
      * @param message_hash Hash of message to update
      * @param delivered true if delivered, false if failed
      */
-    void update_message_status(const RNS::Bytes& message_hash, bool delivered);
+    void update_message_status(const RNS::Bytes& message_hash, bool delivered, bool failed, bool propagated);
 
     /**
      * Refresh message list (reload from store)
@@ -117,6 +119,18 @@ public:
      * @param callback Function to call when call button is pressed
      */
     void set_call_callback(CallCallback callback);
+
+    /**
+     * Set callback for location sharing
+     * @param callback Function called with duration index (0-4 for durations, 5 for stop)
+     */
+    void set_location_share_callback(LocationShareCallback callback);
+
+    /**
+     * Update location sharing button state
+     * @param active True if currently sharing location with this peer
+     */
+    void set_sharing_state(bool active);
 
     /**
      * Show the screen
@@ -143,6 +157,7 @@ private:
     lv_obj_t* _btn_send;
     lv_obj_t* _btn_back;
     lv_obj_t* _btn_call;
+    lv_obj_t* _btn_location;
 
     RNS::Bytes _peer_hash;
     ::LXMF::MessageStore* _message_store;
@@ -154,6 +169,8 @@ private:
     BackCallback _back_callback;
     SendMessageCallback _send_message_callback;
     CallCallback _call_callback;
+    LocationShareCallback _location_share_callback;
+    bool _sharing_active;
 
     // UI construction
     void create_header();
@@ -164,6 +181,8 @@ private:
     // Event handlers
     static void on_back_clicked(lv_event_t* event);
     static void on_call_clicked(lv_event_t* event);
+    static void on_location_clicked(lv_event_t* event);
+    static void on_location_duration_selected(lv_event_t* event);
     static void on_send_clicked(lv_event_t* event);
     static void on_message_long_pressed(lv_event_t* event);
     static void on_copy_dialog_action(lv_event_t* event);
@@ -179,6 +198,7 @@ private:
     static constexpr size_t MESSAGES_PER_PAGE = 20;
     static constexpr size_t MAX_DISPLAYED_MESSAGES = 50;  // Cap to prevent memory exhaustion
     bool _loading_more;                            // Prevent concurrent loads
+    bool _dirty = false;
 
     // Load more messages (for infinite scroll)
     void load_more_messages();
@@ -186,10 +206,10 @@ private:
 
     // Utility
     static void format_timestamp(double timestamp, char* buf, size_t buf_size);
-    static const char* get_delivery_indicator(bool outgoing, bool delivered, bool failed);
+    static const char* get_delivery_indicator(bool outgoing, bool delivered, bool failed, bool propagated);
     static String parse_display_name(const RNS::Bytes& app_data);
     static void build_status_text(char* buf, size_t buf_size, const char* timestamp,
-                                  bool outgoing, bool delivered, bool failed);
+                                  bool outgoing, bool delivered, bool failed, bool propagated);
 };
 
 } // namespace LXMF

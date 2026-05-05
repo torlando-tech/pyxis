@@ -99,6 +99,14 @@ using namespace Hardware::TDeck;
 // Application settings (loaded from NVS)
 UI::LXMF::AppSettings app_settings;
 
+static const char* SETTINGS_NAMESPACE = "settings";
+static const char* KEY_PROP_AUTO = "prop_auto";
+static const char* KEY_PROP_NODE = "prop_node";
+static const char* KEY_PROP_FALLBACK = "prop_fall";
+static const char* KEY_PROP_ONLY = "prop_only";
+static const char* KEY_PROP_PIN_MIGRATION = "prop_pin_v1";
+static const char* DEFAULT_PROP_NODE = "93df1c70a148cd93af0053cc781ef11a";
+
 // Global instances
 Reticulum* reticulum = nullptr;
 Identity* identity = nullptr;
@@ -115,12 +123,46 @@ Interface* auto_interface = nullptr;
 BLEInterface* ble_interface_impl = nullptr;
 Interface* ble_interface = nullptr;
 
+static void udp_log_init();
+void start_tcp_interface();
+
+static void refresh_outbound_propagation_node() {
+    if (!router || !propagation_manager) {
+        return;
+    }
+
+    Bytes effective_node = propagation_manager->get_effective_node();
+
+    router->set_outbound_propagation_node(effective_node);
+
+    uint8_t stamp_cost = 0;
+    if (effective_node.size() > 0) {
+        PropagationNodeInfo node_info = propagation_manager->get_node(effective_node);
+        stamp_cost = node_info.stamp_cost;
+    }
+    router->set_outbound_propagation_stamp_cost(stamp_cost);
+}
+
+static void migrate_default_propagation_settings(Preferences& prefs) {
+    if (prefs.getBool(KEY_PROP_PIN_MIGRATION, false)) {
+        return;
+    }
+
+    prefs.putBool(KEY_PROP_AUTO, false);
+    prefs.putString(KEY_PROP_NODE, DEFAULT_PROP_NODE);
+    prefs.putBool(KEY_PROP_PIN_MIGRATION, true);
+    INFO(("Applied propagation default migration: pinned node " + String(DEFAULT_PROP_NODE).substring(0, 16) + "...").c_str());
+}
+
 // Timing
 uint32_t last_ui_update = 0;
 uint32_t last_announce = 0;
 uint32_t last_sync = 0;
 uint32_t last_status_check = 0;
+uint32_t last_persist_run = 0;
+uint32_t last_persist_defer_log = 0;
 const uint32_t STATUS_CHECK_INTERVAL = 1000;  // 1 second
+const uint32_t PERSIST_FORCE_INTERVAL_MS = 60000;
 const uint32_t INITIAL_SYNC_DELAY = 45000;    // 45 seconds after boot before first sync
 bool initial_sync_done = false;
 
@@ -134,12 +176,125 @@ volatile bool wifi_reconnect_pending = false;
 String pending_wifi_ssid;
 String pending_wifi_password;
 
+enum class WifiReconnectStage : uint8_t {
+    IDLE = 0,
+    DISCONNECTING,
+    WAITING_FOR_CONNECT,
+};
+
+WifiReconnectStage wifi_reconnect_stage = WifiReconnectStage::IDLE;
+uint32_t wifi_reconnect_stage_started = 0;
+
+bool persist_cycle_active = false;
+uint8_t persist_cycle_stage = 0;
+
 // UDP log broadcasting (POSIX socket — no per-packet heap allocation)
 // WiFiUDP::beginPacket() does new char[1460] on every call, causing severe
 // heap fragmentation over time. A raw POSIX socket with sendto() avoids this.
 static int udp_log_sock = -1;
 static struct sockaddr_in udp_log_dest;
 static bool udp_log_ready = false;
+
+static void queue_wifi_reconnect(const String& ssid, const String& password) {
+    if (ssid.isEmpty()) {
+        WARNING("WiFi reconnect skipped: SSID is empty");
+        return;
+    }
+
+    pending_wifi_ssid = ssid;
+    pending_wifi_password = password;
+    wifi_reconnect_pending = true;
+    INFO(("WiFi reconnect queued for: " + ssid).c_str());
+}
+
+static void pump_wifi_reconnect() {
+    uint32_t now = millis();
+
+    if (wifi_reconnect_stage == WifiReconnectStage::IDLE && wifi_reconnect_pending) {
+        wifi_reconnect_pending = false;
+        udp_log_ready = false;
+        WiFi.disconnect();
+        wifi_reconnect_stage = WifiReconnectStage::DISCONNECTING;
+        wifi_reconnect_stage_started = now;
+        INFO(("Reconnecting WiFi to: " + pending_wifi_ssid).c_str());
+        return;
+    }
+
+    if (wifi_reconnect_stage == WifiReconnectStage::DISCONNECTING) {
+        if (now - wifi_reconnect_stage_started < 100) {
+            return;
+        }
+
+        WiFi.begin(pending_wifi_ssid.c_str(), pending_wifi_password.c_str());
+        wifi_reconnect_stage = WifiReconnectStage::WAITING_FOR_CONNECT;
+        wifi_reconnect_stage_started = now;
+        return;
+    }
+
+    if (wifi_reconnect_stage == WifiReconnectStage::WAITING_FOR_CONNECT) {
+        if (WiFi.status() == WL_CONNECTED) {
+            udp_log_init();
+            udp_log_ready = true;
+            INFO(("WiFi connected! IP: " + WiFi.localIP().toString()).c_str());
+
+            if (app_settings.tcp_enabled) {
+                if (tcp_interface_impl) {
+                    tcp_interface_impl->start();
+                } else {
+                    start_tcp_interface();
+                }
+            }
+
+            pending_wifi_ssid = "";
+            pending_wifi_password = "";
+            wifi_reconnect_stage = WifiReconnectStage::IDLE;
+            wifi_reconnect_stage_started = 0;
+            return;
+        }
+
+        if (now - wifi_reconnect_stage_started >= 10000) {
+            WARNING("WiFi reconnection failed");
+            pending_wifi_ssid = "";
+            pending_wifi_password = "";
+            wifi_reconnect_stage = WifiReconnectStage::IDLE;
+            wifi_reconnect_stage_started = 0;
+        }
+    }
+}
+
+static void pump_persistence() {
+    uint32_t now = millis();
+    uint32_t last_flush_ms = Hardware::TDeck::Display::last_flush_ms();
+    bool ui_under_pressure = (last_flush_ms > 0 && (now - last_flush_ms) > 1000);
+    bool tcp_under_pressure = tcp_interface_impl && tcp_interface_impl->under_backpressure();
+    bool forced = (now - last_persist_run >= PERSIST_FORCE_INTERVAL_MS);
+
+    if (!persist_cycle_active) {
+        if ((ui_under_pressure || tcp_under_pressure) && !forced) {
+            if (now - last_persist_defer_log >= 5000) {
+                last_persist_defer_log = now;
+                INFO("Deferring persistence while UI/TCP are under pressure");
+            }
+            return;
+        }
+
+        persist_cycle_active = true;
+        persist_cycle_stage = 0;
+    }
+
+    if (persist_cycle_stage == 0) {
+        reticulum->should_persist_data();
+        esp_task_wdt_reset();
+        persist_cycle_stage = 1;
+        return;
+    }
+
+    Identity::should_persist_data();
+    esp_task_wdt_reset();
+    persist_cycle_stage = 0;
+    persist_cycle_active = false;
+    last_persist_run = now;
+}
 
 static void udp_log_init() {
     if (udp_log_sock >= 0) close(udp_log_sock);  // Re-init safe
@@ -216,6 +371,26 @@ int calculate_timezone_offset_hours(double longitude) {
     return offset;
 }
 
+static bool uses_north_america_dst(double latitude, double longitude) {
+    return latitude >= 24.0 && latitude <= 70.0 &&
+           longitude >= -127.5 && longitude < -52.5;
+}
+
+static const char* build_timezone_string(double latitude, double longitude) {
+    static char tz_buf[40];
+
+    const int utc_offset = calculate_timezone_offset_hours(longitude);
+    const int posix_offset = -utc_offset;
+
+    if (uses_north_america_dst(latitude, longitude)) {
+        snprintf(tz_buf, sizeof(tz_buf), "LCL%dLDT,M3.2.0,M11.1.0", posix_offset);
+    } else {
+        snprintf(tz_buf, sizeof(tz_buf), "LCL%d", posix_offset);
+    }
+
+    return tz_buf;
+}
+
 /**
  * Try to sync time from GPS
  * Returns true if successful, false if no valid fix
@@ -223,27 +398,18 @@ int calculate_timezone_offset_hours(double longitude) {
 bool sync_time_from_gps(uint32_t timeout_ms = 30000) {
     INFO("Attempting GPS time sync...");
 
-    uint32_t start = millis();
-    bool got_time = false;
-    bool got_location = false;
+    // Check if gps object already has valid data (from main loop feeding)
+    bool got_time = (gps.date.isValid() && gps.time.isValid() && gps.date.year() >= 2024);
+    bool got_location = gps.location.isValid();
 
-    while (millis() - start < timeout_ms) {
+    // If not ready yet, wait and read serial data
+    uint32_t start = millis();
+    while (!(got_time && got_location) && (millis() - start < timeout_ms)) {
         while (GPSSerial.available() > 0) {
-            if (gps.encode(GPSSerial.read())) {
-                // Check if we have valid date/time
-                if (gps.date.isValid() && gps.time.isValid() && gps.date.year() >= 2024) {
-                    got_time = true;
-                }
-                // Check if we have valid location (for timezone)
-                if (gps.location.isValid()) {
-                    got_location = true;
-                }
-                // If we have both, we can sync
-                if (got_time && got_location) {
-                    break;
-                }
-            }
+            gps.encode(GPSSerial.read());
         }
+        got_time = (gps.date.isValid() && gps.time.isValid() && gps.date.year() >= 2024);
+        got_location = gps.location.isValid();
         if (got_time && got_location) break;
         delay(10);
     }
@@ -264,12 +430,11 @@ bool sync_time_from_gps(uint32_t timeout_ms = 30000) {
     gps_time.tm_isdst = 0;  // GPS time is UTC, no DST
 
     // Convert to Unix timestamp (UTC)
-    time_t gps_unix = mktime(&gps_time);
-    // mktime assumes local time, adjust back to UTC
-    // Actually, we'll set TZ to UTC first
+    // Set TZ to UTC BEFORE mktime — mktime interprets its argument as local
+    // time and mutates the struct, so TZ must be correct on the first call.
     setenv("TZ", "UTC0", 1);
     tzset();
-    gps_unix = mktime(&gps_time);
+    time_t gps_unix = mktime(&gps_time);
 
     // Set the system time
     struct timeval tv;
@@ -277,32 +442,24 @@ bool sync_time_from_gps(uint32_t timeout_ms = 30000) {
     tv.tv_usec = 0;
     settimeofday(&tv, nullptr);
 
-    // Set timezone based on location if available
+    // Set timezone from coordinates when location is available.
+    // Without a timezone database we use a bounded longitude-based UTC offset,
+    // and apply North American DST rules only inside a broad regional box.
+    const char* tz_str = "UTC0";
     if (got_location) {
+        double latitude = gps.location.lat();
         double longitude = gps.location.lng();
-        int tz_offset = calculate_timezone_offset_hours(longitude);
+        tz_str = build_timezone_string(latitude, longitude);
 
-        // Build POSIX TZ string (e.g., "EST5" for UTC-5)
-        // Note: POSIX uses opposite sign convention!
-        char tz_str[32];
-        if (tz_offset >= 0) {
-            snprintf(tz_str, sizeof(tz_str), "GPS%d", -tz_offset);
-        } else {
-            snprintf(tz_str, sizeof(tz_str), "GPS+%d", -tz_offset);
-        }
-        setenv("TZ", tz_str, 1);
-        tzset();
-
-        String msg = "  GPS location: " + String(gps.location.lat(), 4) + ", " + String(longitude, 4);
+        String msg = "  GPS location: " + String(latitude, 4) + ", " + String(longitude, 4);
         INFO(msg.c_str());
-        msg = "  Timezone offset: UTC" + String(tz_offset >= 0 ? "+" : "") + String(tz_offset);
+        msg = "  Timezone: " + String(tz_str);
         INFO(msg.c_str());
     } else {
-        // No location, use default Eastern Time
-        WARNING("GPS location not available, using Eastern Time");
-        setenv("TZ", "EST5EDT,M3.2.0,M11.1.0", 1);
-        tzset();
+        WARNING("GPS location not available, using UTC timezone");
     }
+    setenv("TZ", tz_str, 1);
+    tzset();
 
     // Set the time offset for Utilities::OS::time()
     time_t now = time(nullptr);
@@ -423,7 +580,8 @@ void load_app_settings() {
     INFO("Loading application settings from NVS...");
 
     Preferences prefs;
-    prefs.begin("settings", true);  // Read-only
+    prefs.begin(SETTINGS_NAMESPACE, false);
+    migrate_default_propagation_settings(prefs);
 
     // Network
     app_settings.wifi_ssid = prefs.getString("wifi_ssid", "");
@@ -460,9 +618,10 @@ void load_app_settings() {
     app_settings.gps_time_sync = prefs.getBool("gps_sync", true);
 
     // Propagation
-    app_settings.prop_auto_select = prefs.getBool("prop_auto", true);
-    app_settings.prop_selected_node = prefs.getString("prop_node", "");
-    app_settings.prop_fallback_enabled = prefs.getBool("prop_fall", true);
+    app_settings.prop_auto_select = prefs.getBool(KEY_PROP_AUTO, false);
+    app_settings.prop_selected_node = prefs.getString(KEY_PROP_NODE, DEFAULT_PROP_NODE);
+    app_settings.prop_fallback_enabled = prefs.getBool(KEY_PROP_FALLBACK, true);
+    app_settings.prop_only = prefs.getBool(KEY_PROP_ONLY, false);
 
     prefs.end();
 
@@ -509,9 +668,9 @@ void setup_wifi() {
             // Fallback to NTP if GPS didn't work
             INFO("Syncing time via NTP (GPS not available)...");
 
-            // Use configTzTime for proper timezone handling on ESP32
-            // Eastern Time: EST5EDT = UTC-5, DST starts 2nd Sunday March, ends 1st Sunday Nov
-            configTzTime("EST5EDT,M3.2.0,M11.1.0", "pool.ntp.org", "time.nist.gov");
+            // Without a valid GPS location we cannot infer a local timezone.
+            // Keep NTP fallback in UTC until coordinates are available.
+            configTzTime("UTC0", "pool.ntp.org", "time.nist.gov");
 
             // Wait for time to be set (max 10 seconds)
             struct tm timeinfo;
@@ -846,19 +1005,19 @@ void setup_lxmf() {
     // Configure propagation settings
     router->set_fallback_to_propagation(app_settings.prop_fallback_enabled);
     router->set_propagation_only(app_settings.prop_only);
-    if (!app_settings.prop_selected_node.isEmpty()) {
-        // Use stored node (works for both manual and auto-select as initial/fallback)
+    if (!app_settings.prop_auto_select && !app_settings.prop_selected_node.isEmpty()) {
         Bytes selected_node;
         selected_node.assignHex(app_settings.prop_selected_node.c_str());
-        router->set_outbound_propagation_node(selected_node);
-        if (app_settings.prop_auto_select) {
-            INFO(("  Propagation node: auto-select (using last known: " + app_settings.prop_selected_node.substring(0, 16) + "...)").c_str());
-        } else {
-            INFO(("  Selected propagation node: " + app_settings.prop_selected_node.substring(0, 16) + "...").c_str());
-        }
+        propagation_manager->set_selected_node(selected_node);
+        INFO(("  Selected propagation node: " + app_settings.prop_selected_node.substring(0, 16) + "...").c_str());
     } else {
-        INFO("  Propagation node: auto-select (no cached node)");
+        propagation_manager->set_selected_node(Bytes());
+        INFO("  Propagation node: auto-select");
     }
+    propagation_manager->set_update_callback([]() {
+        refresh_outbound_propagation_node();
+    });
+    refresh_outbound_propagation_node();
     INFO(("  Fallback to propagation: " + String(app_settings.prop_fallback_enabled ? "enabled" : "disabled")).c_str());
     INFO(("  Propagation only: " + String(app_settings.prop_only ? "enabled" : "disabled")).c_str());
 
@@ -956,14 +1115,7 @@ void setup_ui_manager() {
 
         // Set WiFi reconnect callback (deferred to main loop to avoid blocking LVGL task)
         settings->set_wifi_reconnect_callback([](const String& ssid, const String& password) {
-            if (ssid.isEmpty()) {
-                WARNING("WiFi reconnect skipped: SSID is empty");
-                return;
-            }
-            pending_wifi_ssid = ssid;
-            pending_wifi_password = password;
-            wifi_reconnect_pending = true;
-            INFO(("WiFi reconnect queued for: " + ssid).c_str());
+            queue_wifi_reconnect(ssid, password);
         });
 
         // Set save callback (update app_settings and apply)
@@ -987,25 +1139,8 @@ void setup_ui_manager() {
 
             // Handle WiFi credential changes - auto reconnect
             if (wifi_settings_changed && new_settings.wifi_ssid.length() > 0) {
-                INFO(("WiFi credentials changed, reconnecting to: " + new_settings.wifi_ssid).c_str());
-                udp_log_ready = false;  // Suspend UDP logging during WiFi transition
-                WiFi.disconnect();
-                delay(100);
-                WiFi.begin(new_settings.wifi_ssid.c_str(), new_settings.wifi_password.c_str());
-
-                // Wait for connection (with timeout)
-                uint32_t start = millis();
-                while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
-                    delay(100);
-                }
-
-                if (WiFi.status() == WL_CONNECTED) {
-                    udp_log_init();  // Rebind to new WiFi interface IP
-                    udp_log_ready = true;  // Resume UDP logging
-                    INFO(("WiFi connected! IP: " + WiFi.localIP().toString()).c_str());
-                } else {
-                    WARNING("WiFi connection failed");
-                }
+                INFO(("WiFi credentials changed, queueing reconnect to: " + new_settings.wifi_ssid).c_str());
+                queue_wifi_reconnect(new_settings.wifi_ssid, new_settings.wifi_password);
             }
 
             // Update router display name
@@ -1135,6 +1270,18 @@ void setup_ui_manager() {
                 router->set_fallback_to_propagation(new_settings.prop_fallback_enabled);
                 router->set_propagation_only(new_settings.prop_only);
 
+                if (propagation_manager) {
+                    if (new_settings.prop_auto_select) {
+                        propagation_manager->set_selected_node(Bytes());
+                    } else if (!new_settings.prop_selected_node.isEmpty()) {
+                        Bytes selected_node;
+                        selected_node.assignHex(new_settings.prop_selected_node.c_str());
+                        propagation_manager->set_selected_node(selected_node);
+                    }
+                }
+
+                refresh_outbound_propagation_node();
+
                 // When auto-select is enabled, save the current effective node for next boot
                 if (new_settings.prop_auto_select && propagation_manager) {
                     Bytes effective = propagation_manager->get_effective_node();
@@ -1142,8 +1289,8 @@ void setup_ui_manager() {
                         app_settings.prop_selected_node = String(effective.toHex().c_str());
                         // Also persist to NVS
                         Preferences prefs;
-                        prefs.begin("lxmf", false);
-                        prefs.putString("prop_node", app_settings.prop_selected_node);
+                        prefs.begin(SETTINGS_NAMESPACE, false);
+                        prefs.putString(KEY_PROP_NODE, app_settings.prop_selected_node);
                         prefs.end();
                         INFO(("  Cached effective propagation node: " + app_settings.prop_selected_node.substring(0, 16) + "...").c_str());
                     }
@@ -1350,6 +1497,43 @@ void setup() {
         ui_manager->announce_lxst();
     }
 
+    // Register sent callback to update message status in storage and UI
+    router->register_sent_callback([](LXMF::LXMessage& msg) {
+        RNS::Bytes msg_hash = msg.hash();
+        bool propagated = (msg.method() == LXMF::Type::Message::PROPAGATED);
+        INFO("Message sent for message: " + msg_hash.toHex().substr(0, 16) + "...");
+        Serial.flush();
+
+        if (message_store) {
+            message_store->update_message_delivery_status(
+                msg_hash,
+                LXMF::Type::Message::SENT,
+                propagated
+            );
+
+            if (msg.destination_hash()) {
+                msg.state(LXMF::Type::Message::SENT);
+                msg.set_method(msg.method());
+                if (ui_manager) {
+                    ui_manager->on_message_sent(msg);
+                }
+            } else {
+                LXMF::LXMessage full_msg = message_store->load_message(msg_hash);
+                if (full_msg.hash()) {
+                    full_msg.state(LXMF::Type::Message::SENT);
+                    full_msg.set_method(msg.method());
+                    if (ui_manager) {
+                        ui_manager->on_message_sent(full_msg);
+                    }
+                } else if (ui_manager) {
+                    ui_manager->on_message_sent(msg);
+                }
+            }
+        } else if (ui_manager) {
+            ui_manager->on_message_sent(msg);
+        }
+    });
+
     // Register delivered callback to update message status in storage and UI
     router->register_delivered_callback([](LXMF::LXMessage& msg) {
         INFO(">>> APP DELIVERED CALLBACK ENTRY");
@@ -1373,13 +1557,14 @@ void setup() {
             LXMF::LXMessage full_msg = message_store->load_message(msg_hash);
             INFO(">>> Message loaded, checking hash");
             Serial.flush();
-            if (full_msg.hash()) {
-                INFO(">>> Setting state on full message");
-                Serial.flush();
-                full_msg.state(LXMF::Type::Message::DELIVERED);
-                if (ui_manager) {
-                    INFO(">>> Calling UI manager on_message_delivered");
-                    Serial.flush();
+              if (full_msg.hash()) {
+                  INFO(">>> Setting state on full message");
+                  Serial.flush();
+                  full_msg.state(LXMF::Type::Message::DELIVERED);
+                  full_msg.set_method(msg.method());
+                  if (ui_manager) {
+                      INFO(">>> Calling UI manager on_message_delivered");
+                      Serial.flush();
                     ui_manager->on_message_delivered(full_msg);
                     INFO(">>> UI manager returned");
                     Serial.flush();
@@ -1388,6 +1573,29 @@ void setup() {
         }
         INFO(">>> APP DELIVERED CALLBACK EXIT");
         Serial.flush();
+    });
+
+    router->register_failed_callback([](LXMF::LXMessage& msg) {
+        RNS::Bytes msg_hash = msg.hash();
+        WARNING("Message delivery failed for message: " + msg_hash.toHex().substr(0, 16) + "...");
+        Serial.flush();
+
+        if (message_store) {
+            message_store->update_message_state(msg_hash, LXMF::Type::Message::FAILED);
+
+            LXMF::LXMessage full_msg = message_store->load_message(msg_hash);
+            if (full_msg.hash()) {
+                full_msg.state(LXMF::Type::Message::FAILED);
+                full_msg.set_method(msg.method());
+                if (ui_manager) {
+                    ui_manager->on_message_failed(full_msg);
+                }
+            } else if (ui_manager) {
+                ui_manager->on_message_failed(msg);
+            }
+        } else if (ui_manager) {
+            ui_manager->on_message_failed(msg);
+        }
     });
 
     // Boot profiling complete
@@ -1463,30 +1671,7 @@ void loop() {
 
     // Handle deferred WiFi reconnect (from LVGL task)
     LOOP_STEP(3);  // WiFi reconnect check
-    if (wifi_reconnect_pending) {
-        wifi_reconnect_pending = false;
-        INFO(("Reconnecting WiFi to: " + pending_wifi_ssid).c_str());
-        udp_log_ready = false;  // Suspend UDP logging during WiFi transition
-        WiFi.disconnect();
-        delay(100);
-        WiFi.begin(pending_wifi_ssid.c_str(), pending_wifi_password.c_str());
-
-        uint32_t start = millis();
-        while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
-            esp_task_wdt_reset();
-            delay(100);
-        }
-
-        if (WiFi.status() == WL_CONNECTED) {
-            udp_log_init();  // Rebind to new WiFi interface IP
-            udp_log_ready = true;  // Resume UDP logging
-            INFO(("WiFi connected! IP: " + WiFi.localIP().toString()).c_str());
-        } else {
-            WARNING("WiFi reconnection failed");
-        }
-        pending_wifi_ssid = "";
-        pending_wifi_password = "";
-    }
+    pump_wifi_reconnect();
 
     // Process Reticulum
     LOOP_STEP(4);  // reticulum->loop()
@@ -1503,11 +1688,7 @@ void loop() {
     // involves sector erases (100ms each) and can take 5-15s total.
     // WDT feeds between calls prevent timeout during heavy flash I/O.
     LOOP_STEP(5);  // persist data
-    reticulum->should_persist_data();
-    esp_task_wdt_reset();
-    // Fast-persist known destinations (5s after dirty) to survive crashes
-    Identity::should_persist_data();
-    esp_task_wdt_reset();
+    pump_persistence();
 
     // Process TCP interface
     LOOP_STEP(6);  // TCP loop
@@ -1599,7 +1780,6 @@ void loop() {
     if (tcp_interface_impl && tcp_interface_impl->check_reconnected()) {
         INFO("TCP interface reconnected - sending announce");
         if (router) {
-            delay(500);  // Brief stabilization delay
             router->announce();
             last_announce = millis();
         }
@@ -1662,6 +1842,14 @@ void loop() {
     // Read GPS data continuously (TinyGPSPlus needs constant feeding)
     while (GPSSerial.available() > 0) {
         gps.encode(GPSSerial.read());
+    }
+
+    // Retry GPS time sync once we get a fix (boot timeout often misses cold start)
+    if (!gps_time_synced && gps.date.isValid() && gps.time.isValid()
+        && gps.date.year() >= 2024 && gps.location.isValid()) {
+        // Data is already in the gps object from the feed loop above —
+        // sync_time_from_gps will find it on the first iteration
+        sync_time_from_gps(1000);
     }
 
     // Screen timeout handling
@@ -1824,6 +2012,7 @@ void loop() {
         last_free_heap = free_heap;
     }
 
-    // Small delay to prevent tight loop
+    // Small delay to prevent tight loop while still letting lower-priority tasks run.
+    taskYIELD();
     delay(5);
 }

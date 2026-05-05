@@ -19,7 +19,8 @@
             "+<Hardware/TDeck/*.cpp>",
             "+<UI/*.cpp>",
             "+<UI/LVGL/*.cpp>",
-            "+<UI/LXMF/*.cpp>"
+            "+<UI/LXMF/*.cpp>",
+            "+<Telemetry/*.cpp>"
         ],
         "includeDir": "."
     }
