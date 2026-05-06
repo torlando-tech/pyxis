@@ -3,7 +3,7 @@
 
 #include <Arduino.h>
 #include <Wire.h>
-#include <SPIFFS.h>
+#include <LittleFS.h>
 #include <Preferences.h>
 #include <time.h>
 #include <sys/time.h>
@@ -19,9 +19,15 @@
 
 // Filesystem
 // Was: <UniversalFileSystem.h> (pyxis-provided RNS::FileSystem wrapper).
-// Post-graft: microStore ships its own SPIFFS adapter, activated via
-// -DUSTORE_USE_SPIFFS in platformio.ini.
-#include <microStore/Adapters/SPIFFSFileSystem.h>
+// Post-graft: microStore ships filesystem adapters; we use LittleFS via
+// -DUSTORE_USE_LITTLEFS. LittleFS replaced SPIFFS for the persistent
+// path table because SPIFFS chokes on sustained writes (its GC stalls
+// the FS for hundreds of ms during block erase) — under live announce
+// flood, SPIFFS's flush_buffer() returns false from FileStore::put,
+// surfacing as "Failed to add destination to path table" spam.
+// LittleFS reuses the same partition (label "spiffs") and reformats it
+// on first boot.
+#include <microStore/Adapters/LittleFSFileSystem.h>
 #include <Identity.h>
 #include <Destination.h>
 #include <Transport.h>
@@ -623,17 +629,20 @@ void setup_wifi() {
 void setup_hardware() {
     INFO("\n=== Hardware Initialization ===");
 
-    // Initialize SPIFFS for persistence.
+    // Initialize LittleFS for persistence.
     //
     // Pre-graft: pyxis used its own RNS::FileSystem(new UniversalFileSystem())
     // wrapper. Vanilla upstream microReticulum @ 0.3.0 deleted RNS::FileSystem
     // entirely and replaced it with microStore (an out-of-tree dep). microStore
-    // ships an SPIFFS adapter activated by -DUSTORE_USE_SPIFFS that does the
-    // exact same thing pyxis's UniversalFileSystem did, so we use it directly.
+    // ships filesystem adapters activated by build flags. We use LittleFS
+    // (-DUSTORE_USE_LITTLEFS) because it tolerates sustained writes much
+    // better than SPIFFS — the path table backend (microStore::BasicFileStore)
+    // does several puts/sec under network load, and SPIFFS's GC stalls
+    // were causing flush failures.
     //
     // Pyxis's lib/universal_filesystem/ is now dead code on this build path and
     // can be deleted once the graft lands.
-    static microStore::Adapters::SPIFFSFileSystem fs;
+    static microStore::Adapters::LittleFSFileSystem fs;
     if (!fs.init()) {
         ERROR("FileSystem mount failed!");
     } else {
@@ -704,6 +713,19 @@ void setup_reticulum() {
 
     // Create Reticulum instance (no auto-init)
     reticulum = new Reticulum();
+
+    // Enable transport mode so Transport::start() initializes the path
+    // store. Without this, the entire `_path_store.init()` block at
+    // Transport.cpp:244 is gated out, _new_path_table.put() always
+    // returns false at TypedStore::isValid(), and every announce
+    // surfaces as "Failed to add destination to path table". The UI's
+    // announce list reads from the path table, so on a busy network
+    // (TLAN) nothing ever appears.
+    //
+    // Transport mode also enables relaying packets for other nodes —
+    // typically a desktop-class node behavior, but acceptable on a
+    // T-Deck Plus with PSRAM and LittleFS-backed path persistence.
+    Reticulum::transport_enabled(true);
 
     // Reduce transport log verbosity — LOG_TRACE floods serial with
     // token/link/announce details that drown out audio diagnostics.
