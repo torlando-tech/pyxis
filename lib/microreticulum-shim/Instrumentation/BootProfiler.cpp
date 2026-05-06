@@ -18,7 +18,7 @@
 #include <Log.h>
 
 #include <Arduino.h>
-#include <SPIFFS.h>
+#include <LittleFS.h>
 #include <cstring>
 
 namespace RNS { namespace Instrumentation {
@@ -185,21 +185,21 @@ bool BootProfiler::saveToFile() {
 
     // Delete oldest log if exists
     snprintf(old_path, sizeof(old_path), "/boot_%d.log", MAX_BOOT_LOGS);
-    if (SPIFFS.exists(old_path)) {
-        SPIFFS.remove(old_path);
+    if (LittleFS.exists(old_path)) {
+        LittleFS.remove(old_path);
     }
 
     // Shift remaining logs (4->5, 3->4, 2->3, 1->2)
     for (int i = MAX_BOOT_LOGS - 1; i >= 1; i--) {
         snprintf(old_path, sizeof(old_path), "/boot_%d.log", i);
         snprintf(new_path, sizeof(new_path), "/boot_%d.log", i + 1);
-        if (SPIFFS.exists(old_path)) {
-            SPIFFS.rename(old_path, new_path);
+        if (LittleFS.exists(old_path)) {
+            LittleFS.rename(old_path, new_path);
         }
     }
 
     // Write new boot profile to boot_1.log
-    File file = SPIFFS.open("/boot_1.log", FILE_WRITE);
+    File file = LittleFS.open("/boot_1.log", FILE_WRITE);
     if (!file) {
         ERROR("[BOOT] Failed to create boot profile file");
         return false;
