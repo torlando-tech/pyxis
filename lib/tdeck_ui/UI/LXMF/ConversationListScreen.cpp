@@ -473,30 +473,40 @@ void ConversationListScreen::update_status() {
         lv_obj_set_style_text_color(_label_lora, Theme::textMuted(), 0);
     }
 
-    // Update GPS state — three tiers:
-    //   "--" muted   no GPS handle, or no NMEA bytes parsed yet
-    //   "?" yellow   NMEA flowing but no $GPGGA satellite count yet
-    //                (module is alive but no fix)
-    //   "N" colored  satellite count valid; color by count
+    // Update GPS state — four tiers:
+    //   "--"   muted    no GPS handle, or no NMEA bytes parsed yet
+    //   "?"    yellow   NMEA flowing, no fix, no in-view info either
+    //   "?N"   yellow   N satellites in view but no fix yet
+    //   "N"    colored  N satellites in fix; color by count
     //
-    // satellites.isValid() only flips true once a $GPGGA sentence has
-    // been parsed; before first fix the module typically emits
-    // $GPGSV (visible sats) but no GGA. Without the "?" tier the bar
-    // showed "--" indistinguishably from "GPS module not connected"
-    // even when the module was happily streaming NMEA.
-    if (_gps && _gps->satellites.isValid()) {
-        int sats = _gps->satellites.value();
+    // `_gps->satellites` only updates from $GPGGA (sats USED in fix). A
+    // module that's seeing the sky but hasn't acquired a fix outputs 0
+    // for GGA-sats while $GPGSV reports N visible. We bind a
+    // TinyGPSCustom to GPGSV field 3 in set_gps to surface that count
+    // — the user sees "?12" ("12 visible, no fix") and watches it flip
+    // to a colored "N" once the lock comes in.
+    int sats_in_fix = (_gps && _gps->satellites.isValid())
+                      ? (int)_gps->satellites.value() : 0;
+    int sats_in_view = (_gps_in_view.isValid())
+                       ? atoi(_gps_in_view.value()) : 0;
+
+    if (_gps && sats_in_fix > 0) {
         char gps_text[32];
-        snprintf(gps_text, sizeof(gps_text), "%s %d", LV_SYMBOL_GPS, sats);
+        snprintf(gps_text, sizeof(gps_text), "%s %d", LV_SYMBOL_GPS, sats_in_fix);
         lv_label_set_text(_label_gps, gps_text);
 
-        if (sats >= 6) {
-            lv_obj_set_style_text_color(_label_gps, Theme::success(), 0);  // Green
-        } else if (sats >= 3) {
-            lv_obj_set_style_text_color(_label_gps, Theme::warning(), 0);  // Yellow
+        if (sats_in_fix >= 6) {
+            lv_obj_set_style_text_color(_label_gps, Theme::success(), 0);
+        } else if (sats_in_fix >= 3) {
+            lv_obj_set_style_text_color(_label_gps, Theme::warning(), 0);
         } else {
-            lv_obj_set_style_text_color(_label_gps, Theme::error(), 0);    // Red
+            lv_obj_set_style_text_color(_label_gps, Theme::error(), 0);
         }
+    } else if (_gps && sats_in_view > 0) {
+        char gps_text[32];
+        snprintf(gps_text, sizeof(gps_text), "%s ?%d", LV_SYMBOL_GPS, sats_in_view);
+        lv_label_set_text(_label_gps, gps_text);
+        lv_obj_set_style_text_color(_label_gps, Theme::warning(), 0);
     } else if (_gps && _gps->charsProcessed() > 0) {
         lv_label_set_text(_label_gps, LV_SYMBOL_GPS " ?");
         lv_obj_set_style_text_color(_label_gps, Theme::warning(), 0);
