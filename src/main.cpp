@@ -50,6 +50,10 @@
 #include <LXMF/MessageStore.h>
 #include <LXMF/PropagationNodeManager.h>
 
+#ifdef PYXIS_TEST_HOOKS
+#include "pyxis_test_hooks.h"
+#endif
+
 // Hardware drivers
 #include <Hardware/TDeck/Config.h>
 #include <Hardware/TDeck/Display.h>
@@ -439,6 +443,15 @@ void load_app_settings() {
     app_settings.wifi_password = prefs.getString("wifi_pass", "");
     app_settings.tcp_host = prefs.getString("tcp_host", "sideband.connect.reticulum.network");
     app_settings.tcp_port = prefs.getUShort("tcp_port", 4965);
+
+#ifdef PYXIS_TEST_HOOKS
+    // Test mode: hard-override the TCP server so the harness on the Mac
+    // can reach this T-Deck regardless of what's persisted in NVS. The
+    // harness runs an rnsd with TCPServerInterface on the configured
+    // address; pyxis dials it as a TCP CLIENT.
+    app_settings.tcp_host = String(PYXIS_TEST_TCP_HOST);
+    app_settings.tcp_port = PYXIS_TEST_TCP_PORT;
+#endif
 
     // Identity
     app_settings.display_name = prefs.getString("disp_name", "");
@@ -1479,13 +1492,264 @@ static volatile uint8_t loop_step = 0;
 // Feed WDT and advance loop step tracker
 #define LOOP_STEP(n) do { loop_step = (n); esp_task_wdt_reset(); } while(0)
 
+#ifdef PYXIS_TEST_HOOKS
+// Test-hook serial command interface for the Mac-side harness. All
+// outputs are prefixed `T:OK` or `T:ERR` so the harness can parse them
+// out of the regular log stream.
+//
+// Commands:
+//   T:DEST                       — print our delivery dest hash
+//   T:ID                         — print our identity hash
+//   T:ANN                        — force an announce
+//   T:PATHS                      — print known path destination hashes
+//   T:HASPATH <hex_dest>         — query path-table membership
+//   T:RECALL <hex_dest>          — print app_data hex for that dest
+//   T:SEND <hex_dest> <text...>  — queue an outbound DIRECT LXMessage,
+//                                  print the message hash on success
+//   T:STATE <hex_msg_hash>       — print the LXMessage state if known
+//   T:RX                         — print received-message count then a
+//                                  one-line summary per message
+//   T:SETPROP <hex> <stamp_cost> — configure outbound propagation node
+//   T:SENDPROP <hex> <text>      — queue an outbound PROPAGATED message
+//   T:SYNCPROP                   — request_messages_from_propagation_node
+//   T:SYNCSTATE                  — print current PR_* sync state
+static String hex_byte_to_string(const RNS::Bytes& b) { return String(b.toHex().c_str()); }
+
+static RNS::Bytes parse_hex_arg(const String& hex) {
+    std::string s = std::string(hex.c_str());
+    RNS::Bytes b;
+    for (size_t i = 0; i + 1 < s.size(); i += 2) {
+        char buf[3] = {s[i], s[i+1], 0};
+        b << (uint8_t)strtoul(buf, nullptr, 16);
+    }
+    return b;
+}
+
+// Track sent messages so T:STATE can look them up. Capped circular
+// buffer; oldest entries drop on overflow. Index 0 = most recent.
+struct TestSentEntry { RNS::Bytes hash; LXMF::LXMessage msg; bool in_use = false; };
+static const size_t TEST_SENT_RING = 16;
+static TestSentEntry test_sent_ring[TEST_SENT_RING];
+static size_t test_sent_head = 0;
+static void test_sent_record(const LXMF::LXMessage& msg) {
+    test_sent_ring[test_sent_head].hash = msg.hash();
+    test_sent_ring[test_sent_head].msg = msg;
+    test_sent_ring[test_sent_head].in_use = true;
+    test_sent_head = (test_sent_head + 1) % TEST_SENT_RING;
+}
+static LXMF::LXMessage* test_sent_find(const RNS::Bytes& hash) {
+    for (size_t i = 0; i < TEST_SENT_RING; ++i) {
+        if (test_sent_ring[i].in_use && test_sent_ring[i].hash == hash) {
+            return &test_sent_ring[i].msg;
+        }
+    }
+    return nullptr;
+}
+
+// Track received messages so T:RX can summarize.
+struct TestRxEntry { RNS::Bytes source; RNS::Bytes content; bool in_use = false; };
+static const size_t TEST_RX_RING = 32;
+static TestRxEntry test_rx_ring[TEST_RX_RING];
+static size_t test_rx_count = 0;
+
+// Public wrapper exposed via pyxis_test_hooks.h (global scope, no
+// namespace) so other TUs (eg UIManager.cpp) can record received
+// messages without ADL gymnastics.
+void pyxis_test_hook_record_rx(const ::LXMF::LXMessage& msg) {
+    if (test_rx_count >= TEST_RX_RING) return;
+    test_rx_ring[test_rx_count].source = msg.source_hash();
+    test_rx_ring[test_rx_count].content = msg.content();
+    test_rx_ring[test_rx_count].in_use = true;
+    test_rx_count++;
+}
+
+static const char* test_state_name(LXMF::Type::Message::State s) {
+    switch (s) {
+        case LXMF::Type::Message::GENERATING: return "GENERATING";
+        case LXMF::Type::Message::OUTBOUND:   return "OUTBOUND";
+        case LXMF::Type::Message::SENDING:    return "SENDING";
+        case LXMF::Type::Message::SENT:       return "SENT";
+        case LXMF::Type::Message::DELIVERED:  return "DELIVERED";
+        case LXMF::Type::Message::REJECTED:   return "REJECTED";
+        case LXMF::Type::Message::CANCELLED:  return "CANCELLED";
+        case LXMF::Type::Message::FAILED:     return "FAILED";
+        default:                              return "UNKNOWN";
+    }
+}
+
+static void handle_test_hook_command(const String& line) {
+    int sep = line.indexOf(' ');
+    String cmd = (sep < 0) ? line : line.substring(0, sep);
+    String args = (sep < 0) ? "" : line.substring(sep + 1);
+
+    if (cmd == "T:DEST") {
+        if (!router) { Serial.println("T:ERR no router"); return; }
+        Serial.println(String("T:OK ") + router->delivery_destination().hash().toHex().c_str());
+    }
+    else if (cmd == "T:ID") {
+        Serial.println(String("T:OK ") + identity->hash().toHex().c_str());
+    }
+    else if (cmd == "T:ANN") {
+        if (!router) { Serial.println("T:ERR no router"); return; }
+        router->announce();
+        Serial.println("T:OK announced");
+    }
+    else if (cmd == "T:PATHS") {
+        const auto& path_table = RNS::Transport::get_path_table();
+        Serial.print("T:OK count=");
+        Serial.println(String((unsigned)path_table.size()));
+        for (const auto& kv : path_table) {
+            Serial.print("T:PATH ");
+            Serial.println(kv.first.toHex().c_str());
+        }
+    }
+    else if (cmd == "T:HASPATH") {
+        RNS::Bytes dest = parse_hex_arg(args);
+        if (dest.size() != 16) { Serial.println("T:ERR bad hex"); return; }
+        bool has = RNS::Transport::has_path(dest);
+        // Diagnostic: also dump whether the in-memory _path_table has it,
+        // and the size of each store. They should match when the dual-
+        // write fix is working.
+        const auto& mem_table = RNS::Transport::get_path_table();
+        bool mem_has = (mem_table.find(dest) != mem_table.end());
+        Serial.print("T:OK ");
+        Serial.print(has ? "1" : "0");
+        Serial.print(" mem=");
+        Serial.print(mem_has ? "1" : "0");
+        Serial.print(" mem_count=");
+        Serial.println(String((unsigned)mem_table.size()));
+    }
+    else if (cmd == "T:RECALL") {
+        RNS::Bytes dest = parse_hex_arg(args);
+        if (dest.size() != 16) { Serial.println("T:ERR bad hex"); return; }
+        RNS::Bytes app = RNS::Identity::recall_app_data(dest);
+        Serial.println(String("T:OK size=") + String((unsigned)app.size())
+                       + " hex=" + app.toHex().c_str());
+    }
+    else if (cmd == "T:SEND" || cmd == "T:SENDOPP") {
+        if (!router) { Serial.println("T:ERR no router"); return; }
+        int sp = args.indexOf(' ');
+        if (sp < 0) { Serial.println("T:ERR usage <cmd> <hex> <text>"); return; }
+        String hex = args.substring(0, sp);
+        String text = args.substring(sp + 1);
+        RNS::Bytes dest_hash = parse_hex_arg(hex);
+        if (dest_hash.size() != 16) { Serial.println("T:ERR bad hex"); return; }
+        RNS::Identity dest_identity = RNS::Identity::recall(dest_hash);
+        RNS::Destination destination(RNS::Type::NONE);
+        if (dest_identity) {
+            destination = RNS::Destination(dest_identity, RNS::Type::Destination::OUT,
+                                           RNS::Type::Destination::SINGLE,
+                                           "lxmf", "delivery");
+        }
+        RNS::Bytes content_b((const uint8_t*)text.c_str(), text.length());
+        RNS::Bytes title_b;
+        LXMF::Type::Message::Method method = (cmd == "T:SENDOPP")
+            ? LXMF::Type::Message::OPPORTUNISTIC
+            : LXMF::Type::Message::DIRECT;
+        LXMF::LXMessage msg(destination, router->delivery_destination(),
+                            content_b, title_b, method);
+        if (!dest_identity) msg.destination_hash(dest_hash);
+        msg.pack();
+        router->handle_outbound(msg);
+        test_sent_record(msg);
+        Serial.println(String("T:OK hash=") + msg.hash().toHex().c_str()
+                       + " state=" + test_state_name(msg.state())
+                       + " method=" + (method == LXMF::Type::Message::OPPORTUNISTIC
+                                       ? "OPPORTUNISTIC" : "DIRECT"));
+    }
+    else if (cmd == "T:STATE") {
+        RNS::Bytes hash = parse_hex_arg(args);
+        LXMF::LXMessage* m = test_sent_find(hash);
+        if (!m) { Serial.println("T:ERR not found"); return; }
+        Serial.println(String("T:OK state=") + test_state_name(m->state()));
+    }
+    else if (cmd == "T:RX") {
+        Serial.print("T:OK count=");
+        Serial.println(String((unsigned)test_rx_count));
+        for (size_t i = 0; i < test_rx_count; ++i) {
+            const auto& e = test_rx_ring[i];
+            std::string c((const char*)e.content.data(), e.content.size());
+            Serial.print("T:RXMSG src=");
+            Serial.print(e.source.toHex().c_str());
+            Serial.print(" content=");
+            Serial.println(c.c_str());
+        }
+    }
+    else if (cmd == "T:RXCLR") {
+        test_rx_count = 0;
+        Serial.println("T:OK cleared");
+    }
+    else if (cmd == "T:SETPROP") {
+        // T:SETPROP <hex_dest> <stamp_cost> — configure outbound propagation node.
+        if (!router) { Serial.println("T:ERR no router"); return; }
+        int sp = args.indexOf(' ');
+        String hex = (sp < 0) ? args : args.substring(0, sp);
+        int stamp_cost = (sp < 0) ? 0 : args.substring(sp + 1).toInt();
+        RNS::Bytes node_hash = parse_hex_arg(hex);
+        if (node_hash.size() != 16) { Serial.println("T:ERR bad hex"); return; }
+        router->set_outbound_propagation_node(node_hash);
+        router->set_outbound_propagation_stamp_cost((uint8_t)stamp_cost);
+        Serial.println(String("T:OK pn=") + hex + " cost=" + String(stamp_cost));
+    }
+    else if (cmd == "T:SENDPROP") {
+        // T:SENDPROP <hex_dest> <text> — send PROPAGATED via the
+        // currently-configured outbound propagation node.
+        if (!router) { Serial.println("T:ERR no router"); return; }
+        int sp = args.indexOf(' ');
+        if (sp < 0) { Serial.println("T:ERR usage T:SENDPROP <hex> <text>"); return; }
+        String hex = args.substring(0, sp);
+        String text = args.substring(sp + 1);
+        RNS::Bytes dest_hash = parse_hex_arg(hex);
+        if (dest_hash.size() != 16) { Serial.println("T:ERR bad hex"); return; }
+        RNS::Identity dest_identity = RNS::Identity::recall(dest_hash);
+        RNS::Destination destination(RNS::Type::NONE);
+        if (dest_identity) {
+            destination = RNS::Destination(dest_identity, RNS::Type::Destination::OUT,
+                                           RNS::Type::Destination::SINGLE,
+                                           "lxmf", "delivery");
+        }
+        RNS::Bytes content_b((const uint8_t*)text.c_str(), text.length());
+        RNS::Bytes title_b;
+        LXMF::LXMessage msg(destination, router->delivery_destination(),
+                            content_b, title_b, LXMF::Type::Message::PROPAGATED);
+        if (!dest_identity) msg.destination_hash(dest_hash);
+        msg.pack();
+        router->handle_outbound(msg);
+        test_sent_record(msg);
+        Serial.println(String("T:OK hash=") + msg.hash().toHex().c_str()
+                       + " state=" + test_state_name(msg.state())
+                       + " method=PROPAGATED");
+    }
+    else if (cmd == "T:SYNCPROP") {
+        // T:SYNCPROP — kick off a sync from the configured propagation
+        // node. State machine progresses asynchronously; the harness
+        // can poll T:SYNCSTATE to track progress.
+        if (!router) { Serial.println("T:ERR no router"); return; }
+        router->request_messages_from_propagation_node();
+        Serial.println("T:OK sync_requested");
+    }
+    else if (cmd == "T:SYNCSTATE") {
+        // T:SYNCSTATE — return the current PR_* state of the prop sync FSM.
+        if (!router) { Serial.println("T:ERR no router"); return; }
+        Serial.print("T:OK state=");
+        Serial.println(String((unsigned)router->get_sync_state()));
+    }
+    else {
+        Serial.print("T:ERR unknown cmd ");
+        Serial.println(cmd);
+    }
+}
+#endif // PYXIS_TEST_HOOKS
+
 void loop() {
     esp_task_wdt_reset();
 
     // Handle OTA updates (must be called frequently)
     ArduinoOTA.handle();
 
-    // Handle serial commands for web flasher detection
+    // Handle serial commands for web flasher detection + (under
+    // PYXIS_TEST_HOOKS) the harness command interface. Buffer up to
+    // 1024 chars so long T:SEND payloads work.
     while (Serial.available()) {
         char c = Serial.read();
         if (c == '\n' || c == '\r') {
@@ -1500,8 +1764,13 @@ void loop() {
                 REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
                 esp_restart();
             }
+#ifdef PYXIS_TEST_HOOKS
+            else if (serial_cmd_buffer.startsWith("T:")) {
+                handle_test_hook_command(serial_cmd_buffer);
+            }
+#endif
             serial_cmd_buffer = "";
-        } else if (serial_cmd_buffer.length() < 32) {
+        } else if (serial_cmd_buffer.length() < 1024) {
             serial_cmd_buffer += c;
         }
     }
