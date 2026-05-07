@@ -741,7 +741,12 @@ void UIManager::send_message(const Bytes& dest_hash, const String& content) {
 }
 
 void UIManager::on_message_received(::LXMF::LXMessage& message) {
-    LVGL_LOCK();
+    // Don't take LVGL_LOCK across the LittleFS write — under sustained
+    // LXMF receive load (eg propagation soak), LittleFS compaction can
+    // stall the save for several seconds. While the lock was held the
+    // Arduino loop's `UIManager::update()` would assert at the 5s
+    // LVGL_LOCK timeout (LVGLLock.h:45), tipping pyxis into a panic
+    // reset. Scope the lock to ONLY the UI mutations below.
     std::string source_hex = message.source_hash().toHex().substr(0, 8);
     std::string msg = "Message received from " + source_hex + "...";
     INFO(msg.c_str());
@@ -753,8 +758,12 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
     // Pre-graft: RNS::Identity::mark_persistent — fork-only. See note above.
     // (void)RNS::Identity::mark_persistent(message.source_hash());
 
-    // Save to store
+    // Save to store — no LVGL lock; LittleFS GC is allowed to take its
+    // time without freezing the UI thread.
     _store.save_message(message);
+
+    // Take the LVGL lock now for the UI-touching code below.
+    LVGL_LOCK();
 
     // Update UI if we're viewing this conversation
     bool viewing_this_chat = (_current_screen == SCREEN_CHAT && _current_peer_hash == message.source_hash());
