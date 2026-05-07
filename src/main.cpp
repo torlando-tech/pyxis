@@ -78,6 +78,7 @@
 
 // SD Card access and logging
 #include <Hardware/TDeck/SDAccess.h>
+#include <Hardware/TDeck/SDArchiveFileSystem.h>
 #include <Hardware/TDeck/SDLogger.h>
 
 // OTA flashing
@@ -880,6 +881,23 @@ void setup_lxmf() {
     // Create message store
     message_store = new MessageStore("/lxmf");
     INFO("Message store ready");
+
+    // Wire up the SD card as the archive tier so messages older than
+    // HOT_MESSAGES_PER_CONVERSATION (50) get moved off LittleFS. This
+    // is critical for sustained operation: the LittleFS partition is
+    // 1.875MB and a sustained-receive soak fills it in ~30min. With
+    // SD archive enabled, hot stays bounded indefinitely.
+    if (Hardware::TDeck::SDAccess::is_ready()) {
+        // Path on the SD card. We use "/lxmf-archive" (rather than the
+        // hot path "/lxmf") so the archive is clearly distinct from
+        // anything else the SD card might hold.
+        static Hardware::TDeck::SDArchiveFileSystem sd_archive_fs;
+        message_store->set_archive_filesystem(sd_archive_fs, "/lxmf-archive");
+        INFO("Message store: SD archive enabled at /lxmf-archive");
+    } else {
+        WARNING("Message store: SD card not ready, archive disabled — "
+                "older messages will be deleted instead of archived");
+    }
 
     // Create LXMF router
     router = new LXMRouter(*identity, "/lxmf");
