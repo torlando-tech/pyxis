@@ -16,6 +16,12 @@
 #include <MsgPack.h>
 #include <TinyGPSPlus.h>
 
+// SX1262Interface owns the last-RX RSSI/SNR snapshot that the top-bar
+// LoRa indicator reads. Only the .cpp needs the full type — the header
+// keeps `_lora_interface` typed as RNS::Interface* so set_lora_interface
+// callers don't need to include the concrete class.
+#include "SX1262Interface.h"
+
 using namespace RNS;
 using namespace Hardware::TDeck;
 
@@ -432,14 +438,15 @@ void ConversationListScreen::update_status() {
         lv_obj_set_style_text_color(_label_wifi, Theme::textMuted(), 0);
     }
 
-    // Update LoRa RSSI. Pre-graft this called Interface::get_rssi() —
-    // a virtual method the fork added that vanilla upstream doesn't
-    // expose on the Interface base class. To restore: change
-    // _lora_interface to a concrete SX1262Interface* (the method is
-    // still defined there, just non-virtual). Disabled for the spike.
-    if (false && _lora_interface) {
-        float rssi_f = 0.0f;
-        (void)rssi_f;
+    // Update LoRa RSSI. SX1262Interface::get_rssi() is non-virtual on
+    // the concrete impl class, and `_lora_interface` is a RNS::Interface
+    // wrapper — we have to drop down to its InterfaceImpl* via .get()
+    // and static_cast to the concrete subclass. Pyxis only ever passes
+    // a SX1262Interface here (set_lora_interface in main.cpp wraps
+    // `lora_interface_impl`, which IS SX1262Interface*).
+    if (_lora_interface && _lora_interface->get()) {
+        SX1262Interface* lora = static_cast<SX1262Interface*>(_lora_interface->get());
+        float rssi_f = lora->get_rssi();
         int rssi = (int)rssi_f;
 
         // Only show RSSI if we've received at least one packet (RSSI != 0)
@@ -466,21 +473,33 @@ void ConversationListScreen::update_status() {
         lv_obj_set_style_text_color(_label_lora, Theme::textMuted(), 0);
     }
 
-    // Update GPS satellite count
+    // Update GPS state — three tiers:
+    //   "--" muted   no GPS handle, or no NMEA bytes parsed yet
+    //   "?" yellow   NMEA flowing but no $GPGGA satellite count yet
+    //                (module is alive but no fix)
+    //   "N" colored  satellite count valid; color by count
+    //
+    // satellites.isValid() only flips true once a $GPGGA sentence has
+    // been parsed; before first fix the module typically emits
+    // $GPGSV (visible sats) but no GGA. Without the "?" tier the bar
+    // showed "--" indistinguishably from "GPS module not connected"
+    // even when the module was happily streaming NMEA.
     if (_gps && _gps->satellites.isValid()) {
         int sats = _gps->satellites.value();
         char gps_text[32];
         snprintf(gps_text, sizeof(gps_text), "%s %d", LV_SYMBOL_GPS, sats);
         lv_label_set_text(_label_gps, gps_text);
 
-        // Color based on satellite count
         if (sats >= 6) {
             lv_obj_set_style_text_color(_label_gps, Theme::success(), 0);  // Green
         } else if (sats >= 3) {
             lv_obj_set_style_text_color(_label_gps, Theme::warning(), 0);  // Yellow
         } else {
-            lv_obj_set_style_text_color(_label_gps, Theme::error(), 0);  // Red
+            lv_obj_set_style_text_color(_label_gps, Theme::error(), 0);    // Red
         }
+    } else if (_gps && _gps->charsProcessed() > 0) {
+        lv_label_set_text(_label_gps, LV_SYMBOL_GPS " ?");
+        lv_obj_set_style_text_color(_label_gps, Theme::warning(), 0);
     } else {
         lv_label_set_text(_label_gps, LV_SYMBOL_GPS " --");
         lv_obj_set_style_text_color(_label_gps, Theme::textMuted(), 0);
