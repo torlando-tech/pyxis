@@ -13,6 +13,11 @@
 #include "LXMF/MessageStore.h"
 #include "Interface.h"
 
+// TinyGPS++ pulled in for TinyGPSCustom (the in-view-satellites parser
+// hook; declared as a member below). The forward decl on TinyGPSPlus
+// stays since the field is a pointer.
+#include <TinyGPS++.h>
+
 class TinyGPSPlus;  // Forward declaration
 
 namespace UI {
@@ -169,9 +174,23 @@ public:
 
     /**
      * Set GPS for satellite count display
+     *
+     * Also binds a custom $GPGSV field-3 ("satellites in view") parser
+     * to the same TinyGPSPlus instance so the top bar can show
+     * "in-view but not yet locked" status (yellow "?N") before the
+     * fix has any locked satellites.
+     *
      * @param gps TinyGPSPlus instance
      */
-    void set_gps(TinyGPSPlus* gps) { _gps = gps; }
+    void set_gps(TinyGPSPlus* gps) {
+        _gps = gps;
+        if (gps) {
+            // GSV sentence: $GPGSV,<total_sentences>,<sentence_num>,
+            //               <total_in_view>,<sat1_id>,...
+            // Field 3 is the count of satellites visible to the receiver.
+            _gps_in_view.begin(*gps, "GPGSV", 3);
+        }
+    }
 
 private:
     lv_obj_t* _screen;
@@ -191,6 +210,7 @@ private:
     RNS::Interface* _lora_interface;
     RNS::Interface* _ble_interface;
     TinyGPSPlus* _gps;
+    TinyGPSCustom _gps_in_view;  // $GPGSV field 3 — satellites in view
 
     ::LXMF::MessageStore* _message_store;
     std::vector<ConversationItem> _conversations;
