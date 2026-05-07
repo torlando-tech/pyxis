@@ -232,7 +232,12 @@ void ConversationListScreen::refresh() {
         ConversationItem item;
         item.peer_hash = peer_hash;
 
-        // Try to get display name from app_data, fall back to hash
+        // Resolve display name in three tiers:
+        //   1. Live announce cache (Identity::recall_app_data) — fresh
+        //   2. MessageStore-persisted name — survives reboots
+        //   3. Truncated hash — last resort
+        // When (1) succeeds, also write through to the persisted cache
+        // so future cold boots get (2) immediately.
         bool resolved = false;
         Bytes app_data = Identity::recall_app_data(peer_hash);
         if (app_data && app_data.size() > 0) {
@@ -240,13 +245,21 @@ void ConversationListScreen::refresh() {
             if (display_name.length() > 0) {
                 item.peer_name = display_name;
                 resolved = true;
-            } else {
-                item.peer_name = truncate_hash(peer_hash);
+                if (_message_store) {
+                    _message_store->set_display_name(
+                        peer_hash, std::string(display_name.c_str()));
+                }
             }
-        } else {
-            item.peer_name = truncate_hash(peer_hash);
+        }
+        if (!resolved && _message_store) {
+            std::string cached = _message_store->get_display_name(peer_hash);
+            if (!cached.empty()) {
+                item.peer_name = String(cached.c_str());
+                resolved = true;
+            }
         }
         if (!resolved) {
+            item.peer_name = truncate_hash(peer_hash);
             _has_unresolved_names = true;
         }
 
@@ -705,10 +718,25 @@ void ConversationListScreen::on_delete_confirmed(lv_event_t* event) {
 
 String ConversationListScreen::format_timestamp(uint32_t timestamp) {
     double now = Utilities::OS::time();
+
+    // If our local clock hasn't been set (no GPS lock yet, no NTP) it's
+    // running off uptime in seconds — way smaller than any real
+    // unix-epoch timestamp from a properly-clocked peer. The legacy
+    // "diff < 0 → Future" branch then mis-fires on every message,
+    // because every message looks like it's from the future.
+    //
+    // Threshold: 2024-01-01 UTC = 1704067200. Anything less than that
+    // means we don't have real time. Show "?" rather than confusing the
+    // user with "Future" on every row.
+    constexpr double SANE_EPOCH = 1704067200.0;
+    if (now < SANE_EPOCH) {
+        return "?";  // Local clock not yet synced
+    }
+
     double diff = now - (double)timestamp;
 
     if (diff < 0) {
-        return "Future";  // Clock not synced or future timestamp
+        return "Future";  // Genuine future timestamp (peer's clock is off)
     } else if (diff < 60) {
         return "Just now";
     } else if (diff < 3600) {
