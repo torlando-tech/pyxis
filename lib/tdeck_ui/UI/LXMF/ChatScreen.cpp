@@ -168,14 +168,26 @@ void ChatScreen::load_conversation(const Bytes& peer_hash, ::LXMF::MessageStore&
         INFO(log_buf);
     }
 
-    // Try to get display name from app_data
+    // Three-tier display name resolution (mirrors ConversationListScreen):
+    //   1. Live announce cache (Identity::recall_app_data)
+    //   2. MessageStore-persisted name (survives reboots)
+    //   3. Truncated hash (last resort)
+    // When (1) hits, write through to the persistent cache so future
+    // cold boots get the name back without waiting for a re-announce.
     String peer_name;
     Bytes app_data = Identity::recall_app_data(peer_hash);
     if (app_data && app_data.size() > 0) {
         peer_name = parse_display_name(app_data);
+        if (peer_name.length() > 0) {
+            store.set_display_name(peer_hash, std::string(peer_name.c_str()));
+        }
     }
-
-    // Fall back to truncated hash if no display name
+    if (peer_name.length() == 0) {
+        std::string cached = store.get_display_name(peer_hash);
+        if (!cached.empty()) {
+            peer_name = String(cached.c_str());
+        }
+    }
     if (peer_name.length() == 0) {
         char hash_buf[20];
         snprintf(hash_buf, sizeof(hash_buf), "%.12s...", peer_hash.toHex().c_str());
