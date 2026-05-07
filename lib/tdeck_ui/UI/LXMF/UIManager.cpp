@@ -8,6 +8,9 @@
 #include <lvgl.h>
 #include <Preferences.h>
 #include "Log.h"
+#ifdef PYXIS_TEST_HOOKS
+#include "pyxis_test_hooks.h"
+#endif
 #include "Tone.h"
 #include "../LVGL/LVGLLock.h"
 #include "lxst_audio.h"
@@ -742,6 +745,10 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
     std::string source_hex = message.source_hash().toHex().substr(0, 8);
     std::string msg = "Message received from " + source_hex + "...";
     INFO(msg.c_str());
+
+#ifdef PYXIS_TEST_HOOKS
+    pyxis_test_hook_record_rx(message);
+#endif
 
     // Pre-graft: RNS::Identity::mark_persistent — fork-only. See note above.
     // (void)RNS::Identity::mark_persistent(message.source_hash());
