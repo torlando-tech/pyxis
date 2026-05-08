@@ -116,19 +116,21 @@ static void empty_input_does_not_crash() {
 
 static void dc_offset_attenuated_by_hpf() {
     VoiceFilterChain chain(1, HP_CUT, LP_CUT, AGC_TARGET_DB, AGC_MAX_GAIN_DB);
-    // Constant non-zero bias. NOTE: this filter chain does *not* fully remove
-    // DC — the 1-pole HPF as currently written degenerates to a fixed gain
-    // (alpha*x) for any constant input, identical to upstream LXST-kt's
-    // native_audio_filters.cpp. The AGC then pulls the residual down toward
-    // its target level. We assert "much smaller than input", not "zero".
-    // See https://github.com/torlando-tech/LXST-kt/issues/13 — HPF formula
-    // does not actually high-pass; it scales by alpha (~0.81 at 300Hz/8kHz).
-    // Tighten this assertion to `< 0.01` once the upstream fix lands.
+    // Constant DC bias. With a CORRECT 1-pole RC HPF
+    // (y[n] = α(y[n-1] + x[n] - x[n-1])), DC drives x[n]-x[n-1] = 0
+    // forever and the output decays to zero exponentially. After the
+    // settling region we should see tail RMS effectively at the
+    // noise floor.
+    //
+    // Pre-2026 the formula degenerated to y[n] = α·x[n] (constant
+    // gain) because the loop fed the previous OUTPUT as
+    // "previous input". DC sailed through; AGC pulled the residual
+    // toward target. See project_lxst_hpf_filter_bug.md and
+    // https://github.com/torlando-tech/LXST-kt/issues/13.
     std::vector<int16_t> samples(8000, 8000);   // 1s of 0.244 DC (in float terms)
-    double in_rms = 8000.0 / 32768.0;
     chain.process(samples.data(), (int)samples.size(), SR);
     double tail_rms = rms(samples, 4000);
-    EXPECT_TRUE(tail_rms < in_rms * 0.5);   // at least 2x attenuation, in practice ~4x
+    EXPECT_TRUE(tail_rms < 0.01);  // True HPF: DC fully decayed to noise floor.
 }
 
 static void low_freq_below_hpf_attenuated() {
