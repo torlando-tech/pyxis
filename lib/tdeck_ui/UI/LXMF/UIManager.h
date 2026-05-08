@@ -180,6 +180,44 @@ public:
      */
     void on_message_failed(::LXMF::LXMessage& message);
 
+#ifdef PYXIS_TEST_HOOKS
+    /**
+     * Test-only API surface for the soak / LXST harness. None of these
+     * are reachable from the UI; they're called from the T:CALL serial
+     * commands defined in main.cpp under PYXIS_TEST_HOOKS.
+     */
+
+    /** Initiate an outgoing call to peer (calls private call_initiate). */
+    void test_call_initiate(const RNS::Bytes& peer_hash) { call_initiate(peer_hash); }
+
+    /** Hang up the active call (calls private call_hangup). */
+    void test_call_hangup() { call_hangup(); }
+
+    /**
+     * String name of the current call state, eg "IDLE", "ACTIVE",
+     * "INCOMING_RINGING". Stable for harness assertions.
+     */
+    const char* test_call_state_name() const;
+
+    /** Number of audio frames TX'd since the active call started. */
+    uint32_t test_call_audio_tx_count() const { return _call_audio_tx_count; }
+
+    /** Number of audio frames RX'd since the active call started. */
+    uint32_t test_call_audio_rx_count() const { return _call_audio_rx_count; }
+
+    /**
+     * QoS counters from the playback decode path. decode_ok counts
+     * successful Codec2 decodes; decode_fail counts decode errors
+     * (malformed frame, bad mode header, codec internal error).
+     * Together they validate wire-level audio fidelity. Reset by
+     * call_initiate; the harness samples them after ACTIVE.
+     *
+     * Defined in UIManager.cpp (LXSTAudio is forward-declared here).
+     */
+    uint32_t test_call_decode_ok() const;
+    uint32_t test_call_decode_fail() const;
+#endif
+
 private:
     enum Screen {
         SCREEN_CONVERSATION_LIST,

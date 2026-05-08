@@ -1685,6 +1685,19 @@ static void handle_test_hook_command(const String& line) {
         Serial.println(String("T:OK size=") + String((unsigned)app.size())
                        + " hex=" + app.toHex().c_str());
     }
+    else if (cmd == "T:HASIDENTITY") {
+        // T:HASIDENTITY <hex_dest> — boolean check whether pyxis has
+        // an identity cached for this destination hash. Distinct from
+        // T:RECALL which only inspects app_data (and "size=0" is
+        // ambiguous between "unknown" and "known with empty app_data").
+        // Required for harness pre-call wait — the announce_handler
+        // populates _known_destinations slightly after path_store, and
+        // T:HASPATH succeeding doesn't imply Identity::recall will.
+        RNS::Bytes dest = parse_hex_arg(args);
+        if (dest.size() != 16) { Serial.println("T:ERR bad hex"); return; }
+        RNS::Identity ident = RNS::Identity::recall(dest);
+        Serial.println(String("T:OK ") + (ident ? "1" : "0"));
+    }
     else if (cmd == "T:SEND" || cmd == "T:SENDOPP") {
         if (!router) { Serial.println("T:ERR no router"); return; }
         int sp = args.indexOf(' ');
@@ -1792,6 +1805,57 @@ static void handle_test_hook_command(const String& line) {
         if (!router) { Serial.println("T:ERR no router"); return; }
         Serial.print("T:OK state=");
         Serial.println(String((unsigned)router->get_sync_state()));
+    }
+    else if (cmd == "T:CALL") {
+        // T:CALL <hex_dest> — initiate an outgoing LXST voice call.
+        // The state machine progresses asynchronously; harness should
+        // poll T:CALL_STATE for IDLE → ... → ACTIVE transitions.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        RNS::Bytes dest_hash = parse_hex_arg(args);
+        if (dest_hash.size() != 16) { Serial.println("T:ERR bad hex"); return; }
+        ui_manager->test_call_initiate(dest_hash);
+        Serial.println(String("T:OK calling=") + args);
+    }
+    else if (cmd == "T:CALL_STATE") {
+        // T:CALL_STATE — print the current call FSM state name.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        Serial.print("T:OK state=");
+        Serial.println(ui_manager->test_call_state_name());
+    }
+    else if (cmd == "T:CALL_HANGUP") {
+        // T:CALL_HANGUP — tear down the active call.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        ui_manager->test_call_hangup();
+        Serial.println("T:OK hung_up");
+    }
+    else if (cmd == "T:CALL_STATS") {
+        // T:CALL_STATS — return audio frame counters for the most recent
+        // call. tx = frames sent over the wire (encoded by capture path),
+        // rx = frames received and queued for playback (decoded). Both
+        // are reset on call_initiate.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        Serial.print("T:OK tx=");
+        Serial.print((unsigned long)ui_manager->test_call_audio_tx_count());
+        Serial.print(" rx=");
+        Serial.print((unsigned long)ui_manager->test_call_audio_rx_count());
+        Serial.print(" state=");
+        Serial.println(ui_manager->test_call_state_name());
+    }
+    else if (cmd == "T:CALL_QOS") {
+        // T:CALL_QOS — wire-level audio fidelity counters from the
+        // playback decode path. decode_ok = frames Codec2 successfully
+        // decoded into PCM; decode_fail = frames it rejected (bad mode
+        // header, corrupt subframe, internal codec error). With a
+        // well-behaved peer all received frames decode_ok and
+        // decode_fail stays 0 — a non-zero fail count points at
+        // the peer's encoder OR network corruption.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        Serial.print("T:OK decode_ok=");
+        Serial.print((unsigned long)ui_manager->test_call_decode_ok());
+        Serial.print(" decode_fail=");
+        Serial.print((unsigned long)ui_manager->test_call_decode_fail());
+        Serial.print(" state=");
+        Serial.println(ui_manager->test_call_state_name());
     }
     else {
         Serial.print("T:ERR unknown cmd ");

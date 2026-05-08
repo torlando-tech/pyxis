@@ -148,6 +148,16 @@ public:
     /** Number of decoded frames buffered for playback. */
     int playbackFramesBuffered() const;
 
+    /**
+     * Decode QoS counters surfaced from the playback path. See
+     * I2SPlayback::decodeOkCount() / decodeFailCount() for semantics.
+     * Used by the LXST harness to validate that the peer is sending
+     * well-formed Codec2 frames.
+     */
+    uint32_t playbackDecodeOk() const;
+    uint32_t playbackDecodeFail() const;
+    void playbackResetCounters();
+
 private:
     I2SCapture* capture_ = nullptr;
     I2SPlayback* playback_ = nullptr;
