@@ -272,23 +272,51 @@ void I2SCapture::captureLoop() {
                 int16_t* frameData = muted_.load(std::memory_order_relaxed)
                     ? silenceBuf_ : accumBuffer_;
 
-                // Test injection: overwrite the frame with a phase-
-                // continuous sine wave. Skips voice filters too — we
-                // want pure samples reaching the encoder.
+                // Test injection: overwrite the frame with a synthetic
+                // speech-like signal. Pure tones get mangled by Codec2
+                // (it's a SPEECH codec — pure-sine round-trip retains
+                // ~12% RMS). Three-formant sum approximates a voiced
+                // vowel: F1 (the freq arg, default 730Hz) + F2≈1.5·F1
+                // + F3≈3.3·F1 with a 120Hz amplitude envelope to
+                // emulate glottal pulses. Phase-continuous so the
+                // encoder never sees a discontinuity.
                 if (injectSine_.load(std::memory_order_relaxed)
                         && !muted_.load(std::memory_order_relaxed)) {
-                    int   freq = injectFreq_.load(std::memory_order_relaxed);
+                    int   f1 = injectFreq_.load(std::memory_order_relaxed);
                     int16_t peak = injectPeak_.load(std::memory_order_relaxed);
-                    float dphase = 2.0f * 3.14159265358979f * (float)freq
-                                   / (float)CODEC_SAMPLE_RATE;
+                    const float kTwoPi = 2.0f * 3.14159265358979f;
+                    const float dp1 = kTwoPi * (float)f1        / (float)CODEC_SAMPLE_RATE;
+                    const float dp2 = kTwoPi * (float)f1 * 1.5f / (float)CODEC_SAMPLE_RATE;
+                    const float dp3 = kTwoPi * (float)f1 * 3.3f / (float)CODEC_SAMPLE_RATE;
+                    const float dpe = kTwoPi * 120.0f           / (float)CODEC_SAMPLE_RATE;
+                    // Per-formant amplitude weights summing to ~1.0
+                    // before envelope gain, so peak output ≈ peak.
                     for (int s = 0; s < frameSamples_; ++s) {
-                        accumBuffer_[s] = (int16_t)(peak * sinf(injectPhase_));
-                        injectPhase_ += dphase;
+                        float env = 0.55f + 0.45f * sinf(injectEnvPhase_);
+                        float v = 0.55f * sinf(injectPhase_)
+                                + 0.30f * sinf(injectPhase2_)
+                                + 0.15f * sinf(injectPhase3_);
+                        v *= env;
+                        // Soft clip to int16 range
+                        int32_t sample = (int32_t)(peak * v);
+                        if (sample > 32767) sample = 32767;
+                        if (sample < -32768) sample = -32768;
+                        accumBuffer_[s] = (int16_t)sample;
+                        injectPhase_  += dp1;
+                        injectPhase2_ += dp2;
+                        injectPhase3_ += dp3;
+                        injectEnvPhase_ += dpe;
                     }
-                    // Wrap phase to keep it bounded
-                    while (injectPhase_ >= 2.0f * 3.14159265358979f) {
-                        injectPhase_ -= 2.0f * 3.14159265358979f;
-                    }
+                    // Bounded phase wrap so float precision stays sharp
+                    auto wrap = [](float& p) {
+                        const float kTwoPi = 2.0f * 3.14159265358979f;
+                        while (p >= kTwoPi) p -= kTwoPi;
+                        while (p < 0.0f)   p += kTwoPi;
+                    };
+                    wrap(injectPhase_);
+                    wrap(injectPhase2_);
+                    wrap(injectPhase3_);
+                    wrap(injectEnvPhase_);
                     frameData = accumBuffer_;
                 }
 
