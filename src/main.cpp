@@ -3,6 +3,8 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include <SD.h>
+#include <FS.h>
 #include <LittleFS.h>
 #include <Preferences.h>
 #include <time.h>

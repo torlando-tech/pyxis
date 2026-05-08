@@ -7,6 +7,7 @@
     "dependencies": {
         "Wire": "*",
         "tdeck_ui": "*",
-        "tone": "*"
+        "tone": "*",
+        "codec2": "*"
     }
 }
