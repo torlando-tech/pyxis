@@ -1830,6 +1830,17 @@ static void handle_test_hook_command(const String& line) {
         ui_manager->test_call_hangup();
         Serial.println("T:OK hung_up");
     }
+    else if (cmd == "T:CALL_ANSWER") {
+        // T:CALL_ANSWER — accept an incoming ring. Only valid when state
+        // is INCOMING_RINGING. Used by the harness for pyxis-as-callee
+        // interop tests against real LXST.Telephony.Telephone clients.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        if (!ui_manager->test_call_answer()) {
+            Serial.println("T:ERR not_ringing");
+            return;
+        }
+        Serial.println("T:OK answered");
+    }
     else if (cmd == "T:CALL_STATS") {
         // T:CALL_STATS — return audio frame counters for the most recent
         // call. tx = frames sent over the wire (encoded by capture path),
@@ -1862,6 +1873,27 @@ static void handle_test_hook_command(const String& line) {
         Serial.print((unsigned long long)ui_manager->test_call_pcm_sum_squares());
         Serial.print(" state=");
         Serial.println(ui_manager->test_call_state_name());
+    }
+    else if (cmd == "T:CALL_PROFILE") {
+        // T:CALL_PROFILE [hex] — get/set pyxis's preferred Codec2 profile.
+        // No arg: print current. With arg: set.
+        // Valid: 0x10 (ULBW/700C), 0x20 (VLBW/1600), 0x30 (LBW/3200).
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        if (args.length() == 0) {
+            int p = ui_manager->test_call_get_profile();
+            Serial.print("T:OK profile=0x");
+            if (p < 16) Serial.print("0");
+            Serial.println(String(p, HEX));
+            return;
+        }
+        int profile = (int)strtol(args.c_str(), nullptr, 0);
+        if (!ui_manager->test_call_set_profile(profile)) {
+            Serial.println("T:ERR unknown profile");
+            return;
+        }
+        Serial.print("T:OK profile=0x");
+        if (profile < 16) Serial.print("0");
+        Serial.println(String(profile, HEX));
     }
     else if (cmd == "T:CALL_INJECT") {
         // T:CALL_INJECT <on|off> [freq_hz] [amp_pct]
