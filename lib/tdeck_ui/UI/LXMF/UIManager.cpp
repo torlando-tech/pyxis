@@ -43,6 +43,20 @@ public:
 };
 static std::shared_ptr<LXSTAnnounceHandler> s_lxst_announce_handler;
 
+// Default preferred profile: Codec2-700C (ULBW). Sized to fit a LoRa
+// SF7-9 link with header overhead. T:CALL_PROFILE in the test hooks
+// changes this between calls.
+int UIManager::_preferred_profile = UIManager::LXST_PROFILE_ULBW;
+
+int UIManager::profile_to_codec2_mode(int profile) {
+    switch (profile) {
+        case LXST_PROFILE_ULBW: return CODEC2_MODE_700C;
+        case LXST_PROFILE_VLBW: return CODEC2_MODE_1600;
+        case LXST_PROFILE_LBW:  return CODEC2_MODE_3200;
+        default:                return -1;
+    }
+}
+
 UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::MessageStore& store)
     : _reticulum(reticulum), _router(router), _store(store),
       // Vanilla upstream RNS::Destination has no default ctor; construct in
@@ -955,6 +969,18 @@ void UIManager::test_call_set_inject_sine(bool enabled, int freq, float amp) {
     if (_lxst_audio) _lxst_audio->captureSetInjectSine(enabled, freq, amp);
 }
 
+bool UIManager::test_call_set_profile(int profile) {
+    if (profile_to_codec2_mode(profile) < 0) return false;
+    _preferred_profile = profile;
+    return true;
+}
+
+bool UIManager::test_call_answer() {
+    if (_call_state != CallState::INCOMING_RINGING) return false;
+    _call_answer_pending = true;
+    return true;
+}
+
 const char* UIManager::test_call_state_name() const {
     switch (_call_state) {
         case CallState::IDLE:               return "IDLE";
@@ -1215,12 +1241,12 @@ void UIManager::call_on_packet(const Bytes& data) {
         // Pyxis only supports Codec2, so respond with LBW (Codec2 3200bps).
         if (signal >= LXST_PREFERRED_PROFILE) {
             int remote_profile = signal - LXST_PREFERRED_PROFILE;
-            char dbg[64];
-            snprintf(dbg, sizeof(dbg), "LXST: Remote prefers profile 0x%02X, responding LBW (Codec2)",
-                     remote_profile);
+            char dbg[80];
+            snprintf(dbg, sizeof(dbg),
+                     "LXST: Remote prefers profile 0x%02X, responding 0x%02X",
+                     remote_profile, _preferred_profile);
             INFO(dbg);
-            // Send our preferred profile (LBW = Codec2 3200bps)
-            call_send_signal(LXST_PREFERRED_PROFILE + LXST_PROFILE_LBW);
+            call_send_signal(LXST_PREFERRED_PROFILE + _preferred_profile);
             return;
         }
 
@@ -1324,8 +1350,8 @@ void UIManager::call_process_signal(uint8_t signal) {
         case CallState::WAIT_RINGING:
             if (signal == LXST_STATUS_RINGING) {
                 INFO("LXST: Remote is ringing");
-                // Tell remote we need Codec2 (LBW = 3200bps)
-                call_send_signal(LXST_PREFERRED_PROFILE + LXST_PROFILE_LBW);
+                // Tell remote our preferred profile (default ULBW = Codec2-700C)
+                call_send_signal(LXST_PREFERRED_PROFILE + _preferred_profile);
                 _call_state = CallState::RINGING;
                 _call_timeout_ms = millis() + 60000;
                 _call_screen->set_state(CallScreen::CallState::RINGING);
@@ -1341,11 +1367,13 @@ void UIManager::call_process_signal(uint8_t signal) {
                 _call_state = CallState::CONNECTING;
                 lxst_breadcrumb(20, ESP.getFreeHeap());
 
+                int codec_mode = profile_to_codec2_mode(_preferred_profile);
+                if (codec_mode < 0) codec_mode = CODEC2_MODE_700C;
                 if (!_lxst_audio) {
                     _lxst_audio = new LXSTAudio();
                 }
                 lxst_breadcrumb(21, ESP.getFreeHeap());
-                if (!_lxst_audio->init(CODEC2_MODE_3200)) {
+                if (!_lxst_audio->init(codec_mode)) {
                     WARNING("LXST: Audio init failed");
                     call_ended();
                     return;
@@ -1364,9 +1392,11 @@ void UIManager::call_process_signal(uint8_t signal) {
                 _call_screen->set_state(CallScreen::CallState::ACTIVE);
                 lxst_breadcrumb(24, ESP.getFreeHeap());
 
+                int codec_mode = profile_to_codec2_mode(_preferred_profile);
+                if (codec_mode < 0) codec_mode = CODEC2_MODE_700C;
                 if (!_lxst_audio) {
                     _lxst_audio = new LXSTAudio();
-                    if (!_lxst_audio->init(CODEC2_MODE_3200)) {
+                    if (!_lxst_audio->init(codec_mode)) {
                         WARNING("LXST: Audio init failed");
                         call_ended();
                         return;
@@ -1730,10 +1760,14 @@ void UIManager::call_answer() {
         _lxst_audio = new LXSTAudio();
     }
     lxst_breadcrumb(31, ESP.getFreeHeap());
-    if (!_lxst_audio->init(CODEC2_MODE_3200)) {
-        WARNING("LXST: Audio init failed");
-        call_ended();
-        return;
+    {
+        int codec_mode = profile_to_codec2_mode(_preferred_profile);
+        if (codec_mode < 0) codec_mode = CODEC2_MODE_700C;
+        if (!_lxst_audio->init(codec_mode)) {
+            WARNING("LXST: Audio init failed");
+            call_ended();
+            return;
+        }
     }
     lxst_breadcrumb(32, ESP.getFreeHeap());
 
@@ -1743,8 +1777,9 @@ void UIManager::call_answer() {
     }
     lxst_breadcrumb(33, ESP.getFreeHeap());
 
-    // Send profile preference: LBW (Codec2 3200bps) — answerer sends last and "wins"
-    call_send_signal(LXST_PREFERRED_PROFILE + LXST_PROFILE_LBW);
+    // Send profile preference (default ULBW = Codec2-700C). Answerer
+    // sends last and wins.
+    call_send_signal(LXST_PREFERRED_PROFILE + _preferred_profile);
 
     // Send STATUS_ESTABLISHED
     call_send_signal(LXST_STATUS_ESTABLISHED);

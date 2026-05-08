@@ -194,6 +194,16 @@ public:
     void test_call_hangup() { call_hangup(); }
 
     /**
+     * Programmatic answer for incoming calls. Sets the same
+     * _call_answer_pending flag the UI button does so the main loop
+     * picks it up and runs call_answer() in its proper context. Used
+     * by the harness for pyxis-as-callee interop tests with real
+     * LXST.Telephony.Telephone clients (Sideband, MeshChatX). Returns
+     * true if there was an incoming ring to accept.
+     */
+    bool test_call_answer();
+
+    /**
      * String name of the current call state, eg "IDLE", "ACTIVE",
      * "INCOMING_RINGING". Stable for harness assertions.
      */
@@ -232,6 +242,15 @@ public:
      * bidirectional content-fidelity validation.
      */
     void test_call_set_inject_sine(bool enabled, int freq = 1000, float amp = 0.5f);
+
+    /**
+     * Get/set the preferred Codec2 profile pyxis advertises and uses
+     * for the next call. Valid values: LXST_PROFILE_ULBW (0x10,
+     * Codec2-700C, LoRa-friendly default), LXST_PROFILE_VLBW (0x20,
+     * Codec2-1600), LXST_PROFILE_LBW (0x30, Codec2-3200, used pre-2026).
+     */
+    int test_call_get_profile() const { return _preferred_profile; }
+    bool test_call_set_profile(int profile);
 #endif
 
 private:
@@ -311,8 +330,19 @@ private:
 
     // LXST profile negotiation
     static constexpr int LXST_PREFERRED_PROFILE = 0xFF;
+    static constexpr int LXST_PROFILE_ULBW      = 0x10;  // Codec2 700C  (~700 bps)  — LoRa-friendly default
     static constexpr int LXST_PROFILE_VLBW      = 0x20;  // Codec2 1600bps
     static constexpr int LXST_PROFILE_LBW       = 0x30;  // Codec2 3200bps
+
+    // The profile we ASK the remote for and CONFIGURE locally on every
+    // new call. Defaults to ULBW (Codec2-700C) since pyxis is targeted
+    // at LoRa where 3200 bps would saturate even SF7 BW125. Test
+    // harness can override via T:CALL_PROFILE.
+    static int _preferred_profile;
+
+    // Map profile byte to the Codec2 library mode constant
+    // (CODEC2_MODE_*). Returns -1 for unknown profiles.
+    static int profile_to_codec2_mode(int profile);
 
     enum class CallState {
         IDLE,
