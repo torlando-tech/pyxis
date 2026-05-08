@@ -107,26 +107,34 @@ void VoiceFilterChain::process(int16_t* samples, int numSamples, int sampleRate)
 }
 
 void VoiceFilterChain::applyHighPass(float* samples, int numFrames) {
+    // Single-pole RC HPF: y[n] = α · (y[n-1] + x[n] - x[n-1]).
+    //
+    // The pre-2026 implementation read `x[n-1]` from samples[prevIdx]
+    // — but that slot had been overwritten by `y[n-1]` in the previous
+    // iteration. Substituting that in collapses the formula to
+    // y[n] = α · (y[n-1] + x[n] - y[n-1]) = α · x[n] — a constant
+    // gain, not a high-pass response. DC offsets sailed through and
+    // the chain only kept signals reasonable because the AGC stage
+    // downstream pulled everything toward target. Documented in the
+    // vault at project_lxst_hpf_filter_bug.md (filed upstream as
+    // LXST-kt#13).
+    //
+    // Fix: walk per-channel with explicit `xPrev` / `yPrev` variables
+    // so we track the input history correctly.
     float alpha = hp_.alpha;
-
     for (int ch = 0; ch < channels_; ++ch) {
-        float inputDiff = samples[ch] - hp_.lastInputs[ch];
-        samples[ch] = alpha * (hp_.filterStates[ch] + inputDiff);
-    }
-
-    for (int i = 1; i < numFrames; ++i) {
-        for (int ch = 0; ch < channels_; ++ch) {
+        float xPrev = hp_.lastInputs[ch];
+        float yPrev = hp_.filterStates[ch];
+        for (int i = 0; i < numFrames; ++i) {
             int idx = i * channels_ + ch;
-            int prevIdx = (i - 1) * channels_ + ch;
-            float inputDiff = samples[idx] - samples[prevIdx];
-            samples[idx] = alpha * (samples[prevIdx] + inputDiff);
+            float xCur = samples[idx];
+            float yCur = alpha * (yPrev + xCur - xPrev);
+            samples[idx] = yCur;
+            xPrev = xCur;
+            yPrev = yCur;
         }
-    }
-
-    for (int ch = 0; ch < channels_; ++ch) {
-        int lastIdx = (numFrames - 1) * channels_ + ch;
-        hp_.filterStates[ch] = samples[lastIdx];
-        hp_.lastInputs[ch] = samples[lastIdx];
+        hp_.filterStates[ch] = yPrev;
+        hp_.lastInputs[ch] = xPrev;  // x[n-1] for next chunk's first sample
     }
 }
 
