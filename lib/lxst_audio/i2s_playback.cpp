@@ -161,8 +161,10 @@ bool I2SPlayback::writeEncodedPacket(const uint8_t* data, int length) {
     int decodedSamples = codec_->decode(data, length, decodeBuf_, decodeBufSize_);
     if (decodedSamples <= 0) {
         Serial.printf("[PLAY] Decode FAIL: in=%d buf=%d\n", length, decodeBufSize_);
+        decodeFailCount_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
+    decodeOkCount_.fetch_add(1, std::memory_order_relaxed);
 
     // Write decoded PCM to ring buffer one frame at a time
     // (ring buffer only accepts exactly frameSamples_ per write)

@@ -934,6 +934,31 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
     lxst_breadcrumb(7, ESP.getFreeHeap());
 }
 
+#ifdef PYXIS_TEST_HOOKS
+uint32_t UIManager::test_call_decode_ok() const {
+    return _lxst_audio ? _lxst_audio->playbackDecodeOk() : 0;
+}
+
+uint32_t UIManager::test_call_decode_fail() const {
+    return _lxst_audio ? _lxst_audio->playbackDecodeFail() : 0;
+}
+
+const char* UIManager::test_call_state_name() const {
+    switch (_call_state) {
+        case CallState::IDLE:               return "IDLE";
+        case CallState::PATH_REQUESTING:    return "PATH_REQUESTING";
+        case CallState::LINK_ESTABLISHING:  return "LINK_ESTABLISHING";
+        case CallState::WAIT_AVAILABLE:     return "WAIT_AVAILABLE";
+        case CallState::WAIT_RINGING:       return "WAIT_RINGING";
+        case CallState::RINGING:            return "RINGING";
+        case CallState::INCOMING_RINGING:   return "INCOMING_RINGING";
+        case CallState::CONNECTING:         return "CONNECTING";
+        case CallState::ACTIVE:             return "ACTIVE";
+    }
+    return "UNKNOWN";
+}
+#endif
+
 void UIManager::call_hangup() {
     INFO("LXST: Hanging up");
 

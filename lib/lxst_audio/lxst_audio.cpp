@@ -352,4 +352,18 @@ int LXSTAudio::playbackFramesBuffered() const {
     return playback_->bufferedFrames();
 }
 
+uint32_t LXSTAudio::playbackDecodeOk() const {
+    if (!playback_) return 0;
+    return playback_->decodeOkCount();
+}
+
+uint32_t LXSTAudio::playbackDecodeFail() const {
+    if (!playback_) return 0;
+    return playback_->decodeFailCount();
+}
+
+void LXSTAudio::playbackResetCounters() {
+    if (playback_) playback_->resetCounters();
+}
+
 #endif // ARDUINO
