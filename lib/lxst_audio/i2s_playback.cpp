@@ -166,6 +166,17 @@ bool I2SPlayback::writeEncodedPacket(const uint8_t* data, int length) {
     }
     decodeOkCount_.fetch_add(1, std::memory_order_relaxed);
 
+    // Tally PCM energy for RMS-based QoS (LXST harness gates on this).
+    // Sum-of-squares uses uint64 so int16² ≤ 2³⁰ adds for ~2³⁴ frames
+    // before overflow — far longer than any test call.
+    uint64_t sumsq = 0;
+    for (int s = 0; s < decodedSamples; ++s) {
+        int32_t v = decodeBuf_[s];
+        sumsq += (uint64_t)(v * v);
+    }
+    pcmSampleCount_.fetch_add((uint32_t)decodedSamples, std::memory_order_relaxed);
+    pcmSumSquares_.fetch_add(sumsq, std::memory_order_relaxed);
+
     // Write decoded PCM to ring buffer one frame at a time
     // (ring buffer only accepts exactly frameSamples_ per write)
     int numFrames = decodedSamples / frameSamples_;

@@ -943,6 +943,18 @@ uint32_t UIManager::test_call_decode_fail() const {
     return _lxst_audio ? _lxst_audio->playbackDecodeFail() : 0;
 }
 
+uint32_t UIManager::test_call_pcm_sample_count() const {
+    return _lxst_audio ? _lxst_audio->playbackPcmSampleCount() : 0;
+}
+
+uint64_t UIManager::test_call_pcm_sum_squares() const {
+    return _lxst_audio ? _lxst_audio->playbackPcmSumSquares() : 0;
+}
+
+void UIManager::test_call_set_inject_sine(bool enabled, int freq, float amp) {
+    if (_lxst_audio) _lxst_audio->captureSetInjectSine(enabled, freq, amp);
+}
+
 const char* UIManager::test_call_state_name() const {
     switch (_call_state) {
         case CallState::IDLE:               return "IDLE";

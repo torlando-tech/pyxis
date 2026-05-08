@@ -1845,17 +1845,53 @@ static void handle_test_hook_command(const String& line) {
         // T:CALL_QOS — wire-level audio fidelity counters from the
         // playback decode path. decode_ok = frames Codec2 successfully
         // decoded into PCM; decode_fail = frames it rejected (bad mode
-        // header, corrupt subframe, internal codec error). With a
-        // well-behaved peer all received frames decode_ok and
-        // decode_fail stays 0 — a non-zero fail count points at
-        // the peer's encoder OR network corruption.
+        // header, corrupt subframe, internal codec error). pcm_n /
+        // pcm_ss = sample count + cumulative sum-of-squares the harness
+        // divides into RMS for content-level validation. With a peer
+        // injecting a 1kHz sine at peak P the expected RMS = P/√2.
         if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
         Serial.print("T:OK decode_ok=");
         Serial.print((unsigned long)ui_manager->test_call_decode_ok());
         Serial.print(" decode_fail=");
         Serial.print((unsigned long)ui_manager->test_call_decode_fail());
+        Serial.print(" pcm_n=");
+        Serial.print((unsigned long)ui_manager->test_call_pcm_sample_count());
+        Serial.print(" pcm_ss=");
+        Serial.print((unsigned long long)ui_manager->test_call_pcm_sum_squares());
         Serial.print(" state=");
         Serial.println(ui_manager->test_call_state_name());
+    }
+    else if (cmd == "T:CALL_INJECT") {
+        // T:CALL_INJECT <on|off> [freq_hz] [amp_pct]
+        // Replace mic capture with a synthesized sine wave for the
+        // active call (bypasses ES7210 + voice filters). The bot
+        // decodes pyxis's audio packets and computes RMS over the
+        // decoded PCM — should match the expected sine energy.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        int sp = args.indexOf(' ');
+        String on_off = (sp < 0) ? args : args.substring(0, sp);
+        bool enabled = (on_off == "on" || on_off == "1" || on_off == "true");
+        int freq = 1000;
+        float amp = 0.5f;
+        if (sp >= 0) {
+            String rest = args.substring(sp + 1);
+            int sp2 = rest.indexOf(' ');
+            if (sp2 < 0) {
+                freq = rest.toInt();
+            } else {
+                freq = rest.substring(0, sp2).toInt();
+                amp = rest.substring(sp2 + 1).toFloat();
+            }
+            if (freq <= 0) freq = 1000;
+            if (amp <= 0.f || amp > 1.f) amp = 0.5f;
+        }
+        ui_manager->test_call_set_inject_sine(enabled, freq, amp);
+        Serial.print("T:OK inject=");
+        Serial.print(enabled ? "on" : "off");
+        Serial.print(" freq=");
+        Serial.print(freq);
+        Serial.print(" amp=");
+        Serial.println(amp, 3);
     }
     else {
         Serial.print("T:ERR unknown cmd ");

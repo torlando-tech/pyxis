@@ -75,9 +75,23 @@ public:
      */
     uint32_t decodeOkCount() const { return decodeOkCount_.load(std::memory_order_relaxed); }
     uint32_t decodeFailCount() const { return decodeFailCount_.load(std::memory_order_relaxed); }
+
+    /**
+     * PCM energy on the decoded audio. pcmSampleCount() = total int16
+     * samples produced by the decoder; pcmSumSquares() = sum of each
+     * sample squared (uint64). The harness divides + sqrts to get
+     * RMS. The peer is expected to send a 1kHz sine via its
+     * setInjectSine path; pyxis's RMS should match the expected sine
+     * energy ≈ peak / sqrt(2). For peak=16384 expected RMS ≈ 11585.
+     */
+    uint32_t pcmSampleCount() const { return pcmSampleCount_.load(std::memory_order_relaxed); }
+    uint64_t pcmSumSquares() const { return pcmSumSquares_.load(std::memory_order_relaxed); }
+
     void resetCounters() {
         decodeOkCount_.store(0, std::memory_order_relaxed);
         decodeFailCount_.store(0, std::memory_order_relaxed);
+        pcmSampleCount_.store(0, std::memory_order_relaxed);
+        pcmSumSquares_.store(0, std::memory_order_relaxed);
     }
 
     /** Release playback buffers (does NOT destroy the shared codec). */
@@ -98,6 +112,10 @@ private:
     // QoS counters incremented on each writeEncodedPacket call.
     std::atomic<uint32_t> decodeOkCount_{0};
     std::atomic<uint32_t> decodeFailCount_{0};
+    // PCM energy accumulators — fed from the decoded buffer after
+    // each successful decode. Used by the harness to compute RMS.
+    std::atomic<uint32_t> pcmSampleCount_{0};
+    std::atomic<uint64_t> pcmSumSquares_{0};
 
     // Decode buffer for incoming encoded packets
     int16_t* decodeBuf_ = nullptr;

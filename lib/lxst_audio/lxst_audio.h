@@ -156,7 +156,12 @@ public:
      */
     uint32_t playbackDecodeOk() const;
     uint32_t playbackDecodeFail() const;
+    uint32_t playbackPcmSampleCount() const;
+    uint64_t playbackPcmSumSquares() const;
     void playbackResetCounters();
+
+    /** Test-injection passthrough to I2SCapture::setInjectSine. */
+    void captureSetInjectSine(bool enabled, int freq = 1000, float amp = 0.5f);
 
 private:
     I2SCapture* capture_ = nullptr;
