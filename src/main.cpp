@@ -199,6 +199,7 @@ extern "C" void pyxis_log(const char* msg) {
 
 // Forward declarations
 void start_tcp_interface();
+void on_wifi_connected();
 
 // Screen timeout
 bool screen_off = false;
@@ -511,57 +512,80 @@ void setup_wifi() {
     WiFi.mode(WIFI_STA);
     WiFi.begin(app_settings.wifi_ssid.c_str(), app_settings.wifi_password.c_str());
 
+    // Don't block boot waiting for WiFi association — the main loop
+    // already sets up TCP and does NTP sync once WL_CONNECTED is
+    // observed (search for `last_wifi_connected`). Give association
+    // ~1s in case it lands fast (so we can do NTP+TCP synchronously
+    // when possible), then continue.
     BOOT_PROFILE_WAIT_START("wifi_connect");
     uint32_t start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 30000) {
-        delay(500);
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 1000) {
+        delay(50);
         Serial.print(".");
     }
     Serial.println();
     BOOT_PROFILE_WAIT_END("wifi_connect");
 
     if (WiFi.status() == WL_CONNECTED) {
-        INFO("WiFi connected!");
-        msg = "  IP address: " + WiFi.localIP().toString();
-        INFO(msg.c_str());
-        msg = "  RSSI: " + String(WiFi.RSSI()) + " dBm";
-        INFO(msg.c_str());
+        on_wifi_connected();
+    } else {
+        INFO("WiFi association deferred — main-loop event handler will "
+             "do NTP/OTA/UDP setup when the connect lands");
+    }
+}
 
-        // Try GPS time sync first (if GPS is initialized and we haven't synced already)
-        if (!gps_time_synced) {
-            // Fallback to NTP if GPS didn't work
-            INFO("Syncing time via NTP (GPS not available)...");
+// One-shot post-WiFi-connect setup. Runs the first time WL_CONNECTED is
+// observed — either at boot (via setup_wifi) or after async association
+// completes (via the periodic-status-check branch in loop()). Pulls
+// NTP, OTA, and UDP logging out of setup_wifi so the boot fast-path
+// (no synchronous WiFi wait) doesn't lose them.
+static bool _wifi_post_connect_done = false;
+void on_wifi_connected() {
+    if (_wifi_post_connect_done) return;
+    _wifi_post_connect_done = true;
 
-            // Use configTzTime for proper timezone handling on ESP32
-            // Eastern Time: EST5EDT = UTC-5, DST starts 2nd Sunday March, ends 1st Sunday Nov
-            configTzTime("EST5EDT,M3.2.0,M11.1.0", "pool.ntp.org", "time.nist.gov");
+    INFO("WiFi connected!");
+    String msg = "  IP address: " + WiFi.localIP().toString();
+    INFO(msg.c_str());
+    msg = "  RSSI: " + String(WiFi.RSSI()) + " dBm";
+    INFO(msg.c_str());
 
-            // Wait for time to be set (max 10 seconds)
-            struct tm timeinfo;
-            int retry = 0;
-            while (!getLocalTime(&timeinfo) && retry < 20) {
-                delay(500);
-                retry++;
-            }
+    // Try GPS time sync first (if GPS is initialized and we haven't synced already)
+    if (!gps_time_synced) {
+        // Fallback to NTP if GPS didn't work
+        INFO("Syncing time via NTP (GPS not available)...");
 
-            if (retry < 20) {
-                // Set the time offset for Utilities::OS::time()
-                time_t now = time(nullptr);
-                uint64_t uptime_ms = millis();
-                uint64_t unix_ms = (uint64_t)now * 1000;
-                RNS::Utilities::OS::setTimeOffset(unix_ms - uptime_ms);
+        // Use configTzTime for proper timezone handling on ESP32
+        // Eastern Time: EST5EDT = UTC-5, DST starts 2nd Sunday March, ends 1st Sunday Nov
+        configTzTime("EST5EDT,M3.2.0,M11.1.0", "pool.ntp.org", "time.nist.gov");
 
-                char time_str[64];
-                strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S %Z", &timeinfo);
-                msg = "  NTP time synced: " + String(time_str);
-                INFO(msg.c_str());
-            } else {
-                WARNING("NTP time sync failed!");
-            }
-        } else {
-            INFO("Time already synced via GPS");
+        // Wait for time to be set (max 10 seconds)
+        struct tm timeinfo;
+        int retry = 0;
+        while (!getLocalTime(&timeinfo) && retry < 20) {
+            delay(500);
+            retry++;
         }
 
+        if (retry < 20) {
+            // Set the time offset for Utilities::OS::time()
+            time_t now = time(nullptr);
+            uint64_t uptime_ms = millis();
+            uint64_t unix_ms = (uint64_t)now * 1000;
+            RNS::Utilities::OS::setTimeOffset(unix_ms - uptime_ms);
+
+            char time_str[64];
+            strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S %Z", &timeinfo);
+            msg = "  NTP time synced: " + String(time_str);
+            INFO(msg.c_str());
+        } else {
+            WARNING("NTP time sync failed!");
+        }
+    } else {
+        INFO("Time already synced via GPS");
+    }
+
+    {
         // Initialize ArduinoOTA for wireless flashing
         ArduinoOTA.setHostname("pyxis-tdeck");
         ArduinoOTA.onStart([]() {
@@ -635,8 +659,6 @@ void setup_wifi() {
             }
         });
         INFO("UDP log broadcasting on port 9999");
-    } else {
-        ERROR("WiFi connection failed!");
     }
 }
 
@@ -692,17 +714,8 @@ void setup_lvgl_and_ui() {
     lv_obj_set_style_bg_opa(lv_scr_act(), LV_OPA_COVER, 0);
 
     INFO("LVGL initialized");
-
-    // Start LVGL on its own FreeRTOS task for responsive UI
-    // Core 1, priority 1 (same as loopTask — round-robin scheduling).
-    // Previously priority 2, but this starved loopTask of CPU time during
-    // heavy rendering, causing 30s WDT timeouts on loopTask.
-    if (!UI::LVGL::LVGLInit::start_task(1, 1)) {
-        ERROR("Failed to start LVGL task!");
-        while (1) delay(1000);
-    }
-
-    INFO("LVGL task started on core 1");
+    INFO("LVGL task start deferred until UI manager is ready "
+         "(splash stays visible until first real frame)");
 
     // Initialize memory monitoring (if enabled)
 #ifdef MEMORY_INSTRUMENTATION_ENABLED
@@ -1315,14 +1328,20 @@ void setup() {
     load_app_settings();
     BOOT_PROFILE_END("settings");
 
-    // Initialize GPS and try to sync time (before WiFi)
+    // Initialize GPS but DON'T block boot waiting for a fix. The 15s
+    // synchronous wait was 31% of boot on this hardware; GPS rarely
+    // cold-starts in 15s anyway, so we'd usually just eat the full
+    // timeout. Keep a small (500ms) opportunistic check in case GPS
+    // already has a fix from before the boot (warm restart). After
+    // boot, the main loop's per-tick gps.encode + a periodic
+    // try_gps_sync retry will pick up the time the moment it lands.
     BOOT_PROFILE_START("gps");
     setup_gps();
     if (app_settings.gps_time_sync) {
         INFO("\n=== Time Synchronization ===");
         BOOT_PROFILE_WAIT_START("gps_sync");
-        if (!sync_time_from_gps(15000)) {  // 15 second timeout for GPS
-            INFO("GPS time sync not available, will try NTP after WiFi");
+        if (!sync_time_from_gps(500)) {  // brief warm-restart check only
+            INFO("GPS time sync deferred (will retry async)");
         }
         BOOT_PROFILE_WAIT_END("gps_sync");
     } else {
@@ -1330,7 +1349,13 @@ void setup() {
     }
     BOOT_PROFILE_END("gps");
 
-    // Initialize WiFi
+    // Initialize WiFi non-blocking. Previously we'd block boot up to
+    // 30s waiting for association; with a wrong password the device
+    // ate the full 30s and booted broken anyway. The main loop
+    // already handles "WiFi just associated" via the
+    // last_wifi_connected -> wifi_connected transition (sets up TCP
+    // interface and does NTP sync at that point), so blocking here
+    // adds nothing except boot latency.
     BOOT_PROFILE_START("wifi");
     setup_wifi();
     BOOT_PROFILE_END("wifi");
@@ -1409,6 +1434,22 @@ void setup() {
     BOOT_PROFILE_START("ui_manager");
     setup_ui_manager();
     BOOT_PROFILE_END("ui_manager");
+
+    // Now that UIManager has built screens and configured the active
+    // one, start the LVGL render task. Doing this any earlier means
+    // the LVGL task refreshes its empty default screen on top of the
+    // boot splash (visible flash to black), then later refreshes the
+    // real UI. Deferring keeps the splash on-screen until the first
+    // real frame.
+    //
+    // Core 1, priority 1 (same as loopTask — round-robin scheduling).
+    // Previously priority 2, but that starved loopTask of CPU time
+    // during heavy rendering, causing 30s WDT timeouts on loopTask.
+    if (!UI::LVGL::LVGLInit::start_task(1, 1)) {
+        ERROR("Failed to start LVGL task!");
+        while (1) delay(1000);
+    }
+    INFO("LVGL task started on core 1");
 
     // Send initial LXST voice destination announce
     if (ui_manager) {
@@ -1957,11 +1998,17 @@ void loop() {
     if (millis() - last_status_check > STATUS_CHECK_INTERVAL) {
         last_status_check = millis();
 
-        // Start TCP interface when WiFi becomes available
+        // Start TCP interface + run one-shot NTP/OTA/UDP setup when
+        // WiFi becomes available. on_wifi_connected is idempotent
+        // (guarded by _wifi_post_connect_done) so it's safe whether
+        // the connect happened during boot or here later.
         bool wifi_connected = (WiFi.status() == WL_CONNECTED);
-        if (wifi_connected && !last_wifi_connected && !tcp_interface_impl && app_settings.tcp_enabled) {
-            INFO("WiFi connected - starting TCP interface");
-            start_tcp_interface();
+        if (wifi_connected && !last_wifi_connected) {
+            INFO("WiFi connected (post-boot) — running on_wifi_connected");
+            on_wifi_connected();
+            if (!tcp_interface_impl && app_settings.tcp_enabled) {
+                start_tcp_interface();
+            }
         }
         last_wifi_connected = wifi_connected;
 
@@ -2009,6 +2056,22 @@ void loop() {
     // Read GPS data continuously (TinyGPSPlus needs constant feeding)
     while (GPSSerial.available() > 0) {
         gps.encode(GPSSerial.read());
+    }
+
+    // Async GPS time sync retry. We dropped the synchronous 15s wait
+    // from boot — instead, retry every 30s here until sync succeeds.
+    // This also gives a path to catch fixes that arrive after boot
+    // (warm starts, stationary cold starts, etc).
+    static uint32_t _gps_sync_last_attempt = 0;
+    if (!gps_time_synced
+            && app_settings.gps_time_sync
+            && millis() - _gps_sync_last_attempt > 30000) {
+        _gps_sync_last_attempt = millis();
+        if (gps.date.isValid() && gps.time.isValid() && gps.date.year() >= 2024) {
+            // Cheap path: TinyGPSPlus already has a valid timestamp,
+            // so sync_time_from_gps will return immediately.
+            sync_time_from_gps(0);
+        }
     }
 
     // Screen timeout handling
