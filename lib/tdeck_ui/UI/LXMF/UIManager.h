@@ -216,6 +216,22 @@ public:
      */
     uint32_t test_call_decode_ok() const;
     uint32_t test_call_decode_fail() const;
+
+    /**
+     * PCM energy on the decoded audio. Together with sample_count
+     * gives a running RMS for content-fidelity validation. Reset by
+     * call_initiate.
+     */
+    uint32_t test_call_pcm_sample_count() const;
+    uint64_t test_call_pcm_sum_squares() const;
+
+    /**
+     * Replace mic input with a synthesized sine for the active call.
+     * Bypasses ES7210 capture and the voice filter chain so the
+     * remote sees a clean tone. Used by the LXST harness for
+     * bidirectional content-fidelity validation.
+     */
+    void test_call_set_inject_sine(bool enabled, int freq = 1000, float amp = 0.5f);
 #endif
 
 private:

@@ -4,6 +4,7 @@
 #include "i2s_capture.h"
 
 #ifdef ARDUINO
+#include <cmath>  // sinf for setInjectSine sine generator
 #include <cstring>
 #include <driver/i2s.h>
 #include <esp_log.h>
@@ -271,8 +272,29 @@ void I2SCapture::captureLoop() {
                 int16_t* frameData = muted_.load(std::memory_order_relaxed)
                     ? silenceBuf_ : accumBuffer_;
 
-                // Apply voice filters
-                if (filtersEnabled_ && filterChain_ && !muted_.load(std::memory_order_relaxed)) {
+                // Test injection: overwrite the frame with a phase-
+                // continuous sine wave. Skips voice filters too — we
+                // want pure samples reaching the encoder.
+                if (injectSine_.load(std::memory_order_relaxed)
+                        && !muted_.load(std::memory_order_relaxed)) {
+                    int   freq = injectFreq_.load(std::memory_order_relaxed);
+                    int16_t peak = injectPeak_.load(std::memory_order_relaxed);
+                    float dphase = 2.0f * 3.14159265358979f * (float)freq
+                                   / (float)CODEC_SAMPLE_RATE;
+                    for (int s = 0; s < frameSamples_; ++s) {
+                        accumBuffer_[s] = (int16_t)(peak * sinf(injectPhase_));
+                        injectPhase_ += dphase;
+                    }
+                    // Wrap phase to keep it bounded
+                    while (injectPhase_ >= 2.0f * 3.14159265358979f) {
+                        injectPhase_ -= 2.0f * 3.14159265358979f;
+                    }
+                    frameData = accumBuffer_;
+                }
+
+                // Apply voice filters (skip if injecting test sine)
+                if (filtersEnabled_ && filterChain_ && !muted_.load(std::memory_order_relaxed)
+                        && !injectSine_.load(std::memory_order_relaxed)) {
                     filterChain_->process(frameData, frameSamples_, CODEC_SAMPLE_RATE);
                 }
 

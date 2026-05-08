@@ -54,6 +54,26 @@ public:
     void setMute(bool muted) { muted_.store(muted, std::memory_order_relaxed); }
     bool isMuted() const { return muted_.load(std::memory_order_relaxed); }
 
+    /**
+     * Test injection: replace mic input with a synthesized 1kHz sine
+     * wave. Bypasses both ES7210 capture and the voice filter chain
+     * so the encoder sees pure samples. Used by the LXST harness to
+     * validate audio quality across the call (peer's decoded RMS
+     * matches expected sine energy).
+     *
+     * @param enabled True to inject, false to use mic
+     * @param freq    Sine frequency in Hz (default 1000)
+     * @param amp     Amplitude as fraction of int16 max (0.0–1.0,
+     *                default 0.5 → ~16384 peak)
+     */
+    void setInjectSine(bool enabled, int freq = 1000, float amp = 0.5f) {
+        injectFreq_.store(freq, std::memory_order_relaxed);
+        int16_t peak = (int16_t)(32767.0f * (amp < 0.f ? 0.f : (amp > 1.f ? 1.f : amp)));
+        injectPeak_.store(peak, std::memory_order_relaxed);
+        injectSine_.store(enabled, std::memory_order_relaxed);
+    }
+    bool isInjectingSine() const { return injectSine_.load(std::memory_order_relaxed); }
+
     /** Check if currently capturing. */
     bool isCapturing() const { return capturing_.load(std::memory_order_relaxed); }
 
@@ -82,6 +102,17 @@ private:
     std::atomic<bool> capturing_{false};
     std::atomic<bool> muted_{false};
     void* taskHandle_ = nullptr;
+
+    // Test injection (see setInjectSine). When injectSine_ is true,
+    // the capture path replaces accumulated mic samples with a
+    // sine wave at injectFreq_ Hz, peak amplitude injectPeak_,
+    // before encoding. Phase is maintained across frames for
+    // continuity (no chunk-boundary discontinuities the encoder
+    // would have to spend bits on).
+    std::atomic<bool> injectSine_{false};
+    std::atomic<int> injectFreq_{1000};
+    std::atomic<int16_t> injectPeak_{16384};
+    float injectPhase_ = 0.0f;
 
     // Audio pipeline components
     Codec2Wrapper* codec_ = nullptr;  // Shared, not owned

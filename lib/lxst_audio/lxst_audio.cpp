@@ -366,4 +366,18 @@ void LXSTAudio::playbackResetCounters() {
     if (playback_) playback_->resetCounters();
 }
 
+uint32_t LXSTAudio::playbackPcmSampleCount() const {
+    if (!playback_) return 0;
+    return playback_->pcmSampleCount();
+}
+
+uint64_t LXSTAudio::playbackPcmSumSquares() const {
+    if (!playback_) return 0;
+    return playback_->pcmSumSquares();
+}
+
+void LXSTAudio::captureSetInjectSine(bool enabled, int freq, float amp) {
+    if (capture_) capture_->setInjectSine(enabled, freq, amp);
+}
+
 #endif // ARDUINO
