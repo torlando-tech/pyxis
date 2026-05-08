@@ -105,14 +105,19 @@ private:
 
     // Test injection (see setInjectSine). When injectSine_ is true,
     // the capture path replaces accumulated mic samples with a
-    // sine wave at injectFreq_ Hz, peak amplitude injectPeak_,
-    // before encoding. Phase is maintained across frames for
-    // continuity (no chunk-boundary discontinuities the encoder
-    // would have to spend bits on).
+    // synthetic speech-like signal: F1 sine at injectFreq_ Hz +
+    // F2 at 1.5·F1 + F3 at 3.3·F1, modulated by a 120 Hz
+    // amplitude envelope. Each formant has its own phase tracker
+    // so the encoder never sees a discontinuity. The signal
+    // approximates a voiced vowel — Codec2 retains far more RMS
+    // on this than on a pure tone.
     std::atomic<bool> injectSine_{false};
-    std::atomic<int> injectFreq_{1000};
+    std::atomic<int> injectFreq_{730};        // F1 default ≈ "a" formant
     std::atomic<int16_t> injectPeak_{16384};
-    float injectPhase_ = 0.0f;
+    float injectPhase_     = 0.0f;             // F1 phase
+    float injectPhase2_    = 0.0f;             // F2 phase
+    float injectPhase3_    = 0.0f;             // F3 phase
+    float injectEnvPhase_  = 0.0f;             // 120Hz amplitude env phase
 
     // Audio pipeline components
     Codec2Wrapper* codec_ = nullptr;  // Shared, not owned
