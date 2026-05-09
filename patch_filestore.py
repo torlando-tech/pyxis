@@ -2,12 +2,12 @@
 PlatformIO pre-build script: patches the libdeps copy of microStore
 FileStore.h before each build.
 
-Two purposes:
+Three purposes:
 
 1. Adds diagnostic printfs to `exists()` and `put()` for tracking down
    the path-table-store bug where exists() returns false right after a
    successful put for the same key. Temporary; remove once that
-   investigation is closed.
+   investigation is closed. Gated behind PYXIS_FILESTORE_DIAG=1.
 
 2. Silences the spammy "[ustore] get: key not found in index" print
    that fires on every path-table miss. RNS hits path-store lookups
@@ -15,6 +15,12 @@ Two purposes:
    that print floods USB CDC at hundreds of lines/sec, saturating the
    serial buffer and starving T:CALL_QOS responses (#75). The print
    is unconditional in upstream microStore, so we patch it out here.
+
+3. Closes `active_file` before unlinking segment files in
+   `finalize_compaction()` and `clear()`. Without this, on LittleFS
+   / FAT (any FS that doesn't auto-close on unlink) the FD leaks —
+   over enough compactions the device can't open new files. Local
+   patch pending the upstream fix landing.
 """
 Import("env")
 import os
@@ -57,6 +63,49 @@ PUT_NEW = """\t\tindex_insert(key, key_len, current_segment, offset, ts, ttl);
 SPAMMY_OLD = '\t\t\tprintf("[ustore] get: key not found in index\\n");'
 SPAMMY_NEW = '\t\t\t/* silenced — fires on every path-store miss, floods USB CDC */'
 
+# FD-leak fix: close active_file before unlinking segments. Two sites.
+FDLEAK_FINALIZE_OLD = """\tvoid finalize_compaction()
+\t{
+\t\tchar tmp_name[USTORE_MAX_FILENAME_LEN]; snprintf(tmp_name, sizeof(tmp_name), \"%s_compact.tmp\", base_prefix);
+\t\tchar seg0[USTORE_MAX_FILENAME_LEN];     segment_name(0, seg0);
+
+\t\t// Remove all existing segments, then rename tmp → seg0.
+\t\tfor (uint32_t i = 0; i < _segment_count; i++) {
+\t\t\tchar sname[USTORE_MAX_FILENAME_LEN]; segment_name(i, sname);
+\t\t\t_filesystem.remove(sname);
+\t\t}"""
+FDLEAK_FINALIZE_NEW = """\tvoid finalize_compaction()
+\t{
+\t\tchar tmp_name[USTORE_MAX_FILENAME_LEN]; snprintf(tmp_name, sizeof(tmp_name), \"%s_compact.tmp\", base_prefix);
+\t\tchar seg0[USTORE_MAX_FILENAME_LEN];     segment_name(0, seg0);
+
+\t\t// pyxis-local: close active_file before unlinking, otherwise the FD
+\t\t// leaks on LittleFS / FAT.
+\t\tif (active_file) active_file.close();
+
+\t\t// Remove all existing segments, then rename tmp → seg0.
+\t\tfor (uint32_t i = 0; i < _segment_count; i++) {
+\t\t\tchar sname[USTORE_MAX_FILENAME_LEN]; segment_name(i, sname);
+\t\t\t_filesystem.remove(sname);
+\t\t}"""
+
+FDLEAK_CLEAR_OLD = """\t\tif (index_file) index_file.close();
+
+\t\tfor(uint32_t i = 0; i < _segment_count; i++)
+\t\t{
+\t\t\tsegment_name(i,name);
+\t\t\t_filesystem.remove(name);
+\t\t}"""
+FDLEAK_CLEAR_NEW = """\t\tif (index_file) index_file.close();
+\t\t// pyxis-local: same active_file FD-leak fix as finalize_compaction().
+\t\tif (active_file) active_file.close();
+
+\t\tfor(uint32_t i = 0; i < _segment_count; i++)
+\t\t{
+\t\t\tsegment_name(i,name);
+\t\t\t_filesystem.remove(name);
+\t\t}"""
+
 DIAG_ENABLED = os.environ.get("PYXIS_FILESTORE_DIAG", "0") == "1"
 
 def patch(content):
@@ -67,6 +116,17 @@ def patch(content):
         print("PATCH: FileStore.h: silenced 'key not found in index' spam")
     elif "silenced — fires on every path-store miss" in content:
         print("PATCH: FileStore.h: 'key not found' spam already silenced")
+    # FD-leak fix always runs.
+    if FDLEAK_FINALIZE_OLD in out:
+        out = out.replace(FDLEAK_FINALIZE_OLD, FDLEAK_FINALIZE_NEW)
+        print("PATCH: FileStore.h: closed active_file in finalize_compaction()")
+    elif "pyxis-local: close active_file before unlinking" in content:
+        print("PATCH: FileStore.h: finalize_compaction() FD-leak fix already applied")
+    if FDLEAK_CLEAR_OLD in out:
+        out = out.replace(FDLEAK_CLEAR_OLD, FDLEAK_CLEAR_NEW)
+        print("PATCH: FileStore.h: closed active_file in clear()")
+    elif "pyxis-local: same active_file FD-leak fix" in content:
+        print("PATCH: FileStore.h: clear() FD-leak fix already applied")
     # Diagnostic patches only when explicitly requested.
     if not DIAG_ENABLED:
         return out
