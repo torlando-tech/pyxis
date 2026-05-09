@@ -201,6 +201,7 @@ extern "C" void pyxis_log(const char* msg) {
 
 // Forward declarations
 void start_tcp_interface();
+void start_auto_interface();
 void on_wifi_connected();
 
 // Screen timeout
@@ -831,21 +832,17 @@ void setup_reticulum() {
         INFO("LoRa interface disabled in settings");
     }
 
-    // Add Auto interface (if enabled and WiFi connected)
-    if (app_settings.auto_enabled && WiFi.status() == WL_CONNECTED) {
-        INFO("Initializing AutoInterface (IPv6 peer discovery)...");
-
-        auto_interface_impl = new AutoInterface("Auto");
-        auto_interface = new Interface(auto_interface_impl);
-
-        if (!auto_interface->start()) {
-            ERROR("Failed to initialize AutoInterface!");
+    // Add Auto interface (if enabled). Use the idempotent helper so
+    // on_wifi_connected can re-attempt if WiFi associates after this
+    // boot block runs (it usually does — wifi_connect typically
+    // takes 2-5s, well past where we are in boot).
+    if (app_settings.auto_enabled) {
+        if (WiFi.status() == WL_CONNECTED) {
+            start_auto_interface();
         } else {
-            INFO("AutoInterface started");
-            Transport::register_interface(*auto_interface);
+            WARNING("AutoInterface enabled but WiFi not connected - "
+                    "will retry from on_wifi_connected");
         }
-    } else if (app_settings.auto_enabled) {
-        WARNING("AutoInterface enabled but WiFi not connected - skipping");
     } else {
         INFO("AutoInterface disabled in settings");
     }
@@ -1242,6 +1239,37 @@ void setup_ui_manager() {
 
 // Create and start TCP interface, register with Transport.
 // Safe to call multiple times - no-op if interface already exists.
+// Idempotent AutoInterface starter. Call from both boot and the
+// post-WiFi handler — the boot path fires before WiFi finishes
+// associating, so the boot-time gate fails and AutoInterface
+// silently never starts. Mirroring start_tcp_interface()'s pattern
+// makes "UI shows AutoInterface enabled" actually take effect once
+// WiFi lands a few seconds later.
+void start_auto_interface() {
+    if (!app_settings.auto_enabled || WiFi.status() != WL_CONNECTED) {
+        return;
+    }
+    if (!auto_interface_impl) {
+        INFO("Initializing AutoInterface (IPv6 peer discovery)...");
+        auto_interface_impl = new AutoInterface("Auto");
+        auto_interface = new Interface(auto_interface_impl);
+        if (!auto_interface->start()) {
+            ERROR("Failed to initialize AutoInterface!");
+        } else {
+            INFO("AutoInterface started");
+            Transport::register_interface(*auto_interface);
+        }
+    } else if (!auto_interface->online()) {
+        // Interface exists but stopped (post-disconnect): restart.
+        INFO("Restarting AutoInterface (was stopped)...");
+        if (auto_interface->start()) {
+            INFO("AutoInterface restarted");
+        } else {
+            ERROR("AutoInterface restart failed!");
+        }
+    }
+}
+
 void start_tcp_interface() {
     if (!app_settings.tcp_enabled || WiFi.status() != WL_CONNECTED) {
         return;
@@ -2163,6 +2191,12 @@ void loop() {
             on_wifi_connected();
             if (!tcp_interface_impl && app_settings.tcp_enabled) {
                 start_tcp_interface();
+            }
+            // AutoInterface init at boot fails its WiFi-connected gate
+            // because WiFi typically associates 2-5s after the boot
+            // block runs. Retry here once WiFi actually lands.
+            if (!auto_interface_impl && app_settings.auto_enabled) {
+                start_auto_interface();
             }
         }
         last_wifi_connected = wifi_connected;
