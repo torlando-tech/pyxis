@@ -1655,6 +1655,17 @@ static void handle_test_hook_command(const String& line) {
         router->announce();
         Serial.println("T:OK announced");
     }
+    else if (cmd == "T:ANNLXST") {
+        // T:ANNLXST — force a fresh announce of the lxst.telephony
+        // destination. Required before pyxis-as-callee tests because
+        // the TCP-reconnect path at main.cpp:963 only announces LXMF;
+        // a brand-new boot ends up with the LXST destination absent
+        // from rnsd's cache, so the bot can resolve a path but the
+        // path doesn't actually route to pyxis.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        ui_manager->announce_lxst();
+        Serial.println("T:OK announced");
+    }
     else if (cmd == "T:PATHS") {
         const auto& path_table = RNS::Transport::get_path_table();
         Serial.print("T:OK count=");
@@ -1840,6 +1851,16 @@ static void handle_test_hook_command(const String& line) {
             return;
         }
         Serial.println("T:OK answered");
+    }
+    else if (cmd == "T:LXSTDEST") {
+        // T:LXSTDEST — pyxis's lxst.telephony destination hash. Used
+        // by the harness to set up pyxis-as-callee tests (the bot
+        // dials this hash). Returns "T:ERR not_ready" if the
+        // destination hasn't been registered yet (early boot).
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        std::string h = ui_manager->test_lxst_dest_hex();
+        if (h.empty()) { Serial.println("T:ERR not_ready"); return; }
+        Serial.println(String("T:OK ") + h.c_str());
     }
     else if (cmd == "T:CALL_STATS") {
         // T:CALL_STATS — return audio frame counters for the most recent

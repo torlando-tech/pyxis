@@ -203,6 +203,10 @@ public:
      */
     bool test_call_answer();
 
+    /** Pyxis's lxst.telephony destination hash, hex. Empty if the
+     *  LXST destination has not been registered yet (early boot). */
+    std::string test_lxst_dest_hex() const;
+
     /**
      * String name of the current call state, eg "IDLE", "ACTIVE",
      * "INCOMING_RINGING". Stable for harness assertions.
