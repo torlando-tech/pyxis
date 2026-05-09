@@ -431,17 +431,6 @@ void TCPClientInterface::extract_and_process_frames() {
 /*virtual*/ void TCPClientInterface::send_outgoing(const Bytes& data) {
     DEBUG(toString() + ".send_outgoing: data: " + std::to_string(data.size()) + " bytes");
 
-    // Log first 50 bytes of raw packet (before HDLC framing)
-    std::string hex_preview;
-    size_t preview_len = (data.size() < 50) ? data.size() : 50;
-    for (size_t i = 0; i < preview_len; ++i) {
-        char buf[4];
-        snprintf(buf, sizeof(buf), "%02x", data.data()[i]);
-        hex_preview += buf;
-    }
-    if (data.size() > 50) hex_preview += "...";
-    INFO("WIRE TX raw (" + std::to_string(data.size()) + " bytes): " + hex_preview);
-
     if (!_online) {
         DEBUG("TCPClientInterface: Not connected, cannot send");
         return;
@@ -451,16 +440,31 @@ void TCPClientInterface::extract_and_process_frames() {
         // Frame with HDLC
         Bytes framed = HDLC::frame(data);
 
-        // Log HDLC framed output for debugging
-        std::string framed_hex;
-        size_t flen = (framed.size() < 30) ? framed.size() : 30;
-        for (size_t i = 0; i < flen; ++i) {
-            char buf[4];
-            snprintf(buf, sizeof(buf), "%02x", framed.data()[i]);
-            framed_hex += buf;
+        // Wire-format dumps are protocol-debug only — re-enable by
+        // raising RNS log level to DEBUG. At INFO they fired ~10×/s
+        // during voice calls (pre + post HDLC, per packet) and
+        // saturated USB CDC, starving T:CALL_QOS responses.
+        if (RNS::loglevel() >= RNS::LOG_DEBUG) {
+            std::string hex_preview;
+            size_t preview_len = (data.size() < 50) ? data.size() : 50;
+            for (size_t i = 0; i < preview_len; ++i) {
+                char buf[4];
+                snprintf(buf, sizeof(buf), "%02x", data.data()[i]);
+                hex_preview += buf;
+            }
+            if (data.size() > 50) hex_preview += "...";
+            DEBUG("WIRE TX raw (" + std::to_string(data.size()) + " bytes): " + hex_preview);
+
+            std::string framed_hex;
+            size_t flen = (framed.size() < 30) ? framed.size() : 30;
+            for (size_t i = 0; i < flen; ++i) {
+                char buf[4];
+                snprintf(buf, sizeof(buf), "%02x", framed.data()[i]);
+                framed_hex += buf;
+            }
+            if (framed.size() > 30) framed_hex += "...";
+            DEBUG("WIRE TX framed (" + std::to_string(framed.size()) + " bytes): " + framed_hex);
         }
-        if (framed.size() > 30) framed_hex += "...";
-        INFO("WIRE TX framed (" + std::to_string(framed.size()) + " bytes): " + framed_hex);
 
 #ifdef ARDUINO
         size_t written = _client.write(framed.data(), framed.size());
