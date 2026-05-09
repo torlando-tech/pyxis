@@ -256,6 +256,24 @@ void AutoInterface::loop() {
     // Process incoming data packets
     process_data();
 
+    // Periodic stats heartbeat — visibility into TX/RX during peer
+    // discovery debugging. Without this it's hard to tell whether
+    // pyxis is sending at all, sending and getting blocked at the
+    // AP, or sending fine but rejecting the responses.
+    if (now - _last_stats_log >= 10.0) {
+        _last_stats_log = now;
+        char buf[160];
+        snprintf(buf, sizeof(buf),
+                 "AutoInterface: stats announce_tx=%lu tx_fail=%lu disc_rx=%lu disc_self=%lu data_rx=%lu peers=%u",
+                 (unsigned long)_stat_announce_sent,
+                 (unsigned long)_stat_announce_send_fail,
+                 (unsigned long)_stat_discovery_rx,
+                 (unsigned long)_stat_discovery_rx_self,
+                 (unsigned long)_stat_data_rx,
+                 (unsigned)_peers.size());
+        INFO(buf);
+    }
+
     // Check multicast echo timeout
     check_echo_timeout();
 
@@ -714,27 +732,37 @@ bool AutoInterface::setup_discovery_socket() {
         _if_index = netif_get_index(nif);
         INFO("AutoInterface: Using interface index " + std::to_string(_if_index) + " for multicast");
 
-        // Join the IPv6 multicast group using standard socket API
-        // This properly links the socket to receive multicast packets
+        // Join the IPv6 multicast group via standard socket API. On
+        // ESP-IDF this returns success but in practice doesn't always
+        // push the multicast hash into the WiFi MAC filter — incoming
+        // multicast frames get silently dropped at L2. Symptoms: pyxis
+        // sends fine, but its discovery socket never sees its own
+        // echo or any peer's announces. Workaround: ALSO call lwIP's
+        // mld6_joingroup_netif() directly, which goes through the
+        // netif's igmp_mac_filter and updates the chip filter.
         struct ipv6_mreq mreq;
         memcpy(&mreq.ipv6mr_multiaddr, &_multicast_address, sizeof(_multicast_address));
         mreq.ipv6mr_interface = _if_index;
 
-        if (setsockopt(_discovery_socket, IPPROTO_IPV6, IPV6_JOIN_GROUP, &mreq, sizeof(mreq)) < 0) {
-            WARNING("AutoInterface: Failed to join multicast group via setsockopt (errno=" +
-                    std::to_string(errno) + "), trying mld6 API");
-            // Fallback to lwIP mld6 API
-            ip6_addr_t mcast_addr;
-            memcpy(&mcast_addr.addr, &_multicast_address, sizeof(_multicast_address));
-            err_t err = mld6_joingroup_netif(nif, &mcast_addr);
-            if (err == ERR_OK) {
-                INFO("AutoInterface: Joined IPv6 multicast group via mld6 API: " + _multicast_address_str);
-            } else {
-                WARNING("AutoInterface: mld6_joingroup failed (err=" + std::to_string(err) +
-                        ") - discovery may not work");
-            }
-        } else {
+        bool joined_setsockopt = (setsockopt(_discovery_socket, IPPROTO_IPV6,
+                                              IPV6_JOIN_GROUP, &mreq, sizeof(mreq)) == 0);
+        if (joined_setsockopt) {
             INFO("AutoInterface: Joined IPv6 multicast group via setsockopt: " + _multicast_address_str);
+        } else {
+            WARNING("AutoInterface: setsockopt IPV6_JOIN_GROUP failed (errno=" +
+                    std::to_string(errno) + ")");
+        }
+
+        // Always call mld6_joingroup_netif() too — on ESP-IDF, this is
+        // what actually programs the WiFi multicast filter. Joining
+        // twice on the netif is idempotent (refcounted internally).
+        ip6_addr_t mcast_addr;
+        memcpy(&mcast_addr.addr, &_multicast_address, sizeof(_multicast_address));
+        err_t err = mld6_joingroup_netif(nif, &mcast_addr);
+        if (err == ERR_OK) {
+            INFO("AutoInterface: mld6_joingroup_netif OK on " + std::string(nif->name, 2));
+        } else {
+            WARNING("AutoInterface: mld6_joingroup_netif failed (err=" + std::to_string(err) + ")");
         }
 
         // Set multicast interface for outgoing packets (critical for multicast to reach other hosts!)
@@ -743,6 +771,16 @@ bool AutoInterface::setup_discovery_socket() {
             WARNING("AutoInterface: Failed to set IPV6_MULTICAST_IF (errno=" + std::to_string(errno) + ")");
         } else {
             DEBUG("AutoInterface: Set IPV6_MULTICAST_IF to interface " + std::to_string(_if_index));
+        }
+
+        // Enable multicast loopback so we receive our own echoes — the
+        // upstream "carrier" check expects to see them and goes
+        // "carrier lost" otherwise. ESP-IDF lwIP defaults this off.
+        int loop = 1;
+        if (setsockopt(_discovery_socket, IPPROTO_IPV6, IPV6_MULTICAST_LOOP,
+                       &loop, sizeof(loop)) < 0) {
+            DEBUG("AutoInterface: IPV6_MULTICAST_LOOP not supported (errno=" +
+                  std::to_string(errno) + ") — own-echo timeout will fire on isolated networks");
         }
     } else {
         WARNING("AutoInterface: Could not find station netif for multicast join");
@@ -873,8 +911,10 @@ void AutoInterface::send_announce() {
     ssize_t sent = sendto(_discovery_socket, _discovery_token.data(), _discovery_token.size(), 0,
                           (struct sockaddr*)&dest_addr, sizeof(dest_addr));
     if (sent > 0) {
+        _stat_announce_sent++;
         DEBUG("AutoInterface: Sent discovery announce (" + std::to_string(sent) + " bytes) to " + _multicast_address_str);
     } else {
+        _stat_announce_send_fail++;
         WARNING("AutoInterface: Failed to send discovery announce (errno=" + std::to_string(errno) + ")");
     }
 }
@@ -902,8 +942,19 @@ void AutoInterface::process_discovery() {
     // Hot path - no logging to avoid heap allocation on every packet
 
     while (len > 0) {
+        _stat_discovery_rx++;
         // Convert source address to COMPRESSED string format (match Python)
         std::string src_str = ipv6_to_compressed_string((const uint8_t*)&src_addr.sin6_addr);
+
+        // Self-echo bookkeeping (sender == us → multicast loopback works)
+        if (src_str == _link_local_address_str) {
+            _stat_discovery_rx_self++;
+            _last_multicast_echo = RNS::Utilities::OS::time();
+            if (!_initial_echo_received) {
+                _initial_echo_received = true;
+                INFO("AutoInterface: Initial multicast self-echo received");
+            }
+        }
 
         // Verify the peering hash (full TOKEN_SIZE = 32 bytes)
         Bytes combined;
@@ -912,10 +963,18 @@ void AutoInterface::process_discovery() {
         Bytes expected_hash = Identity::full_hash(combined);
 
         // Compare received token with expected (full TOKEN_SIZE = 32 bytes)
-        if (len >= (ssize_t)TOKEN_SIZE && memcmp(recv_buffer, expected_hash.data(), TOKEN_SIZE) == 0) {
+        bool token_match = (len >= (ssize_t)TOKEN_SIZE
+                            && memcmp(recv_buffer, expected_hash.data(), TOKEN_SIZE) == 0);
+        if (token_match) {
             // Valid peer - use IPv6Address (IPAddress is IPv4-only!)
             IPv6Address remoteIP((const uint8_t*)&src_addr.sin6_addr);
             add_or_refresh_peer(remoteIP, RNS::Utilities::OS::time());
+        } else if (src_str != _link_local_address_str) {
+            // Peer's hash mismatched ours — log once per source so the
+            // user can see "we got a packet but couldn't validate" cases
+            // (group_id mismatch / scope-suffix mismatch / wrong size).
+            WARNINGF("AutoInterface: Discovery RX from %s len=%d but peering hash mismatched (token check failed)",
+                     src_str.c_str(), (int)len);
         }
 
         // Try to receive more
@@ -937,6 +996,7 @@ void AutoInterface::process_data() {
                            (struct sockaddr*)&src_addr, &src_len);
 
     while (len > 0) {
+        _stat_data_rx++;
         _buffer.clear();
         _buffer.append(recv_buffer, len);
 
