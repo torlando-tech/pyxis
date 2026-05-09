@@ -981,6 +981,11 @@ bool UIManager::test_call_answer() {
     return true;
 }
 
+std::string UIManager::test_lxst_dest_hex() const {
+    if (!_lxst_destination) return std::string();
+    return _lxst_destination.hash().toHex();
+}
+
 const char* UIManager::test_call_state_name() const {
     switch (_call_state) {
         case CallState::IDLE:               return "IDLE";
@@ -1792,7 +1797,12 @@ void UIManager::call_answer() {
 
 void UIManager::announce_lxst() {
     if (_lxst_destination) {
+        std::string h = _lxst_destination.hash().toHex();
+        INFO(("Announcing LXST telephony destination: " + h).c_str());
         _lxst_destination.announce();
+        INFO("LXST announce sent");
+    } else {
+        WARNING("announce_lxst skipped: _lxst_destination not constructed");
     }
 }
 
