@@ -1,11 +1,20 @@
 """
-PlatformIO pre-build script: TEMPORARY diagnostic patch for
-microStore's FileStore::exists().
+PlatformIO pre-build script: patches the libdeps copy of microStore
+FileStore.h before each build.
 
-Adds a printf at the top of `bool exists(const uint8_t*, uint8_t)` so
-we can see why the path-table store's exists returns false even when
-the most recent put for the same key succeeded. Remove once the
-investigation is done.
+Two purposes:
+
+1. Adds diagnostic printfs to `exists()` and `put()` for tracking down
+   the path-table-store bug where exists() returns false right after a
+   successful put for the same key. Temporary; remove once that
+   investigation is closed.
+
+2. Silences the spammy "[ustore] get: key not found in index" print
+   that fires on every path-table miss. RNS hits path-store lookups
+   constantly on every incoming packet — during an active LXST call
+   that print floods USB CDC at hundreds of lines/sec, saturating the
+   serial buffer and starving T:CALL_QOS responses (#75). The print
+   is unconditional in upstream microStore, so we patch it out here.
 """
 Import("env")
 import os
@@ -45,8 +54,22 @@ PUT_NEW = """\t\tindex_insert(key, key_len, current_segment, offset, ts, ttl);
 
 \t\t// Enforce max_recs:"""
 
+SPAMMY_OLD = '\t\t\tprintf("[ustore] get: key not found in index\\n");'
+SPAMMY_NEW = '\t\t\t/* silenced — fires on every path-store miss, floods USB CDC */'
+
+DIAG_ENABLED = os.environ.get("PYXIS_FILESTORE_DIAG", "0") == "1"
+
 def patch(content):
     out = content
+    # Silence patch always runs.
+    if SPAMMY_OLD in out:
+        out = out.replace(SPAMMY_OLD, SPAMMY_NEW)
+        print("PATCH: FileStore.h: silenced 'key not found in index' spam")
+    elif "silenced — fires on every path-store miss" in content:
+        print("PATCH: FileStore.h: 'key not found' spam already silenced")
+    # Diagnostic patches only when explicitly requested.
+    if not DIAG_ENABLED:
+        return out
     if OLD in out:
         out = out.replace(OLD, NEW)
         print("PATCH: FileStore.h: exists() diagnostics added")
