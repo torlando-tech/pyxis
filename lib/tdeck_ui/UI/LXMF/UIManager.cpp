@@ -86,7 +86,9 @@ UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::Me
       _call_signal_write(0),
       _call_signal_read(0),
       _call_audio_rx_count(0),
-      _call_audio_tx_count(0) {
+      _call_audio_tx_count(0),
+      _pending_conversation_refresh(false),
+      _last_conversation_refresh_ms(0) {
     memset((void*)_call_signal_queue, 0, sizeof(_call_signal_queue));
 }
 
@@ -344,6 +346,23 @@ void UIManager::update() {
             _status_screen->refresh();
         }
     }
+
+    // Drain coalesced conversation-list refresh requests. Only when
+    // the user is actually viewing the list — if they're in chat or
+    // settings, the list rebuilds the next time they navigate back
+    // (show_conversation_list already calls refresh()). Throttle to
+    // at most once every 750ms even when the screen IS visible so
+    // the SPI flush isn't saturated by sustained inbound traffic.
+    static constexpr uint32_t COALESCE_MS = 750;
+    if (_pending_conversation_refresh
+        && _current_screen == SCREEN_CONVERSATION_LIST
+        && (now - _last_conversation_refresh_ms) >= COALESCE_MS) {
+        _pending_conversation_refresh = false;
+        _last_conversation_refresh_ms = now;
+        if (_conversation_list_screen) {
+            _conversation_list_screen->refresh();
+        }
+    }
 }
 
 void UIManager::show_conversation_list() {
@@ -351,6 +370,8 @@ void UIManager::show_conversation_list() {
     INFO("Showing conversation list");
 
     _conversation_list_screen->refresh();
+    _pending_conversation_refresh = false;
+    _last_conversation_refresh_ms = millis();
     _conversation_list_screen->show();
     _chat_screen->hide();
     _compose_screen->hide();
@@ -793,9 +814,12 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
         }
     }
 
-    // Update conversation list unread count
-    // TODO: Track unread counts
-    _conversation_list_screen->refresh();
+    // Coalesce list refreshes — if 50 propagation messages land
+    // back-to-back we used to redraw the list 50 times and saturate
+    // the SPI flush + serial output. Just flag the pending refresh;
+    // call_update() / main loop drains it at most every COALESCE_MS
+    // and only when the user is actually on the conversation list.
+    _pending_conversation_refresh = true;
 
     INFO("  Message processed");
 }

@@ -278,6 +278,16 @@ private:
     Screen _current_screen;
     RNS::Bytes _current_peer_hash;
 
+    // Conversation-list refresh debouncing. on_message_received() used
+    // to call refresh() unconditionally per message — under propagation
+    // sync flood (50+ queued messages delivered back-to-back) that's
+    // 50 full LVGL redraws of the list, each holding LVGL_LOCK,
+    // saturating the SPI display flush, and starving the USB CDC
+    // serial-handler. Now we just set the pending flag here; the main
+    // loop drains it at most once every COALESCE_MS.
+    volatile bool _pending_conversation_refresh;
+    uint32_t _last_conversation_refresh_ms;
+
     ConversationListScreen* _conversation_list_screen;
     ChatScreen* _chat_screen;
     ComposeScreen* _compose_screen;
