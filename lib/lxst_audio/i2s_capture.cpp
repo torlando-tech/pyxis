@@ -239,16 +239,18 @@ void I2SCapture::captureLoop() {
         }
 
         // Measure actual sample rate. Only print when something
-        // notable happened — peak above noise floor or any ring
-        // drops — otherwise this fires every 2s and during an active
-        // LXST call the serial buffer can't keep up alongside the
-        // per-batch TX/RX logs. Pyxis still keeps the count internally.
+        // exceptional happened (ring drops) — the steady-state rate
+        // report fires often enough during an active LXST call to
+        // saturate USB CDC alongside per-batch TX/RX logs (especially
+        // in callee mode where the t-deck speaker→mic acoustic
+        // feedback drives peak high). Counter still accumulates;
+        // we just skip the print.
         totalSamples += ch0Count;
         uint32_t now = millis();
         uint32_t elapsed = now - rateCheckMs;
         if (elapsed >= 2000) {
-            uint32_t rate = (totalSamples * 1000) / elapsed;
-            if (ringDrops > 0 || runningPeak > 1000) {
+            if (ringDrops > 0) {
+                uint32_t rate = (totalSamples * 1000) / elapsed;
                 char logbuf[128];
                 snprintf(logbuf, sizeof(logbuf), "[CAP] rate=%luHz frames=%lu peak=%d ringDrops=%lu",
                          (unsigned long)rate, (unsigned long)framesEncoded,
