@@ -1893,7 +1893,9 @@ static void handle_test_hook_command(const String& line) {
             return;
         }
         Preferences prefs;
-        prefs.begin("lxmf", false);
+        // Boot loads ble_en from NVS namespace "settings" — must match here
+        // or the change won't survive a reboot.
+        prefs.begin("settings", false);
         prefs.putBool("ble_en", want_on);
         prefs.end();
         app_settings.ble_enabled = want_on;
@@ -1991,6 +1993,114 @@ static void handle_test_hook_command(const String& line) {
         Serial.print("T:OK profile=0x");
         if (profile < 16) Serial.print("0");
         Serial.println(String(profile, HEX));
+    }
+    else if (cmd == "T:SHOW") {
+        // T:SHOW <name> — switch the UI to a named screen. Used by
+        // scripts/screenshot.py --all to drive a full doc capture.
+        // Names match UIManager's show_* methods; chat/qr/call need
+        // additional state (peer hash / identity / active call) and
+        // are not exposed here.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        if (args == "conversation_list" || args == "home") {
+            ui_manager->show_conversation_list();
+        } else if (args == "compose") {
+            ui_manager->show_compose();
+        } else if (args == "announces") {
+            ui_manager->show_announces();
+        } else if (args == "status") {
+            ui_manager->show_status();
+        } else if (args == "settings") {
+            ui_manager->show_settings();
+        } else if (args == "propagation_nodes") {
+            ui_manager->show_propagation_nodes();
+        } else {
+            Serial.print("T:ERR unknown screen ");
+            Serial.println(args);
+            return;
+        }
+        Serial.print("T:OK shown ");
+        Serial.println(args);
+    }
+    else if (cmd == "T:SCREENSHOT") {
+        // T:SCREENSHOT — capture the active LVGL screen as RGB565 and
+        // dump base64 over USB-CDC. Decoder is scripts/screenshot.py.
+        //
+        // Wire format:
+        //   T:SCREENSHOT BEGIN W=<w> H=<h> FMT=rgb565<be|le> BYTES=<n>
+        //   <base64 line, 76 chars max>
+        //   <base64 line>
+        //   ...
+        //   T:SCREENSHOT END
+        //
+        // The host script reads until "T:SCREENSHOT END", concatenates
+        // all lines between the markers, base64-decodes, and converts
+        // to PNG. FMT carries the byte order (`be` when LV_COLOR_16_SWAP
+        // is on, `le` otherwise) so the decoder doesn't have to guess.
+        LVGL_LOCK();
+        lv_obj_t* scr = lv_scr_act();
+        if (!scr) {
+            Serial.println("T:ERR no active screen");
+            return;
+        }
+        lv_img_dsc_t* snap = lv_snapshot_take(scr, LV_IMG_CF_TRUE_COLOR);
+        if (!snap || !snap->data) {
+            if (snap) lv_snapshot_free(snap);
+            Serial.println("T:ERR snapshot failed (PSRAM exhausted?)");
+            return;
+        }
+        const uint16_t w = snap->header.w;
+        const uint16_t h = snap->header.h;
+        const uint32_t bytes = snap->data_size;
+#if LV_COLOR_16_SWAP
+        const char* fmt = "rgb565be";
+#else
+        const char* fmt = "rgb565le";
+#endif
+        Serial.print("T:SCREENSHOT BEGIN W=");
+        Serial.print(w);
+        Serial.print(" H=");
+        Serial.print(h);
+        Serial.print(" FMT=");
+        Serial.print(fmt);
+        Serial.print(" BYTES=");
+        Serial.println(bytes);
+
+        static const char b64[] =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        const uint8_t* p = snap->data;
+        uint32_t remaining = bytes;
+        char line[80];
+        size_t line_len = 0;
+        // Encode in 3-byte → 4-char groups; flush at 76-char boundary
+        // so the host script can read line-by-line.
+        while (remaining >= 3) {
+            uint32_t v = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+            line[line_len++] = b64[(v >> 18) & 0x3f];
+            line[line_len++] = b64[(v >> 12) & 0x3f];
+            line[line_len++] = b64[(v >> 6) & 0x3f];
+            line[line_len++] = b64[v & 0x3f];
+            p += 3;
+            remaining -= 3;
+            if (line_len >= 76) {
+                line[line_len] = '\0';
+                Serial.println(line);
+                line_len = 0;
+            }
+        }
+        if (remaining > 0) {
+            uint32_t v = (uint32_t)p[0] << 16;
+            if (remaining == 2) v |= (uint32_t)p[1] << 8;
+            line[line_len++] = b64[(v >> 18) & 0x3f];
+            line[line_len++] = b64[(v >> 12) & 0x3f];
+            line[line_len++] = (remaining == 2) ? b64[(v >> 6) & 0x3f] : '=';
+            line[line_len++] = '=';
+        }
+        if (line_len > 0) {
+            line[line_len] = '\0';
+            Serial.println(line);
+        }
+        Serial.println("T:SCREENSHOT END");
+        lv_snapshot_free(snap);
     }
     else if (cmd == "T:CALL_INJECT") {
         // T:CALL_INJECT <on|off> [freq_hz] [amp_pct]

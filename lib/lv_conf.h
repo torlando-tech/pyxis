@@ -157,6 +157,13 @@
  *====================*/
 #define LV_USE_QRCODE 1
 
+/* lv_snapshot_take() — used by the T:SCREENSHOT serial command for
+ * docs and automated UI testing. Pulls a full-screen RGB565 buffer
+ * (320x240x2 = 153KB) into a heap allocation; with LV_MEM_CUSTOM_ALLOC
+ * routing >1KB to PSRAM this lands in PSRAM and doesn't compete with
+ * internal RAM. ~5KB code-size cost. See scripts/screenshot.py. */
+#define LV_USE_SNAPSHOT 1
+
 /*====================
    THEMES
  *====================*/
