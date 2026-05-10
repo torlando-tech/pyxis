@@ -2506,8 +2506,18 @@ bool NimBLEPlatform::setupAdvertising() {
     _advertising_obj->setMinInterval(_config.adv_interval_min_ms * 1000 / 625);  // Convert to 0.625ms units
     _advertising_obj->setMaxInterval(_config.adv_interval_max_ms * 1000 / 625);
 
+    // Enable scan-response payload BEFORE addServiceUUID + setName so the
+    // 128-bit service UUID (18 bytes once you include the AD type+length
+    // headers) and the device name (~9-11 bytes once you include its
+    // header) don't both fight for the 31-byte legacy adv packet. With
+    // scan-response on, NimBLE places the long name in the secondary 31
+    // bytes returned to active scanners. Without this, NimBLE was logging
+    // "NimBLEAdvertisementData: Data length exceeded" twice at startup
+    // and emitting truncated advertising data — Android Columba's
+    // BleScanner never saw pyxis's service UUID.
+    _advertising_obj->enableScanResponse(true);
+
     // NimBLE 2.x: Use addServiceUUID to include service in advertising packet
-    // The name goes in scan response automatically when enableScanResponse is used
     _advertising_obj->addServiceUUID(NimBLEUUID(UUID::SERVICE));
     _advertising_obj->setName(_config.device_name);
 
