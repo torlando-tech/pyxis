@@ -1880,6 +1880,54 @@ static void handle_test_hook_command(const String& line) {
         }
         Serial.println("T:OK answered");
     }
+    else if (cmd == "T:BLE") {
+        // T:BLE on|off — toggle the BLE Mesh interface at runtime + persist
+        // to NVS. Used by the harness to bring BLE up for cross-device
+        // tests against Android Columba. Mirrors the SettingsScreen save
+        // path so the change survives a reboot.
+        bool want_on = (args == "on" || args == "1" || args == "true");
+        bool want_off = (args == "off" || args == "0" || args == "false");
+        if (!want_on && !want_off) {
+            // No arg → query current state
+            Serial.println(String("T:OK ble_enabled=") + (app_settings.ble_enabled ? "1" : "0"));
+            return;
+        }
+        Preferences prefs;
+        prefs.begin("lxmf", false);
+        prefs.putBool("ble_en", want_on);
+        prefs.end();
+        app_settings.ble_enabled = want_on;
+        if (want_on && !ble_interface_impl) {
+            INFO("T:BLE on — creating BLE interface");
+            void* ble_mem = heap_caps_calloc(1, sizeof(BLEInterface), MALLOC_CAP_SPIRAM);
+            ble_interface_impl = new (ble_mem) BLEInterface("BLE");
+            ble_interface_impl->setRole(RNS::BLE::Role::DUAL);
+            ble_interface_impl->setLocalIdentity(identity->get_public_key().left(16));
+            std::string ble_name = "TD-" + identity->get_public_key().toHex().substr(26, 6);
+            ble_interface_impl->setDeviceName(ble_name);
+            ble_interface = new Interface(ble_interface_impl);
+            if (ble_interface->start()) {
+                Transport::register_interface(*ble_interface);
+                ble_interface_impl->start_task(1, 0);
+                Serial.println("T:OK ble_enabled=1 started");
+            } else {
+                Serial.println("T:ERR ble_start_failed");
+            }
+        } else if (want_on) {
+            // Already exists, just restart
+            if (ble_interface->start()) {
+                Serial.println("T:OK ble_enabled=1 restarted");
+            } else {
+                Serial.println("T:ERR ble_restart_failed");
+            }
+        } else if (ble_interface_impl) {
+            // want_off
+            ble_interface_impl->stop();
+            Serial.println("T:OK ble_enabled=0 stopped");
+        } else {
+            Serial.println("T:OK ble_enabled=0");
+        }
+    }
     else if (cmd == "T:LXSTDEST") {
         // T:LXSTDEST — pyxis's lxst.telephony destination hash. Used
         // by the harness to set up pyxis-as-callee tests (the bot
