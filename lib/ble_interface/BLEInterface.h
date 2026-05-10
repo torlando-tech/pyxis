@@ -281,6 +281,18 @@ private:
     PendingData _pending_data_pool[MAX_PENDING_DATA];
     size_t _pending_data_count = 0;
 
+    // Diagnostic counters — included in the periodic BLE heartbeat
+    // log so we can see "did fragments actually flow over a peer
+    // connection" without per-event logs flooding USB CDC. Cumulative
+    // since interface start.
+    uint32_t _stat_tx_packets = 0;     // outbound RNS packets attempted
+    uint32_t _stat_tx_fragments = 0;   // BLE fragments actually written/notified
+    uint32_t _stat_tx_bytes = 0;       // total bytes written
+    uint32_t _stat_tx_fail = 0;        // platform write/notify returned false
+    uint32_t _stat_rx_fragments = 0;   // BLE fragments handed to reassembler
+    uint32_t _stat_rx_bytes = 0;       // total bytes received
+    uint32_t _stat_rx_packets_complete = 0; // reassembled packets passed up
+
     // Thread safety for callbacks from BLE stack
     // Using recursive_mutex because handleIncomingData holds the lock while
     // calling processReceivedData, which can trigger onHandshakeComplete callback
