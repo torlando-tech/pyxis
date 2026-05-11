@@ -47,9 +47,13 @@ public:
     inline virtual size_t size() const { return _file.size(); }
     inline virtual void close() {
         if (!_open) return;
-        SDAccess::acquire_bus(500);
+        // Only release the bus if we actually took it — otherwise the
+        // matching xSemaphoreGive in release_bus() would be unmatched
+        // and skew the mutex counter. _file.close() under SPI contention
+        // is the lesser evil vs corrupting the bus mutex.
+        bool held = SDAccess::acquire_bus(500);
         _file.close();
-        SDAccess::release_bus();
+        if (held) SDAccess::release_bus();
         _open = false;
     }
     inline virtual int read() {
