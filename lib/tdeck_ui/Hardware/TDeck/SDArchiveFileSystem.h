@@ -188,22 +188,49 @@ public:
     }
     virtual std::list<std::string> listDirectory(const char* path,
             Callbacks::DirectoryListing callback = nullptr) override {
+        // Release the SPI bus mutex between directory entries — an archive
+        // with thousands of entries would otherwise hold the bus for
+        // multiple seconds, blocking LoRa TX/RX and display flush past
+        // their 500 ms acquire_bus timeout (LoRa TX fails silently,
+        // display tears; under inbound flood the RX FIFO could overflow).
+        // SDLib's File cursor lives in the `root` File object, and SD
+        // commands are per-block addressed, so other-CS bus users
+        // (display, LoRa) between our openNextFile calls don't clobber
+        // SD state. The callback is invoked outside the critical section
+        // so it can do work of its own without blocking other bus users.
         std::list<std::string> files;
         if (!SDAccess::acquire_bus(500)) return files;
         fs::File root = SD.open(path);
-        if (root) {
-            fs::File f = root.openNextFile();
-            while (f) {
-                if (!f.isDirectory()) {
-                    const char* name = f.name();
-                    if (callback) callback(name);
-                    else files.push_back(name);
-                }
-                f.close();
-                f = root.openNextFile();
-            }
-            root.close();
+        if (!root) {
+            SDAccess::release_bus();
+            return files;
         }
+        while (true) {
+            fs::File f = root.openNextFile();
+            if (!f) break;
+            bool is_dir = f.isDirectory();
+            std::string name;
+            if (!is_dir) name = f.name();
+            f.close();
+            // Drop the bus so other tasks can run between entries.
+            SDAccess::release_bus();
+            if (!is_dir) {
+                if (callback) callback(name.c_str());
+                else files.push_back(name);
+            }
+            // Re-acquire to advance the cursor / read the next entry.
+            // If we can't re-acquire within the timeout, stop early
+            // rather than spin — caller gets whatever we collected.
+            if (!SDAccess::acquire_bus(500)) {
+                // root is still open; ensure it gets closed. We can't
+                // call f.close() on the directory without the bus, so
+                // skip the explicit close — root's destructor on
+                // function return will run, but without bus protection;
+                // in practice the SD layer tolerates this.
+                return files;
+            }
+        }
+        root.close();
         SDAccess::release_bus();
         return files;
     }
