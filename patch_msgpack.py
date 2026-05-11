@@ -19,7 +19,7 @@ import os
 
 MSGPACK_BASE = os.path.join(
     env.get("PROJECT_DIR", "."),
-    ".pio", "libdeps", "tdeck", "MsgPack", "MsgPack"
+    ".pio", "libdeps", env.get("PIOENV", "tdeck"), "MsgPack", "MsgPack"
 )
 
 def apply_patch(filepath, old, new, label):

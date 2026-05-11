@@ -27,7 +27,7 @@ import os
 
 FILESTORE_H = os.path.join(
     env.get("PROJECT_DIR", "."),
-    ".pio", "libdeps", "tdeck", "microStore", "include", "microStore", "FileStore.h",
+    ".pio", "libdeps", env.get("PIOENV", "tdeck"), "microStore", "include", "microStore", "FileStore.h",
 )
 
 OLD = """\tbool exists(const uint8_t* key, uint8_t key_len)
