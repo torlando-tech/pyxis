@@ -556,7 +556,19 @@ void setup_wifi() {
 // completes (via the periodic-status-check branch in loop()). Pulls
 // NTP, OTA, and UDP logging out of setup_wifi so the boot fast-path
 // (no synchronous WiFi wait) doesn't lose them.
+//
+// NTP sync is kicked off here (configTzTime is non-blocking on ESP32 —
+// it just stores the server list and starts the SNTP task) but the
+// "did it land?" polling happens incrementally in pump_ntp_sync_if_pending()
+// from loop(). The earlier in-place `getLocalTime` retry loop blocked
+// loopTask for up to 10 s on first WiFi-associate, stalling RNS packet
+// ingestion / LXMF delivery / SX1262 RX FIFO drain — a real one-shot
+// dead zone for radio traffic. Splitting kick-off from polling fixes that.
 static bool _wifi_post_connect_done = false;
+static bool _ntp_pending = false;
+static uint32_t _ntp_start_ms = 0;
+static const uint32_t NTP_TIMEOUT_MS = 10000;  // matches former retry budget
+
 void on_wifi_connected() {
     if (_wifi_post_connect_done) return;
     _wifi_post_connect_done = true;
@@ -574,30 +586,12 @@ void on_wifi_connected() {
 
         // Use configTzTime for proper timezone handling on ESP32
         // Eastern Time: EST5EDT = UTC-5, DST starts 2nd Sunday March, ends 1st Sunday Nov
+        // This call is non-blocking — ESP32's lwIP SNTP task does the
+        // actual network exchange. Polling for completion happens in
+        // pump_ntp_sync_if_pending() (called from loop()).
         configTzTime("EST5EDT,M3.2.0,M11.1.0", "pool.ntp.org", "time.nist.gov");
-
-        // Wait for time to be set (max 10 seconds)
-        struct tm timeinfo;
-        int retry = 0;
-        while (!getLocalTime(&timeinfo) && retry < 20) {
-            delay(500);
-            retry++;
-        }
-
-        if (retry < 20) {
-            // Set the time offset for Utilities::OS::time()
-            time_t now = time(nullptr);
-            uint64_t uptime_ms = millis();
-            uint64_t unix_ms = (uint64_t)now * 1000;
-            RNS::Utilities::OS::setTimeOffset(unix_ms - uptime_ms);
-
-            char time_str[64];
-            strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S %Z", &timeinfo);
-            msg = "  NTP time synced: " + String(time_str);
-            INFO(msg.c_str());
-        } else {
-            WARNING("NTP time sync failed!");
-        }
+        _ntp_pending = true;
+        _ntp_start_ms = millis();
     } else {
         INFO("Time already synced via GPS");
     }
@@ -676,6 +670,37 @@ void on_wifi_connected() {
             }
         });
         INFO("UDP log broadcasting on port 9999");
+    }
+}
+
+// Incremental NTP-completion poller. Called once per loop() pass. Single
+// non-blocking getLocalTime probe (ms=0 → tries once, returns immediately).
+// When the SNTP task lands the time, snapshots it into
+// RNS::Utilities::OS::setTimeOffset so microReticulum sees real wall-clock.
+// Bounded by NTP_TIMEOUT_MS — after that we log + give up, matching the
+// 10 s budget of the previous synchronous retry loop.
+static void pump_ntp_sync_if_pending() {
+    if (!_ntp_pending) return;
+
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo, 0)) {
+        // Set the time offset for Utilities::OS::time()
+        time_t now = time(nullptr);
+        uint64_t uptime_ms = millis();
+        uint64_t unix_ms = (uint64_t)now * 1000;
+        RNS::Utilities::OS::setTimeOffset(unix_ms - uptime_ms);
+
+        char time_str[64];
+        strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S %Z", &timeinfo);
+        String msg = "  NTP time synced: " + String(time_str);
+        INFO(msg.c_str());
+        _ntp_pending = false;
+        return;
+    }
+
+    if (millis() - _ntp_start_ms >= NTP_TIMEOUT_MS) {
+        WARNING("NTP time sync failed!");
+        _ntp_pending = false;
     }
 }
 
@@ -2359,6 +2384,11 @@ void loop() {
         }
         last_tcp_online = true;
     }
+
+    // Drain any pending NTP probe (non-blocking, no-op when not pending).
+    // on_wifi_connected kicks NTP off without blocking; this polls each
+    // pass until the SNTP task lands the time or NTP_TIMEOUT_MS elapses.
+    pump_ntp_sync_if_pending();
 
     // Periodic RNS status check (check all interfaces)
     if (millis() - last_status_check > STATUS_CHECK_INTERVAL) {
