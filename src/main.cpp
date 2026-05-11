@@ -1650,15 +1650,23 @@ static LXMF::LXMessage* test_sent_find(const RNS::Bytes& hash) {
 }
 
 // Track received messages so T:RX can summarize.
+// test_rx_total: monotonic count of all received messages (what the
+// harness reads as `count=`). test_rx_count: number of entries
+// currently held in the ring (≤ TEST_RX_RING). Splitting these two
+// fixes T:RX silently capping at 32 during long soak runs — the
+// detailed-entry dump is still bounded by ring size, but the count
+// the harness sees keeps climbing.
 struct TestRxEntry { RNS::Bytes source; RNS::Bytes content; bool in_use = false; };
 static const size_t TEST_RX_RING = 32;
 static TestRxEntry test_rx_ring[TEST_RX_RING];
 static size_t test_rx_count = 0;
+static size_t test_rx_total = 0;
 
 // Public wrapper exposed via pyxis_test_hooks.h (global scope, no
 // namespace) so other TUs (eg UIManager.cpp) can record received
 // messages without ADL gymnastics.
 void pyxis_test_hook_record_rx(const ::LXMF::LXMessage& msg) {
+    test_rx_total++;
     if (test_rx_count >= TEST_RX_RING) return;
     test_rx_ring[test_rx_count].source = msg.source_hash();
     test_rx_ring[test_rx_count].content = msg.content();
@@ -1791,8 +1799,10 @@ static void handle_test_hook_command(const String& line) {
         Serial.println(String("T:OK state=") + test_state_name(m->state()));
     }
     else if (cmd == "T:RX") {
+        // count=<total received since boot/clear> — keeps climbing past
+        // TEST_RX_RING. T:RXMSG dump is still capped to ring contents.
         Serial.print("T:OK count=");
-        Serial.println(String((unsigned)test_rx_count));
+        Serial.println(String((unsigned)test_rx_total));
         for (size_t i = 0; i < test_rx_count; ++i) {
             const auto& e = test_rx_ring[i];
             std::string c((const char*)e.content.data(), e.content.size());
@@ -1804,6 +1814,7 @@ static void handle_test_hook_command(const String& line) {
     }
     else if (cmd == "T:RXCLR") {
         test_rx_count = 0;
+        test_rx_total = 0;
         Serial.println("T:OK cleared");
     }
     else if (cmd == "T:SETPROP") {

@@ -18,10 +18,17 @@ import os
 import shutil
 from pathlib import Path
 
-# (source_dir, libdep_subdir_name)
-FILE_DEPS = [
-    ("~/repos/microReticulum", "microReticulum"),
-]
+# (source_dir, libdep_subdir_name) — populated from env vars so the
+# script doesn't bake any contributor's local checkout path into the
+# committed source. Since microReticulum is now consumed as a pinned
+# git URL in platformio.ini (not a file:// dep), this script no-ops
+# for everyone by default. Set PYXIS_MICRORETICULUM_DIR to opt in to
+# a local-override workflow (mirrors that source tree into
+# .pio/libdeps/<env>/microReticulum on each build).
+FILE_DEPS = []
+_micro_reticulum_dir = os.environ.get("PYXIS_MICRORETICULUM_DIR", "").strip()
+if _micro_reticulum_dir:
+    FILE_DEPS.append((_micro_reticulum_dir, "microReticulum"))
 
 PROJECT_DIR = Path(env.get("PROJECT_DIR", "."))
 ENV_NAME = env.get("PIOENV", "tdeck")
