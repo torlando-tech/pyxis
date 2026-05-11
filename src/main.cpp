@@ -454,8 +454,22 @@ void load_app_settings() {
     // can reach this T-Deck regardless of what's persisted in NVS. The
     // harness runs an rnsd with TCPServerInterface on the configured
     // address; pyxis dials it as a TCP CLIENT.
-    app_settings.tcp_host = String(PYXIS_TEST_TCP_HOST);
-    app_settings.tcp_port = PYXIS_TEST_TCP_PORT;
+    //
+    // Host:port come from env vars at build time (PYXIS_TEST_TCP_HOST,
+    // PYXIS_TEST_TCP_PORT — see platformio.ini + .env.example). If
+    // unset, the macros expand to empty/zero; fall back to NVS so a
+    // missing env var doesn't silently brick test mode.
+    {
+        const char* test_host = PYXIS_TEST_TCP_HOST;
+        if (test_host && test_host[0] != '\0') {
+            app_settings.tcp_host = String(test_host);
+        }
+        const char* test_port_str = PYXIS_TEST_TCP_PORT;
+        if (test_port_str && test_port_str[0] != '\0') {
+            int test_port = atoi(test_port_str);
+            if (test_port > 0) app_settings.tcp_port = test_port;
+        }
+    }
 #endif
 
     // Identity
