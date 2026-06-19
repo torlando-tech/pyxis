@@ -40,7 +40,19 @@ OLD = """\tbool exists(const uint8_t* key, uint8_t key_len)
 \t\treturn true;
 \t}"""
 
-NEW = """\tbool exists(const uint8_t* key, uint8_t key_len)
+NEW = """\t// pyxis-local diagnostic helper, only compiled under PYXIS_FILESTORE_DIAG
+\t// and only used by the printfs below. Hex-encodes a binary key using just
+\t// standard C so the diagnostic build is self-contained (no external bin_str).
+\t// Static buffer is fine here: each printf evaluates it exactly once.
+\tstatic const char* bin_str(const uint8_t* d, uint8_t n) {
+\t\tstatic char b[2 * USTORE_MAX_KEY_LEN + 1];
+\t\tstatic const char hex[] = "0123456789abcdef";
+\t\tif (n > USTORE_MAX_KEY_LEN) n = USTORE_MAX_KEY_LEN;
+\t\tfor (uint8_t i = 0; i < n; i++) { b[2 * i] = hex[(d[i] >> 4) & 0xF]; b[2 * i + 1] = hex[d[i] & 0xF]; }
+\t\tb[2 * n] = '\\0';
+\t\treturn b;
+\t}
+\tbool exists(const uint8_t* key, uint8_t key_len)
 \t{
 \t\tif (!isValid()) { printf("[ustore] exists: !isValid len=%u idx_size=%zu store=%p\\n", (unsigned)key_len, _index.size(), (void*)this); return false; }
 \t\tif(key_len > USTORE_MAX_KEY_LEN) { printf("[ustore] exists: key too long\\n"); return false; }
