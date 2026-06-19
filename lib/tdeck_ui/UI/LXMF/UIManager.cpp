@@ -321,6 +321,12 @@ bool UIManager::init() {
 }
 
 void UIManager::update() {
+    // Flush display-name write-throughs the last conversation-list refresh
+    // deferred. Done here, BEFORE LVGL_LOCK, so the microStore/LittleFS I/O
+    // never runs under the render lock (same reason as on_message_received).
+    if (_conversation_list_screen) {
+        _conversation_list_screen->flush_pending_name_writes();
+    }
     LVGL_LOCK();
     // Process outbound LXMF messages
     _router.process_outbound();

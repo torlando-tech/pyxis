@@ -9,6 +9,8 @@
 #include <lvgl.h>
 #include <vector>
 #include <functional>
+#include <string>
+#include <utility>
 #include "Bytes.h"
 #include "LXMF/MessageStore.h"
 #include "Interface.h"
@@ -94,6 +96,11 @@ public:
      * Refresh conversation list (reload from store)
      */
     void refresh();
+
+    // Flush display-name write-throughs deferred by refresh(). MUST be called
+    // OUTSIDE the LVGL lock (UIManager::update() calls it before taking the
+    // lock) — set_display_name() hits microStore/LittleFS.
+    void flush_pending_name_writes();
 
     /**
      * Update unread count for a specific conversation
@@ -218,6 +225,11 @@ private:
     std::vector<RNS::Bytes> _peer_hash_pool;  // Object pool to avoid per-item allocations
     RNS::Bytes _pending_delete_hash;  // Hash of conversation pending deletion
     bool _has_unresolved_names = false;  // True if any conversation shows hash instead of name
+    // Display-name write-throughs deferred out of refresh() (which runs under
+    // the LVGL lock). set_display_name() hits microStore/LittleFS; doing it
+    // under the lock stalls the render task on a cold-boot announce burst.
+    // Drained by UIManager::update() before it takes the lock.
+    std::vector<std::pair<RNS::Bytes, std::string>> _pending_name_writes;
 
     ConversationSelectedCallback _conversation_selected_callback;
     ComposeCallback _compose_callback;

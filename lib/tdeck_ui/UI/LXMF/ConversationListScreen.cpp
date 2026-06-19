@@ -245,10 +245,13 @@ void ConversationListScreen::refresh() {
             if (display_name.length() > 0) {
                 item.peer_name = display_name;
                 resolved = true;
-                if (_message_store) {
-                    _message_store->set_display_name(
-                        peer_hash, std::string(display_name.c_str()));
-                }
+                // Defer the persisted write-through — set_display_name() hits
+                // microStore/LittleFS, and refresh() runs under the LVGL lock
+                // (held by UIManager::update()). UIManager::update() flushes
+                // these before it takes the lock so the I/O never stalls the
+                // render task. (Same rationale as on_message_received.)
+                _pending_name_writes.emplace_back(
+                    peer_hash, std::string(display_name.c_str()));
             }
         }
         if (!resolved && _message_store) {
@@ -277,6 +280,20 @@ void ConversationListScreen::refresh() {
         _conversations.push_back(item);
         create_conversation_item(item);
     }
+}
+
+void ConversationListScreen::flush_pending_name_writes() {
+    // Called from UIManager::update() BEFORE it takes the LVGL lock.
+    // set_display_name() hits microStore/LittleFS; running it inside refresh()
+    // (under the lock) serially stalls the LVGL render task on a cold-boot
+    // announce burst. Same fix as UIManager::on_message_received.
+    if (!_message_store || _pending_name_writes.empty()) {
+        return;
+    }
+    for (const auto& w : _pending_name_writes) {
+        _message_store->set_display_name(w.first, w.second);
+    }
+    _pending_name_writes.clear();
 }
 
 void ConversationListScreen::create_conversation_item(const ConversationItem& item) {
