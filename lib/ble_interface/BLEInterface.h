@@ -16,9 +16,9 @@
  */
 #pragma once
 
-#include "Interface.h"
-#include "Bytes.h"
-#include "Type.h"
+#include <microReticulum/Interface.h>
+#include <microReticulum/Bytes.h>
+#include <microReticulum/Type.h>
 #include "BLETypes.h"
 #include "BLEPlatform.h"
 #include "BLEFragmenter.h"
@@ -166,7 +166,7 @@ public:
     bool is_task_running() const { return _task_handle != nullptr; }
 
 protected:
-    virtual void send_outgoing(const RNS::Bytes& data) override;
+    virtual bool send_outgoing(const RNS::Bytes& data) override;
 
 private:
     //=========================================================================

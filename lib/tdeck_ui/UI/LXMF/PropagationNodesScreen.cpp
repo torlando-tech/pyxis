@@ -6,9 +6,9 @@
 
 #ifdef ARDUINO
 
-#include "Log.h"
+#include <microReticulum/Log.h>
 #include "LXMF/PropagationNodeManager.h"
-#include "Utilities/OS.h"
+#include <microReticulum/Utilities/OS.h>
 #include "../LVGL/LVGLInit.h"
 #include "../LVGL/LVGLLock.h"
 #include "../TextAreaHelper.h"

@@ -16,8 +16,8 @@
 #include <soc/rtc_cntl_reg.h>
 
 // Reticulum
-#include <Reticulum.h>
-#include <Utilities/OS.h>
+#include <microReticulum/Reticulum.h>
+#include <microReticulum/Utilities/OS.h>
 
 // Filesystem
 // Was: <UniversalFileSystem.h> (pyxis-provided RNS::FileSystem wrapper).
@@ -30,10 +30,10 @@
 // LittleFS reuses the same partition (label "spiffs") and reformats it
 // on first boot.
 #include <microStore/Adapters/LittleFSFileSystem.h>
-#include <Identity.h>
-#include <Destination.h>
-#include <Transport.h>
-#include <Interface.h>
+#include <microReticulum/Identity.h>
+#include <microReticulum/Destination.h>
+#include <microReticulum/Transport.h>
+#include <microReticulum/Interface.h>
 
 // TCP Client Interface
 #include "TCPClientInterface.h"
@@ -76,7 +76,7 @@
 #include "Tone.h"
 
 // Logging
-#include <Log.h>
+#include <microReticulum/Log.h>
 
 // SD Card access and logging
 #include <Hardware/TDeck/SDAccess.h>
@@ -1742,7 +1742,7 @@ static void handle_test_hook_command(const String& line) {
         Serial.println("T:OK announced");
     }
     else if (cmd == "T:PATHS") {
-        const auto& path_table = RNS::Transport::get_path_table();
+        const auto& path_table = RNS::Transport::path_table();
         Serial.print("T:OK count=");
         Serial.println(String((unsigned)path_table.size()));
         for (const auto& kv : path_table) {
@@ -1757,7 +1757,7 @@ static void handle_test_hook_command(const String& line) {
         // Diagnostic: also dump whether the in-memory _path_table has it,
         // and the size of each store. They should match when the dual-
         // write fix is working.
-        const auto& mem_table = RNS::Transport::get_path_table();
+        const auto& mem_table = RNS::Transport::path_table();
         bool mem_has = (mem_table.find(dest) != mem_table.end());
         Serial.print("T:OK ");
         Serial.print(has ? "1" : "0");

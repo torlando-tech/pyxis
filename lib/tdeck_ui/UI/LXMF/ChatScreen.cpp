@@ -6,8 +6,8 @@
 
 #ifdef ARDUINO
 
-#include "Log.h"
-#include "Identity.h"
+#include <microReticulum/Log.h>
+#include <microReticulum/Identity.h>
 #include "../LVGL/LVGLInit.h"
 #include "../LVGL/LVGLLock.h"
 #include "../Clipboard.h"

@@ -4,8 +4,8 @@
  */
 
 #include "BLEInterface.h"
-#include "Log.h"
-#include "Utilities/OS.h"
+#include <microReticulum/Log.h>
+#include <microReticulum/Utilities/OS.h>
 
 #ifdef ARDUINO
 #include <Arduino.h>
@@ -311,9 +311,9 @@ void BLEInterface::loop() {
 // Data Transfer
 //=============================================================================
 
-void BLEInterface::send_outgoing(const Bytes& data) {
+bool BLEInterface::send_outgoing(const Bytes& data) {
     if (!_platform || !_platform->isRunning()) {
-        return;
+        return false;
     }
 
     // Non-blocking lock: if BLE task holds _mutex (maintenance, connect, etc.),
@@ -321,7 +321,7 @@ void BLEInterface::send_outgoing(const Bytes& data) {
     // retransmission at the transport layer.
     if (!_mutex.try_lock()) {
         TRACE("BLEInterface: send_outgoing skipped - BLE task busy");
-        return;
+        return false;
     }
     std::lock_guard<std::recursive_mutex> lock(_mutex, std::adopt_lock);
 
@@ -330,7 +330,7 @@ void BLEInterface::send_outgoing(const Bytes& data) {
 
     if (connected_peers.empty()) {
         TRACE("BLEInterface: No connected peers, dropping packet");
-        return;
+        return false;
     }
 
     // Count peers with identity
@@ -352,6 +352,7 @@ void BLEInterface::send_outgoing(const Bytes& data) {
 
     // Track outgoing stats
     handle_outgoing(data);
+    return true;
 }
 
 bool BLEInterface::sendToPeer(const Bytes& peer_identity, const Bytes& data) {

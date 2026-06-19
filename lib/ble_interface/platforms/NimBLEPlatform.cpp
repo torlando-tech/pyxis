@@ -7,8 +7,8 @@
 
 #if defined(ESP32) && (defined(USE_NIMBLE) || defined(CONFIG_BT_NIMBLE_ENABLED))
 
-#include "Log.h"
-#include "Identity.h"
+#include <microReticulum/Log.h>
+#include <microReticulum/Identity.h>
 #include <algorithm>
 #include <esp_mac.h>
 

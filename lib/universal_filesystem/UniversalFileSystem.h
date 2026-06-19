@@ -2,7 +2,7 @@
 
 #include <FileSystem.h>
 #include <FileStream.h>
-#include <Bytes.h>
+#include <microReticulum/Bytes.h>
 
 #ifdef ARDUINO
 #ifdef BOARD_ESP32

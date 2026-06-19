@@ -11,7 +11,7 @@
 #include <deque>
 #include <map>
 #include <functional>
-#include "Bytes.h"
+#include <microReticulum/Bytes.h>
 #include "LXMF/LXMessage.h"
 #include "LXMF/MessageStore.h"
 

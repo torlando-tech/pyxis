@@ -3,7 +3,7 @@
 #ifndef RNS_MESSAGE_BASE_H
 #define RNS_MESSAGE_BASE_H
 
-#include "Bytes.h"
+#include <microReticulum/Bytes.h>
 
 namespace RNS {
 

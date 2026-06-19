@@ -8,8 +8,8 @@
 #include <Arduino.h>
 #include <lvgl.h>
 #include <functional>
-#include "Bytes.h"
-#include "Identity.h"
+#include <microReticulum/Bytes.h>
+#include <microReticulum/Identity.h>
 
 namespace UI {
 namespace LXMF {

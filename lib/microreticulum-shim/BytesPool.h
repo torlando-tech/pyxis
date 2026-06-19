@@ -36,7 +36,7 @@
  */
 
 #include "PSRAMAllocator.h"
-#include "Log.h"
+#include <microReticulum/Log.h>
 
 #include <cstddef>
 #include <cstdint>

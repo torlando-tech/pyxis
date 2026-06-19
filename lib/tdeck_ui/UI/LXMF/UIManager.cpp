@@ -7,16 +7,16 @@
 
 #include <lvgl.h>
 #include <Preferences.h>
-#include "Log.h"
+#include <microReticulum/Log.h>
 #ifdef PYXIS_TEST_HOOKS
 #include "pyxis_test_hooks.h"
 #endif
 #include "Tone.h"
 #include "../LVGL/LVGLLock.h"
 #include "lxst_audio.h"
-#include "Packet.h"
-#include "Transport.h"
-#include "Destination.h"
+#include <microReticulum/Packet.h>
+#include <microReticulum/Transport.h>
+#include <microReticulum/Destination.h>
 
 using namespace RNS;
 

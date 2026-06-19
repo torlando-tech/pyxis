@@ -6,7 +6,7 @@
 
 #ifdef ARDUINO
 
-#include "Log.h"
+#include <microReticulum/Log.h>
 #include <esp_heap_caps.h>
 
 #if __has_include("SplashImage.h")

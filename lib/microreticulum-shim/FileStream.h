@@ -1,9 +1,9 @@
 #pragma once
 
-#include "Utilities/Crc.h"
-#include "Log.h"
-#include "Bytes.h"
-#include "Type.h"
+#include <microReticulum/Utilities/Crc.h>
+#include <microReticulum/Log.h>
+#include <microReticulum/Bytes.h>
+#include <microReticulum/Type.h>
 
 #ifdef ARDUINO
 #include <Stream.h>

@@ -1,6 +1,6 @@
 #include "AutoInterface.h"
-#include "Log.h"
-#include "Utilities/OS.h"
+#include <microReticulum/Log.h>
+#include <microReticulum/Utilities/OS.h>
 
 #include <cstring>
 #include <algorithm>
@@ -290,17 +290,17 @@ void AutoInterface::loop() {
     }
 }
 
-void AutoInterface::send_outgoing(const Bytes& data) {
+bool AutoInterface::send_outgoing(const Bytes& data) {
     DEBUG(toString() + ".send_outgoing: data: " + data.toHex());
 
-    if (!_online) return;
+    if (!_online) return false;
 
 #ifdef ARDUINO
     // ESP32: Send to all known peers via unicast using persistent raw IPv6 socket
     // (WiFiUDP doesn't support IPv6)
     if (_data_socket < 0) {
         WARNING("AutoInterface: Data socket not ready, cannot send");
-        return;
+        return false;
     }
 
     for (const auto& peer : _peers) {
@@ -330,6 +330,7 @@ void AutoInterface::send_outgoing(const Bytes& data) {
 
     // Perform post-send housekeeping
     InterfaceImpl::handle_outgoing(data);
+    return true;
 #else
     // POSIX: Send to all known peers via unicast
     for (const auto& peer : _peers) {
@@ -354,6 +355,7 @@ void AutoInterface::send_outgoing(const Bytes& data) {
 
     // Perform post-send housekeeping
     InterfaceImpl::handle_outgoing(data);
+    return true;
 #endif
 }
 

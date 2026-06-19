@@ -124,7 +124,7 @@ public:
     virtual ~FileSystemImpl() {}
 
     // SD is already mounted by SDAccess::init() — we don't re-mount.
-    virtual bool init() override { return SDAccess::is_ready(); }
+    virtual bool init(bool reformatOnFail = true) override { return SDAccess::is_ready(); }
     virtual bool format() override { return false; }
 
     virtual microStore::File open(const char* path, microStore::File::Mode mode,

@@ -7,8 +7,8 @@
 
 #pragma once
 
-#include "Type.h"
-#include "Bytes.h"
+#include <microReticulum/Type.h>
+#include <microReticulum/Bytes.h>
 
 #include <stdint.h>
 #include <string>

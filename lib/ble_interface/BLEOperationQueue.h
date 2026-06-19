@@ -13,8 +13,8 @@
 #pragma once
 
 #include "BLETypes.h"
-#include "Bytes.h"
-#include "Utilities/OS.h"
+#include <microReticulum/Bytes.h>
+#include <microReticulum/Utilities/OS.h>
 
 #include <queue>
 #include <functional>

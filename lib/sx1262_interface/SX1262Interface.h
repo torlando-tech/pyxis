@@ -3,10 +3,10 @@
 
 #pragma once
 
-#include "Interface.h"
-#include "Bytes.h"
-#include "Type.h"
-#include "Cryptography/Random.h"
+#include <microReticulum/Interface.h>
+#include <microReticulum/Bytes.h>
+#include <microReticulum/Type.h>
+#include <microReticulum/Cryptography/Random.h>
 
 #ifdef ARDUINO
 #include <RadioLib.h>
@@ -81,7 +81,7 @@ public:
     virtual std::string toString() const override;
 
 protected:
-    virtual void send_outgoing(const RNS::Bytes& data) override;
+    virtual bool send_outgoing(const RNS::Bytes& data) override;
 
 private:
     void on_incoming(const RNS::Bytes& data);

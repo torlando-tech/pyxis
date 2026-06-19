@@ -9,7 +9,7 @@
 #include <lvgl.h>
 #include <vector>
 #include <functional>
-#include "Bytes.h"
+#include <microReticulum/Bytes.h>
 
 namespace LXMF {
 	class PropagationNodeManager;
