@@ -322,11 +322,23 @@ bool sync_time_from_gps(uint32_t timeout_ms = 30000) {
         tzset();
     }
 
-    // Set the time offset for Utilities::OS::time()
+    // Set the time offset for Utilities::OS::time().
+    // Derive the current uptime from the SAME 64-bit rolling counter OS::time()
+    // uses (ltime() = (high32<<32|low32) + _time_offset), not raw 32-bit
+    // millis(). If we used millis() here, then once high32 != 0 (after a
+    // millis() rollover, or an erratic screen-off/wake that trips ltime()'s
+    // roll-over check) OS::time() would be wrong by high32*49.7 days — surfacing
+    // as garbage "Nw ago" timestamps in the conversation list.
     time_t now = time(nullptr);
-    uint64_t uptime_ms = millis();
+    uint64_t uptime_ms = RNS::Utilities::OS::ltime() - RNS::Utilities::OS::getTimeOffset();
     uint64_t unix_ms = (uint64_t)now * 1000;
     RNS::Utilities::OS::setTimeOffset(unix_ms - uptime_ms);
+    {
+        char tbuf[96];
+        snprintf(tbuf, sizeof(tbuf), "  GPS time offset set: OS::time()=%lu (unix=%lu)",
+                 (unsigned long)RNS::Utilities::OS::time(), (unsigned long)now);
+        INFO(tbuf);
+    }
 
     // Display synced time
     struct tm timeinfo;
@@ -684,9 +696,11 @@ static void pump_ntp_sync_if_pending() {
 
     struct tm timeinfo;
     if (getLocalTime(&timeinfo, 0)) {
-        // Set the time offset for Utilities::OS::time()
+        // Set the time offset for Utilities::OS::time(). Use the 64-bit rolling
+        // uptime OS::time() uses, not raw 32-bit millis() — see the GPS path for
+        // why (a high32 != 0 would otherwise skew OS::time() by 49.7-day units).
         time_t now = time(nullptr);
-        uint64_t uptime_ms = millis();
+        uint64_t uptime_ms = RNS::Utilities::OS::ltime() - RNS::Utilities::OS::getTimeOffset();
         uint64_t unix_ms = (uint64_t)now * 1000;
         RNS::Utilities::OS::setTimeOffset(unix_ms - uptime_ms);
 
@@ -694,6 +708,12 @@ static void pump_ntp_sync_if_pending() {
         strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S %Z", &timeinfo);
         String msg = "  NTP time synced: " + String(time_str);
         INFO(msg.c_str());
+        {
+            char tbuf[96];
+            snprintf(tbuf, sizeof(tbuf), "  NTP time offset set: OS::time()=%lu (unix=%lu)",
+                     (unsigned long)RNS::Utilities::OS::time(), (unsigned long)now);
+            INFO(tbuf);
+        }
         _ntp_pending = false;
         return;
     }
