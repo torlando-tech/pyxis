@@ -291,7 +291,6 @@ private:
     uint32_t _stat_tx_fail = 0;        // platform write/notify returned false
     uint32_t _stat_rx_fragments = 0;   // BLE fragments handed to reassembler
     uint32_t _stat_rx_bytes = 0;       // total bytes received
-    uint32_t _stat_rx_packets_complete = 0; // reassembled packets passed up
 
     // Thread safety for callbacks from BLE stack
     // Using recursive_mutex because handleIncomingData holds the lock while
