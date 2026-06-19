@@ -369,6 +369,7 @@ def main():
 
     if not wait_for_pyxis_boot(t, timeout=90):
         log("HARNESS", "FAILED: pyxis boot did not complete in 90s")
+        t.close()
         return 1
 
     wait_for_tcp_link(t, timeout=30)
@@ -377,6 +378,7 @@ def main():
     pyxis_dest_resp = t.send_command("T:DEST", response_timeout=5)
     if not pyxis_dest_resp or not pyxis_dest_resp.startswith("T:OK"):
         log("HARNESS", f"FAILED: T:DEST returned {pyxis_dest_resp}")
+        t.close()
         return 1
     pyxis_dest = pyxis_dest_resp.split(" ", 1)[1].strip()
     log("HARNESS", f"Pyxis delivery dest = {pyxis_dest}")
@@ -389,6 +391,7 @@ def main():
     if not bot_dest:
         log("HARNESS", "FAILED: could not extract bot destination hash")
         bot.terminate()
+        t.close()
         return 1
     log("HARNESS", f"Echo bot delivery dest = {bot_dest}")
 
@@ -396,6 +399,7 @@ def main():
     if not wait_for_path(t, bot_dest, timeout=120):
         log("HARNESS", "FAILED: pyxis never learned bot's path")
         bot.terminate()
+        t.close()
         return 1
 
     # 3b. Drive pyxis to announce so the bot learns pyxis's identity
@@ -440,6 +444,7 @@ def main():
         log("HARNESS", "FAILED: bot never learned pyxis's identity — "
                        "echoes will fail")
         bot.terminate()
+        t.close()
         return 1
 
     fails = 0

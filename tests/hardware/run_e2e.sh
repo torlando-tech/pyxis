@@ -65,4 +65,5 @@ if [ "${PYXIS_SKIP_FLASH:-0}" != "1" ]; then
 fi
 
 echo "== running harness (resets device, drives T: commands) =="
+[ -z "$PIO_PY" ] && { echo "ERROR: no Python with pyserial found for the harness (set PYXIS_HARNESS_PY)"; exit 2; }
 exec "$PIO_PY" "$HERE/tdeck_harness.py" --soak-hours "$SOAK_HOURS"

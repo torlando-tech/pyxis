@@ -274,13 +274,21 @@ def announcer():
 # announce can stall the first sync several minutes. We proactively
 # `RNS.Transport.request_path()` until we get a path.
 def prop_syncer():
-    while not RNS.Transport.has_path(prop_node_hash):
+    # Bounded path acquisition: give up after ~60 request rounds (~5 min) rather
+    # than spinning forever if the PN is unreachable. The PROPAGATED rounds just
+    # won't run in that case; DIRECT/OPP/bz2 are unaffected.
+    for _attempt in range(60):
+        if RNS.Transport.has_path(prop_node_hash):
+            break
         log("  Requesting path to PN...")
         RNS.Transport.request_path(prop_node_hash)
         for _ in range(10):
             if RNS.Transport.has_path(prop_node_hash):
                 break
             time.sleep(0.5)
+    if not RNS.Transport.has_path(prop_node_hash):
+        log("  WARN: no path to PN after retries; propagation sync disabled")
+        return
     log(f"Path to PN known; starting periodic sync every {PROP_SYNC_INTERVAL_SEC}s")
     while True:
         try:
