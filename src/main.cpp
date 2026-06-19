@@ -2086,15 +2086,23 @@ static void handle_test_hook_command(const String& line) {
         // all lines between the markers, base64-decodes, and converts
         // to PNG. FMT carries the byte order (`be` when LV_COLOR_16_SWAP
         // is on, `le` otherwise) so the decoder doesn't have to guess.
-        LVGL_LOCK();
-        lv_obj_t* scr = lv_scr_act();
-        if (!scr) {
-            Serial.println("T:ERR no active screen");
-            return;
+        // Hold the LVGL lock ONLY for the snapshot: lv_snapshot_take() copies
+        // the screen pixels into a freshly-allocated buffer, so live LVGL state
+        // isn't touched during the ~18s base64 serial dump below. Holding the
+        // recursive mutex across the whole dump blocks the LVGL render task and
+        // trips the 5s LVGLLock timeout assert (LVGLLock.h) in debug builds.
+        lv_img_dsc_t* snap = nullptr;
+        {
+            LVGL_LOCK();
+            lv_obj_t* scr = lv_scr_act();
+            if (!scr) {
+                Serial.println("T:ERR no active screen");
+                return;
+            }
+            snap = lv_snapshot_take(scr, LV_IMG_CF_TRUE_COLOR);
         }
-        lv_img_dsc_t* snap = lv_snapshot_take(scr, LV_IMG_CF_TRUE_COLOR);
         if (!snap || !snap->data) {
-            if (snap) lv_snapshot_free(snap);
+            if (snap) { LVGL_LOCK(); lv_snapshot_free(snap); }
             Serial.println("T:ERR snapshot failed (PSRAM exhausted?)");
             return;
         }
@@ -2150,7 +2158,7 @@ static void handle_test_hook_command(const String& line) {
             Serial.println(line);
         }
         Serial.println("T:SCREENSHOT END");
-        lv_snapshot_free(snap);
+        { LVGL_LOCK(); lv_snapshot_free(snap); }
     }
     else if (cmd == "T:CALL_INJECT") {
         // T:CALL_INJECT <on|off> [freq_hz] [amp_pct]
