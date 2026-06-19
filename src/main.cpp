@@ -2407,8 +2407,13 @@ void loop() {
             }
             // AutoInterface init at boot fails its WiFi-connected gate
             // because WiFi typically associates 2-5s after the boot
-            // block runs. Retry here once WiFi actually lands.
-            if (!auto_interface_impl && app_settings.auto_enabled) {
+            // block runs. Retry here once WiFi actually lands. Also handles
+            // reconnect: the old `!auto_interface_impl` guard meant this only
+            // ran on the first connect, so after a WiFi drop AutoInterface kept
+            // stale multicast sockets and peers never rediscovered until reboot.
+            // start_auto_interface() is idempotent — its else-if(!online())
+            // branch rebinds the sockets on a reconnect.
+            if (app_settings.auto_enabled) {
                 start_auto_interface();
             }
         }
