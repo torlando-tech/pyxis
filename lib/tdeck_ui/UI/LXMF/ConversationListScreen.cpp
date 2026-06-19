@@ -6,9 +6,9 @@
 #ifdef ARDUINO
 
 #include "Theme.h"
-#include "Log.h"
-#include "Identity.h"
-#include "Utilities/OS.h"
+#include <microReticulum/Log.h>
+#include <microReticulum/Identity.h>
+#include <microReticulum/Utilities/OS.h>
 #include "../../Hardware/TDeck/Config.h"
 #include "../LVGL/LVGLInit.h"
 #include "../LVGL/LVGLLock.h"

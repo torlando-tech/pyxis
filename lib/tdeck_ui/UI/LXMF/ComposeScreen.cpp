@@ -6,7 +6,7 @@
 
 #ifdef ARDUINO
 
-#include "Log.h"
+#include <microReticulum/Log.h>
 #include "../LVGL/LVGLLock.h"
 #include "../LVGL/LVGLInit.h"
 #include "../TextAreaHelper.h"

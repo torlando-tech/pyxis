@@ -9,8 +9,8 @@
 #include <lvgl.h>
 #include <Preferences.h>
 #include <functional>
-#include "Bytes.h"
-#include "Identity.h"
+#include <microReticulum/Bytes.h>
+#include <microReticulum/Identity.h>
 
 // Forward declaration
 class TinyGPSPlus;

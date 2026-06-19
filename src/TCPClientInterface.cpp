@@ -1,8 +1,8 @@
 #include "TCPClientInterface.h"
 #include "HDLC.h"
 
-#include <Transport.h>
-#include <Log.h>
+#include <microReticulum/Transport.h>
+#include <microReticulum/Log.h>
 
 #include <memory>
 
@@ -440,12 +440,12 @@ void TCPClientInterface::extract_and_process_frames() {
     }
 }
 
-/*virtual*/ void TCPClientInterface::send_outgoing(const Bytes& data) {
+/*virtual*/ bool TCPClientInterface::send_outgoing(const Bytes& data) {
     DEBUG(toString() + ".send_outgoing: data: " + std::to_string(data.size()) + " bytes");
 
     if (!_online) {
         DEBUG("TCPClientInterface: Not connected, cannot send");
-        return;
+        return false;
     }
 
     try {
@@ -484,7 +484,7 @@ void TCPClientInterface::extract_and_process_frames() {
             ERROR("TCPClientInterface: Write incomplete, " + std::to_string(written) +
                   " of " + std::to_string(framed.size()) + " bytes");
             handle_disconnect();
-            return;
+            return false;
         }
         _client.flush();
 #else
@@ -492,21 +492,23 @@ void TCPClientInterface::extract_and_process_frames() {
         if (written < 0) {
             ERROR("TCPClientInterface: send error " + std::to_string(errno));
             handle_disconnect();
-            return;
+            return false;
         }
         if (static_cast<size_t>(written) != framed.size()) {
             ERROR("TCPClientInterface: Write incomplete, " + std::to_string(written) +
                   " of " + std::to_string(framed.size()) + " bytes");
             handle_disconnect();
-            return;
+            return false;
         }
 #endif
 
         // Perform post-send housekeeping
         InterfaceImpl::handle_outgoing(data);
+        return true;
 
     } catch (std::exception& e) {
         ERROR("TCPClientInterface: Exception during send: " + std::string(e.what()));
         handle_disconnect();
     }
+    return false;
 }

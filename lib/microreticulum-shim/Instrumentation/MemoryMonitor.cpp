@@ -15,7 +15,7 @@
 
 #ifdef MEMORY_INSTRUMENTATION_ENABLED
 
-#include <Log.h>
+#include <microReticulum/Log.h>
 #include <BytesPool.h>
 
 #include <cstring>

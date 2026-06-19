@@ -15,7 +15,7 @@
 
 #ifdef BOOT_PROFILING_ENABLED
 
-#include <Log.h>
+#include <microReticulum/Log.h>
 
 #include <Arduino.h>
 #include <LittleFS.h>

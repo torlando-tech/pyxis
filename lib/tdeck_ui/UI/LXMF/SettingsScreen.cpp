@@ -10,8 +10,8 @@
 #include "../LVGL/LVGLLock.h"
 #include <SPIFFS.h>
 #include <TinyGPSPlus.h>
-#include "Log.h"
-#include "Utilities/OS.h"
+#include <microReticulum/Log.h>
+#include <microReticulum/Utilities/OS.h>
 #include "../LVGL/LVGLInit.h"
 #include "../TextAreaHelper.h"
 

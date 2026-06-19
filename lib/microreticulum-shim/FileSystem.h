@@ -1,9 +1,9 @@
 #pragma once
 
 #include "FileStream.h"
-#include "Log.h"
-#include "Bytes.h"
-#include "Type.h"
+#include <microReticulum/Log.h>
+#include <microReticulum/Bytes.h>
+#include <microReticulum/Type.h>
 
 #include <list>
 #include <memory>

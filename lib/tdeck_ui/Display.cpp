@@ -7,12 +7,12 @@
 #ifdef HAS_DISPLAY
 
 #include "DisplayGraphics.h"
-#include "Identity.h"
-#include "Interface.h"
-#include "Reticulum.h"
-#include "Transport.h"
-#include "Log.h"
-#include "Utilities/OS.h"
+#include <microReticulum/Identity.h>
+#include <microReticulum/Interface.h>
+#include <microReticulum/Reticulum.h>
+#include <microReticulum/Transport.h>
+#include <microReticulum/Log.h>
+#include <microReticulum/Utilities/OS.h>
 
 // Display library includes (board-specific)
 #ifdef ARDUINO

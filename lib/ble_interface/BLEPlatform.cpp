@@ -4,7 +4,7 @@
  */
 
 #include "BLEPlatform.h"
-#include "Log.h"
+#include <microReticulum/Log.h>
 
 // Include platform implementations based on compile-time detection
 #if defined(ESP32) && (defined(USE_NIMBLE) || defined(CONFIG_BT_NIMBLE_ENABLED))

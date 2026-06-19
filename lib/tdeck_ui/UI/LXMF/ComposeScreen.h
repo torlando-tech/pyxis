@@ -8,7 +8,7 @@
 #include <Arduino.h>
 #include <lvgl.h>
 #include <functional>
-#include "Bytes.h"
+#include <microReticulum/Bytes.h>
 
 namespace UI {
 namespace LXMF {

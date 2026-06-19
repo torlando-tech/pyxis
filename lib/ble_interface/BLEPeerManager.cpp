@@ -6,7 +6,7 @@
  */
 
 #include "BLEPeerManager.h"
-#include "Log.h"
+#include <microReticulum/Log.h>
 
 #include <cmath>
 #include <cstring>

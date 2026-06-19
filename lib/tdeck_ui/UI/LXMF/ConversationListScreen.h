@@ -11,9 +11,9 @@
 #include <functional>
 #include <string>
 #include <utility>
-#include "Bytes.h"
+#include <microReticulum/Bytes.h>
 #include "LXMF/MessageStore.h"
-#include "Interface.h"
+#include <microReticulum/Interface.h>
 
 // TinyGPS++ pulled in for TinyGPSCustom (the in-view-satellites parser
 // hook; declared as a member below). The forward decl on TinyGPSPlus

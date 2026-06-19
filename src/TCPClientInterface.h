@@ -1,8 +1,8 @@
 #pragma once
 
-#include "Interface.h"
-#include "Bytes.h"
-#include "Type.h"
+#include <microReticulum/Interface.h>
+#include <microReticulum/Bytes.h>
+#include <microReticulum/Type.h>
 
 #ifdef ARDUINO
 #include <WiFi.h>
@@ -69,7 +69,7 @@ public:
     }
 
 protected:
-    virtual void send_outgoing(const RNS::Bytes& data);
+    virtual bool send_outgoing(const RNS::Bytes& data);
 
 private:
     // Connection management

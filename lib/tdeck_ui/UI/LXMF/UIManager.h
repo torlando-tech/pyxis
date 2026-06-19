@@ -20,8 +20,8 @@
 #include "LXMF/LXMRouter.h"
 #include "LXMF/PropagationNodeManager.h"
 #include "LXMF/MessageStore.h"
-#include "Reticulum.h"
-#include "Link.h"
+#include <microReticulum/Reticulum.h>
+#include <microReticulum/Link.h>
 
 class LXSTAudio;
 

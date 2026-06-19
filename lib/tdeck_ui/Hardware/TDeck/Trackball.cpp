@@ -5,7 +5,7 @@
 
 #ifdef ARDUINO
 
-#include "Log.h"
+#include <microReticulum/Log.h>
 #include <driver/gpio.h>
 
 using namespace RNS;

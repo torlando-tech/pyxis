@@ -10,7 +10,7 @@
 #include <vector>
 #include <functional>
 #include <string>
-#include "Bytes.h"
+#include <microReticulum/Bytes.h>
 
 namespace UI {
 namespace LXMF {

@@ -6,7 +6,7 @@
  */
 
 #include "BLEReassembler.h"
-#include "Log.h"
+#include <microReticulum/Log.h>
 
 namespace RNS { namespace BLE {
 

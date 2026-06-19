@@ -15,7 +15,7 @@
 #pragma once
 
 #include "BLETypes.h"
-#include "Bytes.h"
+#include <microReticulum/Bytes.h>
 
 #include <vector>
 #include <cstdint>

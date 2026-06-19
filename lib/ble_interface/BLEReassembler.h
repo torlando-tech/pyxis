@@ -16,8 +16,8 @@
 
 #include "BLETypes.h"
 #include "BLEFragmenter.h"
-#include "Bytes.h"
-#include "Utilities/OS.h"
+#include <microReticulum/Bytes.h>
+#include <microReticulum/Utilities/OS.h>
 
 #include <functional>
 #include <cstdint>

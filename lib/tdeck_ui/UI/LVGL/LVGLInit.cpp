@@ -7,7 +7,7 @@
 
 #include "esp_task_wdt.h"
 
-#include "Log.h"
+#include <microReticulum/Log.h>
 #include "../../Hardware/TDeck/Display.h"
 #include "../../Hardware/TDeck/Keyboard.h"
 #include "../../Hardware/TDeck/Touch.h"

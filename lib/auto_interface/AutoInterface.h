@@ -1,9 +1,9 @@
 #pragma once
 
-#include "Interface.h"
-#include "Identity.h"
-#include "Bytes.h"
-#include "Type.h"
+#include <microReticulum/Interface.h>
+#include <microReticulum/Identity.h>
+#include <microReticulum/Bytes.h>
+#include <microReticulum/Type.h>
 #include "AutoInterfacePeer.h"
 
 #ifdef ARDUINO
@@ -81,7 +81,7 @@ public:
     bool is_timed_out() const { return _timed_out; }
 
 protected:
-    virtual void send_outgoing(const RNS::Bytes& data) override;
+    virtual bool send_outgoing(const RNS::Bytes& data) override;
 
 private:
     // Discovery and addressing

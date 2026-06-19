@@ -1,7 +1,7 @@
 #include "UniversalFileSystem.h"
 
-#include <Utilities/OS.h>
-#include <Log.h>
+#include <microReticulum/Utilities/OS.h>
+#include <microReticulum/Log.h>
 
 #ifdef ARDUINO
 void UniversalFileSystem::listDir(const char* dir) {

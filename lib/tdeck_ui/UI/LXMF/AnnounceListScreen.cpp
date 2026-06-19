@@ -6,13 +6,13 @@
 
 #ifdef ARDUINO
 
-#include "Log.h"
+#include <microReticulum/Log.h>
 #include "../LVGL/LVGLLock.h"
-#include "Transport.h"
-#include "Identity.h"
-#include "Destination.h"
-#include "Persistence/DestinationEntry.h"   // RNS::Persistence::DestinationEntry (post-graft path)
-#include "Utilities/OS.h"
+#include <microReticulum/Transport.h>
+#include <microReticulum/Identity.h>
+#include <microReticulum/Destination.h>
+#include <microReticulum/Persistence/DestinationEntry.h>   // RNS::Persistence::DestinationEntry (post-graft path)
+#include <microReticulum/Utilities/OS.h>
 #include "../LVGL/LVGLInit.h"
 #include <MsgPack.h>
 
@@ -141,7 +141,7 @@ void AnnounceListScreen::refresh() {
     // Get path table from Transport. Pre-graft the fork called this
     // get_destination_table(); upstream microReticulum @ 0.3.0 renamed it
     // to get_path_table() (the same map of dest_hash → DestinationEntry).
-    const auto& dest_table = Transport::get_path_table();
+    const auto& dest_table = Transport::path_table();
 
     // Compute name_hash for lxmf.delivery to filter announces
     Bytes lxmf_delivery_name_hash = Destination::name_hash("lxmf", "delivery");

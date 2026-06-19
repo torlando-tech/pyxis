@@ -8,8 +8,8 @@
  */
 #pragma once
 
-#include "Bytes.h"
-#include "Log.h"
+#include <microReticulum/Bytes.h>
+#include <microReticulum/Log.h>
 
 #include <functional>
 #include <memory>

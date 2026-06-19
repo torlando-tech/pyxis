@@ -7,7 +7,7 @@
 #ifdef ARDUINO
 
 #include <WiFi.h>
-#include "Log.h"
+#include <microReticulum/Log.h>
 #include "../LVGL/LVGLInit.h"
 #include "../LVGL/LVGLLock.h"
 

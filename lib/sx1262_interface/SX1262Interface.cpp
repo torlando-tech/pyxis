@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 #include "SX1262Interface.h"
-#include "Log.h"
-#include "Utilities/OS.h"
+#include <microReticulum/Log.h>
+#include <microReticulum/Utilities/OS.h>
 
 #ifdef ARDUINO
 #include <SPI.h>
@@ -239,11 +239,11 @@ void SX1262Interface::loop() {
 #endif
 }
 
-void SX1262Interface::send_outgoing(const Bytes& data) {
-    if (!_online) return;
+bool SX1262Interface::send_outgoing(const Bytes& data) {
+    if (!_online) return false;
 
 #ifdef ARDUINO
-    if (_radio == nullptr) return;
+    if (_radio == nullptr) return false;
 
     DEBUG(toString() + ": Sending " + std::to_string(data.size()) + " bytes");
 
@@ -254,7 +254,7 @@ void SX1262Interface::send_outgoing(const Bytes& data) {
     size_t len = 1 + data.size();
     if (len > HW_MTU) {
         ERROR("SX1262Interface: Packet too large (" + std::to_string(len) + " > " + std::to_string(HW_MTU) + ")");
-        return;
+        return false;
     }
 
     uint8_t* buf = new uint8_t[len];
@@ -265,7 +265,7 @@ void SX1262Interface::send_outgoing(const Bytes& data) {
     if (xSemaphoreTake(_spi_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
         ERROR("SX1262Interface: Failed to acquire SPI mutex for TX");
         delete[] buf;
-        return;
+        return false;
     }
 
     _transmitting = true;
@@ -289,10 +289,13 @@ void SX1262Interface::send_outgoing(const Bytes& data) {
         DEBUG("SX1262Interface: Sent " + std::to_string(len) + " bytes");
         // Perform post-send housekeeping
         InterfaceImpl::handle_outgoing(data);
+        return true;
     } else {
         ERROR("SX1262Interface: Transmit failed, code " + std::to_string(state));
+        return false;
     }
 #endif
+    return false;
 }
 
 void SX1262Interface::on_incoming(const Bytes& data) {
