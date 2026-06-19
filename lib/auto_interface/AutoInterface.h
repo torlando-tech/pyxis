@@ -172,4 +172,12 @@ private:
 
     // Receive buffer
     RNS::Bytes _buffer;
+
+    // Diagnostic counters (printed periodically as INFO)
+    uint32_t _stat_announce_sent = 0;
+    uint32_t _stat_announce_send_fail = 0;
+    uint32_t _stat_discovery_rx = 0;
+    uint32_t _stat_discovery_rx_self = 0;
+    uint32_t _stat_data_rx = 0;
+    double   _last_stats_log = 0;
 };

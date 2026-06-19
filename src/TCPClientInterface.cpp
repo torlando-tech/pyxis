@@ -252,11 +252,17 @@ void TCPClientInterface::handle_disconnect() {
     static uint32_t total_rx = 0;
     loop_count++;
     uint32_t now = millis();
-    if (now - last_status_log >= 5000) {  // Every 5 seconds
+    // [TCP] connection-status heartbeat — protocol-debug only. Was at
+    // INFO level firing every 5s; combined with the per-frame [TCP] /
+    // [HDLC] / [ustore] prints below, this saturated USB CDC during
+    // active LXST calls and starved T:CALL_QOS responses (#75).
+    if (now - last_status_log >= 5000) {
         last_status_log = now;
-        int avail = _client.available();
-        Serial.printf("[TCP] connected=%d online=%d avail=%d loops=%u rx=%u buf=%d\n",
-                      _client.connected(), _online, avail, loop_count, total_rx, (int)_frame_buffer.size());
+        if (RNS::loglevel() >= RNS::LOG_DEBUG) {
+            int avail = _client.available();
+            Serial.printf("[TCP] connected=%d online=%d avail=%d loops=%u rx=%u buf=%d\n",
+                          _client.connected(), _online, avail, loop_count, total_rx, (int)_frame_buffer.size());
+        }
         loop_count = 0;
     }
 
@@ -305,7 +311,8 @@ void TCPClientInterface::handle_disconnect() {
     // Read available data
     int avail = _client.available();
     if (avail > 0) {
-        Serial.printf("[TCP] Reading %d bytes\n", avail);
+        bool dbg = RNS::loglevel() >= RNS::LOG_DEBUG;
+        if (dbg) Serial.printf("[TCP] Reading %d bytes\n", avail);
         total_rx += avail;
         _last_data_received = now;  // Update stale timer on any data receipt
         size_t start_pos = _frame_buffer.size();
@@ -313,14 +320,15 @@ void TCPClientInterface::handle_disconnect() {
             uint8_t byte = _client.read();
             _frame_buffer.append(byte);
         }
-        // Dump first 20 bytes of new data
-        Serial.printf("[TCP] First bytes: ");
-        size_t dump_len = (_frame_buffer.size() - start_pos);
-        if (dump_len > 20) dump_len = 20;
-        for (size_t i = 0; i < dump_len; ++i) {
-            Serial.printf("%02x ", _frame_buffer.data()[start_pos + i]);
+        if (dbg) {
+            Serial.printf("[TCP] First bytes: ");
+            size_t dump_len = (_frame_buffer.size() - start_pos);
+            if (dump_len > 20) dump_len = 20;
+            for (size_t i = 0; i < dump_len; ++i) {
+                Serial.printf("%02x ", _frame_buffer.data()[start_pos + i]);
+            }
+            Serial.printf("\n");
         }
-        Serial.printf("\n");
     }
 #else
     // Non-blocking read
@@ -396,21 +404,23 @@ void TCPClientInterface::extract_and_process_frames() {
         // Extract frame content between FLAGS (excluding the FLAGS)
         Bytes frame_content = _frame_buffer.mid(1, end - 1);
         frame_count++;
-        Serial.printf("[HDLC] Frame #%u: %d escaped bytes\n", frame_count, (int)frame_content.size());
+        if (RNS::loglevel() >= RNS::LOG_DEBUG) {
+            Serial.printf("[HDLC] Frame #%u: %d escaped bytes\n", frame_count, (int)frame_content.size());
+        }
 
         // Remove processed frame from buffer (keep data after end FLAG)
         _frame_buffer = _frame_buffer.mid(end);
 
         // Skip empty frames (consecutive FLAGs)
         if (frame_content.size() == 0) {
-            Serial.printf("[HDLC] Empty frame, skipping\n");
+            if (RNS::loglevel() >= RNS::LOG_DEBUG) Serial.printf("[HDLC] Empty frame, skipping\n");
             continue;
         }
 
         // Unescape frame
         Bytes unescaped = HDLC::unescape(frame_content);
         if (unescaped.size() == 0) {
-            Serial.printf("[HDLC] Unescape failed!\n");
+            if (RNS::loglevel() >= RNS::LOG_DEBUG) Serial.printf("[HDLC] Unescape failed!\n");
             DEBUG("TCPClientInterface: HDLC unescape error, discarding frame");
             continue;
         }
@@ -422,7 +432,9 @@ void TCPClientInterface::extract_and_process_frames() {
         }
 
         // Pass to transport layer
-        Serial.printf("[TCP] Processing frame: %d bytes\n", (int)unescaped.size());
+        if (RNS::loglevel() >= RNS::LOG_DEBUG) {
+            Serial.printf("[TCP] Processing frame: %d bytes\n", (int)unescaped.size());
+        }
         DEBUG(toString() + ": Received frame, " + std::to_string(unescaped.size()) + " bytes");
         InterfaceImpl::handle_incoming(unescaped);
     }
@@ -430,17 +442,6 @@ void TCPClientInterface::extract_and_process_frames() {
 
 /*virtual*/ void TCPClientInterface::send_outgoing(const Bytes& data) {
     DEBUG(toString() + ".send_outgoing: data: " + std::to_string(data.size()) + " bytes");
-
-    // Log first 50 bytes of raw packet (before HDLC framing)
-    std::string hex_preview;
-    size_t preview_len = (data.size() < 50) ? data.size() : 50;
-    for (size_t i = 0; i < preview_len; ++i) {
-        char buf[4];
-        snprintf(buf, sizeof(buf), "%02x", data.data()[i]);
-        hex_preview += buf;
-    }
-    if (data.size() > 50) hex_preview += "...";
-    INFO("WIRE TX raw (" + std::to_string(data.size()) + " bytes): " + hex_preview);
 
     if (!_online) {
         DEBUG("TCPClientInterface: Not connected, cannot send");
@@ -451,16 +452,31 @@ void TCPClientInterface::extract_and_process_frames() {
         // Frame with HDLC
         Bytes framed = HDLC::frame(data);
 
-        // Log HDLC framed output for debugging
-        std::string framed_hex;
-        size_t flen = (framed.size() < 30) ? framed.size() : 30;
-        for (size_t i = 0; i < flen; ++i) {
-            char buf[4];
-            snprintf(buf, sizeof(buf), "%02x", framed.data()[i]);
-            framed_hex += buf;
+        // Wire-format dumps are protocol-debug only — re-enable by
+        // raising RNS log level to DEBUG. At INFO they fired ~10×/s
+        // during voice calls (pre + post HDLC, per packet) and
+        // saturated USB CDC, starving T:CALL_QOS responses.
+        if (RNS::loglevel() >= RNS::LOG_DEBUG) {
+            std::string hex_preview;
+            size_t preview_len = (data.size() < 50) ? data.size() : 50;
+            for (size_t i = 0; i < preview_len; ++i) {
+                char buf[4];
+                snprintf(buf, sizeof(buf), "%02x", data.data()[i]);
+                hex_preview += buf;
+            }
+            if (data.size() > 50) hex_preview += "...";
+            DEBUG("WIRE TX raw (" + std::to_string(data.size()) + " bytes): " + hex_preview);
+
+            std::string framed_hex;
+            size_t flen = (framed.size() < 30) ? framed.size() : 30;
+            for (size_t i = 0; i < flen; ++i) {
+                char buf[4];
+                snprintf(buf, sizeof(buf), "%02x", framed.data()[i]);
+                framed_hex += buf;
+            }
+            if (framed.size() > 30) framed_hex += "...";
+            DEBUG("WIRE TX framed (" + std::to_string(framed.size()) + " bytes): " + framed_hex);
         }
-        if (framed.size() > 30) framed_hex += "...";
-        INFO("WIRE TX framed (" + std::to_string(framed.size()) + " bytes): " + framed_hex);
 
 #ifdef ARDUINO
         size_t written = _client.write(framed.data(), framed.size());

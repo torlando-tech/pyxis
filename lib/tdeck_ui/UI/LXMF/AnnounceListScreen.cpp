@@ -11,6 +11,7 @@
 #include "Transport.h"
 #include "Identity.h"
 #include "Destination.h"
+#include "Persistence/DestinationEntry.h"   // RNS::Persistence::DestinationEntry (post-graft path)
 #include "Utilities/OS.h"
 #include "../LVGL/LVGLInit.h"
 #include <MsgPack.h>
@@ -137,15 +138,20 @@ void AnnounceListScreen::refresh() {
     _dest_hash_pool.clear();
     _empty_label = nullptr;
 
-    // Get destination table from Transport
-    const auto& dest_table = Transport::get_destination_table();
+    // Get path table from Transport. Pre-graft the fork called this
+    // get_destination_table(); upstream microReticulum @ 0.3.0 renamed it
+    // to get_path_table() (the same map of dest_hash → DestinationEntry).
+    const auto& dest_table = Transport::get_path_table();
 
     // Compute name_hash for lxmf.delivery to filter announces
     Bytes lxmf_delivery_name_hash = Destination::name_hash("lxmf", "delivery");
 
     for (auto it = dest_table.begin(); it != dest_table.end(); ++it) {
         const Bytes& dest_hash = it->first;
-        const Transport::DestinationEntry& dest_entry = it->second;
+        // Pre-graft: nested Transport::DestinationEntry. Upstream moved
+        // this to RNS::Persistence::DestinationEntry in
+        // Persistence/DestinationEntry.h.
+        const RNS::Persistence::DestinationEntry& dest_entry = it->second;
 
         // Check if this destination has a known identity (was announced properly)
         Identity identity = Identity::recall(dest_hash);

@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        environment: [tdeck, tdeck-bluedroid]
+        environment: [tdeck]
 
     steps:
       - name: Checkout repository

@@ -235,6 +235,8 @@ void BLEInterface::loop() {
                     continue;
                 }
             }
+            _stat_rx_fragments++;
+            _stat_rx_bytes += _pending_data_pool[i].data.size();
             _reassembler.processFragment(stored_id, _pending_data_pool[i].data);
         }
         _pending_data_count = requeue_count;
@@ -242,11 +244,21 @@ void BLEInterface::loop() {
 
     // Debug: log loop status every 10 seconds
     if (now - last_loop_log >= 10.0) {
+        char stats[160];
+        snprintf(stats, sizeof(stats),
+                 " tx_pkt=%lu tx_frag=%lu tx_b=%lu tx_fail=%lu rx_frag=%lu rx_b=%lu",
+                 (unsigned long)_stat_tx_packets,
+                 (unsigned long)_stat_tx_fragments,
+                 (unsigned long)_stat_tx_bytes,
+                 (unsigned long)_stat_tx_fail,
+                 (unsigned long)_stat_rx_fragments,
+                 (unsigned long)_stat_rx_bytes);
         INFO("BLE: running=" + std::string(_platform && _platform->isRunning() ? "yes" : "no") +
              " scanning=" + std::string(_platform && _platform->isScanning() ? "yes" : "no") +
              " connected=" + std::to_string(_peer_manager.connectedCount()) +
              " peers=" + std::to_string(_peer_manager.getAllPeers().size()) +
-             " heap=" + std::to_string(ESP.getFreeHeap()));
+             " heap=" + std::to_string(ESP.getFreeHeap()) +
+             stats);
         last_loop_log = now;
     }
 
@@ -384,6 +396,7 @@ bool BLEInterface::sendToPeer(const Bytes& peer_identity, const Bytes& data) {
 
     // Send each fragment
     bool all_sent = true;
+    _stat_tx_packets++;
     for (const Bytes& fragment : fragments) {
         bool sent = false;
 
@@ -397,7 +410,11 @@ bool BLEInterface::sendToPeer(const Bytes& peer_identity, const Bytes& data) {
             sent = _platform->notify(peer->conn_handle, fragment);
         }
 
-        if (!sent) {
+        if (sent) {
+            _stat_tx_fragments++;
+            _stat_tx_bytes += fragment.size();
+        } else {
+            _stat_tx_fail++;
             WARNING("BLEInterface: Failed to send fragment to " +
                     peer_identity.toHex().substr(0, 8) + " conn=" +
                     std::to_string(peer->conn_handle));

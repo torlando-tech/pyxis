@@ -352,4 +352,32 @@ int LXSTAudio::playbackFramesBuffered() const {
     return playback_->bufferedFrames();
 }
 
+uint32_t LXSTAudio::playbackDecodeOk() const {
+    if (!playback_) return 0;
+    return playback_->decodeOkCount();
+}
+
+uint32_t LXSTAudio::playbackDecodeFail() const {
+    if (!playback_) return 0;
+    return playback_->decodeFailCount();
+}
+
+void LXSTAudio::playbackResetCounters() {
+    if (playback_) playback_->resetCounters();
+}
+
+uint32_t LXSTAudio::playbackPcmSampleCount() const {
+    if (!playback_) return 0;
+    return playback_->pcmSampleCount();
+}
+
+uint64_t LXSTAudio::playbackPcmSumSquares() const {
+    if (!playback_) return 0;
+    return playback_->pcmSumSquares();
+}
+
+void LXSTAudio::captureSetInjectSine(bool enabled, int freq, float amp) {
+    if (capture_) capture_->setInjectSine(enabled, freq, amp);
+}
+
 #endif // ARDUINO

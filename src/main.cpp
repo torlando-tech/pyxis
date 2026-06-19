@@ -3,7 +3,9 @@
 
 #include <Arduino.h>
 #include <Wire.h>
-#include <SPIFFS.h>
+#include <SD.h>
+#include <FS.h>
+#include <LittleFS.h>
 #include <Preferences.h>
 #include <time.h>
 #include <sys/time.h>
@@ -18,7 +20,16 @@
 #include <Utilities/OS.h>
 
 // Filesystem
-#include <UniversalFileSystem.h>
+// Was: <UniversalFileSystem.h> (pyxis-provided RNS::FileSystem wrapper).
+// Post-graft: microStore ships filesystem adapters; we use LittleFS via
+// -DUSTORE_USE_LITTLEFS. LittleFS replaced SPIFFS for the persistent
+// path table because SPIFFS chokes on sustained writes (its GC stalls
+// the FS for hundreds of ms during block erase) — under live announce
+// flood, SPIFFS's flush_buffer() returns false from FileStore::put,
+// surfacing as "Failed to add destination to path table" spam.
+// LittleFS reuses the same partition (label "spiffs") and reformats it
+// on first boot.
+#include <microStore/Adapters/LittleFSFileSystem.h>
 #include <Identity.h>
 #include <Destination.h>
 #include <Transport.h>
@@ -40,6 +51,10 @@
 #include <LXMF/LXMRouter.h>
 #include <LXMF/MessageStore.h>
 #include <LXMF/PropagationNodeManager.h>
+
+#ifdef PYXIS_TEST_HOOKS
+#include "pyxis_test_hooks.h"
+#endif
 
 // Hardware drivers
 #include <Hardware/TDeck/Config.h>
@@ -65,6 +80,7 @@
 
 // SD Card access and logging
 #include <Hardware/TDeck/SDAccess.h>
+#include <Hardware/TDeck/SDArchiveFileSystem.h>
 #include <Hardware/TDeck/SDLogger.h>
 
 // OTA flashing
@@ -185,6 +201,8 @@ extern "C" void pyxis_log(const char* msg) {
 
 // Forward declarations
 void start_tcp_interface();
+void start_auto_interface();
+void on_wifi_connected();
 
 // Screen timeout
 bool screen_off = false;
@@ -431,6 +449,29 @@ void load_app_settings() {
     app_settings.tcp_host = prefs.getString("tcp_host", "sideband.connect.reticulum.network");
     app_settings.tcp_port = prefs.getUShort("tcp_port", 4965);
 
+#ifdef PYXIS_TEST_HOOKS
+    // Test mode: hard-override the TCP server so the harness on the Mac
+    // can reach this T-Deck regardless of what's persisted in NVS. The
+    // harness runs an rnsd with TCPServerInterface on the configured
+    // address; pyxis dials it as a TCP CLIENT.
+    //
+    // Host:port come from env vars at build time (PYXIS_TEST_TCP_HOST,
+    // PYXIS_TEST_TCP_PORT — see platformio.ini + .env.example). If
+    // unset, the macros expand to empty/zero; fall back to NVS so a
+    // missing env var doesn't silently brick test mode.
+    {
+        const char* test_host = PYXIS_TEST_TCP_HOST;
+        if (test_host && test_host[0] != '\0') {
+            app_settings.tcp_host = String(test_host);
+        }
+        const char* test_port_str = PYXIS_TEST_TCP_PORT;
+        if (test_port_str && test_port_str[0] != '\0') {
+            int test_port = atoi(test_port_str);
+            if (test_port > 0) app_settings.tcp_port = test_port;
+        }
+    }
+#endif
+
     // Identity
     app_settings.display_name = prefs.getString("disp_name", "");
 
@@ -488,57 +529,74 @@ void setup_wifi() {
     WiFi.mode(WIFI_STA);
     WiFi.begin(app_settings.wifi_ssid.c_str(), app_settings.wifi_password.c_str());
 
+    // Don't block boot waiting for WiFi association — the main loop
+    // already sets up TCP and does NTP sync once WL_CONNECTED is
+    // observed (search for `last_wifi_connected`). Give association
+    // ~1s in case it lands fast (so we can do NTP+TCP synchronously
+    // when possible), then continue.
     BOOT_PROFILE_WAIT_START("wifi_connect");
     uint32_t start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 30000) {
-        delay(500);
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 1000) {
+        delay(50);
         Serial.print(".");
     }
     Serial.println();
     BOOT_PROFILE_WAIT_END("wifi_connect");
 
     if (WiFi.status() == WL_CONNECTED) {
-        INFO("WiFi connected!");
-        msg = "  IP address: " + WiFi.localIP().toString();
-        INFO(msg.c_str());
-        msg = "  RSSI: " + String(WiFi.RSSI()) + " dBm";
-        INFO(msg.c_str());
+        on_wifi_connected();
+    } else {
+        INFO("WiFi association deferred — main-loop event handler will "
+             "do NTP/OTA/UDP setup when the connect lands");
+    }
+}
 
-        // Try GPS time sync first (if GPS is initialized and we haven't synced already)
-        if (!gps_time_synced) {
-            // Fallback to NTP if GPS didn't work
-            INFO("Syncing time via NTP (GPS not available)...");
+// One-shot post-WiFi-connect setup. Runs the first time WL_CONNECTED is
+// observed — either at boot (via setup_wifi) or after async association
+// completes (via the periodic-status-check branch in loop()). Pulls
+// NTP, OTA, and UDP logging out of setup_wifi so the boot fast-path
+// (no synchronous WiFi wait) doesn't lose them.
+//
+// NTP sync is kicked off here (configTzTime is non-blocking on ESP32 —
+// it just stores the server list and starts the SNTP task) but the
+// "did it land?" polling happens incrementally in pump_ntp_sync_if_pending()
+// from loop(). The earlier in-place `getLocalTime` retry loop blocked
+// loopTask for up to 10 s on first WiFi-associate, stalling RNS packet
+// ingestion / LXMF delivery / SX1262 RX FIFO drain — a real one-shot
+// dead zone for radio traffic. Splitting kick-off from polling fixes that.
+static bool _wifi_post_connect_done = false;
+static bool _ntp_pending = false;
+static uint32_t _ntp_start_ms = 0;
+static const uint32_t NTP_TIMEOUT_MS = 10000;  // matches former retry budget
 
-            // Use configTzTime for proper timezone handling on ESP32
-            // Eastern Time: EST5EDT = UTC-5, DST starts 2nd Sunday March, ends 1st Sunday Nov
-            configTzTime("EST5EDT,M3.2.0,M11.1.0", "pool.ntp.org", "time.nist.gov");
+void on_wifi_connected() {
+    if (_wifi_post_connect_done) return;
+    _wifi_post_connect_done = true;
 
-            // Wait for time to be set (max 10 seconds)
-            struct tm timeinfo;
-            int retry = 0;
-            while (!getLocalTime(&timeinfo) && retry < 20) {
-                delay(500);
-                retry++;
-            }
+    INFO("WiFi connected!");
+    String msg = "  IP address: " + WiFi.localIP().toString();
+    INFO(msg.c_str());
+    msg = "  RSSI: " + String(WiFi.RSSI()) + " dBm";
+    INFO(msg.c_str());
 
-            if (retry < 20) {
-                // Set the time offset for Utilities::OS::time()
-                time_t now = time(nullptr);
-                uint64_t uptime_ms = millis();
-                uint64_t unix_ms = (uint64_t)now * 1000;
-                RNS::Utilities::OS::setTimeOffset(unix_ms - uptime_ms);
+    // Try GPS time sync first (if GPS is initialized and we haven't synced already)
+    if (!gps_time_synced) {
+        // Fallback to NTP if GPS didn't work
+        INFO("Syncing time via NTP (GPS not available)...");
 
-                char time_str[64];
-                strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S %Z", &timeinfo);
-                msg = "  NTP time synced: " + String(time_str);
-                INFO(msg.c_str());
-            } else {
-                WARNING("NTP time sync failed!");
-            }
-        } else {
-            INFO("Time already synced via GPS");
-        }
+        // Use configTzTime for proper timezone handling on ESP32
+        // Eastern Time: EST5EDT = UTC-5, DST starts 2nd Sunday March, ends 1st Sunday Nov
+        // This call is non-blocking — ESP32's lwIP SNTP task does the
+        // actual network exchange. Polling for completion happens in
+        // pump_ntp_sync_if_pending() (called from loop()).
+        configTzTime("EST5EDT,M3.2.0,M11.1.0", "pool.ntp.org", "time.nist.gov");
+        _ntp_pending = true;
+        _ntp_start_ms = millis();
+    } else {
+        INFO("Time already synced via GPS");
+    }
 
+    {
         // Initialize ArduinoOTA for wireless flashing
         ArduinoOTA.setHostname("pyxis-tdeck");
         ArduinoOTA.onStart([]() {
@@ -573,7 +631,8 @@ void setup_wifi() {
         // Initialize UDP log broadcasting (multicast group 239.0.99.99:9999)
         udp_log_init();
         udp_log_ready = true;
-        RNS::setLogCallback([](const char* msg, RNS::LogLevel level) {
+        // Renamed upstream (microReticulum @ 0.3.0): setLogCallback -> set_log_callback.
+        RNS::set_log_callback([](const char* msg, RNS::LogLevel level) {
             // Suppress noisy per-packet LoRa/transport trace lines on UDP
             // (still send to Serial for wired debugging)
             bool suppress_udp = false;
@@ -611,17 +670,57 @@ void setup_wifi() {
             }
         });
         INFO("UDP log broadcasting on port 9999");
-    } else {
-        ERROR("WiFi connection failed!");
+    }
+}
+
+// Incremental NTP-completion poller. Called once per loop() pass. Single
+// non-blocking getLocalTime probe (ms=0 → tries once, returns immediately).
+// When the SNTP task lands the time, snapshots it into
+// RNS::Utilities::OS::setTimeOffset so microReticulum sees real wall-clock.
+// Bounded by NTP_TIMEOUT_MS — after that we log + give up, matching the
+// 10 s budget of the previous synchronous retry loop.
+static void pump_ntp_sync_if_pending() {
+    if (!_ntp_pending) return;
+
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo, 0)) {
+        // Set the time offset for Utilities::OS::time()
+        time_t now = time(nullptr);
+        uint64_t uptime_ms = millis();
+        uint64_t unix_ms = (uint64_t)now * 1000;
+        RNS::Utilities::OS::setTimeOffset(unix_ms - uptime_ms);
+
+        char time_str[64];
+        strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S %Z", &timeinfo);
+        String msg = "  NTP time synced: " + String(time_str);
+        INFO(msg.c_str());
+        _ntp_pending = false;
+        return;
+    }
+
+    if (millis() - _ntp_start_ms >= NTP_TIMEOUT_MS) {
+        WARNING("NTP time sync failed!");
+        _ntp_pending = false;
     }
 }
 
 void setup_hardware() {
     INFO("\n=== Hardware Initialization ===");
 
-    // Initialize SPIFFS for persistence via UniversalFileSystem
-    // NOTE: Do NOT call SPIFFS.begin() here - UniversalFileSystem::init() handles it
-    static RNS::FileSystem fs = new UniversalFileSystem();
+    // Initialize LittleFS for persistence.
+    //
+    // Pre-graft: pyxis used its own RNS::FileSystem(new UniversalFileSystem())
+    // wrapper. Vanilla upstream microReticulum @ 0.3.0 deleted RNS::FileSystem
+    // entirely and replaced it with microStore (an out-of-tree dep). microStore
+    // ships filesystem adapters activated by build flags. We use LittleFS
+    // (-DUSTORE_USE_LITTLEFS) because it tolerates sustained writes much
+    // better than SPIFFS — the path table backend (microStore::BasicFileStore)
+    // does several puts/sec under network load, and SPIFFS's GC stalls
+    // were causing flush failures.
+    //
+    // Pyxis's lib/universal_filesystem/ is now dead code on this build path and
+    // can be deleted once the graft lands.
+    static microStore::Adapters::LittleFSFileSystem fs;
     if (!fs.init()) {
         ERROR("FileSystem mount failed!");
     } else {
@@ -657,17 +756,8 @@ void setup_lvgl_and_ui() {
     lv_obj_set_style_bg_opa(lv_scr_act(), LV_OPA_COVER, 0);
 
     INFO("LVGL initialized");
-
-    // Start LVGL on its own FreeRTOS task for responsive UI
-    // Core 1, priority 1 (same as loopTask — round-robin scheduling).
-    // Previously priority 2, but this starved loopTask of CPU time during
-    // heavy rendering, causing 30s WDT timeouts on loopTask.
-    if (!UI::LVGL::LVGLInit::start_task(1, 1)) {
-        ERROR("Failed to start LVGL task!");
-        while (1) delay(1000);
-    }
-
-    INFO("LVGL task started on core 1");
+    INFO("LVGL task start deferred until UI manager is ready "
+         "(splash stays visible until first real frame)");
 
     // Initialize memory monitoring (if enabled)
 #ifdef MEMORY_INSTRUMENTATION_ENABLED
@@ -692,6 +782,19 @@ void setup_reticulum() {
 
     // Create Reticulum instance (no auto-init)
     reticulum = new Reticulum();
+
+    // Enable transport mode so Transport::start() initializes the path
+    // store. Without this, the entire `_path_store.init()` block at
+    // Transport.cpp:244 is gated out, _new_path_table.put() always
+    // returns false at TypedStore::isValid(), and every announce
+    // surfaces as "Failed to add destination to path table". The UI's
+    // announce list reads from the path table, so on a busy network
+    // (TLAN) nothing ever appears.
+    //
+    // Transport mode also enables relaying packets for other nodes —
+    // typically a desktop-class node behavior, but acceptable on a
+    // T-Deck Plus with PSRAM and LittleFS-backed path persistence.
+    Reticulum::transport_enabled(true);
 
     // Reduce transport log verbosity — LOG_TRACE floods serial with
     // token/link/announce details that drown out audio diagnostics.
@@ -768,21 +871,17 @@ void setup_reticulum() {
         INFO("LoRa interface disabled in settings");
     }
 
-    // Add Auto interface (if enabled and WiFi connected)
-    if (app_settings.auto_enabled && WiFi.status() == WL_CONNECTED) {
-        INFO("Initializing AutoInterface (IPv6 peer discovery)...");
-
-        auto_interface_impl = new AutoInterface("Auto");
-        auto_interface = new Interface(auto_interface_impl);
-
-        if (!auto_interface->start()) {
-            ERROR("Failed to initialize AutoInterface!");
+    // Add Auto interface (if enabled). Use the idempotent helper so
+    // on_wifi_connected can re-attempt if WiFi associates after this
+    // boot block runs (it usually does — wifi_connect typically
+    // takes 2-5s, well past where we are in boot).
+    if (app_settings.auto_enabled) {
+        if (WiFi.status() == WL_CONNECTED) {
+            start_auto_interface();
         } else {
-            INFO("AutoInterface started");
-            Transport::register_interface(*auto_interface);
+            WARNING("AutoInterface enabled but WiFi not connected - "
+                    "will retry from on_wifi_connected");
         }
-    } else if (app_settings.auto_enabled) {
-        WARNING("AutoInterface enabled but WiFi not connected - skipping");
     } else {
         INFO("AutoInterface disabled in settings");
     }
@@ -833,6 +932,23 @@ void setup_lxmf() {
     // Create message store
     message_store = new MessageStore("/lxmf");
     INFO("Message store ready");
+
+    // Wire up the SD card as the archive tier so messages older than
+    // HOT_MESSAGES_PER_CONVERSATION (50) get moved off LittleFS. This
+    // is critical for sustained operation: the LittleFS partition is
+    // 1.875MB and a sustained-receive soak fills it in ~30min. With
+    // SD archive enabled, hot stays bounded indefinitely.
+    if (Hardware::TDeck::SDAccess::is_ready()) {
+        // Path on the SD card. We use "/lxmf-archive" (rather than the
+        // hot path "/lxmf") so the archive is clearly distinct from
+        // anything else the SD card might hold.
+        static Hardware::TDeck::SDArchiveFileSystem sd_archive_fs;
+        message_store->set_archive_filesystem(sd_archive_fs, "/lxmf-archive");
+        INFO("Message store: SD archive enabled at /lxmf-archive");
+    } else {
+        WARNING("Message store: SD card not ready, archive disabled — "
+                "older messages will be deleted instead of archived");
+    }
 
     // Create LXMF router
     router = new LXMRouter(*identity, "/lxmf");
@@ -1162,6 +1278,37 @@ void setup_ui_manager() {
 
 // Create and start TCP interface, register with Transport.
 // Safe to call multiple times - no-op if interface already exists.
+// Idempotent AutoInterface starter. Call from both boot and the
+// post-WiFi handler — the boot path fires before WiFi finishes
+// associating, so the boot-time gate fails and AutoInterface
+// silently never starts. Mirroring start_tcp_interface()'s pattern
+// makes "UI shows AutoInterface enabled" actually take effect once
+// WiFi lands a few seconds later.
+void start_auto_interface() {
+    if (!app_settings.auto_enabled || WiFi.status() != WL_CONNECTED) {
+        return;
+    }
+    if (!auto_interface_impl) {
+        INFO("Initializing AutoInterface (IPv6 peer discovery)...");
+        auto_interface_impl = new AutoInterface("Auto");
+        auto_interface = new Interface(auto_interface_impl);
+        if (!auto_interface->start()) {
+            ERROR("Failed to initialize AutoInterface!");
+        } else {
+            INFO("AutoInterface started");
+            Transport::register_interface(*auto_interface);
+        }
+    } else if (!auto_interface->online()) {
+        // Interface exists but stopped (post-disconnect): restart.
+        INFO("Restarting AutoInterface (was stopped)...");
+        if (auto_interface->start()) {
+            INFO("AutoInterface restarted");
+        } else {
+            ERROR("AutoInterface restart failed!");
+        }
+    }
+}
+
 void start_tcp_interface() {
     if (!app_settings.tcp_enabled || WiFi.status() != WL_CONNECTED) {
         return;
@@ -1250,14 +1397,20 @@ void setup() {
     load_app_settings();
     BOOT_PROFILE_END("settings");
 
-    // Initialize GPS and try to sync time (before WiFi)
+    // Initialize GPS but DON'T block boot waiting for a fix. The 15s
+    // synchronous wait was 31% of boot on this hardware; GPS rarely
+    // cold-starts in 15s anyway, so we'd usually just eat the full
+    // timeout. Keep a small (500ms) opportunistic check in case GPS
+    // already has a fix from before the boot (warm restart). After
+    // boot, the main loop's per-tick gps.encode + a periodic
+    // try_gps_sync retry will pick up the time the moment it lands.
     BOOT_PROFILE_START("gps");
     setup_gps();
     if (app_settings.gps_time_sync) {
         INFO("\n=== Time Synchronization ===");
         BOOT_PROFILE_WAIT_START("gps_sync");
-        if (!sync_time_from_gps(15000)) {  // 15 second timeout for GPS
-            INFO("GPS time sync not available, will try NTP after WiFi");
+        if (!sync_time_from_gps(500)) {  // brief warm-restart check only
+            INFO("GPS time sync deferred (will retry async)");
         }
         BOOT_PROFILE_WAIT_END("gps_sync");
     } else {
@@ -1265,7 +1418,13 @@ void setup() {
     }
     BOOT_PROFILE_END("gps");
 
-    // Initialize WiFi
+    // Initialize WiFi non-blocking. Previously we'd block boot up to
+    // 30s waiting for association; with a wrong password the device
+    // ate the full 30s and booted broken anyway. The main loop
+    // already handles "WiFi just associated" via the
+    // last_wifi_connected -> wifi_connected transition (sets up TCP
+    // interface and does NTP sync at that point), so blocking here
+    // adds nothing except boot latency.
     BOOT_PROFILE_START("wifi");
     setup_wifi();
     BOOT_PROFILE_END("wifi");
@@ -1345,6 +1504,22 @@ void setup() {
     setup_ui_manager();
     BOOT_PROFILE_END("ui_manager");
 
+    // Now that UIManager has built screens and configured the active
+    // one, start the LVGL render task. Doing this any earlier means
+    // the LVGL task refreshes its empty default screen on top of the
+    // boot splash (visible flash to black), then later refreshes the
+    // real UI. Deferring keeps the splash on-screen until the first
+    // real frame.
+    //
+    // Core 1, priority 1 (same as loopTask — round-robin scheduling).
+    // Previously priority 2, but that starved loopTask of CPU time
+    // during heavy rendering, causing 30s WDT timeouts on loopTask.
+    if (!UI::LVGL::LVGLInit::start_task(1, 1)) {
+        ERROR("Failed to start LVGL task!");
+        while (1) delay(1000);
+    }
+    INFO("LVGL task started on core 1");
+
     // Send initial LXST voice destination announce
     if (ui_manager) {
         ui_manager->announce_lxst();
@@ -1405,12 +1580,31 @@ void setup() {
     // Reconfigure Task Watchdog with 30s timeout (default 10s is too tight
     // for SPIFFS flash I/O — identity persistence writes 40-50 entries and
     // can take 5-15s with sector erases and garbage collection)
-    esp_task_wdt_init(30, true);  // 30s timeout, panic on trigger
+    // Task Watchdog config:
+    // - 60s timeout (was 30s; bumped to tolerate WiFi-stack busy windows
+    //   on CPU0 — `pm_tx_data_done_process` in ESP-IDF's `ppTask` can
+    //   starve CPU0 idle for >30s under heavy multicast/mDNS traffic)
+    // - panic=false: log warnings, don't reset. The reset behavior was
+    //   blocking pyxis from running long enough to debug anything else
+    //   on the graft. Will revisit panic=true once the WDT culprit is
+    //   tracked down — see pyxis_microReticulum_graft_spike_findings.md
+    //
+    // We tried `esp_task_wdt_delete(xTaskGetIdleTaskHandleForCPU(0))` to
+    // unsubscribe just CPU0 idle, but Arduino-ESP32's prebuilt framework
+    // re-adds it on the next loop iteration (CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
+    // is baked in and sdkconfig.defaults can't override without a framework
+    // rebuild from source).
+    esp_task_wdt_init(60, false);
     esp_task_wdt_add(NULL);       // Subscribe loopTask
-    INFO("Task Watchdog: loopTask subscribed (30s timeout)");
+    INFO("Task Watchdog: loopTask subscribed (60s timeout, log-only)");
 
-    // Feed WDT during long Identity persistence (71+ entries to SPIFFS can take >30s)
-    Identity::set_persist_yield_callback([]() { esp_task_wdt_reset(); });
+    // Feed WDT during long persistence + clean_cache operations (71+ entries
+    // to SPIFFS can take >30s). Upstream microReticulum @ 0.3.0 moved the
+    // per-Identity yield hook to a global RNS::Utilities::OS::_on_loop
+    // callback (set via set_loop_callback), invoked during long operations
+    // like clean_caches, identity persistence, and the path-table flush.
+    // Was: Identity::set_persist_yield_callback (fork-only).
+    RNS::Utilities::OS::set_loop_callback([]() { esp_task_wdt_reset(); });
 
     // Show startup message
     INFO("Press any key to start messaging");
@@ -1426,13 +1620,594 @@ static volatile uint8_t loop_step = 0;
 // Feed WDT and advance loop step tracker
 #define LOOP_STEP(n) do { loop_step = (n); esp_task_wdt_reset(); } while(0)
 
+#ifdef PYXIS_TEST_HOOKS
+// Test-hook serial command interface for the Mac-side harness. All
+// outputs are prefixed `T:OK` or `T:ERR` so the harness can parse them
+// out of the regular log stream.
+//
+// Commands:
+//   T:DEST                       — print our delivery dest hash
+//   T:ID                         — print our identity hash
+//   T:ANN                        — force an announce
+//   T:PATHS                      — print known path destination hashes
+//   T:HASPATH <hex_dest>         — query path-table membership
+//   T:RECALL <hex_dest>          — print app_data hex for that dest
+//   T:SEND <hex_dest> <text...>  — queue an outbound DIRECT LXMessage,
+//                                  print the message hash on success
+//   T:STATE <hex_msg_hash>       — print the LXMessage state if known
+//   T:RX                         — print received-message count then a
+//                                  one-line summary per message
+//   T:SETPROP <hex> <stamp_cost> — configure outbound propagation node
+//   T:SENDPROP <hex> <text>      — queue an outbound PROPAGATED message
+//   T:SYNCPROP                   — request_messages_from_propagation_node
+//   T:SYNCSTATE                  — print current PR_* sync state
+static String hex_byte_to_string(const RNS::Bytes& b) { return String(b.toHex().c_str()); }
+
+static RNS::Bytes parse_hex_arg(const String& hex) {
+    std::string s = std::string(hex.c_str());
+    RNS::Bytes b;
+    for (size_t i = 0; i + 1 < s.size(); i += 2) {
+        char buf[3] = {s[i], s[i+1], 0};
+        b << (uint8_t)strtoul(buf, nullptr, 16);
+    }
+    return b;
+}
+
+// Track sent messages so T:STATE can look them up. Capped circular
+// buffer; oldest entries drop on overflow. Index 0 = most recent.
+struct TestSentEntry { RNS::Bytes hash; LXMF::LXMessage msg; bool in_use = false; };
+static const size_t TEST_SENT_RING = 16;
+static TestSentEntry test_sent_ring[TEST_SENT_RING];
+static size_t test_sent_head = 0;
+static void test_sent_record(const LXMF::LXMessage& msg) {
+    test_sent_ring[test_sent_head].hash = msg.hash();
+    test_sent_ring[test_sent_head].msg = msg;
+    test_sent_ring[test_sent_head].in_use = true;
+    test_sent_head = (test_sent_head + 1) % TEST_SENT_RING;
+}
+static LXMF::LXMessage* test_sent_find(const RNS::Bytes& hash) {
+    for (size_t i = 0; i < TEST_SENT_RING; ++i) {
+        if (test_sent_ring[i].in_use && test_sent_ring[i].hash == hash) {
+            return &test_sent_ring[i].msg;
+        }
+    }
+    return nullptr;
+}
+
+// Track received messages so T:RX can summarize.
+// test_rx_total: monotonic count of all received messages (what the
+// harness reads as `count=`). test_rx_count: number of entries
+// currently held in the ring (≤ TEST_RX_RING). Splitting these two
+// fixes T:RX silently capping at 32 during long soak runs — the
+// detailed-entry dump is still bounded by ring size, but the count
+// the harness sees keeps climbing.
+struct TestRxEntry { RNS::Bytes source; RNS::Bytes content; bool in_use = false; };
+static const size_t TEST_RX_RING = 32;
+static TestRxEntry test_rx_ring[TEST_RX_RING];
+static size_t test_rx_count = 0;
+static size_t test_rx_total = 0;
+
+// Public wrapper exposed via pyxis_test_hooks.h (global scope, no
+// namespace) so other TUs (eg UIManager.cpp) can record received
+// messages without ADL gymnastics.
+void pyxis_test_hook_record_rx(const ::LXMF::LXMessage& msg) {
+    test_rx_total++;
+    if (test_rx_count >= TEST_RX_RING) return;
+    test_rx_ring[test_rx_count].source = msg.source_hash();
+    test_rx_ring[test_rx_count].content = msg.content();
+    test_rx_ring[test_rx_count].in_use = true;
+    test_rx_count++;
+}
+
+static const char* test_state_name(LXMF::Type::Message::State s) {
+    switch (s) {
+        case LXMF::Type::Message::GENERATING: return "GENERATING";
+        case LXMF::Type::Message::OUTBOUND:   return "OUTBOUND";
+        case LXMF::Type::Message::SENDING:    return "SENDING";
+        case LXMF::Type::Message::SENT:       return "SENT";
+        case LXMF::Type::Message::DELIVERED:  return "DELIVERED";
+        case LXMF::Type::Message::REJECTED:   return "REJECTED";
+        case LXMF::Type::Message::CANCELLED:  return "CANCELLED";
+        case LXMF::Type::Message::FAILED:     return "FAILED";
+        default:                              return "UNKNOWN";
+    }
+}
+
+static void handle_test_hook_command(const String& line) {
+    int sep = line.indexOf(' ');
+    String cmd = (sep < 0) ? line : line.substring(0, sep);
+    String args = (sep < 0) ? "" : line.substring(sep + 1);
+
+    if (cmd == "T:DEST") {
+        if (!router) { Serial.println("T:ERR no router"); return; }
+        Serial.println(String("T:OK ") + router->delivery_destination().hash().toHex().c_str());
+    }
+    else if (cmd == "T:ID") {
+        Serial.println(String("T:OK ") + identity->hash().toHex().c_str());
+    }
+    else if (cmd == "T:ANN") {
+        if (!router) { Serial.println("T:ERR no router"); return; }
+        router->announce();
+        Serial.println("T:OK announced");
+    }
+    else if (cmd == "T:ANNLXST") {
+        // T:ANNLXST — force a fresh announce of the lxst.telephony
+        // destination. Required before pyxis-as-callee tests because
+        // the TCP-reconnect path at main.cpp:963 only announces LXMF;
+        // a brand-new boot ends up with the LXST destination absent
+        // from rnsd's cache, so the bot can resolve a path but the
+        // path doesn't actually route to pyxis.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        ui_manager->announce_lxst();
+        Serial.println("T:OK announced");
+    }
+    else if (cmd == "T:PATHS") {
+        const auto& path_table = RNS::Transport::get_path_table();
+        Serial.print("T:OK count=");
+        Serial.println(String((unsigned)path_table.size()));
+        for (const auto& kv : path_table) {
+            Serial.print("T:PATH ");
+            Serial.println(kv.first.toHex().c_str());
+        }
+    }
+    else if (cmd == "T:HASPATH") {
+        RNS::Bytes dest = parse_hex_arg(args);
+        if (dest.size() != 16) { Serial.println("T:ERR bad hex"); return; }
+        bool has = RNS::Transport::has_path(dest);
+        // Diagnostic: also dump whether the in-memory _path_table has it,
+        // and the size of each store. They should match when the dual-
+        // write fix is working.
+        const auto& mem_table = RNS::Transport::get_path_table();
+        bool mem_has = (mem_table.find(dest) != mem_table.end());
+        Serial.print("T:OK ");
+        Serial.print(has ? "1" : "0");
+        Serial.print(" mem=");
+        Serial.print(mem_has ? "1" : "0");
+        Serial.print(" mem_count=");
+        Serial.println(String((unsigned)mem_table.size()));
+    }
+    else if (cmd == "T:RECALL") {
+        RNS::Bytes dest = parse_hex_arg(args);
+        if (dest.size() != 16) { Serial.println("T:ERR bad hex"); return; }
+        RNS::Bytes app = RNS::Identity::recall_app_data(dest);
+        Serial.println(String("T:OK size=") + String((unsigned)app.size())
+                       + " hex=" + app.toHex().c_str());
+    }
+    else if (cmd == "T:HASIDENTITY") {
+        // T:HASIDENTITY <hex_dest> — boolean check whether pyxis has
+        // an identity cached for this destination hash. Distinct from
+        // T:RECALL which only inspects app_data (and "size=0" is
+        // ambiguous between "unknown" and "known with empty app_data").
+        // Required for harness pre-call wait — the announce_handler
+        // populates _known_destinations slightly after path_store, and
+        // T:HASPATH succeeding doesn't imply Identity::recall will.
+        RNS::Bytes dest = parse_hex_arg(args);
+        if (dest.size() != 16) { Serial.println("T:ERR bad hex"); return; }
+        RNS::Identity ident = RNS::Identity::recall(dest);
+        Serial.println(String("T:OK ") + (ident ? "1" : "0"));
+    }
+    else if (cmd == "T:SEND" || cmd == "T:SENDOPP") {
+        if (!router) { Serial.println("T:ERR no router"); return; }
+        int sp = args.indexOf(' ');
+        if (sp < 0) { Serial.println("T:ERR usage <cmd> <hex> <text>"); return; }
+        String hex = args.substring(0, sp);
+        String text = args.substring(sp + 1);
+        RNS::Bytes dest_hash = parse_hex_arg(hex);
+        if (dest_hash.size() != 16) { Serial.println("T:ERR bad hex"); return; }
+        RNS::Identity dest_identity = RNS::Identity::recall(dest_hash);
+        RNS::Destination destination(RNS::Type::NONE);
+        if (dest_identity) {
+            destination = RNS::Destination(dest_identity, RNS::Type::Destination::OUT,
+                                           RNS::Type::Destination::SINGLE,
+                                           "lxmf", "delivery");
+        }
+        RNS::Bytes content_b((const uint8_t*)text.c_str(), text.length());
+        RNS::Bytes title_b;
+        LXMF::Type::Message::Method method = (cmd == "T:SENDOPP")
+            ? LXMF::Type::Message::OPPORTUNISTIC
+            : LXMF::Type::Message::DIRECT;
+        LXMF::LXMessage msg(destination, router->delivery_destination(),
+                            content_b, title_b, method);
+        if (!dest_identity) msg.destination_hash(dest_hash);
+        msg.pack();
+        router->handle_outbound(msg);
+        test_sent_record(msg);
+        Serial.println(String("T:OK hash=") + msg.hash().toHex().c_str()
+                       + " state=" + test_state_name(msg.state())
+                       + " method=" + (method == LXMF::Type::Message::OPPORTUNISTIC
+                                       ? "OPPORTUNISTIC" : "DIRECT"));
+    }
+    else if (cmd == "T:STATE") {
+        RNS::Bytes hash = parse_hex_arg(args);
+        LXMF::LXMessage* m = test_sent_find(hash);
+        if (!m) { Serial.println("T:ERR not found"); return; }
+        Serial.println(String("T:OK state=") + test_state_name(m->state()));
+    }
+    else if (cmd == "T:RX") {
+        // count=<total received since boot/clear> — keeps climbing past
+        // TEST_RX_RING. T:RXMSG dump is still capped to ring contents.
+        Serial.print("T:OK count=");
+        Serial.println(String((unsigned)test_rx_total));
+        for (size_t i = 0; i < test_rx_count; ++i) {
+            const auto& e = test_rx_ring[i];
+            std::string c((const char*)e.content.data(), e.content.size());
+            Serial.print("T:RXMSG src=");
+            Serial.print(e.source.toHex().c_str());
+            Serial.print(" content=");
+            Serial.println(c.c_str());
+        }
+    }
+    else if (cmd == "T:RXCLR") {
+        test_rx_count = 0;
+        test_rx_total = 0;
+        Serial.println("T:OK cleared");
+    }
+    else if (cmd == "T:SETPROP") {
+        // T:SETPROP <hex_dest> <stamp_cost> — configure outbound propagation node.
+        if (!router) { Serial.println("T:ERR no router"); return; }
+        int sp = args.indexOf(' ');
+        String hex = (sp < 0) ? args : args.substring(0, sp);
+        int stamp_cost = (sp < 0) ? 0 : args.substring(sp + 1).toInt();
+        RNS::Bytes node_hash = parse_hex_arg(hex);
+        if (node_hash.size() != 16) { Serial.println("T:ERR bad hex"); return; }
+        router->set_outbound_propagation_node(node_hash);
+        router->set_outbound_propagation_stamp_cost((uint8_t)stamp_cost);
+        Serial.println(String("T:OK pn=") + hex + " cost=" + String(stamp_cost));
+    }
+    else if (cmd == "T:SENDPROP") {
+        // T:SENDPROP <hex_dest> <text> — send PROPAGATED via the
+        // currently-configured outbound propagation node.
+        if (!router) { Serial.println("T:ERR no router"); return; }
+        int sp = args.indexOf(' ');
+        if (sp < 0) { Serial.println("T:ERR usage T:SENDPROP <hex> <text>"); return; }
+        String hex = args.substring(0, sp);
+        String text = args.substring(sp + 1);
+        RNS::Bytes dest_hash = parse_hex_arg(hex);
+        if (dest_hash.size() != 16) { Serial.println("T:ERR bad hex"); return; }
+        RNS::Identity dest_identity = RNS::Identity::recall(dest_hash);
+        RNS::Destination destination(RNS::Type::NONE);
+        if (dest_identity) {
+            destination = RNS::Destination(dest_identity, RNS::Type::Destination::OUT,
+                                           RNS::Type::Destination::SINGLE,
+                                           "lxmf", "delivery");
+        }
+        RNS::Bytes content_b((const uint8_t*)text.c_str(), text.length());
+        RNS::Bytes title_b;
+        LXMF::LXMessage msg(destination, router->delivery_destination(),
+                            content_b, title_b, LXMF::Type::Message::PROPAGATED);
+        if (!dest_identity) msg.destination_hash(dest_hash);
+        msg.pack();
+        router->handle_outbound(msg);
+        test_sent_record(msg);
+        Serial.println(String("T:OK hash=") + msg.hash().toHex().c_str()
+                       + " state=" + test_state_name(msg.state())
+                       + " method=PROPAGATED");
+    }
+    else if (cmd == "T:SYNCPROP") {
+        // T:SYNCPROP — kick off a sync from the configured propagation
+        // node. State machine progresses asynchronously; the harness
+        // can poll T:SYNCSTATE to track progress.
+        if (!router) { Serial.println("T:ERR no router"); return; }
+        router->request_messages_from_propagation_node();
+        Serial.println("T:OK sync_requested");
+    }
+    else if (cmd == "T:SYNCSTATE") {
+        // T:SYNCSTATE — return the current PR_* state of the prop sync FSM.
+        if (!router) { Serial.println("T:ERR no router"); return; }
+        Serial.print("T:OK state=");
+        Serial.println(String((unsigned)router->get_sync_state()));
+    }
+    else if (cmd == "T:CALL") {
+        // T:CALL <hex_dest> — initiate an outgoing LXST voice call.
+        // The state machine progresses asynchronously; harness should
+        // poll T:CALL_STATE for IDLE → ... → ACTIVE transitions.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        RNS::Bytes dest_hash = parse_hex_arg(args);
+        if (dest_hash.size() != 16) { Serial.println("T:ERR bad hex"); return; }
+        ui_manager->test_call_initiate(dest_hash);
+        Serial.println(String("T:OK calling=") + args);
+    }
+    else if (cmd == "T:CALL_STATE") {
+        // T:CALL_STATE — print the current call FSM state name.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        Serial.print("T:OK state=");
+        Serial.println(ui_manager->test_call_state_name());
+    }
+    else if (cmd == "T:CALL_HANGUP") {
+        // T:CALL_HANGUP — tear down the active call.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        ui_manager->test_call_hangup();
+        Serial.println("T:OK hung_up");
+    }
+    else if (cmd == "T:CALL_ANSWER") {
+        // T:CALL_ANSWER — accept an incoming ring. Only valid when state
+        // is INCOMING_RINGING. Used by the harness for pyxis-as-callee
+        // interop tests against real LXST.Telephony.Telephone clients.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        if (!ui_manager->test_call_answer()) {
+            Serial.println("T:ERR not_ringing");
+            return;
+        }
+        Serial.println("T:OK answered");
+    }
+    else if (cmd == "T:BLE") {
+        // T:BLE on|off — toggle the BLE Mesh interface at runtime + persist
+        // to NVS. Used by the harness to bring BLE up for cross-device
+        // tests against Android Columba. Mirrors the SettingsScreen save
+        // path so the change survives a reboot.
+        bool want_on = (args == "on" || args == "1" || args == "true");
+        bool want_off = (args == "off" || args == "0" || args == "false");
+        if (!want_on && !want_off) {
+            // No arg → query current state
+            Serial.println(String("T:OK ble_enabled=") + (app_settings.ble_enabled ? "1" : "0"));
+            return;
+        }
+        Preferences prefs;
+        // Boot loads ble_en from NVS namespace "settings" — must match here
+        // or the change won't survive a reboot.
+        prefs.begin("settings", false);
+        prefs.putBool("ble_en", want_on);
+        prefs.end();
+        app_settings.ble_enabled = want_on;
+        if (want_on && !ble_interface_impl) {
+            INFO("T:BLE on — creating BLE interface");
+            void* ble_mem = heap_caps_calloc(1, sizeof(BLEInterface), MALLOC_CAP_SPIRAM);
+            ble_interface_impl = new (ble_mem) BLEInterface("BLE");
+            ble_interface_impl->setRole(RNS::BLE::Role::DUAL);
+            ble_interface_impl->setLocalIdentity(identity->get_public_key().left(16));
+            std::string ble_name = "TD-" + identity->get_public_key().toHex().substr(26, 6);
+            ble_interface_impl->setDeviceName(ble_name);
+            ble_interface = new Interface(ble_interface_impl);
+            if (ble_interface->start()) {
+                Transport::register_interface(*ble_interface);
+                ble_interface_impl->start_task(1, 0);
+                Serial.println("T:OK ble_enabled=1 started");
+            } else {
+                Serial.println("T:ERR ble_start_failed");
+            }
+        } else if (want_on) {
+            // Already exists, just restart
+            if (ble_interface->start()) {
+                Serial.println("T:OK ble_enabled=1 restarted");
+            } else {
+                Serial.println("T:ERR ble_restart_failed");
+            }
+        } else if (ble_interface_impl) {
+            // want_off
+            ble_interface_impl->stop();
+            Serial.println("T:OK ble_enabled=0 stopped");
+        } else {
+            Serial.println("T:OK ble_enabled=0");
+        }
+    }
+    else if (cmd == "T:LXSTDEST") {
+        // T:LXSTDEST — pyxis's lxst.telephony destination hash. Used
+        // by the harness to set up pyxis-as-callee tests (the bot
+        // dials this hash). Returns "T:ERR not_ready" if the
+        // destination hasn't been registered yet (early boot).
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        std::string h = ui_manager->test_lxst_dest_hex();
+        if (h.empty()) { Serial.println("T:ERR not_ready"); return; }
+        Serial.println(String("T:OK ") + h.c_str());
+    }
+    else if (cmd == "T:CALL_STATS") {
+        // T:CALL_STATS — return audio frame counters for the most recent
+        // call. tx = frames sent over the wire (encoded by capture path),
+        // rx = frames received and queued for playback (decoded). Both
+        // are reset on call_initiate.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        Serial.print("T:OK tx=");
+        Serial.print((unsigned long)ui_manager->test_call_audio_tx_count());
+        Serial.print(" rx=");
+        Serial.print((unsigned long)ui_manager->test_call_audio_rx_count());
+        Serial.print(" state=");
+        Serial.println(ui_manager->test_call_state_name());
+    }
+    else if (cmd == "T:CALL_QOS") {
+        // T:CALL_QOS — wire-level audio fidelity counters from the
+        // playback decode path. decode_ok = frames Codec2 successfully
+        // decoded into PCM; decode_fail = frames it rejected (bad mode
+        // header, corrupt subframe, internal codec error). pcm_n /
+        // pcm_ss = sample count + cumulative sum-of-squares the harness
+        // divides into RMS for content-level validation. With a peer
+        // injecting a 1kHz sine at peak P the expected RMS = P/√2.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        Serial.print("T:OK decode_ok=");
+        Serial.print((unsigned long)ui_manager->test_call_decode_ok());
+        Serial.print(" decode_fail=");
+        Serial.print((unsigned long)ui_manager->test_call_decode_fail());
+        Serial.print(" pcm_n=");
+        Serial.print((unsigned long)ui_manager->test_call_pcm_sample_count());
+        Serial.print(" pcm_ss=");
+        Serial.print((unsigned long long)ui_manager->test_call_pcm_sum_squares());
+        Serial.print(" state=");
+        Serial.println(ui_manager->test_call_state_name());
+    }
+    else if (cmd == "T:CALL_PROFILE") {
+        // T:CALL_PROFILE [hex] — get/set pyxis's preferred Codec2 profile.
+        // No arg: print current. With arg: set.
+        // Valid: 0x10 (ULBW/700C), 0x20 (VLBW/1600), 0x30 (LBW/3200).
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        if (args.length() == 0) {
+            int p = ui_manager->test_call_get_profile();
+            Serial.print("T:OK profile=0x");
+            if (p < 16) Serial.print("0");
+            Serial.println(String(p, HEX));
+            return;
+        }
+        int profile = (int)strtol(args.c_str(), nullptr, 0);
+        if (!ui_manager->test_call_set_profile(profile)) {
+            Serial.println("T:ERR unknown profile");
+            return;
+        }
+        Serial.print("T:OK profile=0x");
+        if (profile < 16) Serial.print("0");
+        Serial.println(String(profile, HEX));
+    }
+    else if (cmd == "T:SHOW") {
+        // T:SHOW <name> — switch the UI to a named screen. Used by
+        // scripts/screenshot.py --all to drive a full doc capture.
+        // Names match UIManager's show_* methods; chat/qr/call need
+        // additional state (peer hash / identity / active call) and
+        // are not exposed here.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        if (args == "conversation_list" || args == "home") {
+            ui_manager->show_conversation_list();
+        } else if (args == "compose") {
+            ui_manager->show_compose();
+        } else if (args == "announces") {
+            ui_manager->show_announces();
+        } else if (args == "status") {
+            ui_manager->show_status();
+        } else if (args == "settings") {
+            ui_manager->show_settings();
+        } else if (args == "propagation_nodes") {
+            ui_manager->show_propagation_nodes();
+        } else {
+            Serial.print("T:ERR unknown screen ");
+            Serial.println(args);
+            return;
+        }
+        Serial.print("T:OK shown ");
+        Serial.println(args);
+    }
+    else if (cmd == "T:SCREENSHOT") {
+        // T:SCREENSHOT — capture the active LVGL screen as RGB565 and
+        // dump base64 over USB-CDC. Decoder is scripts/screenshot.py.
+        //
+        // Wire format:
+        //   T:SCREENSHOT BEGIN W=<w> H=<h> FMT=rgb565<be|le> BYTES=<n>
+        //   <base64 line, 76 chars max>
+        //   <base64 line>
+        //   ...
+        //   T:SCREENSHOT END
+        //
+        // The host script reads until "T:SCREENSHOT END", concatenates
+        // all lines between the markers, base64-decodes, and converts
+        // to PNG. FMT carries the byte order (`be` when LV_COLOR_16_SWAP
+        // is on, `le` otherwise) so the decoder doesn't have to guess.
+        // Hold the LVGL lock ONLY for the snapshot: lv_snapshot_take() copies
+        // the screen pixels into a freshly-allocated buffer, so live LVGL state
+        // isn't touched during the ~18s base64 serial dump below. Holding the
+        // recursive mutex across the whole dump blocks the LVGL render task and
+        // trips the 5s LVGLLock timeout assert (LVGLLock.h) in debug builds.
+        lv_img_dsc_t* snap = nullptr;
+        {
+            LVGL_LOCK();
+            lv_obj_t* scr = lv_scr_act();
+            if (!scr) {
+                Serial.println("T:ERR no active screen");
+                return;
+            }
+            snap = lv_snapshot_take(scr, LV_IMG_CF_TRUE_COLOR);
+        }
+        if (!snap || !snap->data) {
+            if (snap) { LVGL_LOCK(); lv_snapshot_free(snap); }
+            Serial.println("T:ERR snapshot failed (PSRAM exhausted?)");
+            return;
+        }
+        const uint16_t w = snap->header.w;
+        const uint16_t h = snap->header.h;
+        const uint32_t bytes = snap->data_size;
+#if LV_COLOR_16_SWAP
+        const char* fmt = "rgb565be";
+#else
+        const char* fmt = "rgb565le";
+#endif
+        Serial.print("T:SCREENSHOT BEGIN W=");
+        Serial.print(w);
+        Serial.print(" H=");
+        Serial.print(h);
+        Serial.print(" FMT=");
+        Serial.print(fmt);
+        Serial.print(" BYTES=");
+        Serial.println(bytes);
+
+        static const char b64[] =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        const uint8_t* p = snap->data;
+        uint32_t remaining = bytes;
+        char line[80];
+        size_t line_len = 0;
+        // Encode in 3-byte → 4-char groups; flush at 76-char boundary
+        // so the host script can read line-by-line.
+        while (remaining >= 3) {
+            uint32_t v = ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
+            line[line_len++] = b64[(v >> 18) & 0x3f];
+            line[line_len++] = b64[(v >> 12) & 0x3f];
+            line[line_len++] = b64[(v >> 6) & 0x3f];
+            line[line_len++] = b64[v & 0x3f];
+            p += 3;
+            remaining -= 3;
+            if (line_len >= 76) {
+                line[line_len] = '\0';
+                Serial.println(line);
+                line_len = 0;
+            }
+        }
+        if (remaining > 0) {
+            uint32_t v = (uint32_t)p[0] << 16;
+            if (remaining == 2) v |= (uint32_t)p[1] << 8;
+            line[line_len++] = b64[(v >> 18) & 0x3f];
+            line[line_len++] = b64[(v >> 12) & 0x3f];
+            line[line_len++] = (remaining == 2) ? b64[(v >> 6) & 0x3f] : '=';
+            line[line_len++] = '=';
+        }
+        if (line_len > 0) {
+            line[line_len] = '\0';
+            Serial.println(line);
+        }
+        Serial.println("T:SCREENSHOT END");
+        { LVGL_LOCK(); lv_snapshot_free(snap); }
+    }
+    else if (cmd == "T:CALL_INJECT") {
+        // T:CALL_INJECT <on|off> [freq_hz] [amp_pct]
+        // Replace mic capture with a synthesized sine wave for the
+        // active call (bypasses ES7210 + voice filters). The bot
+        // decodes pyxis's audio packets and computes RMS over the
+        // decoded PCM — should match the expected sine energy.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        int sp = args.indexOf(' ');
+        String on_off = (sp < 0) ? args : args.substring(0, sp);
+        bool enabled = (on_off == "on" || on_off == "1" || on_off == "true");
+        int freq = 1000;
+        float amp = 0.5f;
+        if (sp >= 0) {
+            String rest = args.substring(sp + 1);
+            int sp2 = rest.indexOf(' ');
+            if (sp2 < 0) {
+                freq = rest.toInt();
+            } else {
+                freq = rest.substring(0, sp2).toInt();
+                amp = rest.substring(sp2 + 1).toFloat();
+            }
+            if (freq <= 0) freq = 1000;
+            if (amp <= 0.f || amp > 1.f) amp = 0.5f;
+        }
+        ui_manager->test_call_set_inject_sine(enabled, freq, amp);
+        Serial.print("T:OK inject=");
+        Serial.print(enabled ? "on" : "off");
+        Serial.print(" freq=");
+        Serial.print(freq);
+        Serial.print(" amp=");
+        Serial.println(amp, 3);
+    }
+    else {
+        Serial.print("T:ERR unknown cmd ");
+        Serial.println(cmd);
+    }
+}
+#endif // PYXIS_TEST_HOOKS
+
 void loop() {
     esp_task_wdt_reset();
 
     // Handle OTA updates (must be called frequently)
     ArduinoOTA.handle();
 
-    // Handle serial commands for web flasher detection
+    // Handle serial commands for web flasher detection + (under
+    // PYXIS_TEST_HOOKS) the harness command interface. Buffer up to
+    // 1024 chars so long T:SEND payloads work.
     while (Serial.available()) {
         char c = Serial.read();
         if (c == '\n' || c == '\r') {
@@ -1447,8 +2222,13 @@ void loop() {
                 REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
                 esp_restart();
             }
+#ifdef PYXIS_TEST_HOOKS
+            else if (serial_cmd_buffer.startsWith("T:")) {
+                handle_test_hook_command(serial_cmd_buffer);
+            }
+#endif
             serial_cmd_buffer = "";
-        } else if (serial_cmd_buffer.length() < 32) {
+        } else if (serial_cmd_buffer.length() < 1024) {
             serial_cmd_buffer += c;
         }
     }
@@ -1499,14 +2279,21 @@ void loop() {
     }
 
     // Periodically persist identity/transport data (display names, paths, etc.)
-    // NOTE: Identity persistence writes 40-50 entries to SPIFFS flash, which
-    // involves sector erases (100ms each) and can take 5-15s total.
-    // WDT feeds between calls prevent timeout during heavy flash I/O.
+    // NOTE: Persistence writes 40-50 entries via microStore (which routes
+    // through the new microStore::FileSystem to SPIFFS or whichever backend
+    // is configured). Sector erases (100ms each) can stretch the call to
+    // 5-15s; the OS::set_loop_callback above feeds the WDT between entries.
+    //
+    // Upstream microReticulum @ 0.3.0 unified persistence into a single
+    // Reticulum::should_persist_data() entry point — the fork had a
+    // separate Identity::should_persist_data() for a 5s fast-flush of known
+    // destinations. That fast cadence is folded into microStore's dirty-
+    // tracking; the explicit Identity::should_persist_data() call has been
+    // dropped here. (If we observe excessive lost-known-destinations after
+    // crashes, revisit microStore's flush cadence rather than re-adding
+    // the fork-only Identity API.)
     LOOP_STEP(5);  // persist data
     reticulum->should_persist_data();
-    esp_task_wdt_reset();
-    // Fast-persist known destinations (5s after dirty) to survive crashes
-    Identity::should_persist_data();
     esp_task_wdt_reset();
 
     // Process TCP interface
@@ -1606,15 +2393,37 @@ void loop() {
         last_tcp_online = true;
     }
 
+    // Drain any pending NTP probe (non-blocking, no-op when not pending).
+    // on_wifi_connected kicks NTP off without blocking; this polls each
+    // pass until the SNTP task lands the time or NTP_TIMEOUT_MS elapses.
+    pump_ntp_sync_if_pending();
+
     // Periodic RNS status check (check all interfaces)
     if (millis() - last_status_check > STATUS_CHECK_INTERVAL) {
         last_status_check = millis();
 
-        // Start TCP interface when WiFi becomes available
+        // Start TCP interface + run one-shot NTP/OTA/UDP setup when
+        // WiFi becomes available. on_wifi_connected is idempotent
+        // (guarded by _wifi_post_connect_done) so it's safe whether
+        // the connect happened during boot or here later.
         bool wifi_connected = (WiFi.status() == WL_CONNECTED);
-        if (wifi_connected && !last_wifi_connected && !tcp_interface_impl && app_settings.tcp_enabled) {
-            INFO("WiFi connected - starting TCP interface");
-            start_tcp_interface();
+        if (wifi_connected && !last_wifi_connected) {
+            INFO("WiFi connected (post-boot) — running on_wifi_connected");
+            on_wifi_connected();
+            if (!tcp_interface_impl && app_settings.tcp_enabled) {
+                start_tcp_interface();
+            }
+            // AutoInterface init at boot fails its WiFi-connected gate
+            // because WiFi typically associates 2-5s after the boot
+            // block runs. Retry here once WiFi actually lands. Also handles
+            // reconnect: the old `!auto_interface_impl` guard meant this only
+            // ran on the first connect, so after a WiFi drop AutoInterface kept
+            // stale multicast sockets and peers never rediscovered until reboot.
+            // start_auto_interface() is idempotent — its else-if(!online())
+            // branch rebinds the sockets on a reconnect.
+            if (app_settings.auto_enabled) {
+                start_auto_interface();
+            }
         }
         last_wifi_connected = wifi_connected;
 
@@ -1662,6 +2471,22 @@ void loop() {
     // Read GPS data continuously (TinyGPSPlus needs constant feeding)
     while (GPSSerial.available() > 0) {
         gps.encode(GPSSerial.read());
+    }
+
+    // Async GPS time sync retry. We dropped the synchronous 15s wait
+    // from boot — instead, retry every 30s here until sync succeeds.
+    // This also gives a path to catch fixes that arrive after boot
+    // (warm starts, stationary cold starts, etc).
+    static uint32_t _gps_sync_last_attempt = 0;
+    if (!gps_time_synced
+            && app_settings.gps_time_sync
+            && millis() - _gps_sync_last_attempt > 30000) {
+        _gps_sync_last_attempt = millis();
+        if (gps.date.isValid() && gps.time.isValid() && gps.date.year() >= 2024) {
+            // Cheap path: TinyGPSPlus already has a valid timestamp,
+            // so sync_time_from_gps will return immediately.
+            sync_time_from_gps(0);
+        }
     }
 
     // Screen timeout handling
@@ -1757,35 +2582,24 @@ void loop() {
                 Serial.println(crit);
                 udp_send(crit, strlen(crit));
             }
-            // Print Transport table sizes for debugging
+            // Print Transport table sizes for debugging.
+            //
+            // Vanilla upstream microReticulum @ 0.3.0 doesn't expose the
+            // *_count() getter family the fork added. The fork's commit
+            // 4d6f0b9 (PSRAM/TLSF allocator) replaced these with allocator-
+            // stats getters, but pyxis hasn't been ported to those yet.
+            //
+            // Drop the diagnostic for now — it's a developer-debugging tool,
+            // not load-bearing for runtime behavior. To restore: either (a)
+            // upstream PR adding the *_count getters back to Transport, or
+            // (b) port the diagnostic to use Reticulum::get_path_table().size()
+            // and friends, plus heap-stats from the new allocator.
+            //
+            // Tracked in pyxis_microReticulum_graft_spike_findings.md.
             {
-                char tbl[192];
-                int n = snprintf(tbl, sizeof(tbl),
-                    "[TABLES] ann=%zu dest=%zu rev=%zu link=%zu held=%zu rate=%zu path=%zu",
-                    RNS::Transport::announce_table_count(),
-                    RNS::Transport::destination_table_count(),
-                    RNS::Transport::reverse_table_count(),
-                    RNS::Transport::link_table_count(),
-                    RNS::Transport::held_announces_count(),
-                    RNS::Transport::announce_rate_table_count(),
-                    RNS::Transport::path_requests_count());
-                Serial.println(tbl);
-                udp_send(tbl, n);
-                n = snprintf(tbl, sizeof(tbl),
-                    "[TABLES] pend_link=%zu act_link=%zu rcpt=%zu pkt_hash=%zu iface=%zu dest_pool=%zu",
-                    RNS::Transport::pending_links_count(),
-                    RNS::Transport::active_links_count(),
-                    RNS::Transport::receipts_count(),
-                    RNS::Transport::packet_hashlist_count(),
-                    RNS::Transport::interfaces_count(),
-                    RNS::Transport::destinations_count());
-                Serial.println(tbl);
-                udp_send(tbl, n);
-                n = snprintf(tbl, sizeof(tbl), "[IDENTITY] known_dest=%zu known_ratch=%zu",
-                    RNS::Identity::known_destinations_count(),
-                    RNS::Identity::known_ratchets_count());
-                Serial.println(tbl);
-                udp_send(tbl, n);
+                const char* note = "[TABLES] (size diagnostics disabled — see graft notes)";
+                Serial.println(note);
+                udp_send(note, strlen(note));
             }
         } else if (free_heap < 50000) {
             const char* warn = "[HEAP] WARNING: Free heap below 50KB";
@@ -1803,23 +2617,12 @@ void loop() {
             udp_send(frag, n);
         }
 
-        // Periodic table diagnostics (every 30 seconds)
-        if (millis() - last_table_check > 30000) {
-            last_table_check = millis();
-            char diag[192];
-            int n = snprintf(diag, sizeof(diag),
-                "[DIAG] ikd=%zu ikr=%zu ann=%zu dest=%zu pkt=%zu held=%zu rev=%zu link=%zu",
-                RNS::Identity::known_destinations_count(),
-                RNS::Identity::known_ratchets_count(),
-                RNS::Transport::announce_table_count(),
-                RNS::Transport::destination_table_count(),
-                RNS::Transport::packet_hashlist_count(),
-                RNS::Transport::held_announces_count(),
-                RNS::Transport::reverse_table_count(),
-                RNS::Transport::link_table_count());
-            Serial.println(diag);
-            udp_send(diag, n);
-        }
+        // Periodic table diagnostics — disabled post-graft. Same reason as
+        // the in-CRITICAL-heap [TABLES] block above: vanilla upstream
+        // microReticulum @ 0.3.0 doesn't expose Identity::*_count or
+        // Transport::*_count getters. Restore by porting to upstream's
+        // get_path_table().size() etc., or PR the getters back upstream.
+        (void)last_table_check;
 
         last_free_heap = free_heap;
     }

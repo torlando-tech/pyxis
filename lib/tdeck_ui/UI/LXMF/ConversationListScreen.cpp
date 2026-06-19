@@ -16,6 +16,12 @@
 #include <MsgPack.h>
 #include <TinyGPSPlus.h>
 
+// SX1262Interface owns the last-RX RSSI/SNR snapshot that the top-bar
+// LoRa indicator reads. Only the .cpp needs the full type — the header
+// keeps `_lora_interface` typed as RNS::Interface* so set_lora_interface
+// callers don't need to include the concrete class.
+#include "SX1262Interface.h"
+
 using namespace RNS;
 using namespace Hardware::TDeck;
 
@@ -226,7 +232,12 @@ void ConversationListScreen::refresh() {
         ConversationItem item;
         item.peer_hash = peer_hash;
 
-        // Try to get display name from app_data, fall back to hash
+        // Resolve display name in three tiers:
+        //   1. Live announce cache (Identity::recall_app_data) — fresh
+        //   2. MessageStore-persisted name — survives reboots
+        //   3. Truncated hash — last resort
+        // When (1) succeeds, also write through to the persisted cache
+        // so future cold boots get (2) immediately.
         bool resolved = false;
         Bytes app_data = Identity::recall_app_data(peer_hash);
         if (app_data && app_data.size() > 0) {
@@ -234,13 +245,24 @@ void ConversationListScreen::refresh() {
             if (display_name.length() > 0) {
                 item.peer_name = display_name;
                 resolved = true;
-            } else {
-                item.peer_name = truncate_hash(peer_hash);
+                // Defer the persisted write-through — set_display_name() hits
+                // microStore/LittleFS, and refresh() runs under the LVGL lock
+                // (held by UIManager::update()). UIManager::update() flushes
+                // these before it takes the lock so the I/O never stalls the
+                // render task. (Same rationale as on_message_received.)
+                _pending_name_writes.emplace_back(
+                    peer_hash, std::string(display_name.c_str()));
             }
-        } else {
-            item.peer_name = truncate_hash(peer_hash);
+        }
+        if (!resolved && _message_store) {
+            std::string cached = _message_store->get_display_name(peer_hash);
+            if (!cached.empty()) {
+                item.peer_name = String(cached.c_str());
+                resolved = true;
+            }
         }
         if (!resolved) {
+            item.peer_name = truncate_hash(peer_hash);
             _has_unresolved_names = true;
         }
 
@@ -258,6 +280,20 @@ void ConversationListScreen::refresh() {
         _conversations.push_back(item);
         create_conversation_item(item);
     }
+}
+
+void ConversationListScreen::flush_pending_name_writes() {
+    // Called from UIManager::update() BEFORE it takes the LVGL lock.
+    // set_display_name() hits microStore/LittleFS; running it inside refresh()
+    // (under the lock) serially stalls the LVGL render task on a cold-boot
+    // announce burst. Same fix as UIManager::on_message_received.
+    if (!_message_store || _pending_name_writes.empty()) {
+        return;
+    }
+    for (const auto& w : _pending_name_writes) {
+        _message_store->set_display_name(w.first, w.second);
+    }
+    _pending_name_writes.clear();
 }
 
 void ConversationListScreen::create_conversation_item(const ConversationItem& item) {
@@ -432,9 +468,15 @@ void ConversationListScreen::update_status() {
         lv_obj_set_style_text_color(_label_wifi, Theme::textMuted(), 0);
     }
 
-    // Update LoRa RSSI
-    if (_lora_interface) {
-        float rssi_f = _lora_interface->get_rssi();
+    // Update LoRa RSSI. SX1262Interface::get_rssi() is non-virtual on
+    // the concrete impl class, and `_lora_interface` is a RNS::Interface
+    // wrapper — we have to drop down to its InterfaceImpl* via .get()
+    // and static_cast to the concrete subclass. Pyxis only ever passes
+    // a SX1262Interface here (set_lora_interface in main.cpp wraps
+    // `lora_interface_impl`, which IS SX1262Interface*).
+    if (_lora_interface && _lora_interface->get()) {
+        SX1262Interface* lora = static_cast<SX1262Interface*>(_lora_interface->get());
+        float rssi_f = lora->get_rssi();
         int rssi = (int)rssi_f;
 
         // Only show RSSI if we've received at least one packet (RSSI != 0)
@@ -461,21 +503,43 @@ void ConversationListScreen::update_status() {
         lv_obj_set_style_text_color(_label_lora, Theme::textMuted(), 0);
     }
 
-    // Update GPS satellite count
-    if (_gps && _gps->satellites.isValid()) {
-        int sats = _gps->satellites.value();
+    // Update GPS state — four tiers:
+    //   "--"   muted    no GPS handle, or no NMEA bytes parsed yet
+    //   "?"    yellow   NMEA flowing, no fix, no in-view info either
+    //   "?N"   yellow   N satellites in view but no fix yet
+    //   "N"    colored  N satellites in fix; color by count
+    //
+    // `_gps->satellites` only updates from $GPGGA (sats USED in fix). A
+    // module that's seeing the sky but hasn't acquired a fix outputs 0
+    // for GGA-sats while $GPGSV reports N visible. We bind a
+    // TinyGPSCustom to GPGSV field 3 in set_gps to surface that count
+    // — the user sees "?12" ("12 visible, no fix") and watches it flip
+    // to a colored "N" once the lock comes in.
+    int sats_in_fix = (_gps && _gps->satellites.isValid())
+                      ? (int)_gps->satellites.value() : 0;
+    int sats_in_view = (_gps_in_view.isValid())
+                       ? atoi(_gps_in_view.value()) : 0;
+
+    if (_gps && sats_in_fix > 0) {
         char gps_text[32];
-        snprintf(gps_text, sizeof(gps_text), "%s %d", LV_SYMBOL_GPS, sats);
+        snprintf(gps_text, sizeof(gps_text), "%s %d", LV_SYMBOL_GPS, sats_in_fix);
         lv_label_set_text(_label_gps, gps_text);
 
-        // Color based on satellite count
-        if (sats >= 6) {
-            lv_obj_set_style_text_color(_label_gps, Theme::success(), 0);  // Green
-        } else if (sats >= 3) {
-            lv_obj_set_style_text_color(_label_gps, Theme::warning(), 0);  // Yellow
+        if (sats_in_fix >= 6) {
+            lv_obj_set_style_text_color(_label_gps, Theme::success(), 0);
+        } else if (sats_in_fix >= 3) {
+            lv_obj_set_style_text_color(_label_gps, Theme::warning(), 0);
         } else {
-            lv_obj_set_style_text_color(_label_gps, Theme::error(), 0);  // Red
+            lv_obj_set_style_text_color(_label_gps, Theme::error(), 0);
         }
+    } else if (_gps && sats_in_view > 0) {
+        char gps_text[32];
+        snprintf(gps_text, sizeof(gps_text), "%s ?%d", LV_SYMBOL_GPS, sats_in_view);
+        lv_label_set_text(_label_gps, gps_text);
+        lv_obj_set_style_text_color(_label_gps, Theme::warning(), 0);
+    } else if (_gps && _gps->charsProcessed() > 0) {
+        lv_label_set_text(_label_gps, LV_SYMBOL_GPS " ?");
+        lv_obj_set_style_text_color(_label_gps, Theme::warning(), 0);
     } else {
         lv_label_set_text(_label_gps, LV_SYMBOL_GPS " --");
         lv_obj_set_style_text_color(_label_gps, Theme::textMuted(), 0);
@@ -486,14 +550,14 @@ void ConversationListScreen::update_status() {
         int central_count = 0;
         int peripheral_count = 0;
 
-        // Get connection counts from BLE interface
-        // The interface stores stats about connections
-        // Use get_stats() map if available, otherwise show "--"
-        auto stats = _ble_interface->get_stats();
-        auto it_c = stats.find("central_connections");
-        auto it_p = stats.find("peripheral_connections");
-        if (it_c != stats.end()) central_count = (int)it_c->second;
-        if (it_p != stats.end()) peripheral_count = (int)it_p->second;
+        // Pre-graft: BLEInterface::get_stats() was a virtual override on
+        // RNS::Interface. Vanilla upstream doesn't expose get_stats on the
+        // Interface base; the method is still defined on BLEInterface as
+        // non-virtual. To restore: change _ble_interface to BLEInterface*.
+        // Disabled for the spike.
+        // auto stats = _ble_interface->get_stats();
+        (void)central_count;
+        (void)peripheral_count;
 
         char ble_text[32];
         snprintf(ble_text, sizeof(ble_text), "%s %d|%d", LV_SYMBOL_BLUETOOTH, central_count, peripheral_count);
@@ -671,10 +735,25 @@ void ConversationListScreen::on_delete_confirmed(lv_event_t* event) {
 
 String ConversationListScreen::format_timestamp(uint32_t timestamp) {
     double now = Utilities::OS::time();
+
+    // If our local clock hasn't been set (no GPS lock yet, no NTP) it's
+    // running off uptime in seconds — way smaller than any real
+    // unix-epoch timestamp from a properly-clocked peer. The legacy
+    // "diff < 0 → Future" branch then mis-fires on every message,
+    // because every message looks like it's from the future.
+    //
+    // Threshold: 2024-01-01 UTC = 1704067200. Anything less than that
+    // means we don't have real time. Show "?" rather than confusing the
+    // user with "Future" on every row.
+    constexpr double SANE_EPOCH = 1704067200.0;
+    if (now < SANE_EPOCH) {
+        return "?";  // Local clock not yet synced
+    }
+
     double diff = now - (double)timestamp;
 
     if (diff < 0) {
-        return "Future";  // Clock not synced or future timestamp
+        return "Future";  // Genuine future timestamp (peer's clock is off)
     } else if (diff < 60) {
         return "Just now";
     } else if (diff < 3600) {

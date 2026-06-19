@@ -76,13 +76,25 @@ CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=4096
 
 # ============================================================================
 # Task Watchdog Timer (TWDT)
-# Detects task starvation and deadlock conditions
+# Detects task starvation and deadlock conditions on user-code core (CPU1).
 # 30s timeout accommodates SPIFFS flash I/O during identity persistence
-# (writing 40-50 destinations to flash takes 5-15s with GC/erase)
+# (writing 40-50 destinations to flash takes 5-15s with GC/erase).
+#
+# CPU0 IDLE watchdog INTENTIONALLY DISABLED:
+# ESP-IDF runs the WiFi controller, lwIP TCP/IP stack, and system timer
+# tasks on CPU0. Under heavy network load (busy TCP frames, mDNS, multicast
+# WiFi traffic) those tasks can starve the CPU0 idle task for >30s without
+# any user-code involvement. Triggering an `abort` because lwIP is busy is
+# false-positive — it doesn't mean any pyxis task is misbehaving. We keep
+# the watchdog on the loopTask (added explicitly via esp_task_wdt_add in
+# main.cpp:1421) and on CPU1 idle, which together cover the core where
+# all user code runs. Surfaced 2026-05-05 by the post-graft `task_wdt_isr`
+# abort decoded to esp_vApplicationIdleHook on core 0; pre-graft pyxis
+# was hitting the same pattern (~57s reset cadence).
 # ============================================================================
 CONFIG_ESP_TASK_WDT_EN=y
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
-CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n
 CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=y
 
 # ============================================================================

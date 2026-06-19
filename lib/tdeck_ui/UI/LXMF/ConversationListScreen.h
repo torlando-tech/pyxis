@@ -9,9 +9,16 @@
 #include <lvgl.h>
 #include <vector>
 #include <functional>
+#include <string>
+#include <utility>
 #include "Bytes.h"
 #include "LXMF/MessageStore.h"
 #include "Interface.h"
+
+// TinyGPS++ pulled in for TinyGPSCustom (the in-view-satellites parser
+// hook; declared as a member below). The forward decl on TinyGPSPlus
+// stays since the field is a pointer.
+#include <TinyGPS++.h>
 
 class TinyGPSPlus;  // Forward declaration
 
@@ -89,6 +96,11 @@ public:
      * Refresh conversation list (reload from store)
      */
     void refresh();
+
+    // Flush display-name write-throughs deferred by refresh(). MUST be called
+    // OUTSIDE the LVGL lock (UIManager::update() calls it before taking the
+    // lock) — set_display_name() hits microStore/LittleFS.
+    void flush_pending_name_writes();
 
     /**
      * Update unread count for a specific conversation
@@ -169,9 +181,23 @@ public:
 
     /**
      * Set GPS for satellite count display
+     *
+     * Also binds a custom $GPGSV field-3 ("satellites in view") parser
+     * to the same TinyGPSPlus instance so the top bar can show
+     * "in-view but not yet locked" status (yellow "?N") before the
+     * fix has any locked satellites.
+     *
      * @param gps TinyGPSPlus instance
      */
-    void set_gps(TinyGPSPlus* gps) { _gps = gps; }
+    void set_gps(TinyGPSPlus* gps) {
+        _gps = gps;
+        if (gps) {
+            // GSV sentence: $GPGSV,<total_sentences>,<sentence_num>,
+            //               <total_in_view>,<sat1_id>,...
+            // Field 3 is the count of satellites visible to the receiver.
+            _gps_in_view.begin(*gps, "GPGSV", 3);
+        }
+    }
 
 private:
     lv_obj_t* _screen;
@@ -191,6 +217,7 @@ private:
     RNS::Interface* _lora_interface;
     RNS::Interface* _ble_interface;
     TinyGPSPlus* _gps;
+    TinyGPSCustom _gps_in_view;  // $GPGSV field 3 — satellites in view
 
     ::LXMF::MessageStore* _message_store;
     std::vector<ConversationItem> _conversations;
@@ -198,6 +225,11 @@ private:
     std::vector<RNS::Bytes> _peer_hash_pool;  // Object pool to avoid per-item allocations
     RNS::Bytes _pending_delete_hash;  // Hash of conversation pending deletion
     bool _has_unresolved_names = false;  // True if any conversation shows hash instead of name
+    // Display-name write-throughs deferred out of refresh() (which runs under
+    // the LVGL lock). set_display_name() hits microStore/LittleFS; doing it
+    // under the lock stalls the render task on a cold-boot announce burst.
+    // Drained by UIManager::update() before it takes the lock.
+    std::vector<std::pair<RNS::Bytes, std::string>> _pending_name_writes;
 
     ConversationSelectedCallback _conversation_selected_callback;
     ComposeCallback _compose_callback;

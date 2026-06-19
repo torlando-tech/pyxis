@@ -4,6 +4,7 @@
 #include "i2s_capture.h"
 
 #ifdef ARDUINO
+#include <cmath>  // sinf for setInjectSine sine generator
 #include <cstring>
 #include <driver/i2s.h>
 #include <esp_log.h>
@@ -237,13 +238,19 @@ void I2SCapture::captureLoop() {
             if (v > runningPeak) runningPeak = v;
         }
 
-        // Measure actual sample rate
+        // Measure actual sample rate. Only print when something
+        // exceptional happened (ring drops) — the steady-state rate
+        // report fires often enough during an active LXST call to
+        // saturate USB CDC alongside per-batch TX/RX logs (especially
+        // in callee mode where the t-deck speaker→mic acoustic
+        // feedback drives peak high). Counter still accumulates;
+        // we just skip the print.
         totalSamples += ch0Count;
         uint32_t now = millis();
         uint32_t elapsed = now - rateCheckMs;
         if (elapsed >= 2000) {
-            uint32_t rate = (totalSamples * 1000) / elapsed;
-            {
+            if (ringDrops > 0) {
+                uint32_t rate = (totalSamples * 1000) / elapsed;
                 char logbuf[128];
                 snprintf(logbuf, sizeof(logbuf), "[CAP] rate=%luHz frames=%lu peak=%d ringDrops=%lu",
                          (unsigned long)rate, (unsigned long)framesEncoded,
@@ -271,8 +278,57 @@ void I2SCapture::captureLoop() {
                 int16_t* frameData = muted_.load(std::memory_order_relaxed)
                     ? silenceBuf_ : accumBuffer_;
 
-                // Apply voice filters
-                if (filtersEnabled_ && filterChain_ && !muted_.load(std::memory_order_relaxed)) {
+                // Test injection: overwrite the frame with a synthetic
+                // speech-like signal. Pure tones get mangled by Codec2
+                // (it's a SPEECH codec — pure-sine round-trip retains
+                // ~12% RMS). Three-formant sum approximates a voiced
+                // vowel: F1 (the freq arg, default 730Hz) + F2≈1.5·F1
+                // + F3≈3.3·F1 with a 120Hz amplitude envelope to
+                // emulate glottal pulses. Phase-continuous so the
+                // encoder never sees a discontinuity.
+                if (injectSine_.load(std::memory_order_relaxed)
+                        && !muted_.load(std::memory_order_relaxed)) {
+                    int   f1 = injectFreq_.load(std::memory_order_relaxed);
+                    int16_t peak = injectPeak_.load(std::memory_order_relaxed);
+                    const float kTwoPi = 2.0f * 3.14159265358979f;
+                    const float dp1 = kTwoPi * (float)f1        / (float)CODEC_SAMPLE_RATE;
+                    const float dp2 = kTwoPi * (float)f1 * 1.5f / (float)CODEC_SAMPLE_RATE;
+                    const float dp3 = kTwoPi * (float)f1 * 3.3f / (float)CODEC_SAMPLE_RATE;
+                    const float dpe = kTwoPi * 120.0f           / (float)CODEC_SAMPLE_RATE;
+                    // Per-formant amplitude weights summing to ~1.0
+                    // before envelope gain, so peak output ≈ peak.
+                    for (int s = 0; s < frameSamples_; ++s) {
+                        float env = 0.55f + 0.45f * sinf(injectEnvPhase_);
+                        float v = 0.55f * sinf(injectPhase_)
+                                + 0.30f * sinf(injectPhase2_)
+                                + 0.15f * sinf(injectPhase3_);
+                        v *= env;
+                        // Soft clip to int16 range
+                        int32_t sample = (int32_t)(peak * v);
+                        if (sample > 32767) sample = 32767;
+                        if (sample < -32768) sample = -32768;
+                        accumBuffer_[s] = (int16_t)sample;
+                        injectPhase_  += dp1;
+                        injectPhase2_ += dp2;
+                        injectPhase3_ += dp3;
+                        injectEnvPhase_ += dpe;
+                    }
+                    // Bounded phase wrap so float precision stays sharp
+                    auto wrap = [](float& p) {
+                        const float kTwoPi = 2.0f * 3.14159265358979f;
+                        while (p >= kTwoPi) p -= kTwoPi;
+                        while (p < 0.0f)   p += kTwoPi;
+                    };
+                    wrap(injectPhase_);
+                    wrap(injectPhase2_);
+                    wrap(injectPhase3_);
+                    wrap(injectEnvPhase_);
+                    frameData = accumBuffer_;
+                }
+
+                // Apply voice filters (skip if injecting test sine)
+                if (filtersEnabled_ && filterChain_ && !muted_.load(std::memory_order_relaxed)
+                        && !injectSine_.load(std::memory_order_relaxed)) {
                     filterChain_->process(frameData, frameSamples_, CODEC_SAMPLE_RATE);
                 }
 

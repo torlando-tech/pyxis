@@ -2,4 +2,13 @@
 .vscode/
 *.pyc
 docs/flasher/firmware/
-lib/tdeck_ui/Hardware/TDeck/SplashImage.h
+# Local environment overrides for PYXIS_TEST_* vars (see .env.example).
+# Sourced before `pio run` to inject test-mode TCP host/port without
+# hardcoding identifying LAN addresses in source.
+.env
+# SplashImage.h is checked in as an artifact so machines without
+# cairosvg/Pillow can still build a working firmware. The pre-build
+# script generate_splash.py only regenerates it when pyxis-icon.svg
+# is newer (see should_regenerate), so contributors with the deps
+# installed get fresh rebuilds while contributors without them still
+# get a working binary from the committed copy.

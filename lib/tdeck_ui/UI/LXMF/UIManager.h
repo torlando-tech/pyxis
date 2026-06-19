@@ -180,6 +180,83 @@ public:
      */
     void on_message_failed(::LXMF::LXMessage& message);
 
+#ifdef PYXIS_TEST_HOOKS
+    /**
+     * Test-only API surface for the soak / LXST harness. None of these
+     * are reachable from the UI; they're called from the T:CALL serial
+     * commands defined in main.cpp under PYXIS_TEST_HOOKS.
+     */
+
+    /** Initiate an outgoing call to peer (calls private call_initiate). */
+    void test_call_initiate(const RNS::Bytes& peer_hash) { call_initiate(peer_hash); }
+
+    /** Hang up the active call (calls private call_hangup). */
+    void test_call_hangup() { call_hangup(); }
+
+    /**
+     * Programmatic answer for incoming calls. Sets the same
+     * _call_answer_pending flag the UI button does so the main loop
+     * picks it up and runs call_answer() in its proper context. Used
+     * by the harness for pyxis-as-callee interop tests with real
+     * LXST.Telephony.Telephone clients (Sideband, MeshChatX). Returns
+     * true if there was an incoming ring to accept.
+     */
+    bool test_call_answer();
+
+    /** Pyxis's lxst.telephony destination hash, hex. Empty if the
+     *  LXST destination has not been registered yet (early boot). */
+    std::string test_lxst_dest_hex() const;
+
+    /**
+     * String name of the current call state, eg "IDLE", "ACTIVE",
+     * "INCOMING_RINGING". Stable for harness assertions.
+     */
+    const char* test_call_state_name() const;
+
+    /** Number of audio frames TX'd since the active call started. */
+    uint32_t test_call_audio_tx_count() const { return _call_audio_tx_count; }
+
+    /** Number of audio frames RX'd since the active call started. */
+    uint32_t test_call_audio_rx_count() const { return _call_audio_rx_count; }
+
+    /**
+     * QoS counters from the playback decode path. decode_ok counts
+     * successful Codec2 decodes; decode_fail counts decode errors
+     * (malformed frame, bad mode header, codec internal error).
+     * Together they validate wire-level audio fidelity. Reset by
+     * call_initiate; the harness samples them after ACTIVE.
+     *
+     * Defined in UIManager.cpp (LXSTAudio is forward-declared here).
+     */
+    uint32_t test_call_decode_ok() const;
+    uint32_t test_call_decode_fail() const;
+
+    /**
+     * PCM energy on the decoded audio. Together with sample_count
+     * gives a running RMS for content-fidelity validation. Reset by
+     * call_initiate.
+     */
+    uint32_t test_call_pcm_sample_count() const;
+    uint64_t test_call_pcm_sum_squares() const;
+
+    /**
+     * Replace mic input with a synthesized sine for the active call.
+     * Bypasses ES7210 capture and the voice filter chain so the
+     * remote sees a clean tone. Used by the LXST harness for
+     * bidirectional content-fidelity validation.
+     */
+    void test_call_set_inject_sine(bool enabled, int freq = 1000, float amp = 0.5f);
+
+    /**
+     * Get/set the preferred Codec2 profile pyxis advertises and uses
+     * for the next call. Valid values: LXST_PROFILE_ULBW (0x10,
+     * Codec2-700C, LoRa-friendly default), LXST_PROFILE_VLBW (0x20,
+     * Codec2-1600), LXST_PROFILE_LBW (0x30, Codec2-3200, used pre-2026).
+     */
+    int test_call_get_profile() const { return _preferred_profile; }
+    bool test_call_set_profile(int profile);
+#endif
+
 private:
     enum Screen {
         SCREEN_CONVERSATION_LIST,
@@ -200,6 +277,16 @@ private:
 
     Screen _current_screen;
     RNS::Bytes _current_peer_hash;
+
+    // Conversation-list refresh debouncing. on_message_received() used
+    // to call refresh() unconditionally per message — under propagation
+    // sync flood (50+ queued messages delivered back-to-back) that's
+    // 50 full LVGL redraws of the list, each holding LVGL_LOCK,
+    // saturating the SPI display flush, and starving the USB CDC
+    // serial-handler. Now we just set the pending flag here; the main
+    // loop drains it at most once every COALESCE_MS.
+    volatile bool _pending_conversation_refresh;
+    uint32_t _last_conversation_refresh_ms;
 
     ConversationListScreen* _conversation_list_screen;
     ChatScreen* _chat_screen;
@@ -257,8 +344,19 @@ private:
 
     // LXST profile negotiation
     static constexpr int LXST_PREFERRED_PROFILE = 0xFF;
+    static constexpr int LXST_PROFILE_ULBW      = 0x10;  // Codec2 700C  (~700 bps)  — LoRa-friendly default
     static constexpr int LXST_PROFILE_VLBW      = 0x20;  // Codec2 1600bps
     static constexpr int LXST_PROFILE_LBW       = 0x30;  // Codec2 3200bps
+
+    // The profile we ASK the remote for and CONFIGURE locally on every
+    // new call. Defaults to ULBW (Codec2-700C) since pyxis is targeted
+    // at LoRa where 3200 bps would saturate even SF7 BW125. Test
+    // harness can override via T:CALL_PROFILE.
+    static int _preferred_profile;
+
+    // Map profile byte to the Codec2 library mode constant
+    // (CODEC2_MODE_*). Returns -1 for unknown profiles.
+    static int profile_to_codec2_mode(int profile);
 
     enum class CallState {
         IDLE,
@@ -275,7 +373,10 @@ private:
     CallState _call_state;
     RNS::Bytes _call_peer_hash;
     RNS::Bytes _call_dest_hash;   // LXST destination hash (for deferred link creation)
-    RNS::Link _call_link;
+    // Vanilla upstream Link's default ctor crashes in load_private_key()
+    // when constructed without a real Destination — explicit Type::NONE
+    // takes the safe NoneConstructor branch. Same fix as DirectLinkSlot.
+    RNS::Link _call_link{RNS::Type::NONE};
     LXSTAudio* _lxst_audio;
     uint32_t _call_start_ms;       // millis() when call became ACTIVE
     uint32_t _call_timeout_ms;     // millis() deadline for current wait state

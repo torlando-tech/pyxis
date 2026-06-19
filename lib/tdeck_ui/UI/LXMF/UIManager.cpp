@@ -8,6 +8,9 @@
 #include <lvgl.h>
 #include <Preferences.h>
 #include "Log.h"
+#ifdef PYXIS_TEST_HOOKS
+#include "pyxis_test_hooks.h"
+#endif
 #include "Tone.h"
 #include "../LVGL/LVGLLock.h"
 #include "lxst_audio.h"
@@ -40,8 +43,26 @@ public:
 };
 static std::shared_ptr<LXSTAnnounceHandler> s_lxst_announce_handler;
 
+// Default preferred profile: Codec2-700C (ULBW). Sized to fit a LoRa
+// SF7-9 link with header overhead. T:CALL_PROFILE in the test hooks
+// changes this between calls.
+int UIManager::_preferred_profile = UIManager::LXST_PROFILE_ULBW;
+
+int UIManager::profile_to_codec2_mode(int profile) {
+    switch (profile) {
+        case LXST_PROFILE_ULBW: return CODEC2_MODE_700C;
+        case LXST_PROFILE_VLBW: return CODEC2_MODE_1600;
+        case LXST_PROFILE_LBW:  return CODEC2_MODE_3200;
+        default:                return -1;
+    }
+}
+
 UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::MessageStore& store)
     : _reticulum(reticulum), _router(router), _store(store),
+      // Vanilla upstream RNS::Destination has no default ctor; construct in
+      // a Type::NONE state, then assign a real Destination later. (The fork
+      // had a default ctor that pyxis was implicitly relying on.)
+      _lxst_destination(RNS::Type::NONE),
       _current_screen(SCREEN_CONVERSATION_LIST),
       _conversation_list_screen(nullptr),
       _chat_screen(nullptr),
@@ -65,7 +86,9 @@ UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::Me
       _call_signal_write(0),
       _call_signal_read(0),
       _call_audio_rx_count(0),
-      _call_audio_tx_count(0) {
+      _call_audio_tx_count(0),
+      _pending_conversation_refresh(false),
+      _last_conversation_refresh_ms(0) {
     memset((void*)_call_signal_queue, 0, sizeof(_call_signal_queue));
 }
 
@@ -298,6 +321,12 @@ bool UIManager::init() {
 }
 
 void UIManager::update() {
+    // Flush display-name write-throughs the last conversation-list refresh
+    // deferred. Done here, BEFORE LVGL_LOCK, so the microStore/LittleFS I/O
+    // never runs under the render lock (same reason as on_message_received).
+    if (_conversation_list_screen) {
+        _conversation_list_screen->flush_pending_name_writes();
+    }
     LVGL_LOCK();
     // Process outbound LXMF messages
     _router.process_outbound();
@@ -323,6 +352,23 @@ void UIManager::update() {
             _status_screen->refresh();
         }
     }
+
+    // Drain coalesced conversation-list refresh requests. Only when
+    // the user is actually viewing the list — if they're in chat or
+    // settings, the list rebuilds the next time they navigate back
+    // (show_conversation_list already calls refresh()). Throttle to
+    // at most once every 750ms even when the screen IS visible so
+    // the SPI flush isn't saturated by sustained inbound traffic.
+    static constexpr uint32_t COALESCE_MS = 750;
+    if (_pending_conversation_refresh
+        && _current_screen == SCREEN_CONVERSATION_LIST
+        && (now - _last_conversation_refresh_ms) >= COALESCE_MS) {
+        _pending_conversation_refresh = false;
+        _last_conversation_refresh_ms = now;
+        if (_conversation_list_screen) {
+            _conversation_list_screen->refresh();
+        }
+    }
 }
 
 void UIManager::show_conversation_list() {
@@ -330,6 +376,8 @@ void UIManager::show_conversation_list() {
     INFO("Showing conversation list");
 
     _conversation_list_screen->refresh();
+    _pending_conversation_refresh = false;
+    _last_conversation_refresh_ms = millis();
     _conversation_list_screen->show();
     _chat_screen->hide();
     _compose_screen->hide();
@@ -680,8 +728,12 @@ void UIManager::send_message(const Bytes& dest_hash, const String& content) {
     std::string msg = "Sending message to " + hash_hex + "...";
     INFO(msg.c_str());
 
-    // Mark recipient as a persistent contact (survives reboot)
-    Identity::mark_persistent(dest_hash);
+    // Pre-graft: Identity::mark_persistent(dest_hash) — fork-only API for
+    // the 5s fast-flush semantics. Vanilla upstream relies on microStore's
+    // dirty-tracking + reticulum->should_persist_data() to decide what
+    // gets written. If we observe lost contacts after crashes, revisit
+    // microStore flush cadence rather than re-adding the fork API.
+    // (void)Identity::mark_persistent(dest_hash);
 
     // Get our source destination (needed for signing)
     Destination source = _router.delivery_destination();
@@ -730,16 +782,29 @@ void UIManager::send_message(const Bytes& dest_hash, const String& content) {
 }
 
 void UIManager::on_message_received(::LXMF::LXMessage& message) {
-    LVGL_LOCK();
+    // Don't take LVGL_LOCK across the LittleFS write — under sustained
+    // LXMF receive load (eg propagation soak), LittleFS compaction can
+    // stall the save for several seconds. While the lock was held the
+    // Arduino loop's `UIManager::update()` would assert at the 5s
+    // LVGL_LOCK timeout (LVGLLock.h:45), tipping pyxis into a panic
+    // reset. Scope the lock to ONLY the UI mutations below.
     std::string source_hex = message.source_hash().toHex().substr(0, 8);
     std::string msg = "Message received from " + source_hex + "...";
     INFO(msg.c_str());
 
-    // Mark sender as a persistent contact (survives reboot)
-    RNS::Identity::mark_persistent(message.source_hash());
+#ifdef PYXIS_TEST_HOOKS
+    pyxis_test_hook_record_rx(message);
+#endif
 
-    // Save to store
+    // Pre-graft: RNS::Identity::mark_persistent — fork-only. See note above.
+    // (void)RNS::Identity::mark_persistent(message.source_hash());
+
+    // Save to store — no LVGL lock; LittleFS GC is allowed to take its
+    // time without freezing the UI thread.
     _store.save_message(message);
+
+    // Take the LVGL lock now for the UI-touching code below.
+    LVGL_LOCK();
 
     // Update UI if we're viewing this conversation
     bool viewing_this_chat = (_current_screen == SCREEN_CHAT && _current_peer_hash == message.source_hash());
@@ -755,9 +820,12 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
         }
     }
 
-    // Update conversation list unread count
-    // TODO: Track unread counts
-    _conversation_list_screen->refresh();
+    // Coalesce list refreshes — if 50 propagation messages land
+    // back-to-back we used to redraw the list 50 times and saturate
+    // the SPI flush + serial output. Just flag the pending refresh;
+    // call_update() / main loop drains it at most every COALESCE_MS
+    // and only when the user is actually on the conversation list.
+    _pending_conversation_refresh = true;
 
     INFO("  Message processed");
 }
@@ -909,6 +977,60 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
 
     lxst_breadcrumb(7, ESP.getFreeHeap());
 }
+
+#ifdef PYXIS_TEST_HOOKS
+uint32_t UIManager::test_call_decode_ok() const {
+    return _lxst_audio ? _lxst_audio->playbackDecodeOk() : 0;
+}
+
+uint32_t UIManager::test_call_decode_fail() const {
+    return _lxst_audio ? _lxst_audio->playbackDecodeFail() : 0;
+}
+
+uint32_t UIManager::test_call_pcm_sample_count() const {
+    return _lxst_audio ? _lxst_audio->playbackPcmSampleCount() : 0;
+}
+
+uint64_t UIManager::test_call_pcm_sum_squares() const {
+    return _lxst_audio ? _lxst_audio->playbackPcmSumSquares() : 0;
+}
+
+void UIManager::test_call_set_inject_sine(bool enabled, int freq, float amp) {
+    if (_lxst_audio) _lxst_audio->captureSetInjectSine(enabled, freq, amp);
+}
+
+bool UIManager::test_call_set_profile(int profile) {
+    if (profile_to_codec2_mode(profile) < 0) return false;
+    _preferred_profile = profile;
+    return true;
+}
+
+bool UIManager::test_call_answer() {
+    if (_call_state != CallState::INCOMING_RINGING) return false;
+    _call_answer_pending = true;
+    return true;
+}
+
+std::string UIManager::test_lxst_dest_hex() const {
+    if (!_lxst_destination) return std::string();
+    return _lxst_destination.hash().toHex();
+}
+
+const char* UIManager::test_call_state_name() const {
+    switch (_call_state) {
+        case CallState::IDLE:               return "IDLE";
+        case CallState::PATH_REQUESTING:    return "PATH_REQUESTING";
+        case CallState::LINK_ESTABLISHING:  return "LINK_ESTABLISHING";
+        case CallState::WAIT_AVAILABLE:     return "WAIT_AVAILABLE";
+        case CallState::WAIT_RINGING:       return "WAIT_RINGING";
+        case CallState::RINGING:            return "RINGING";
+        case CallState::INCOMING_RINGING:   return "INCOMING_RINGING";
+        case CallState::CONNECTING:         return "CONNECTING";
+        case CallState::ACTIVE:             return "ACTIVE";
+    }
+    return "UNKNOWN";
+}
+#endif
 
 void UIManager::call_hangup() {
     INFO("LXST: Hanging up");
@@ -1154,12 +1276,12 @@ void UIManager::call_on_packet(const Bytes& data) {
         // Pyxis only supports Codec2, so respond with LBW (Codec2 3200bps).
         if (signal >= LXST_PREFERRED_PROFILE) {
             int remote_profile = signal - LXST_PREFERRED_PROFILE;
-            char dbg[64];
-            snprintf(dbg, sizeof(dbg), "LXST: Remote prefers profile 0x%02X, responding LBW (Codec2)",
-                     remote_profile);
+            char dbg[80];
+            snprintf(dbg, sizeof(dbg),
+                     "LXST: Remote prefers profile 0x%02X, responding 0x%02X",
+                     remote_profile, _preferred_profile);
             INFO(dbg);
-            // Send our preferred profile (LBW = Codec2 3200bps)
-            call_send_signal(LXST_PREFERRED_PROFILE + LXST_PROFILE_LBW);
+            call_send_signal(LXST_PREFERRED_PROFILE + _preferred_profile);
             return;
         }
 
@@ -1263,8 +1385,8 @@ void UIManager::call_process_signal(uint8_t signal) {
         case CallState::WAIT_RINGING:
             if (signal == LXST_STATUS_RINGING) {
                 INFO("LXST: Remote is ringing");
-                // Tell remote we need Codec2 (LBW = 3200bps)
-                call_send_signal(LXST_PREFERRED_PROFILE + LXST_PROFILE_LBW);
+                // Tell remote our preferred profile (default ULBW = Codec2-700C)
+                call_send_signal(LXST_PREFERRED_PROFILE + _preferred_profile);
                 _call_state = CallState::RINGING;
                 _call_timeout_ms = millis() + 60000;
                 _call_screen->set_state(CallScreen::CallState::RINGING);
@@ -1280,11 +1402,13 @@ void UIManager::call_process_signal(uint8_t signal) {
                 _call_state = CallState::CONNECTING;
                 lxst_breadcrumb(20, ESP.getFreeHeap());
 
+                int codec_mode = profile_to_codec2_mode(_preferred_profile);
+                if (codec_mode < 0) codec_mode = CODEC2_MODE_700C;
                 if (!_lxst_audio) {
                     _lxst_audio = new LXSTAudio();
                 }
                 lxst_breadcrumb(21, ESP.getFreeHeap());
-                if (!_lxst_audio->init(CODEC2_MODE_3200)) {
+                if (!_lxst_audio->init(codec_mode)) {
                     WARNING("LXST: Audio init failed");
                     call_ended();
                     return;
@@ -1303,9 +1427,11 @@ void UIManager::call_process_signal(uint8_t signal) {
                 _call_screen->set_state(CallScreen::CallState::ACTIVE);
                 lxst_breadcrumb(24, ESP.getFreeHeap());
 
+                int codec_mode = profile_to_codec2_mode(_preferred_profile);
+                if (codec_mode < 0) codec_mode = CODEC2_MODE_700C;
                 if (!_lxst_audio) {
                     _lxst_audio = new LXSTAudio();
-                    if (!_lxst_audio->init(CODEC2_MODE_3200)) {
+                    if (!_lxst_audio->init(codec_mode)) {
                         WARNING("LXST: Audio init failed");
                         call_ended();
                         return;
@@ -1669,10 +1795,14 @@ void UIManager::call_answer() {
         _lxst_audio = new LXSTAudio();
     }
     lxst_breadcrumb(31, ESP.getFreeHeap());
-    if (!_lxst_audio->init(CODEC2_MODE_3200)) {
-        WARNING("LXST: Audio init failed");
-        call_ended();
-        return;
+    {
+        int codec_mode = profile_to_codec2_mode(_preferred_profile);
+        if (codec_mode < 0) codec_mode = CODEC2_MODE_700C;
+        if (!_lxst_audio->init(codec_mode)) {
+            WARNING("LXST: Audio init failed");
+            call_ended();
+            return;
+        }
     }
     lxst_breadcrumb(32, ESP.getFreeHeap());
 
@@ -1682,8 +1812,9 @@ void UIManager::call_answer() {
     }
     lxst_breadcrumb(33, ESP.getFreeHeap());
 
-    // Send profile preference: LBW (Codec2 3200bps) — answerer sends last and "wins"
-    call_send_signal(LXST_PREFERRED_PROFILE + LXST_PROFILE_LBW);
+    // Send profile preference (default ULBW = Codec2-700C). Answerer
+    // sends last and wins.
+    call_send_signal(LXST_PREFERRED_PROFILE + _preferred_profile);
 
     // Send STATUS_ESTABLISHED
     call_send_signal(LXST_STATUS_ESTABLISHED);
@@ -1696,7 +1827,12 @@ void UIManager::call_answer() {
 
 void UIManager::announce_lxst() {
     if (_lxst_destination) {
+        std::string h = _lxst_destination.hash().toHex();
+        INFO(("Announcing LXST telephony destination: " + h).c_str());
         _lxst_destination.announce();
+        INFO("LXST announce sent");
+    } else {
+        WARNING("announce_lxst skipped: _lxst_destination not constructed");
     }
 }
 

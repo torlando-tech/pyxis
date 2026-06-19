@@ -68,9 +68,14 @@ public:
     virtual void stop() override;
     virtual void loop() override;
 
-    // Status getters (override virtual from InterfaceImpl)
-    float get_rssi() const override { return _last_rssi; }
-    float get_snr() const override { return _last_snr; }
+    // Status getters. NOT virtual overrides post-graft to attermann/
+    // microReticulum @ 0.3.0: vanilla upstream's InterfaceImpl base
+    // class doesn't declare get_rssi/get_snr. The fork added these so
+    // diagnostic code could read them polymorphically; for now they
+    // remain as plain methods and the callers must hold an SX1262Interface*
+    // (not a base Interface*). Propose upstream PR to add to base API.
+    float get_rssi() const { return _last_rssi; }
+    float get_snr() const { return _last_snr; }
     bool is_transmitting() const { return _transmitting; }
 
     virtual std::string toString() const override;
