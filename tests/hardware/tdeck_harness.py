@@ -71,6 +71,11 @@ TDECK_LOG = "/tmp/tdeck-harness-tdeck.log"
 ECHOBOT_LOG = "/tmp/echobot.log"
 ECHOBOT_PY = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "lxmf_echo_bot.py")
+# Interpreter for the echo bot subprocess. Defaults to the same Python running
+# this harness (which run_e2e.sh selects, and which already has rns/lxmf
+# importable via the bot's repo-path insert). Override with PYXIS_BOT_PY if the
+# bot needs a different interpreter than the harness.
+BOT_PY = os.environ.get("PYXIS_BOT_PY") or sys.executable
 
 
 def ts():
@@ -225,7 +230,7 @@ def start_echobot(peer_hex=""):
         # rebroadcast limit was already reached when the bot connected.
         env["ECHOBOT_PEER_HEX"] = peer_hex
     proc = subprocess.Popen(
-        ["/usr/bin/python3", ECHOBOT_PY],
+        [BOT_PY, ECHOBOT_PY],
         stdout=fh, stderr=subprocess.STDOUT,
         env=env,
     )
@@ -289,7 +294,6 @@ def echobot_log_after(marker, predicate, timeout=30):
     after `marker` (a substring known to be present already, used to
     avoid matching old log entries from a previous round)."""
     deadline = time.time() + timeout
-    last_size = 0
     while time.time() < deadline:
         try:
             with open(ECHOBOT_LOG) as f:
