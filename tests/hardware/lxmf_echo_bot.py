@@ -47,6 +47,9 @@ def log(msg):
 CONFIG_DIR = "/tmp/echobot-rnsconfig"
 STORAGE_DIR = "/tmp/echobot-storage"
 DISPLAY_NAME = "Mac Echo Bot"
+# rnsd port — must match the one run_e2e.sh bakes into the firmware
+# (PYXIS_TEST_TCP_PORT) so the bot and the T-Deck join the same rnsd.
+TCP_PORT = os.environ.get("PYXIS_TEST_TCP_PORT", "4242").strip() or "4242"
 
 # Optional: when the harness launches the bot, it sets ECHOBOT_PEER_HEX
 # to pyxis's delivery destination hash. We use that to proactively
@@ -84,7 +87,7 @@ os.makedirs(STORAGE_DIR, exist_ok=True)
 # Reticulum state). The bot is its own RNS process.
 config_path = os.path.join(CONFIG_DIR, "config")
 with open(config_path, "w") as f:
-    f.write("""\
+    f.write(f"""\
 [reticulum]
 enable_transport = Yes
 share_instance = No
@@ -99,7 +102,7 @@ loglevel = 4
     type = TCPClientInterface
     enabled = yes
     target_host = 127.0.0.1
-    target_port = 4242
+    target_port = {TCP_PORT}
 """)
 
 reticulum = RNS.Reticulum(configdir=CONFIG_DIR, loglevel=4)
