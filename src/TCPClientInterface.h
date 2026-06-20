@@ -94,6 +94,7 @@ private:
     void task_loop();
     TaskHandle_t _task_handle = nullptr;
     volatile bool _task_running = false;
+    volatile bool _task_done = false;   // task sets this right before exit; stop() joins on it
     std::atomic<uint8_t> _conn_state{DISCONNECTED};
 #endif
 
@@ -107,7 +108,12 @@ private:
 
     // Connection state
     bool _initiator = true;
+#ifdef ARDUINO
+    // Touched by both task_loop() (core 0) and handle_disconnect() (core 1).
+    std::atomic<uint32_t> _last_connect_attempt{0};
+#else
     uint32_t _last_connect_attempt = 0;
+#endif
 #ifdef ARDUINO
     std::atomic<bool> _reconnected{false};  // re-established after offline (task-set)
 #else

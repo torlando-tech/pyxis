@@ -265,7 +265,9 @@ void TCPClientInterface::handle_disconnect() {
 
 #ifdef ARDUINO
 /*static*/ void TCPClientInterface::tcp_task(void* arg) {
-    static_cast<TCPClientInterface*>(arg)->task_loop();
+    auto* self = static_cast<TCPClientInterface*>(arg);
+    self->task_loop();
+    self->_task_done = true;   // let stop() join before the object is freed
     vTaskDelete(nullptr);
 }
 
@@ -299,11 +301,16 @@ void TCPClientInterface::task_loop() {
 
 /*virtual*/ void TCPClientInterface::stop() {
 #ifdef ARDUINO
-    // Stop the connect task first; wait long enough for any in-flight connect()
-    // (bounded by CONNECT_TIMEOUT_MS) to finish so we don't close _client under it.
+    // Join the task: signal it, then wait until it has actually left task_loop()
+    // before tearing anything down. An in-flight connect() can overrun
+    // CONNECT_TIMEOUT_MS on a slow DNS server, and ~TCPClientInterface() calls
+    // stop() — returning early would risk a use-after-free on `this`.
     _task_running = false;
     if (_task_handle != nullptr) {
-        vTaskDelay(pdMS_TO_TICKS(CONNECT_TIMEOUT_MS + 500));
+        uint32_t deadline = millis() + CONNECT_TIMEOUT_MS + 2000;
+        while (!_task_done && (int32_t)(millis() - deadline) < 0) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
         _task_handle = nullptr;
     }
     _conn_state.store(DISCONNECTED);
