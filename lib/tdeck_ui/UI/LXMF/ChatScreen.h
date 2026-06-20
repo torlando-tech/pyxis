@@ -176,7 +176,12 @@ private:
     // Pagination state for infinite scroll
     std::vector<RNS::Bytes> _all_message_hashes;  // All message hashes in conversation
     size_t _display_start_idx;                     // Index into _all_message_hashes where display starts
-    static constexpr size_t MESSAGES_PER_PAGE = 20;
+    // ChatScreen::refresh() loads + renders this many messages under the LVGL
+    // lock; on a large conversation (32 msgs) with a memory-pressured heap, 20
+    // reads exceeded the 5s LVGLLock timeout and asserted (crash). 10 keeps the
+    // under-lock work well under budget; older messages load on scroll. Proper
+    // fix is to do the message I/O off the LVGL lock.
+    static constexpr size_t MESSAGES_PER_PAGE = 10;
     static constexpr size_t MAX_DISPLAYED_MESSAGES = 50;  // Cap to prevent memory exhaustion
     bool _loading_more;                            // Prevent concurrent loads
 
