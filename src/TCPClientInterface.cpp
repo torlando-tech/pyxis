@@ -290,7 +290,9 @@ void TCPClientInterface::task_loop() {
                     if (connect()) {
                         _frame_buffer.clear();
                         _last_data_received = millis();
-                        _online = true;
+                        // _online is owned by the main loop (it sets it on
+                        // observing CONNECTED); writing it here would race with
+                        // loop()'s `_online = false` during the CONNECTING window.
                         _reconnected.store(true);       // main loop announces
                         _conn_state.store(CONNECTED);   // hand _client to main loop
                     } else {
