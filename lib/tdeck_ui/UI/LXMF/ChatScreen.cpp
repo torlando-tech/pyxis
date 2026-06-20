@@ -410,6 +410,13 @@ void ChatScreen::create_message_bubble(const MessageItem& item) {
     build_status_text(status_text, sizeof(status_text), item.timestamp_str,
                       item.outgoing, item.delivered, item.failed);
 
+    // Cap very long messages for display — laying out and re-drawing a multi-KB
+    // wrapped bubble is slow and memory-heavy. The full content stays stored.
+    String display_text = item.content;
+    if (display_text.length() > MAX_DISPLAY_CHARS) {
+        display_text = display_text.substring(0, MAX_DISPLAY_CHARS) + "...";
+    }
+
     // Calculate text widths to decide layout
     // Bubble is 80% of 320 = 256px, minus 16px padding = 240px usable
     const lv_coord_t bubble_inner_width = 240;
@@ -417,7 +424,7 @@ void ChatScreen::create_message_bubble(const MessageItem& item) {
     const lv_coord_t gap = 12;  // Space between message and timestamp
 
     lv_coord_t msg_width = lv_txt_get_width(
-        item.content.c_str(), item.content.length(), font, 0, LV_TEXT_FLAG_NONE);
+        display_text.c_str(), display_text.length(), font, 0, LV_TEXT_FLAG_NONE);
     lv_coord_t status_width = lv_txt_get_width(
         status_text, strlen(status_text), font, 0, LV_TEXT_FLAG_NONE);
 
@@ -431,7 +438,7 @@ void ChatScreen::create_message_bubble(const MessageItem& item) {
 
         // Message content
         lv_obj_t* label_content = lv_label_create(bubble);
-        lv_label_set_text(label_content, item.content.c_str());
+        lv_label_set_text(label_content, display_text.c_str());
         lv_obj_set_style_text_color(label_content, lv_color_white(), 0);
 
         // Timestamp on same row
@@ -446,7 +453,7 @@ void ChatScreen::create_message_bubble(const MessageItem& item) {
 
         // Message content with wrapping
         lv_obj_t* label_content = lv_label_create(bubble);
-        lv_label_set_text(label_content, item.content.c_str());
+        lv_label_set_text(label_content, display_text.c_str());
         lv_label_set_long_mode(label_content, LV_LABEL_LONG_WRAP);
         lv_obj_set_width(label_content, LV_PCT(100));
         lv_obj_set_style_text_color(label_content, lv_color_white(), 0);

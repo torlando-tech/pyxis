@@ -192,6 +192,11 @@ private:
     static constexpr size_t MESSAGES_PER_PAGE = 10; // full first page (filled in background)
     static constexpr size_t BG_FILL_BATCH = 2;      // older messages streamed per tick
     static constexpr size_t MAX_DISPLAYED_MESSAGES = 50;  // Cap to prevent memory exhaustion
+    // Cap the text rendered per bubble. LVGL lays out (and re-draws on scroll) a
+    // wrapped label in O(length); a multi-KB message (e.g. a large bz2-delivered
+    // payload) becomes a 50+ line bubble that crawls when scrolled past. The full
+    // content stays stored; only the rendered text is truncated.
+    static constexpr size_t MAX_DISPLAY_CHARS = 600;
     bool _loading_more;                            // Prevent concurrent loads
     // Streaming state. _bg_fill_active is atomic because on_scroll() (LVGL task)
     // and refresh() may set it while tick_background_fill() (main loop) reads it;
