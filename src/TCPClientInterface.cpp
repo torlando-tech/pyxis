@@ -319,9 +319,20 @@ void TCPClientInterface::task_loop() {
     // stop() — returning early would risk a use-after-free on `this`.
     _task_running = false;
     if (_task_handle != nullptr) {
-        uint32_t deadline = millis() + CONNECT_TIMEOUT_MS + 2000;
+        // Wait for the task to leave task_loop() and set _task_done — after that
+        // it only calls vTaskDelete(nullptr) and never touches `this` again, so
+        // it's safe to free the object. The deadline is far longer than any
+        // connect()+DNS (incl. lwIP DNS retries) can take.
+        uint32_t deadline = millis() + 30000;
         while (!_task_done && (int32_t)(millis() - deadline) < 0) {
             vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        if (!_task_done) {
+            // Pathological: the task is still inside a hung connect() past the
+            // deadline. Force-delete it so it cannot reference `this` after we
+            // return. Safe against its own self-delete: that path sets _task_done
+            // first, so reaching here means it has not self-deleted.
+            vTaskDelete(_task_handle);
         }
         _task_handle = nullptr;
     }
