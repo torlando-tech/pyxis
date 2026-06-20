@@ -293,8 +293,13 @@ void TCPClientInterface::task_loop() {
                         // _online is owned by the main loop (it sets it on
                         // observing CONNECTED); writing it here would race with
                         // loop()'s `_online = false` during the CONNECTING window.
-                        _reconnected.store(true);       // main loop announces
+                        // Publish CONNECTED BEFORE _reconnected: seq-cst then
+                        // guarantees that whenever the main loop observes
+                        // _reconnected==true the interface is already CONNECTED,
+                        // so check_reconnected() can't fire the announce on an
+                        // offline interface (which would drop it).
                         _conn_state.store(CONNECTED);   // hand _client to main loop
+                        _reconnected.store(true);       // main loop announces
                     } else {
                         _conn_state.store(DISCONNECTED);
                     }
