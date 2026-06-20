@@ -11,6 +11,7 @@
 #include <deque>
 #include <map>
 #include <functional>
+#include <atomic>
 #include <microReticulum/Bytes.h>
 #include "LXMF/LXMessage.h"
 #include "LXMF/MessageStore.h"
@@ -192,7 +193,11 @@ private:
     static constexpr size_t BG_FILL_BATCH = 2;      // older messages streamed per tick
     static constexpr size_t MAX_DISPLAYED_MESSAGES = 50;  // Cap to prevent memory exhaustion
     bool _loading_more;                            // Prevent concurrent loads
-    bool _bg_fill_active = false;                  // streaming the rest of the page in
+    // Streaming state. _bg_fill_active is atomic because on_scroll() (LVGL task)
+    // and refresh() may set it while tick_background_fill() (main loop) reads it;
+    // writers always set _bg_fill_target BEFORE _bg_fill_active so the target is
+    // visible once active is observed true.
+    std::atomic<bool> _bg_fill_active{false};      // streaming the rest of the page in
     size_t _bg_fill_target = 0;                    // _display_start_idx to fill down to
 
     // Load more messages (infinite scroll + background fill)

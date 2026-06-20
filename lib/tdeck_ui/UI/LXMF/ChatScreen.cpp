@@ -260,11 +260,12 @@ void ChatScreen::refresh() {
         create_message_bubble(item);
     }
 
-    // Queue the rest of the first page to stream in on the main loop.
+    // Queue the rest of the first page to stream in on the main loop. Set the
+    // target before activating so tick sees a consistent target.
     _bg_fill_target = (_all_message_hashes.size() > MESSAGES_PER_PAGE)
                           ? _all_message_hashes.size() - MESSAGES_PER_PAGE
                           : 0;
-    _bg_fill_active = (_display_start_idx > _bg_fill_target);
+    _bg_fill_active.store(_display_start_idx > _bg_fill_target);
 
     // Scroll to bottom
     lv_obj_scroll_to_y(_message_list, LV_COORD_MAX, LV_ANIM_OFF);
@@ -274,17 +275,17 @@ void ChatScreen::refresh() {
 // the main loop. Each tick prepends a small batch under a brief LVGL lock, so a
 // large conversation fills in without freezing the UI or holding the lock long.
 void ChatScreen::tick_background_fill() {
-    if (!_bg_fill_active) {
+    if (!_bg_fill_active.load()) {
         return;
     }
     if (_display_start_idx <= _bg_fill_target) {
-        _bg_fill_active = false;
+        _bg_fill_active.store(false);
         return;
     }
     size_t remaining = _display_start_idx - _bg_fill_target;
     load_more_messages(remaining < BG_FILL_BATCH ? remaining : BG_FILL_BATCH);
     if (_display_start_idx <= _bg_fill_target) {
-        _bg_fill_active = false;
+        _bg_fill_active.store(false);
     }
 }
 
@@ -356,8 +357,14 @@ void ChatScreen::on_scroll(lv_event_t* event) {
     // Check if scrolled to top
     lv_coord_t scroll_y = lv_obj_get_scroll_y(screen->_message_list);
 
-    if (scroll_y <= 5) {  // Near top (with small threshold)
-        screen->load_more_messages();
+    if (scroll_y <= 5 && screen->_display_start_idx > 0 && !screen->_bg_fill_active.load()) {
+        // Near the top: stream the next page in incrementally on the main loop
+        // (tick_background_fill) rather than loading a full batch synchronously
+        // under the LVGL lock here, which froze scrolling. Target before active.
+        screen->_bg_fill_target = (screen->_display_start_idx > MESSAGES_PER_PAGE)
+                                      ? screen->_display_start_idx - MESSAGES_PER_PAGE
+                                      : 0;
+        screen->_bg_fill_active.store(true);
     }
 }
 
