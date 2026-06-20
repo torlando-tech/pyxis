@@ -93,8 +93,8 @@ private:
     static void tcp_task(void* arg);
     void task_loop();
     TaskHandle_t _task_handle = nullptr;
-    volatile bool _task_running = false;
-    volatile bool _task_done = false;   // task sets this right before exit; stop() joins on it
+    std::atomic<bool> _task_running{false};
+    std::atomic<bool> _task_done{false};   // task sets this right before exit; stop() joins on it
     std::atomic<uint8_t> _conn_state{DISCONNECTED};
 #endif
 
