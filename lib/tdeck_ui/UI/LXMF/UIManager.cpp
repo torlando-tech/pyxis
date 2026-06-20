@@ -327,6 +327,13 @@ void UIManager::update() {
     if (_conversation_list_screen) {
         _conversation_list_screen->flush_pending_name_writes();
     }
+    // Stream the rest of the open conversation's first page in a few at a time
+    // (the newest were rendered synchronously on open). Done here, on the main
+    // loop, so each small batch only briefly holds the LVGL lock instead of the
+    // whole page blocking it past LVGLLock's 5s timeout.
+    if (_current_screen == SCREEN_CHAT && _chat_screen) {
+        _chat_screen->tick_background_fill();
+    }
     LVGL_LOCK();
     // Process outbound LXMF messages
     _router.process_outbound();

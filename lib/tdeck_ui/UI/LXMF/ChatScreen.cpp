@@ -220,9 +220,13 @@ void ChatScreen::refresh() {
     // Load all message hashes from store (sorted by timestamp)
     _all_message_hashes = _message_store->get_messages_for_conversation(_peer_hash);
 
-    // Start displaying from the most recent messages
-    if (_all_message_hashes.size() > MESSAGES_PER_PAGE) {
-        _display_start_idx = _all_message_hashes.size() - MESSAGES_PER_PAGE;
+    // Render only the few NEWEST messages synchronously (under the LVGL lock) so
+    // the conversation opens fast. The rest of the page is streamed in by
+    // tick_background_fill() a couple per main-loop tick, so the UI never freezes.
+    // (This runs on the main loop, not a task: the MessageStore shares one
+    // _json_doc between save + load and isn't safe for concurrent access.)
+    if (_all_message_hashes.size() > INITIAL_RENDER) {
+        _display_start_idx = _all_message_hashes.size() - INITIAL_RENDER;
     } else {
         _display_start_idx = 0;
     }
@@ -256,11 +260,36 @@ void ChatScreen::refresh() {
         create_message_bubble(item);
     }
 
+    // Queue the rest of the first page to stream in on the main loop. Set the
+    // target before activating so tick sees a consistent target.
+    _bg_fill_target = (_all_message_hashes.size() > MESSAGES_PER_PAGE)
+                          ? _all_message_hashes.size() - MESSAGES_PER_PAGE
+                          : 0;
+    _bg_fill_active.store(_display_start_idx > _bg_fill_target);
+
     // Scroll to bottom
     lv_obj_scroll_to_y(_message_list, LV_COORD_MAX, LV_ANIM_OFF);
 }
 
-void ChatScreen::load_more_messages() {
+// Stream older messages in a few at a time, called from UIManager::update() on
+// the main loop. Each tick prepends a small batch under a brief LVGL lock, so a
+// large conversation fills in without freezing the UI or holding the lock long.
+void ChatScreen::tick_background_fill() {
+    if (!_bg_fill_active.load()) {
+        return;
+    }
+    if (_display_start_idx <= _bg_fill_target) {
+        _bg_fill_active.store(false);
+        return;
+    }
+    size_t remaining = _display_start_idx - _bg_fill_target;
+    load_more_messages(remaining < BG_FILL_BATCH ? remaining : BG_FILL_BATCH);
+    if (_display_start_idx <= _bg_fill_target) {
+        _bg_fill_active.store(false);
+    }
+}
+
+void ChatScreen::load_more_messages(size_t batch) {
     LVGL_LOCK();
     if (_loading_more || _display_start_idx == 0 || !_message_store) {
         return;  // Already at the beginning or already loading
@@ -270,7 +299,7 @@ void ChatScreen::load_more_messages() {
     INFO("Loading more messages...");
 
     // Calculate how many more to load
-    size_t load_count = MESSAGES_PER_PAGE;
+    size_t load_count = batch;
     if (_display_start_idx < load_count) {
         load_count = _display_start_idx;
     }
@@ -328,8 +357,14 @@ void ChatScreen::on_scroll(lv_event_t* event) {
     // Check if scrolled to top
     lv_coord_t scroll_y = lv_obj_get_scroll_y(screen->_message_list);
 
-    if (scroll_y <= 5) {  // Near top (with small threshold)
-        screen->load_more_messages();
+    if (scroll_y <= 5 && screen->_display_start_idx > 0 && !screen->_bg_fill_active.load()) {
+        // Near the top: stream the next page in incrementally on the main loop
+        // (tick_background_fill) rather than loading a full batch synchronously
+        // under the LVGL lock here, which froze scrolling. Target before active.
+        screen->_bg_fill_target = (screen->_display_start_idx > MESSAGES_PER_PAGE)
+                                      ? screen->_display_start_idx - MESSAGES_PER_PAGE
+                                      : 0;
+        screen->_bg_fill_active.store(true);
     }
 }
 
@@ -375,6 +410,13 @@ void ChatScreen::create_message_bubble(const MessageItem& item) {
     build_status_text(status_text, sizeof(status_text), item.timestamp_str,
                       item.outgoing, item.delivered, item.failed);
 
+    // Cap very long messages for display — laying out and re-drawing a multi-KB
+    // wrapped bubble is slow and memory-heavy. The full content stays stored.
+    String display_text = item.content;
+    if (display_text.length() > MAX_DISPLAY_CHARS) {
+        display_text = display_text.substring(0, MAX_DISPLAY_CHARS) + "...";
+    }
+
     // Calculate text widths to decide layout
     // Bubble is 80% of 320 = 256px, minus 16px padding = 240px usable
     const lv_coord_t bubble_inner_width = 240;
@@ -382,7 +424,7 @@ void ChatScreen::create_message_bubble(const MessageItem& item) {
     const lv_coord_t gap = 12;  // Space between message and timestamp
 
     lv_coord_t msg_width = lv_txt_get_width(
-        item.content.c_str(), item.content.length(), font, 0, LV_TEXT_FLAG_NONE);
+        display_text.c_str(), display_text.length(), font, 0, LV_TEXT_FLAG_NONE);
     lv_coord_t status_width = lv_txt_get_width(
         status_text, strlen(status_text), font, 0, LV_TEXT_FLAG_NONE);
 
@@ -396,7 +438,7 @@ void ChatScreen::create_message_bubble(const MessageItem& item) {
 
         // Message content
         lv_obj_t* label_content = lv_label_create(bubble);
-        lv_label_set_text(label_content, item.content.c_str());
+        lv_label_set_text(label_content, display_text.c_str());
         lv_obj_set_style_text_color(label_content, lv_color_white(), 0);
 
         // Timestamp on same row
@@ -411,7 +453,7 @@ void ChatScreen::create_message_bubble(const MessageItem& item) {
 
         // Message content with wrapping
         lv_obj_t* label_content = lv_label_create(bubble);
-        lv_label_set_text(label_content, item.content.c_str());
+        lv_label_set_text(label_content, display_text.c_str());
         lv_label_set_long_mode(label_content, LV_LABEL_LONG_WRAP);
         lv_obj_set_width(label_content, LV_PCT(100));
         lv_obj_set_style_text_color(label_content, lv_color_white(), 0);
@@ -649,28 +691,102 @@ String ChatScreen::parse_display_name(const Bytes& app_data) {
 void ChatScreen::on_message_long_pressed(lv_event_t* event) {
     ChatScreen* screen = (ChatScreen*)lv_event_get_user_data(event);
     lv_obj_t* bubble = lv_event_get_target(event);
+    lv_obj_t* row = lv_obj_get_parent(bubble);
 
-    // Find the content label (first child of bubble)
-    lv_obj_t* label = lv_obj_get_child(bubble, 0);
-    if (!label) {
+    // Bubbles render a truncated copy of long messages, so recover the FULL
+    // content for this row (reverse-lookup row -> hash -> stored item) for both
+    // the detail view and Copy.
+    String full;
+    for (const auto& kv : screen->_message_rows) {
+        if (kv.second == row) {
+            for (const auto& m : screen->_messages) {
+                if (m.message_hash == kv.first) {
+                    full = m.content;
+                    break;
+                }
+            }
+            break;
+        }
+    }
+    if (full.length() == 0) {  // fallback to the (possibly truncated) label text
+        lv_obj_t* label = lv_obj_get_child(bubble, 0);
+        if (label) {
+            const char* t = lv_label_get_text(label);
+            if (t) full = t;
+        }
+    }
+    if (full.length() == 0) {
         return;
     }
 
-    // Get the message text
-    const char* text = lv_label_get_text(label);
-    if (!text || strlen(text) == 0) {
-        return;
+    screen->_pending_copy_text = full;
+    screen->show_full_message(full);
+}
+
+// Full-screen scrollable view of a single message's complete text, with Copy.
+// Opened by long-pressing a (possibly truncated) bubble.
+void ChatScreen::show_full_message(const String& content) {
+    lv_obj_t* modal = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(modal, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(modal, Theme::surface(), 0);
+    lv_obj_set_style_bg_opa(modal, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(modal, 8, 0);
+    lv_obj_set_style_radius(modal, 0, 0);
+    lv_obj_set_style_border_width(modal, 0, 0);
+    lv_obj_set_flex_flow(modal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(modal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    // Scrollable content area filling the space above the buttons
+    lv_obj_t* scroll = lv_obj_create(modal);
+    lv_obj_set_width(scroll, LV_PCT(100));
+    lv_obj_set_flex_grow(scroll, 1);
+    lv_obj_set_style_bg_opa(scroll, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(scroll, 0, 0);
+    lv_obj_set_style_pad_all(scroll, 4, 0);
+
+    lv_obj_t* label = lv_label_create(scroll);
+    lv_label_set_text(label, content.c_str());
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(label, LV_PCT(100));
+    lv_obj_set_style_text_color(label, Theme::textPrimary(), 0);
+
+    // Button row: Copy + Close
+    lv_obj_t* btns = lv_obj_create(modal);
+    lv_obj_set_size(btns, LV_PCT(100), 40);
+    lv_obj_set_style_bg_opa(btns, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btns, 0, 0);
+    lv_obj_set_style_pad_all(btns, 0, 0);
+    lv_obj_set_flex_flow(btns, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btns, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t* copy_btn = lv_btn_create(btns);
+    lv_obj_set_style_bg_color(copy_btn, Theme::btnSecondary(), 0);
+    lv_obj_add_event_cb(copy_btn, on_full_message_copy, LV_EVENT_CLICKED, this);
+    lv_obj_t* copy_lbl = lv_label_create(copy_btn);
+    lv_label_set_text(copy_lbl, "Copy");
+    lv_obj_center(copy_lbl);
+
+    lv_obj_t* close_btn = lv_btn_create(btns);
+    lv_obj_set_style_bg_color(close_btn, Theme::primary(), 0);
+    lv_obj_add_event_cb(close_btn, on_full_message_close, LV_EVENT_CLICKED, modal);
+    lv_obj_t* close_lbl = lv_label_create(close_btn);
+    lv_label_set_text(close_lbl, "Close");
+    lv_obj_center(close_lbl);
+}
+
+void ChatScreen::on_full_message_copy(lv_event_t* event) {
+    ChatScreen* screen = (ChatScreen*)lv_event_get_user_data(event);
+    Clipboard::copy(screen->_pending_copy_text);
+}
+
+void ChatScreen::on_full_message_close(lv_event_t* event) {
+    lv_obj_t* modal = (lv_obj_t*)lv_event_get_user_data(event);
+    if (modal) {
+        // Async: the close button is a descendant of `modal`, so deleting it
+        // synchronously here would free the button whose callback is still
+        // running (use-after-free as LVGL keeps dispatching the event).
+        lv_obj_del_async(modal);
     }
-
-    // Store text for copy action
-    screen->_pending_copy_text = String(text);
-
-    // Show copy dialog
-    static const char* btns[] = {"Copy", "Cancel", ""};
-    lv_obj_t* mbox = lv_msgbox_create(NULL, "Copy Message",
-        "Copy message to clipboard?", btns, false);
-    lv_obj_center(mbox);
-    lv_obj_add_event_cb(mbox, on_copy_dialog_action, LV_EVENT_VALUE_CHANGED, screen);
 }
 
 void ChatScreen::on_copy_dialog_action(lv_event_t* event) {

@@ -11,6 +11,7 @@
 #include <deque>
 #include <map>
 #include <functional>
+#include <atomic>
 #include <microReticulum/Bytes.h>
 #include "LXMF/LXMessage.h"
 #include "LXMF/MessageStore.h"
@@ -101,6 +102,12 @@ public:
     void refresh();
 
     /**
+     * Stream the rest of the first page in, a few messages per call. Call from
+     * UIManager::update() on the main loop after the chat screen is shown.
+     */
+    void tick_background_fill();
+
+    /**
      * Set callback for back button
      * @param callback Function to call when back button is pressed
      */
@@ -167,6 +174,9 @@ private:
     static void on_send_clicked(lv_event_t* event);
     static void on_message_long_pressed(lv_event_t* event);
     static void on_copy_dialog_action(lv_event_t* event);
+    void show_full_message(const String& content);  // detail view for a long message
+    static void on_full_message_copy(lv_event_t* event);
+    static void on_full_message_close(lv_event_t* event);
     static void on_textarea_long_pressed(lv_event_t* event);
     static void on_paste_dialog_action(lv_event_t* event);
 
@@ -176,12 +186,30 @@ private:
     // Pagination state for infinite scroll
     std::vector<RNS::Bytes> _all_message_hashes;  // All message hashes in conversation
     size_t _display_start_idx;                     // Index into _all_message_hashes where display starts
-    static constexpr size_t MESSAGES_PER_PAGE = 20;
+    // refresh() renders only INITIAL_RENDER messages synchronously (fast open);
+    // tick_background_fill() then streams the rest of the first page in,
+    // BG_FILL_BATCH at a time on the main loop. This keeps the per-step
+    // under-LVGL-lock work tiny — a large conversation no longer freezes the UI
+    // or trips LVGLLock's 5s timeout (which previously asserted and crashed).
+    static constexpr size_t INITIAL_RENDER = 3;     // newest messages shown on open
+    static constexpr size_t MESSAGES_PER_PAGE = 10; // full first page (filled in background)
+    static constexpr size_t BG_FILL_BATCH = 2;      // older messages streamed per tick
     static constexpr size_t MAX_DISPLAYED_MESSAGES = 50;  // Cap to prevent memory exhaustion
+    // Cap the text rendered per bubble. LVGL lays out (and re-draws on scroll) a
+    // wrapped label in O(length); a multi-KB message (e.g. a large bz2-delivered
+    // payload) becomes a 50+ line bubble that crawls when scrolled past. The full
+    // content stays stored; only the rendered text is truncated.
+    static constexpr size_t MAX_DISPLAY_CHARS = 600;
     bool _loading_more;                            // Prevent concurrent loads
+    // Streaming state. _bg_fill_active is atomic because on_scroll() (LVGL task)
+    // and refresh() may set it while tick_background_fill() (main loop) reads it;
+    // writers always set _bg_fill_target BEFORE _bg_fill_active so the target is
+    // visible once active is observed true.
+    std::atomic<bool> _bg_fill_active{false};      // streaming the rest of the page in
+    size_t _bg_fill_target = 0;                    // _display_start_idx to fill down to
 
-    // Load more messages (for infinite scroll)
-    void load_more_messages();
+    // Load more messages (infinite scroll + background fill)
+    void load_more_messages(size_t batch = MESSAGES_PER_PAGE);
     static void on_scroll(lv_event_t* event);
 
     // Utility
