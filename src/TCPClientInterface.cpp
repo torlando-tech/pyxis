@@ -50,6 +50,11 @@ TCPClientInterface::TCPClientInterface(const char* name /*= "TCPClientInterface"
 #ifdef ARDUINO
     // The blocking connect() runs on its own task so it never stalls the main
     // loop. read/write/frame stay on the main loop (see loop()).
+    // Seed _last_connect_attempt so the task's first reconnect-wait check passes
+    // immediately; otherwise the initial connect could be delayed up to
+    // RECONNECT_WAIT_MS. Unsigned wraparound keeps this correct when
+    // millis() < RECONNECT_WAIT_MS.
+    _last_connect_attempt = millis() - RECONNECT_WAIT_MS;
     _task_running = true;
     BaseType_t r = xTaskCreatePinnedToCore(tcp_task, "tcp", 6144, this, 1, &_task_handle, 0);
     if (r != pdPASS) {
