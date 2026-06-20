@@ -101,6 +101,12 @@ public:
     void refresh();
 
     /**
+     * Stream the rest of the first page in, a few messages per call. Call from
+     * UIManager::update() on the main loop after the chat screen is shown.
+     */
+    void tick_background_fill();
+
+    /**
      * Set callback for back button
      * @param callback Function to call when back button is pressed
      */
@@ -176,17 +182,21 @@ private:
     // Pagination state for infinite scroll
     std::vector<RNS::Bytes> _all_message_hashes;  // All message hashes in conversation
     size_t _display_start_idx;                     // Index into _all_message_hashes where display starts
-    // ChatScreen::refresh() loads + renders this many messages under the LVGL
-    // lock; on a large conversation (32 msgs) with a memory-pressured heap, 20
-    // reads exceeded the 5s LVGLLock timeout and asserted (crash). 10 keeps the
-    // under-lock work well under budget; older messages load on scroll. Proper
-    // fix is to do the message I/O off the LVGL lock.
-    static constexpr size_t MESSAGES_PER_PAGE = 10;
+    // refresh() renders only INITIAL_RENDER messages synchronously (fast open);
+    // tick_background_fill() then streams the rest of the first page in,
+    // BG_FILL_BATCH at a time on the main loop. This keeps the per-step
+    // under-LVGL-lock work tiny — a large conversation no longer freezes the UI
+    // or trips LVGLLock's 5s timeout (which previously asserted and crashed).
+    static constexpr size_t INITIAL_RENDER = 3;     // newest messages shown on open
+    static constexpr size_t MESSAGES_PER_PAGE = 10; // full first page (filled in background)
+    static constexpr size_t BG_FILL_BATCH = 2;      // older messages streamed per tick
     static constexpr size_t MAX_DISPLAYED_MESSAGES = 50;  // Cap to prevent memory exhaustion
     bool _loading_more;                            // Prevent concurrent loads
+    bool _bg_fill_active = false;                  // streaming the rest of the page in
+    size_t _bg_fill_target = 0;                    // _display_start_idx to fill down to
 
-    // Load more messages (for infinite scroll)
-    void load_more_messages();
+    // Load more messages (infinite scroll + background fill)
+    void load_more_messages(size_t batch = MESSAGES_PER_PAGE);
     static void on_scroll(lv_event_t* event);
 
     // Utility

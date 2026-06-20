@@ -220,9 +220,13 @@ void ChatScreen::refresh() {
     // Load all message hashes from store (sorted by timestamp)
     _all_message_hashes = _message_store->get_messages_for_conversation(_peer_hash);
 
-    // Start displaying from the most recent messages
-    if (_all_message_hashes.size() > MESSAGES_PER_PAGE) {
-        _display_start_idx = _all_message_hashes.size() - MESSAGES_PER_PAGE;
+    // Render only the few NEWEST messages synchronously (under the LVGL lock) so
+    // the conversation opens fast. The rest of the page is streamed in by
+    // tick_background_fill() a couple per main-loop tick, so the UI never freezes.
+    // (This runs on the main loop, not a task: the MessageStore shares one
+    // _json_doc between save + load and isn't safe for concurrent access.)
+    if (_all_message_hashes.size() > INITIAL_RENDER) {
+        _display_start_idx = _all_message_hashes.size() - INITIAL_RENDER;
     } else {
         _display_start_idx = 0;
     }
@@ -256,11 +260,35 @@ void ChatScreen::refresh() {
         create_message_bubble(item);
     }
 
+    // Queue the rest of the first page to stream in on the main loop.
+    _bg_fill_target = (_all_message_hashes.size() > MESSAGES_PER_PAGE)
+                          ? _all_message_hashes.size() - MESSAGES_PER_PAGE
+                          : 0;
+    _bg_fill_active = (_display_start_idx > _bg_fill_target);
+
     // Scroll to bottom
     lv_obj_scroll_to_y(_message_list, LV_COORD_MAX, LV_ANIM_OFF);
 }
 
-void ChatScreen::load_more_messages() {
+// Stream older messages in a few at a time, called from UIManager::update() on
+// the main loop. Each tick prepends a small batch under a brief LVGL lock, so a
+// large conversation fills in without freezing the UI or holding the lock long.
+void ChatScreen::tick_background_fill() {
+    if (!_bg_fill_active) {
+        return;
+    }
+    if (_display_start_idx <= _bg_fill_target) {
+        _bg_fill_active = false;
+        return;
+    }
+    size_t remaining = _display_start_idx - _bg_fill_target;
+    load_more_messages(remaining < BG_FILL_BATCH ? remaining : BG_FILL_BATCH);
+    if (_display_start_idx <= _bg_fill_target) {
+        _bg_fill_active = false;
+    }
+}
+
+void ChatScreen::load_more_messages(size_t batch) {
     LVGL_LOCK();
     if (_loading_more || _display_start_idx == 0 || !_message_store) {
         return;  // Already at the beginning or already loading
@@ -270,7 +298,7 @@ void ChatScreen::load_more_messages() {
     INFO("Loading more messages...");
 
     // Calculate how many more to load
-    size_t load_count = MESSAGES_PER_PAGE;
+    size_t load_count = batch;
     if (_display_start_idx < load_count) {
         load_count = _display_start_idx;
     }
