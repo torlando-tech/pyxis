@@ -782,7 +782,10 @@ void ChatScreen::on_full_message_copy(lv_event_t* event) {
 void ChatScreen::on_full_message_close(lv_event_t* event) {
     lv_obj_t* modal = (lv_obj_t*)lv_event_get_user_data(event);
     if (modal) {
-        lv_obj_del(modal);
+        // Async: the close button is a descendant of `modal`, so deleting it
+        // synchronously here would free the button whose callback is still
+        // running (use-after-free as LVGL keeps dispatching the event).
+        lv_obj_del_async(modal);
     }
 }
 
