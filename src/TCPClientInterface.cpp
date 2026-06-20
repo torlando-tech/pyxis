@@ -47,6 +47,24 @@ TCPClientInterface::TCPClientInterface(const char* name /*= "TCPClientInterface"
         return false;
     }
 
+#ifdef ARDUINO
+    // The blocking connect() runs on its own task so it never stalls the main
+    // loop. read/write/frame stay on the main loop (see loop()).
+    // Seed _last_connect_attempt so the task's first reconnect-wait check passes
+    // immediately; otherwise the initial connect could be delayed up to
+    // RECONNECT_WAIT_MS. Unsigned wraparound keeps this correct when
+    // millis() < RECONNECT_WAIT_MS.
+    _last_connect_attempt = millis() - RECONNECT_WAIT_MS;
+    _task_running = true;
+    BaseType_t r = xTaskCreatePinnedToCore(tcp_task, "tcp", 6144, this, 1, &_task_handle, 0);
+    if (r != pdPASS) {
+        ERROR("TCPClientInterface: Failed to create connect task");
+        _task_running = false;
+        return false;
+    }
+    INFO("TCPClientInterface: connect worker running");
+    return true;
+#else
     // WiFi connection is handled externally (in main.cpp)
     // Attempt initial connection
     if (!connect()) {
@@ -55,16 +73,18 @@ TCPClientInterface::TCPClientInterface(const char* name /*= "TCPClientInterface"
     }
 
     return true;
+#endif
 }
 
 bool TCPClientInterface::connect() {
     TRACE("TCPClientInterface: Connecting to " + _target_host + ":" + std::to_string(_target_port));
 
 #ifdef ARDUINO
-    // Set connection timeout
     _client.setTimeout(CONNECT_TIMEOUT_MS);
 
-    if (!_client.connect(_target_host.c_str(), _target_port)) {
+    // 3-arg connect bounds the blocking time (the 2-arg form ignores it and can
+    // block ~18.5s on an unreachable host). Runs on tcp_task, off the main loop.
+    if (!_client.connect(_target_host.c_str(), _target_port, CONNECT_TIMEOUT_MS)) {
         DEBUG("TCPClientInterface: Connection failed");
         return false;
     }
@@ -73,10 +93,8 @@ bool TCPClientInterface::connect() {
     configure_socket();
 
     INFO("TCPClientInterface: Connected to " + _target_host + ":" + std::to_string(_target_port));
-    _online = true;
-    _reconnected = true;  // Signal that we (re)connected - main loop should announce
-    _last_data_received = millis();  // Reset stale timer
-    _frame_buffer.clear();
+    // task_loop() publishes the link state (_conn_state / _online / _reconnected)
+    // after this returns; nothing else is touched here.
     return true;
 
 #else
@@ -233,19 +251,123 @@ void TCPClientInterface::disconnect() {
 }
 
 void TCPClientInterface::handle_disconnect() {
+#ifdef ARDUINO
+    // Called on the main loop while CONNECTED. Close the socket and hand it back
+    // to tcp_task (DISCONNECTED) for a fresh connect.
+    INFO("TCPClientInterface: Connection lost, will attempt reconnection");
+    disconnect();                     // _client.stop(), _online=false, clear buffer
+    _last_connect_attempt = millis();
+    _conn_state.store(DISCONNECTED);
+#else
     if (_online) {
         INFO("TCPClientInterface: Connection lost, will attempt reconnection");
         disconnect();
         // Reset connect attempt timer to enforce wait before reconnection
         _last_connect_attempt = millis();
     }
+#endif
 }
 
+#ifdef ARDUINO
+/*static*/ void TCPClientInterface::tcp_task(void* arg) {
+    auto* self = static_cast<TCPClientInterface*>(arg);
+    self->task_loop();
+    self->_task_done = true;   // let stop() join before the object is freed
+    vTaskDelete(nullptr);
+}
+
+// Owns _client ONLY while connecting. When the link is down it runs the blocking
+// connect() here (off the main loop); on success it publishes CONNECTED and the
+// main loop takes over all socket I/O. It never touches _client while CONNECTED.
+void TCPClientInterface::task_loop() {
+    while (_task_running) {
+        if (_conn_state.load() == DISCONNECTED) {
+            uint32_t now = millis();
+            if (now - _last_connect_attempt >= RECONNECT_WAIT_MS) {
+                _last_connect_attempt = now;
+                if (ESP.getMaxAllocHeap() >= 20000) {  // skip under heap pressure
+                    _conn_state.store(CONNECTING);      // claim _client
+                    if (connect()) {
+                        _frame_buffer.clear();
+                        _last_data_received = millis();
+                        // _online is owned by the main loop (it sets it on
+                        // observing CONNECTED); writing it here would race with
+                        // loop()'s `_online = false` during the CONNECTING window.
+                        // Publish CONNECTED BEFORE _reconnected: seq-cst then
+                        // guarantees that whenever the main loop observes
+                        // _reconnected==true the interface is already CONNECTED,
+                        // so check_reconnected() can't fire the announce on an
+                        // offline interface (which would drop it).
+                        _conn_state.store(CONNECTED);   // hand _client to main loop
+                        _reconnected.store(true);       // main loop announces
+                    } else {
+                        _conn_state.store(DISCONNECTED);
+                    }
+                }
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+#endif
+
 /*virtual*/ void TCPClientInterface::stop() {
+#ifdef ARDUINO
+    // Join the task: signal it, then wait until it has actually left task_loop()
+    // before tearing anything down. An in-flight connect() can overrun
+    // CONNECT_TIMEOUT_MS on a slow DNS server, and ~TCPClientInterface() calls
+    // stop() — returning early would risk a use-after-free on `this`.
+    _task_running = false;
+    if (_task_handle != nullptr) {
+        // Wait for the task to leave task_loop() and set _task_done — after that
+        // it only calls vTaskDelete(nullptr) and never touches `this` again, so
+        // it's safe to free the object. The deadline is far longer than any
+        // connect()+DNS (incl. lwIP DNS retries) can take.
+        uint32_t deadline = millis() + 30000;
+        while (!_task_done && (int32_t)(millis() - deadline) < 0) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        if (!_task_done) {
+            // Pathological: the task is still inside a hung connect() past the
+            // deadline. Force-delete it so it cannot reference `this` after we
+            // return. Safe against its own self-delete: that path sets _task_done
+            // first, so reaching here means it has not self-deleted.
+            vTaskDelete(_task_handle);
+        }
+        _task_handle = nullptr;
+    }
+    _conn_state.store(DISCONNECTED);
+#endif
     disconnect();
 }
 
 /*virtual*/ void TCPClientInterface::loop() {
+#ifdef ARDUINO
+    // tcp_task owns _client while (re)connecting; the main loop only touches the
+    // socket once CONNECTED. read/write/frame all happen here (same low-latency
+    // path as before the task split). The legacy body below is unreachable on
+    // ARDUINO.
+    if (_conn_state.load() != CONNECTED) {
+        _online = false;
+        return;
+    }
+    _online = true;
+    // ESP32 WiFiClient.connected() can momentarily read false; only treat it as a
+    // drop when there is also no buffered data.
+    if (!_client.connected() && _client.available() == 0) {
+        handle_disconnect();
+        return;
+    }
+    if (_client.available() > 0) {
+        _last_data_received = millis();
+        while (_client.available() > 0) {
+            uint8_t byte = _client.read();
+            _frame_buffer.append(byte);
+        }
+    }
+    extract_and_process_frames();
+    return;
+#endif
     // Periodic status logging
     static uint32_t last_status_log = 0;
     static uint32_t loop_count = 0;
@@ -479,6 +601,12 @@ void TCPClientInterface::extract_and_process_frames() {
         }
 
 #ifdef ARDUINO
+        // Only write when CONNECTED — while (re)connecting, _client belongs to
+        // tcp_task. send_outgoing() runs on the main loop (same thread as loop()),
+        // so no lock is needed once CONNECTED.
+        if (_conn_state.load() != CONNECTED) {
+            return false;  // not connected; Reticulum will retry/route
+        }
         size_t written = _client.write(framed.data(), framed.size());
         if (written != framed.size()) {
             ERROR("TCPClientInterface: Write incomplete, " + std::to_string(written) +

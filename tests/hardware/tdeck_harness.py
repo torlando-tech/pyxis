@@ -207,9 +207,11 @@ def wait_for_pyxis_boot(t, timeout=90):
 def wait_for_tcp_link(t, timeout=60):
     log("HARNESS", "Waiting for TCP interface to connect to rnsd...")
     line = t.wait_for_line(
-        lambda L: "TCPClientInterface" in L and (
-            "connected" in L.lower() or "Connected" in L or "started" in L.lower()
-        ),
+        # Match the actual connection ("Connected to ..."), not interface/worker
+        # startup. Matching "started" let the harness proceed (and drive the
+        # announce) before the link was up, so the announce was lost and the
+        # first direct message failed.
+        lambda L: "TCPClientInterface" in L and "connected to" in L.lower(),
         timeout,
     )
     if line:
