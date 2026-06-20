@@ -174,6 +174,9 @@ private:
     static void on_send_clicked(lv_event_t* event);
     static void on_message_long_pressed(lv_event_t* event);
     static void on_copy_dialog_action(lv_event_t* event);
+    void show_full_message(const String& content);  // detail view for a long message
+    static void on_full_message_copy(lv_event_t* event);
+    static void on_full_message_close(lv_event_t* event);
     static void on_textarea_long_pressed(lv_event_t* event);
     static void on_paste_dialog_action(lv_event_t* event);
 

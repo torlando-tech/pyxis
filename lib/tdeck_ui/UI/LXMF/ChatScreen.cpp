@@ -691,28 +691,99 @@ String ChatScreen::parse_display_name(const Bytes& app_data) {
 void ChatScreen::on_message_long_pressed(lv_event_t* event) {
     ChatScreen* screen = (ChatScreen*)lv_event_get_user_data(event);
     lv_obj_t* bubble = lv_event_get_target(event);
+    lv_obj_t* row = lv_obj_get_parent(bubble);
 
-    // Find the content label (first child of bubble)
-    lv_obj_t* label = lv_obj_get_child(bubble, 0);
-    if (!label) {
+    // Bubbles render a truncated copy of long messages, so recover the FULL
+    // content for this row (reverse-lookup row -> hash -> stored item) for both
+    // the detail view and Copy.
+    String full;
+    for (const auto& kv : screen->_message_rows) {
+        if (kv.second == row) {
+            for (const auto& m : screen->_messages) {
+                if (m.message_hash == kv.first) {
+                    full = m.content;
+                    break;
+                }
+            }
+            break;
+        }
+    }
+    if (full.length() == 0) {  // fallback to the (possibly truncated) label text
+        lv_obj_t* label = lv_obj_get_child(bubble, 0);
+        if (label) {
+            const char* t = lv_label_get_text(label);
+            if (t) full = t;
+        }
+    }
+    if (full.length() == 0) {
         return;
     }
 
-    // Get the message text
-    const char* text = lv_label_get_text(label);
-    if (!text || strlen(text) == 0) {
-        return;
+    screen->_pending_copy_text = full;
+    screen->show_full_message(full);
+}
+
+// Full-screen scrollable view of a single message's complete text, with Copy.
+// Opened by long-pressing a (possibly truncated) bubble.
+void ChatScreen::show_full_message(const String& content) {
+    lv_obj_t* modal = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(modal, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(modal, Theme::surface(), 0);
+    lv_obj_set_style_bg_opa(modal, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(modal, 8, 0);
+    lv_obj_set_style_radius(modal, 0, 0);
+    lv_obj_set_style_border_width(modal, 0, 0);
+    lv_obj_set_flex_flow(modal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(modal, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    // Scrollable content area filling the space above the buttons
+    lv_obj_t* scroll = lv_obj_create(modal);
+    lv_obj_set_width(scroll, LV_PCT(100));
+    lv_obj_set_flex_grow(scroll, 1);
+    lv_obj_set_style_bg_opa(scroll, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(scroll, 0, 0);
+    lv_obj_set_style_pad_all(scroll, 4, 0);
+
+    lv_obj_t* label = lv_label_create(scroll);
+    lv_label_set_text(label, content.c_str());
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(label, LV_PCT(100));
+    lv_obj_set_style_text_color(label, Theme::textPrimary(), 0);
+
+    // Button row: Copy + Close
+    lv_obj_t* btns = lv_obj_create(modal);
+    lv_obj_set_size(btns, LV_PCT(100), 40);
+    lv_obj_set_style_bg_opa(btns, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btns, 0, 0);
+    lv_obj_set_style_pad_all(btns, 0, 0);
+    lv_obj_set_flex_flow(btns, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btns, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t* copy_btn = lv_btn_create(btns);
+    lv_obj_set_style_bg_color(copy_btn, Theme::btnSecondary(), 0);
+    lv_obj_add_event_cb(copy_btn, on_full_message_copy, LV_EVENT_CLICKED, this);
+    lv_obj_t* copy_lbl = lv_label_create(copy_btn);
+    lv_label_set_text(copy_lbl, "Copy");
+    lv_obj_center(copy_lbl);
+
+    lv_obj_t* close_btn = lv_btn_create(btns);
+    lv_obj_set_style_bg_color(close_btn, Theme::primary(), 0);
+    lv_obj_add_event_cb(close_btn, on_full_message_close, LV_EVENT_CLICKED, modal);
+    lv_obj_t* close_lbl = lv_label_create(close_btn);
+    lv_label_set_text(close_lbl, "Close");
+    lv_obj_center(close_lbl);
+}
+
+void ChatScreen::on_full_message_copy(lv_event_t* event) {
+    ChatScreen* screen = (ChatScreen*)lv_event_get_user_data(event);
+    Clipboard::copy(screen->_pending_copy_text);
+}
+
+void ChatScreen::on_full_message_close(lv_event_t* event) {
+    lv_obj_t* modal = (lv_obj_t*)lv_event_get_user_data(event);
+    if (modal) {
+        lv_obj_del(modal);
     }
-
-    // Store text for copy action
-    screen->_pending_copy_text = String(text);
-
-    // Show copy dialog
-    static const char* btns[] = {"Copy", "Cancel", ""};
-    lv_obj_t* mbox = lv_msgbox_create(NULL, "Copy Message",
-        "Copy message to clipboard?", btns, false);
-    lv_obj_center(mbox);
-    lv_obj_add_event_cb(mbox, on_copy_dialog_action, LV_EVENT_VALUE_CHANGED, screen);
 }
 
 void ChatScreen::on_copy_dialog_action(lv_event_t* event) {
