@@ -334,6 +334,13 @@ void UIManager::update() {
     if (_current_screen == SCREEN_CHAT && _chat_screen) {
         _chat_screen->tick_background_fill();
     }
+    // Gather + render the announce list off the LVGL lock on the main loop (its
+    // refresh() just arms a flag). Iterating the path table on the LVGL task raced
+    // the main-loop path-table writes and blocked past the lock timeout once the
+    // table was non-empty — this serializes the gather with the writes instead.
+    if (_current_screen == SCREEN_ANNOUNCES && _announce_list_screen) {
+        _announce_list_screen->tick();
+    }
     LVGL_LOCK();
     // Process outbound LXMF messages
     _router.process_outbound();

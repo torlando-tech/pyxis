@@ -10,6 +10,7 @@
 #include <vector>
 #include <functional>
 #include <string>
+#include <atomic>
 #include <microReticulum/Bytes.h>
 
 namespace UI {
@@ -78,6 +79,13 @@ public:
     void refresh();
 
     /**
+     * Main-loop tick: if a refresh was requested, gather the announce items off
+     * the LVGL lock (race-free on the main loop) and render them. Call from
+     * UIManager::update() while the announces screen is shown.
+     */
+    void tick();
+
+    /**
      * Set callback for announce selection (to start conversation)
      * @param callback Function to call when announce is selected
      */
@@ -121,6 +129,7 @@ private:
     lv_obj_t* _empty_label;
 
     std::vector<AnnounceItem> _announces;
+    std::atomic<bool> _refresh_pending{false};  // armed by refresh(), consumed by tick() on the main loop
     std::vector<lv_obj_t*> _announce_containers;  // For focus group management
     std::vector<RNS::Bytes> _dest_hash_pool;  // Object pool to avoid per-item allocations
 
