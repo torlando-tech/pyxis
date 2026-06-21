@@ -128,41 +128,39 @@ void AnnounceListScreen::create_list() {
 }
 
 void AnnounceListScreen::refresh() {
-    LVGL_LOCK();
-    INFO("Refreshing announce list");
+    // Defer the real work to tick() on the main loop (UIManager::update). The
+    // gather (iterate the live path table + per-entry Identity::recall /
+    // recall_app_data) must NOT run on the LVGL task or hold the render lock:
+    // once the path table became non-empty it raced the main-loop path-table
+    // writes and blocked past LVGLLock's 5s timeout — hanging, then crashing, on
+    // open. refresh() is safe to call from any task; it just arms the tick.
+    _refresh_pending.store(true);
+}
 
-    // Clear existing items (also removes from focus group when deleted)
-    lv_obj_clean(_list);
-    _announces.clear();
-    _announce_containers.clear();
-    _dest_hash_pool.clear();
-    _empty_label = nullptr;
+void AnnounceListScreen::tick() {
+    // Runs on the main loop (UIManager::update), so iterating Transport::path_table()
+    // and reading the identity cache is serialized with — never concurrent to — the
+    // main-loop announce processing that writes them (both run in the Arduino loop).
+    // No LVGL lock is held during the gather; only the final render briefly takes it.
+    if (!_refresh_pending.exchange(false)) {
+        return;
+    }
 
-    // Get path table from Transport. Pre-graft the fork called this
-    // get_destination_table(); upstream microReticulum @ 0.3.0 renamed it
-    // to get_path_table() (the same map of dest_hash → DestinationEntry).
+    // GATHER (no LVGL lock) — build the item list off the render lock.
+    std::vector<AnnounceItem> items;
     const auto& dest_table = Transport::path_table();
-
-    // Compute name_hash for lxmf.delivery to filter announces
-    Bytes lxmf_delivery_name_hash = Destination::name_hash("lxmf", "delivery");
-
     for (auto it = dest_table.begin(); it != dest_table.end(); ++it) {
         const Bytes& dest_hash = it->first;
-        // Pre-graft: nested Transport::DestinationEntry. Upstream moved
-        // this to RNS::Persistence::DestinationEntry in
-        // Persistence/DestinationEntry.h.
         const RNS::Persistence::DestinationEntry& dest_entry = it->second;
 
-        // Check if this destination has a known identity (was announced properly)
+        // Only lxmf.delivery destinations with a known identity belong in the list.
         Identity identity = Identity::recall(dest_hash);
         if (!identity) {
-            continue;  // Skip destinations without known identity
+            continue;
         }
-
-        // Verify this is an lxmf.delivery destination by computing expected hash
         Bytes expected_hash = Destination::hash(identity, "lxmf", "delivery");
         if (dest_hash != expected_hash) {
-            continue;  // Not an lxmf.delivery destination
+            continue;
         }
 
         AnnounceItem item;
@@ -171,45 +169,64 @@ void AnnounceListScreen::refresh() {
         item.hops = dest_entry._hops;
         item.timestamp = dest_entry._timestamp;
         item.timestamp_str = format_timestamp(dest_entry._timestamp);
-        item.has_path = Transport::has_path(dest_hash);
-
-        // Try to get display name from app_data
+        item.has_path = true;  // it's in the path table we're iterating — skip the store probe
         Bytes app_data = Identity::recall_app_data(dest_hash);
         if (app_data && app_data.size() > 0) {
             item.display_name = parse_display_name(app_data);
         }
-
-        _announces.push_back(item);
+        items.push_back(item);
+        // No pre-sort cap: gather every matching lxmf.delivery destination so the
+        // sort below always sees the true newest. The path table is bounded by
+        // USTORE_DEFAULT_MAX_RECS (400) and these allocate in PSRAM, so the gather
+        // is bounded; only the render is capped (MAX_DISPLAY).
     }
 
-    // Sort by timestamp (newest first)
-    std::sort(_announces.begin(), _announces.end(),
+    std::sort(items.begin(), items.end(),
         [](const AnnounceItem& a, const AnnounceItem& b) {
             return a.timestamp > b.timestamp;
         });
 
     {
         char log_buf[64];
-        snprintf(log_buf, sizeof(log_buf), "  Found %zu announced destinations", _announces.size());
+        snprintf(log_buf, sizeof(log_buf), "Announce list: %zu lxmf.delivery destinations", items.size());
         INFO(log_buf);
     }
+
+    // RENDER (brief LVGL lock) — no store access here, capped item count.
+    LVGL_LOCK();
+    lv_obj_clean(_list);
+    _announce_containers.clear();
+    _dest_hash_pool.clear();
+    _empty_label = nullptr;
+    _announces = std::move(items);
 
     if (_announces.empty()) {
         show_empty_state();
     } else {
-        // Limit to 20 most recent to prevent memory exhaustion
         const size_t MAX_DISPLAY = 20;
         size_t display_count = std::min(_announces.size(), MAX_DISPLAY);
-
-        // Reserve capacity to avoid reallocations during population
         _dest_hash_pool.reserve(display_count);
         _announce_containers.reserve(display_count);
-
         size_t count = 0;
         for (const auto& item : _announces) {
             if (count >= MAX_DISPLAY) break;
             create_announce_item(item);
             count++;
+        }
+    }
+
+    // Re-add the freshly created item containers to the focus group for trackball
+    // navigation. The gather is deferred to this main-loop tick, so show() (which
+    // adds widgets to the group) ran before these containers existed, and the
+    // lv_obj_clean above dropped the previous ones. The announces screen is current
+    // (UIManager gates this tick on it), so focusing the first item here is safe.
+    lv_group_t* group = LVGL::LVGLInit::get_default_group();
+    if (group) {
+        for (lv_obj_t* container : _announce_containers) {
+            lv_group_add_obj(group, container);
+        }
+        if (!_announce_containers.empty()) {
+            lv_group_focus_obj(_announce_containers[0]);
         }
     }
 }
