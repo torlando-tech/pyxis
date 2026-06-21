@@ -539,6 +539,10 @@ void setup_wifi() {
     INFO(msg.c_str());
 
     WiFi.mode(WIFI_STA);
+    // Reconnect automatically if the AP drops the association — without this the
+    // device stays offline until a reboot or a manual Settings -> Reconnect.
+    WiFi.setAutoReconnect(true);
+    WiFi.persistent(true);
     WiFi.begin(app_settings.wifi_ssid.c_str(), app_settings.wifi_password.c_str());
 
     // Don't block boot waiting for WiFi association — the main loop
@@ -2443,6 +2447,20 @@ void loop() {
             // branch rebinds the sockets on a reconnect.
             if (app_settings.auto_enabled) {
                 start_auto_interface();
+            }
+        }
+        // Backstop auto-reconnect: WiFi.setAutoReconnect() handles most drops in
+        // the background, but not every disconnect reason — without an explicit
+        // retry the device can sit offline until a reboot (which is exactly what
+        // happened). Re-issue begin() every ~15s while down. Non-blocking; the
+        // connected-edge above picks up once association lands.
+        if (!wifi_connected && app_settings.wifi_ssid.length() > 0) {
+            static uint32_t last_wifi_retry = 0;
+            uint32_t nowms = millis();
+            if (last_wifi_retry == 0 || (nowms - last_wifi_retry) >= 15000) {
+                last_wifi_retry = nowms;
+                INFO("WiFi down — attempting reconnect");
+                WiFi.begin(app_settings.wifi_ssid.c_str(), app_settings.wifi_password.c_str());
             }
         }
         last_wifi_connected = wifi_connected;
