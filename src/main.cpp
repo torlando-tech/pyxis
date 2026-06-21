@@ -539,6 +539,14 @@ void setup_wifi() {
     INFO(msg.c_str());
 
     WiFi.mode(WIFI_STA);
+    // Reconnect automatically if the AP drops the association — without this the
+    // device stays offline until a reboot or a manual Settings -> Reconnect.
+    WiFi.setAutoReconnect(true);
+    // Don't persist creds to NVS on every begin(): the backstop re-issues begin()
+    // periodically while down, and the app already persists creds in Preferences,
+    // so NVS writes here would be redundant flash wear. setAutoReconnect is in-RAM
+    // and unaffected.
+    WiFi.persistent(false);
     WiFi.begin(app_settings.wifi_ssid.c_str(), app_settings.wifi_password.c_str());
 
     // Don't block boot waiting for WiFi association — the main loop
@@ -2443,6 +2451,28 @@ void loop() {
             // branch rebinds the sockets on a reconnect.
             if (app_settings.auto_enabled) {
                 start_auto_interface();
+            }
+        }
+        // Backstop auto-reconnect: WiFi.setAutoReconnect() handles most drops in
+        // the background, but not every disconnect reason — without an explicit
+        // retry the device can sit offline until a reboot (which is exactly what
+        // happened). While down, re-issue begin() every ~15s. Non-blocking; the
+        // connected-edge above picks up once association lands.
+        static uint32_t last_wifi_retry = 0;
+        if (wifi_connected) {
+            last_wifi_retry = 0;  // re-arm the grace period for the next drop
+        } else if (app_settings.wifi_ssid.length() > 0) {
+            // Arm the timer on the first disconnected tick rather than firing
+            // immediately, so we don't interrupt the in-progress boot association
+            // (or setAutoReconnect's own retry) with a redundant begin() that
+            // would reset the WiFi state machine. First real retry is ~15s later.
+            uint32_t nowms = millis();
+            if (last_wifi_retry == 0) {
+                last_wifi_retry = nowms;
+            } else if ((nowms - last_wifi_retry) >= 15000) {
+                last_wifi_retry = nowms;
+                INFO("WiFi down — attempting reconnect");
+                WiFi.begin(app_settings.wifi_ssid.c_str(), app_settings.wifi_password.c_str());
             }
         }
         last_wifi_connected = wifi_connected;
