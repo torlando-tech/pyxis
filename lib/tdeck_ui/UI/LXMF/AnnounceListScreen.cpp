@@ -175,7 +175,10 @@ void AnnounceListScreen::tick() {
             item.display_name = parse_display_name(app_data);
         }
         items.push_back(item);
-        if (items.size() >= 64) break;  // bound the gather
+        // No pre-sort cap: gather every matching lxmf.delivery destination so the
+        // sort below always sees the true newest. The path table is bounded by
+        // USTORE_DEFAULT_MAX_RECS (400) and these allocate in PSRAM, so the gather
+        // is bounded; only the render is capped (MAX_DISPLAY).
     }
 
     std::sort(items.begin(), items.end(),
@@ -209,6 +212,21 @@ void AnnounceListScreen::tick() {
             if (count >= MAX_DISPLAY) break;
             create_announce_item(item);
             count++;
+        }
+    }
+
+    // Re-add the freshly created item containers to the focus group for trackball
+    // navigation. The gather is deferred to this main-loop tick, so show() (which
+    // adds widgets to the group) ran before these containers existed, and the
+    // lv_obj_clean above dropped the previous ones. The announces screen is current
+    // (UIManager gates this tick on it), so focusing the first item here is safe.
+    lv_group_t* group = LVGL::LVGLInit::get_default_group();
+    if (group) {
+        for (lv_obj_t* container : _announce_containers) {
+            lv_group_add_obj(group, container);
+        }
+        if (!_announce_containers.empty()) {
+            lv_group_focus_obj(_announce_containers[0]);
         }
     }
 }
