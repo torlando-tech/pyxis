@@ -1219,7 +1219,7 @@ void SettingsScreen::update_gps_display() {
         time_t now = time(nullptr);
         struct tm lt;
         localtime_r(&now, &lt);
-        if (lt.tm_year + 1900 >= 2016) {
+        if (lt.tm_year + 1900 >= 2024) {  // < 2024 == unsynced (1970 or the ESP32 ~2016 boot default)
             char tbuf[48];
             strftime(tbuf, sizeof(tbuf), "Time: %Y-%m-%d %H:%M:%S", &lt);
             lv_label_set_text(_label_gps_time, tbuf);

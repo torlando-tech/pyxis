@@ -320,12 +320,19 @@ bool sync_time_from_gps(uint32_t timeout_ms = 30000) {
     // US bands use POSIX strings WITH DST rules, so summer correctly shows EDT/CDT/
     // MDT/PDT instead of standard time. The old code used a raw longitude offset with
     // no DST rule, so e.g. Eastern showed EST in June (1h slow). Outside those bands,
-    // fall back to a plain longitude offset (no DST) -- which is also correct for
-    // non-DST regions like Arizona/Puerto Rico that a blanket rule would get wrong.
+    // fall back to a plain longitude offset (no DST) -- correct for non-DST / non-US
+    // regions like Puerto Rico. Arizona (Mountain band, no DST) gets a carve-out below.
     double longitude = gps.location.lng();
+    double latitude  = gps.location.lat();
     const char* tz_str;
     char tz_buf[32];
-    if (longitude >= -82.5 && longitude < -67.0)        tz_str = "EST5EDT,M3.2.0,M11.1.0";  // Eastern
+    // Arizona (excl. the Navajo Nation) is MST year-round -- no DST -- AND straddles
+    // the Mountain/Pacific longitude boundary, so check its lat/lon box before the
+    // longitude bands. Approximate box; the DST-observing Navajo Nation in the NE
+    // corner is not separately handled.
+    if (latitude >= 31.3 && latitude <= 37.0 && longitude >= -114.9 && longitude <= -109.0)
+        tz_str = "MST7";                                                                  // Arizona: no DST
+    else if (longitude >= -82.5 && longitude < -67.0)   tz_str = "EST5EDT,M3.2.0,M11.1.0";  // Eastern
     else if (longitude >= -97.5 && longitude < -82.5)   tz_str = "CST6CDT,M3.2.0,M11.1.0";  // Central
     else if (longitude >= -112.5 && longitude < -97.5)  tz_str = "MST7MDT,M3.2.0,M11.1.0";  // Mountain
     else if (longitude >= -127.5 && longitude < -112.5) tz_str = "PST8PDT,M3.2.0,M11.1.0";  // Pacific
