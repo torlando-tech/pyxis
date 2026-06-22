@@ -59,7 +59,7 @@ SettingsScreen::SettingsScreen(lv_obj_t* parent)
       _ta_tcp_host(nullptr), _ta_tcp_port(nullptr), _btn_reconnect(nullptr),
       _ta_display_name(nullptr),
       _slider_brightness(nullptr), _label_brightness_value(nullptr), _switch_kb_light(nullptr), _dropdown_timeout(nullptr),
-      _label_gps_sats(nullptr), _label_gps_coords(nullptr), _label_gps_alt(nullptr), _label_gps_hdop(nullptr),
+      _label_gps_sats(nullptr), _label_gps_coords(nullptr), _label_gps_alt(nullptr), _label_gps_hdop(nullptr), _label_gps_time(nullptr),
       _label_identity_hash(nullptr), _label_lxmf_address(nullptr), _label_firmware(nullptr),
       _label_storage(nullptr), _label_ram(nullptr),
       _switch_tcp_enabled(nullptr), _switch_lora_enabled(nullptr),
@@ -745,6 +745,7 @@ void SettingsScreen::create_gps_section(lv_obj_t* parent) {
     _label_gps_coords = create_label_row(parent, "Location: No fix");
     _label_gps_alt = create_label_row(parent, "Altitude: --");
     _label_gps_hdop = create_label_row(parent, "HDOP: --");
+    _label_gps_time = create_label_row(parent, "Time: --");
 }
 
 void SettingsScreen::create_system_section(lv_obj_t* parent) {
@@ -1210,6 +1211,23 @@ void SettingsScreen::update_settings_from_ui() {
 
 void SettingsScreen::update_gps_display() {
     LVGL_LOCK();
+
+    // Current system clock (independent of the GPS object): verify the time-sync at
+    // a glance. A sane local date means a good fix synced; "not set" means unsynced;
+    // a far-future year would flag a GPS week-rollover slipping through.
+    {
+        time_t now = time(nullptr);
+        struct tm lt;
+        localtime_r(&now, &lt);
+        if (lt.tm_year + 1900 >= 2016) {
+            char tbuf[48];
+            strftime(tbuf, sizeof(tbuf), "Time: %Y-%m-%d %H:%M:%S", &lt);
+            lv_label_set_text(_label_gps_time, tbuf);
+        } else {
+            lv_label_set_text(_label_gps_time, "Time: not set (awaiting GPS)");
+        }
+    }
+
     if (!_gps) {
         lv_label_set_text(_label_gps_sats, "Satellites: N/A");
         lv_label_set_text(_label_gps_coords, "Location: GPS not available");
@@ -1244,7 +1262,7 @@ void SettingsScreen::update_gps_display() {
 
     // HDOP (fix quality)
     if (_gps->hdop.isValid()) {
-        double hdop = _gps->hdop.hdop() / 100.0;  // TinyGPSPlus returns hdop * 100
+        double hdop = _gps->hdop.hdop();  // hdop() already returns the true value (raw value()/100)
         String quality;
         if (hdop < 1.0) quality = "Ideal";
         else if (hdop < 2.0) quality = "Excellent";

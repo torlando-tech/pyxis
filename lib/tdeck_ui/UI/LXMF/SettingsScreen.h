@@ -260,6 +260,7 @@ private:
     lv_obj_t* _label_gps_coords;
     lv_obj_t* _label_gps_alt;
     lv_obj_t* _label_gps_hdop;
+    lv_obj_t* _label_gps_time;
 
     // System info labels (read-only)
     lv_obj_t* _label_identity_hash;
