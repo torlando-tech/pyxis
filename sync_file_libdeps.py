@@ -15,8 +15,11 @@ fresh source on every build.
 """
 Import("env")
 import os
+import sys
 import shutil
 from pathlib import Path
+sys.path.insert(0, env.get("PROJECT_DIR", "."))
+from _build_helpers import env_libdeps_dir  # per-env libdeps path; never hardcode the env
 
 # (source_dir, libdep_subdir_name) — populated from env vars so the
 # script doesn't bake any contributor's local checkout path into the
@@ -32,7 +35,7 @@ if _micro_reticulum_dir:
 
 PROJECT_DIR = Path(env.get("PROJECT_DIR", "."))
 ENV_NAME = env.get("PIOENV", "tdeck")
-LIBDEPS_BASE = PROJECT_DIR / ".pio" / "libdeps" / ENV_NAME
+LIBDEPS_BASE = Path(env_libdeps_dir(env))
 
 
 def mirror(src: Path, dst: Path):

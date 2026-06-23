@@ -682,7 +682,9 @@ void on_wifi_connected() {
         });
         ArduinoOTA.onError([](ota_error_t error) { ERROR("OTA: Error"); });
         ArduinoOTA.begin();
-        INFO("OTA: Ready");
+        // ArduinoOTA.begin() returns void, so this is "started", not a verified-ready
+        // state -- log the target instead of claiming readiness we can't confirm.
+        INFO("OTA: wireless flash service started (pyxis-tdeck:3232)");
 
         // Initialize UDP log broadcasting (multicast group 239.0.99.99:9999)
         udp_log_init();

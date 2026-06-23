@@ -19,16 +19,11 @@ Patch 4 — NimBLEDevice.cpp: Expose host reset reason via global volatile varia
   global volatile int that application code can poll to capture the reason in UDP logs.
 """
 Import("env")
-import os
+import os, sys
+sys.path.insert(0, env.get("PROJECT_DIR", "."))
+from _build_helpers import env_libdeps_dir  # per-env libdeps path; never hardcode the env
 
-NIMBLE_BASE = os.path.join(
-    env.get("PROJECT_DIR", "."),
-    # Per-environment libdeps tree (each env gets its own). Was hardcoded to
-    # "tdeck", so building any OTHER env (e.g. tdeck-ota) patched the wrong tree
-    # and left nimble_host_reset_reason undefined -> link error. Match the sibling
-    # pre-scripts (patch_msgpack/filestore/littlefs, sync_file_libdeps).
-    ".pio", "libdeps", env.get("PIOENV", "tdeck"), "NimBLE-Arduino", "src"
-)
+NIMBLE_BASE = env_libdeps_dir(env, "NimBLE-Arduino", "src")
 
 def apply_patch(filepath, old, new, label):
     if not os.path.exists(filepath):

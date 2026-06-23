@@ -23,12 +23,11 @@ Three purposes:
    patch pending the upstream fix landing.
 """
 Import("env")
-import os
+import os, sys
+sys.path.insert(0, env.get("PROJECT_DIR", "."))
+from _build_helpers import env_libdeps_dir  # per-env libdeps path; never hardcode the env
 
-FILESTORE_H = os.path.join(
-    env.get("PROJECT_DIR", "."),
-    ".pio", "libdeps", env.get("PIOENV", "tdeck"), "microStore", "include", "microStore", "FileStore.h",
-)
+FILESTORE_H = env_libdeps_dir(env, "microStore", "include", "microStore", "FileStore.h")
 
 OLD = """\tbool exists(const uint8_t* key, uint8_t key_len)
 \t{
