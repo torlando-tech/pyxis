@@ -238,37 +238,58 @@ int calculate_timezone_offset_hours(double longitude) {
  * Try to sync time from GPS
  * Returns true if successful, false if no valid fix
  */
+// --- GPS time-sync quality gate ----------------------------------------------
+// The GPS week-number counter rolls over every 1024 weeks (~19.6 years), and an
+// un-resolved / cold-start fix can emit a date a full rollover off (e.g. 2046).
+// Such bogus dates only appear on weak, un-resolved fixes and don't hold steady,
+// so we refuse to set the clock unless we have a real 3D fix (enough satellites,
+// good HDOP) whose calendar date has been stable for a few seconds.
+static constexpr uint32_t GPS_MIN_SATS = 4;           // a genuine 3D fix
+static constexpr double   GPS_MAX_HDOP = 5.0;         // good geometry
+static constexpr uint32_t GPS_DATE_STABLE_MS = 3000;  // date must hold this long
+static uint32_t g_gps_date_key = 0;          // YYYYMMDD the GPS currently reports
+static uint32_t g_gps_date_stable_since = 0; // millis() that date first appeared
+
+// Call after every gps.encode() so date stability is tracked continuously.
+static void track_gps_date_stability() {
+    if (!gps.date.isValid()) return;
+    uint32_t k = gps.date.year() * 10000u + gps.date.month() * 100u + gps.date.day();
+    if (k != g_gps_date_key) {
+        g_gps_date_key = k;
+        g_gps_date_stable_since = millis();
+    }
+}
+
+// True only when the CURRENT fix is trustworthy enough to set the clock.
+static bool gps_fix_is_trustworthy() {
+    if (!gps.date.isValid() || !gps.time.isValid() || !gps.location.isValid()) return false;
+    if (!gps.satellites.isValid() || gps.satellites.value() < GPS_MIN_SATS) return false;
+    if (!gps.hdop.isValid() || gps.hdop.hdop() <= 0.0 || gps.hdop.hdop() > GPS_MAX_HDOP) return false;
+    uint32_t k = gps.date.year() * 10000u + gps.date.month() * 100u + gps.date.day();
+    if (k != g_gps_date_key) return false;  // date just changed; not yet stable
+    return (millis() - g_gps_date_stable_since) >= GPS_DATE_STABLE_MS;
+}
+
 bool sync_time_from_gps(uint32_t timeout_ms = 30000) {
-    INFO("Attempting GPS time sync...");
+    if (timeout_ms > 0) INFO("Attempting GPS time sync...");
 
     uint32_t start = millis();
-    bool got_time = false;
-    bool got_location = false;
 
-    while (millis() - start < timeout_ms) {
+    // Wait up to timeout_ms for a trustworthy fix, then set the clock. With
+    // timeout_ms == 0 this is NON-BLOCKING: it sets the clock iff the current fix
+    // (fed continuously by the main loop) already passes the gate -- which is how
+    // the periodic re-sync self-corrects (e.g. basement -> window) without stalling.
+    for (;;) {
         while (GPSSerial.available() > 0) {
-            if (gps.encode(GPSSerial.read())) {
-                // Check if we have valid date/time
-                if (gps.date.isValid() && gps.time.isValid() && gps.date.year() >= 2024) {
-                    got_time = true;
-                }
-                // Check if we have valid location (for timezone)
-                if (gps.location.isValid()) {
-                    got_location = true;
-                }
-                // If we have both, we can sync
-                if (got_time && got_location) {
-                    break;
-                }
-            }
+            gps.encode(GPSSerial.read());
+            track_gps_date_stability();
         }
-        if (got_time && got_location) break;
+        if (gps_fix_is_trustworthy()) break;
+        if (millis() - start >= timeout_ms) {
+            if (timeout_ms > 0) WARNING("GPS time not available (no high-quality fix)");
+            return false;
+        }
         delay(10);
-    }
-
-    if (!got_time) {
-        WARNING("GPS time not available");
-        return false;
     }
 
     // Build UTC time from GPS
@@ -281,13 +302,13 @@ bool sync_time_from_gps(uint32_t timeout_ms = 30000) {
     gps_time.tm_sec = gps.time.second();
     gps_time.tm_isdst = 0;  // GPS time is UTC, no DST
 
-    // Convert to Unix timestamp (UTC)
-    time_t gps_unix = mktime(&gps_time);
-    // mktime assumes local time, adjust back to UTC
-    // Actually, we'll set TZ to UTC first
+    // Convert to Unix timestamp. mktime() interprets the struct as LOCAL time and
+    // MUTATES it, so TZ must already be UTC on the single call. The old code called
+    // mktime() once under the *previous* TZ (corrupting the struct), then again under
+    // UTC -> an off-by-DST-offset clock. One call, UTC set first, is correct.
     setenv("TZ", "UTC0", 1);
     tzset();
-    gps_unix = mktime(&gps_time);
+    time_t gps_unix = mktime(&gps_time);
 
     // Set the system time
     struct timeval tv;
@@ -295,31 +316,40 @@ bool sync_time_from_gps(uint32_t timeout_ms = 30000) {
     tv.tv_usec = 0;
     settimeofday(&tv, nullptr);
 
-    // Set timezone based on location if available
-    if (got_location) {
-        double longitude = gps.location.lng();
-        int tz_offset = calculate_timezone_offset_hours(longitude);
+    // Timezone from longitude (location is guaranteed valid by the gate). Continental
+    // US bands use POSIX strings WITH DST rules, so summer correctly shows EDT/CDT/
+    // MDT/PDT instead of standard time. The old code used a raw longitude offset with
+    // no DST rule, so e.g. Eastern showed EST in June (1h slow). Outside those bands,
+    // fall back to a plain longitude offset (no DST) -- correct for non-DST / non-US
+    // regions like Puerto Rico. Arizona (Mountain band, no DST) gets a carve-out below.
+    double longitude = gps.location.lng();
+    double latitude  = gps.location.lat();
+    const char* tz_str;
+    char tz_buf[32];
+    // Arizona (excl. the Navajo Nation) is MST year-round -- no DST -- AND straddles
+    // the Mountain/Pacific longitude boundary, so check its lat/lon box before the
+    // longitude bands. Approximate box; the DST-observing Navajo Nation in the NE
+    // corner is not separately handled.
+    if (latitude >= 31.3 && latitude <= 37.0 && longitude >= -114.9 && longitude <= -109.0)
+        tz_str = "MST7";                                                                  // Arizona: no DST
+    else if (longitude >= -82.5 && longitude < -67.0)   tz_str = "EST5EDT,M3.2.0,M11.1.0";  // Eastern
+    else if (longitude >= -97.5 && longitude < -82.5)   tz_str = "CST6CDT,M3.2.0,M11.1.0";  // Central
+    else if (longitude >= -112.5 && longitude < -97.5)  tz_str = "MST7MDT,M3.2.0,M11.1.0";  // Mountain
+    else if (longitude >= -127.5 && longitude < -112.5) tz_str = "PST8PDT,M3.2.0,M11.1.0";  // Pacific
+    else {
+        int tz_offset = calculate_timezone_offset_hours(longitude);  // POSIX = opposite sign
+        if (tz_offset >= 0) snprintf(tz_buf, sizeof(tz_buf), "GPS%d", -tz_offset);
+        else                snprintf(tz_buf, sizeof(tz_buf), "GPS+%d", -tz_offset);
+        tz_str = tz_buf;
+    }
+    setenv("TZ", tz_str, 1);
+    tzset();
 
-        // Build POSIX TZ string (e.g., "EST5" for UTC-5)
-        // Note: POSIX uses opposite sign convention!
-        char tz_str[32];
-        if (tz_offset >= 0) {
-            snprintf(tz_str, sizeof(tz_str), "GPS%d", -tz_offset);
-        } else {
-            snprintf(tz_str, sizeof(tz_str), "GPS+%d", -tz_offset);
-        }
-        setenv("TZ", tz_str, 1);
-        tzset();
-
-        String msg = "  GPS location: " + String(gps.location.lat(), 4) + ", " + String(longitude, 4);
-        INFO(msg.c_str());
-        msg = "  Timezone offset: UTC" + String(tz_offset >= 0 ? "+" : "") + String(tz_offset);
-        INFO(msg.c_str());
-    } else {
-        // No location, use default Eastern Time
-        WARNING("GPS location not available, using Eastern Time");
-        setenv("TZ", "EST5EDT,M3.2.0,M11.1.0", 1);
-        tzset();
+    {
+        String loc = "  GPS location: " + String(gps.location.lat(), 4) + ", " + String(longitude, 4);
+        INFO(loc.c_str());
+        String tz = String("  Timezone: ") + tz_str;
+        INFO(tz.c_str());
     }
 
     // Set the time offset for Utilities::OS::time().
@@ -2521,6 +2551,7 @@ void loop() {
     // Read GPS data continuously (TinyGPSPlus needs constant feeding)
     while (GPSSerial.available() > 0) {
         gps.encode(GPSSerial.read());
+        track_gps_date_stability();
     }
 
     // Async GPS time sync retry. We dropped the synchronous 15s wait
@@ -2532,11 +2563,10 @@ void loop() {
             && app_settings.gps_time_sync
             && millis() - _gps_sync_last_attempt > 30000) {
         _gps_sync_last_attempt = millis();
-        if (gps.date.isValid() && gps.time.isValid() && gps.date.year() >= 2024) {
-            // Cheap path: TinyGPSPlus already has a valid timestamp,
-            // so sync_time_from_gps will return immediately.
-            sync_time_from_gps(0);
-        }
+        // Non-blocking: sets the clock iff the current fix already passes the
+        // quality+stability gate inside sync_time_from_gps. Retries every 30s until
+        // a trustworthy fix lands (e.g. after moving to a window), then stops.
+        sync_time_from_gps(0);
     }
 
     // Screen timeout handling
