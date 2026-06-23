@@ -23,7 +23,11 @@ import os
 
 NIMBLE_BASE = os.path.join(
     env.get("PROJECT_DIR", "."),
-    ".pio", "libdeps", "tdeck", "NimBLE-Arduino", "src"
+    # Per-environment libdeps tree (each env gets its own). Was hardcoded to
+    # "tdeck", so building any OTHER env (e.g. tdeck-ota) patched the wrong tree
+    # and left nimble_host_reset_reason undefined -> link error. Match the sibling
+    # pre-scripts (patch_msgpack/filestore/littlefs, sync_file_libdeps).
+    ".pio", "libdeps", env.get("PIOENV", "tdeck"), "NimBLE-Arduino", "src"
 )
 
 def apply_patch(filepath, old, new, label):

@@ -771,7 +771,7 @@ void SettingsScreen::create_advanced_section(lv_obj_t* parent) {
     lv_obj_clear_flag(announce_row, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t* announce_label = lv_label_create(announce_row);
-    lv_label_set_text(announce_label, "Announce Interval:");
+    lv_label_set_text(announce_label, "Announce Interval (min):");
     lv_obj_align(announce_label, LV_ALIGN_LEFT_MID, 0, 0);
     lv_obj_set_style_text_color(announce_label, Theme::textTertiary(), 0);
     lv_obj_set_style_text_font(announce_label, &lv_font_montserrat_14, 0);
@@ -813,7 +813,7 @@ void SettingsScreen::create_advanced_section(lv_obj_t* parent) {
     lv_obj_clear_flag(sync_row, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t* sync_label = lv_label_create(sync_row);
-    lv_label_set_text(sync_label, "Prop Sync Interval:");
+    lv_label_set_text(sync_label, "Prop Sync Interval (hrs):");
     lv_obj_align(sync_label, LV_ALIGN_LEFT_MID, 0, 0);
     lv_obj_set_style_text_color(sync_label, Theme::textTertiary(), 0);
     lv_obj_set_style_text_font(sync_label, &lv_font_montserrat_14, 0);
@@ -1015,11 +1015,11 @@ void SettingsScreen::update_ui_from_settings() {
         lv_dropdown_set_selected(_dropdown_timeout, idx);
     }
     if (_ta_announce_interval) {
-        lv_textarea_set_text(_ta_announce_interval, String(_settings.announce_interval).c_str());
+        lv_textarea_set_text(_ta_announce_interval, String(_settings.announce_interval / 60).c_str());  // stored seconds -> shown minutes
     }
     if (_ta_sync_interval) {
         // Display in minutes (stored in seconds)
-        lv_textarea_set_text(_ta_sync_interval, String(_settings.sync_interval / 60).c_str());
+        lv_textarea_set_text(_ta_sync_interval, String(_settings.sync_interval / 3600).c_str());  // stored seconds -> shown hours
     }
     if (_switch_gps_sync) {
         if (_settings.gps_time_sync) {
@@ -1154,11 +1154,11 @@ void SettingsScreen::update_settings_from_ui() {
         }
     }
     if (_ta_announce_interval) {
-        _settings.announce_interval = String(lv_textarea_get_text(_ta_announce_interval)).toInt();
+        _settings.announce_interval = String(lv_textarea_get_text(_ta_announce_interval)).toInt() * 60;  // minutes -> seconds
     }
     if (_ta_sync_interval) {
         // UI shows minutes, store as seconds
-        _settings.sync_interval = String(lv_textarea_get_text(_ta_sync_interval)).toInt() * 60;
+        _settings.sync_interval = String(lv_textarea_get_text(_ta_sync_interval)).toInt() * 3600;  // hours -> seconds
     }
     if (_switch_gps_sync) {
         _settings.gps_time_sync = lv_obj_has_state(_switch_gps_sync, LV_STATE_CHECKED);
@@ -1319,6 +1319,16 @@ void SettingsScreen::set_gps(TinyGPSPlus* gps) {
 void SettingsScreen::refresh() {
     update_gps_display();
     update_system_info();
+}
+
+void SettingsScreen::tick() {
+    // Called every main-loop pass while Settings is the active screen. Throttled to
+    // ~1s, it refreshes the live readouts so the clock (and GPS/system info) updates
+    // on screen instead of being a static snapshot from when the screen was opened.
+    uint32_t now = millis();
+    if (now - _last_tick_ms < 1000) return;
+    _last_tick_ms = now;
+    refresh();
 }
 
 void SettingsScreen::set_back_callback(BackCallback callback) {

@@ -341,6 +341,9 @@ void UIManager::update() {
     if (_current_screen == SCREEN_ANNOUNCES && _announce_list_screen) {
         _announce_list_screen->tick();
     }
+    if (_current_screen == SCREEN_SETTINGS && _settings_screen) {
+        _settings_screen->tick();  // keep the live clock / GPS / system readouts ticking
+    }
     LVGL_LOCK();
     // Process outbound LXMF messages
     _router.process_outbound();
