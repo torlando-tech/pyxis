@@ -34,7 +34,6 @@ if _micro_reticulum_dir:
     FILE_DEPS.append((_micro_reticulum_dir, "microReticulum"))
 
 PROJECT_DIR = Path(env.get("PROJECT_DIR", "."))
-ENV_NAME = env.get("PIOENV", "tdeck")
 LIBDEPS_BASE = Path(env_libdeps_dir(env))
 
 

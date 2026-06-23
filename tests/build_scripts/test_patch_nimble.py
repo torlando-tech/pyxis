@@ -243,6 +243,11 @@ def test_script_is_executable_via_python(tmp_path):
         f"        return {str(tmp_path)!r} if key == 'PROJECT_DIR' else default\n"
         f"import builtins\n"
         f"builtins.env = _Env()\n"
+        # The script imports its sibling _build_helpers; in a real build PROJECT_DIR
+        # is the repo root (where both live), but here PROJECT_DIR is a temp dir, so
+        # put the script's actual directory on sys.path for the import to resolve.
+        f"import sys, os\n"
+        f"sys.path.insert(0, os.path.dirname({str(PATCH_SCRIPT)!r}))\n"
         f"exec(open({str(PATCH_SCRIPT)!r}).read())\n"
     )
     # Use the same interpreter that runs the test suite (sys.executable),
