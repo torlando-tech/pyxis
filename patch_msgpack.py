@@ -15,12 +15,11 @@ Mirrors the patch the microLXMF conformance-bridge applies via its
 CMakeLists (microLXMF/conformance-bridge/CMakeLists.txt:106-125).
 """
 Import("env")
-import os
+import os, sys
+sys.path.insert(0, env.get("PROJECT_DIR", "."))
+from _build_helpers import env_libdeps_dir  # per-env libdeps path; never hardcode the env
 
-MSGPACK_BASE = os.path.join(
-    env.get("PROJECT_DIR", "."),
-    ".pio", "libdeps", env.get("PIOENV", "tdeck"), "MsgPack", "MsgPack"
-)
+MSGPACK_BASE = env_libdeps_dir(env, "MsgPack", "MsgPack")
 
 def apply_patch(filepath, old, new, label):
     if not os.path.exists(filepath):

@@ -24,12 +24,10 @@ normalize paths to a leading "/" itself (file an issue / PR on the fork).
 Import("env")  # noqa: F821
 import os
 import sys
+sys.path.insert(0, env.get("PROJECT_DIR", "."))  # noqa: F821
+from _build_helpers import env_libdeps_dir  # per-env libdeps path; never hardcode the env
 
-ADAPTER_H = os.path.join(
-    env.get("PROJECT_DIR", "."),  # noqa: F821
-    ".pio", "libdeps", env.get("PIOENV", "tdeck"),  # noqa: F821
-    "microStore", "include", "microStore", "Adapters", "LittleFSFileSystem.h",
-)
+ADAPTER_H = env_libdeps_dir(env, "microStore", "include", "microStore", "Adapters", "LittleFSFileSystem.h")
 
 MARKER = "_pyxis_norm_path"
 

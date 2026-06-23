@@ -654,7 +654,8 @@ void on_wifi_connected() {
         // asynchronously from loop() after Update begins instead.
 
         // Initialize ArduinoOTA for wireless flashing
-        ArduinoOTA.setHostname("pyxis-tdeck");
+        static const char* OTA_HOSTNAME = "pyxis-tdeck";
+        ArduinoOTA.setHostname(OTA_HOSTNAME);
         ArduinoOTA.onStart([]() {
             // MUST be non-blocking. ArduinoOTA calls onStart BEFORE it connects back
             // to the host, so anything slow here delays the connect-back past espota's
@@ -682,7 +683,9 @@ void on_wifi_connected() {
         });
         ArduinoOTA.onError([](ota_error_t error) { ERROR("OTA: Error"); });
         ArduinoOTA.begin();
-        INFO("OTA: Ready");
+        // ArduinoOTA.begin() returns void, so this is "started", not a verified-ready
+        // state -- log the target instead of claiming readiness we can't confirm.
+        INFO((String("OTA: wireless flash service started (") + OTA_HOSTNAME + ":3232)").c_str());
 
         // Initialize UDP log broadcasting (multicast group 239.0.99.99:9999)
         udp_log_init();
