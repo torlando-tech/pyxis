@@ -52,8 +52,8 @@ struct AppSettings {
     bool ble_enabled;         // Enable BLE mesh interface
 
     // Advanced
-    uint32_t announce_interval;  // seconds
-    uint32_t sync_interval;      // seconds (0 = disabled, default 3600 = hourly)
+    uint32_t announce_interval;  // seconds (UI shows minutes; default 3600 = 1h)
+    uint32_t sync_interval;      // seconds (0 = disabled; UI shows hours; default 14400 = 4h)
     bool gps_time_sync;
 
     // Propagation
@@ -80,8 +80,8 @@ struct AppSettings {
         lora_power(17),
         auto_enabled(false),
         ble_enabled(false),
-        announce_interval(60),
-        sync_interval(3600),
+        announce_interval(3600),
+        sync_interval(14400),
         gps_time_sync(true),
         prop_auto_select(true),
         prop_selected_node(""),
@@ -185,6 +185,7 @@ public:
      * Refresh GPS and system info displays
      */
     void refresh();
+    void tick();  // periodic update while the screen is shown (ticks clock/GPS/system readouts)
 
     /**
      * Set callback for back button
@@ -261,6 +262,7 @@ private:
     lv_obj_t* _label_gps_alt;
     lv_obj_t* _label_gps_hdop;
     lv_obj_t* _label_gps_time;
+    uint32_t _last_tick_ms = 0;  // throttle for tick()
 
     // System info labels (read-only)
     lv_obj_t* _label_identity_hash;

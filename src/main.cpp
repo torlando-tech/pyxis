@@ -539,7 +539,7 @@ void load_app_settings() {
 
     // Advanced
     app_settings.announce_interval = prefs.getULong("announce", 3600);
-    app_settings.sync_interval = prefs.getULong("sync_int", 3600);  // Default 60 minutes
+    app_settings.sync_interval = prefs.getULong("sync_int", 14400);  // Default 14400s = 4 hours
     app_settings.gps_time_sync = prefs.getBool("gps_sync", true);
 
     // Propagation
@@ -647,20 +647,26 @@ void on_wifi_connected() {
     }
 
     {
+        // NOTE: do NOT call WiFi.setSleep(false) here. The ESP32 REQUIRES WiFi
+        // modem-sleep ENABLED whenever WiFi + Bluetooth coexist (shared 2.4GHz
+        // radio); disabling it aborts at runtime ("Should enable WiFi modem sleep
+        // when both WiFi and Bluetooth are enabled"). For OTA RF headroom, stop BLE
+        // asynchronously from loop() after Update begins instead.
+
         // Initialize ArduinoOTA for wireless flashing
         ArduinoOTA.setHostname("pyxis-tdeck");
         ArduinoOTA.onStart([]() {
-            INFO("OTA: Update starting — suspending BLE for clean WiFi");
-            // Pause BLE to free the shared 2.4GHz radio for WiFi transfer
-            if (ble_interface_impl) {
-                ble_interface_impl->stop();
-                INFO("OTA: BLE stopped");
-            }
-            // Disconnect TCP to reduce WiFi contention
-            if (tcp_interface_impl) {
-                tcp_interface_impl->stop();
-                INFO("OTA: TCP stopped");
-            }
+            // MUST be non-blocking. ArduinoOTA calls onStart BEFORE it connects back
+            // to the host, so anything slow here delays the connect-back past espota's
+            // ~10s accept window and the transfer never starts ("No response from
+            // device"). The old code called TCPClientInterface::stop() here, which
+            // blocks up to 30s draining an in-flight connect -- that was the bug (and
+            // its un-fed WDT also tripped reboots). Just log + feed the WDT; BLE/TCP
+            // stay up during the transfer (some RF contention, but it completes). If
+            // the transfer proves flaky, tear them down asynchronously from loop()
+            // after Update has begun, never synchronously in this callback.
+            INFO("OTA: Update starting");
+            esp_task_wdt_reset();
         });
         ArduinoOTA.onEnd([]() { INFO("OTA: Update complete, rebooting"); });
         ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
@@ -2435,7 +2441,7 @@ void loop() {
             if (tcp_online) {
                 router->request_messages_from_propagation_node();
                 last_sync = now;
-                INFO("Periodic propagation sync (interval: " + std::to_string(app_settings.sync_interval / 60) + " min)");
+                INFO("Periodic propagation sync (interval: " + std::to_string(app_settings.sync_interval / 3600) + " hours)");
             }
         }
     }
