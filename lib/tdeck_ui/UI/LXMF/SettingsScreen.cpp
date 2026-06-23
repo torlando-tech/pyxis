@@ -876,8 +876,8 @@ void SettingsScreen::load_settings() {
     _settings.brightness = prefs.getUChar(KEY_BRIGHTNESS, 180);
     _settings.keyboard_light = prefs.getBool(KEY_KB_LIGHT, false);
     _settings.screen_timeout = prefs.getUShort(KEY_TIMEOUT, 60);
-    _settings.announce_interval = prefs.getUInt(KEY_ANNOUNCE_INT, 60);
-    _settings.sync_interval = prefs.getUInt(KEY_SYNC_INT, 3600);  // Default 60 minutes
+    _settings.announce_interval = prefs.getUInt(KEY_ANNOUNCE_INT, 3600);   // Default 3600s = 1 hour
+    _settings.sync_interval = prefs.getUInt(KEY_SYNC_INT, 14400);  // Default 14400s = 4 hours
     _settings.gps_time_sync = prefs.getBool(KEY_GPS_SYNC, true);
 
     // Notification settings
@@ -1018,7 +1018,7 @@ void SettingsScreen::update_ui_from_settings() {
         lv_textarea_set_text(_ta_announce_interval, String(_settings.announce_interval / 60).c_str());  // stored seconds -> shown minutes
     }
     if (_ta_sync_interval) {
-        // Display in minutes (stored in seconds)
+        // Display in hours (stored in seconds)
         lv_textarea_set_text(_ta_sync_interval, String(_settings.sync_interval / 3600).c_str());  // stored seconds -> shown hours
     }
     if (_switch_gps_sync) {
@@ -1157,7 +1157,7 @@ void SettingsScreen::update_settings_from_ui() {
         _settings.announce_interval = String(lv_textarea_get_text(_ta_announce_interval)).toInt() * 60;  // minutes -> seconds
     }
     if (_ta_sync_interval) {
-        // UI shows minutes, store as seconds
+        // UI shows hours, store as seconds
         _settings.sync_interval = String(lv_textarea_get_text(_ta_sync_interval)).toInt() * 3600;  // hours -> seconds
     }
     if (_switch_gps_sync) {
