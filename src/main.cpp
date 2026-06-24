@@ -199,6 +199,96 @@ extern "C" void pyxis_log(const char* msg) {
     }
 }
 
+// --- Audio loopback PCM dump (test harness) ---------------------------------
+// In LOOPBACK test mode the decoded PCM is streamed over a SECOND multicast
+// destination (239.0.99.99:9998) so the Mac harness can score voice quality.
+// Reuses udp_log_sock — it's already bound to the WiFi station interface for
+// multicast output (IP_MULTICAST_IF set in udp_log_init), so we only need a
+// second dest sockaddr. The group/port are interface-independent, so this dest
+// survives WiFi reconnects (which only re-bind the socket, not the dest).
+static struct sockaddr_in udp_audio_dest;
+static bool udp_audio_dest_ready = false;
+static volatile bool g_audio_dump_armed = false;
+static uint32_t g_audio_dump_offset = 0;
+// When true, the capture task dumps the RAW de-interleaved mic PCM (pre-filter,
+// pre-codec) over UDP and the playback path SKIPS its decoded-PCM dump, so the
+// harness sees exactly what the ES7210 produces, isolated from the codec.
+static volatile bool g_rawmic_mode = false;
+extern "C" bool pyxis_rawmic_mode() { return g_rawmic_mode; }
+// Which pipeline stage the raw-mic tap dumps: 0=raw I2S (16kHz interleaved),
+// 1=post-decimate pre-filter (8kHz), 2=post-filter pre-codec (8kHz). Lets the
+// harness localize where speech is lost in the DSP without reflashing.
+static volatile int g_rawmic_stage = 0;
+extern "C" int pyxis_rawmic_stage() { return g_rawmic_stage; }
+// Runtime ES7210 register poke (defined in es7210.cpp) for the T:REG diagnostic.
+extern "C" void pyxis_es7210_write_reg(int addr, int val);
+extern "C" int  pyxis_es7210_read_reg(int addr);
+// --- Raw-mic recorder: the capture task fills a frame-aligned PSRAM buffer in order
+// (no UDP loss / offset / de-interleave fragility), then T:DUMPREC transfers it over the
+// reliable USB-serial link as checksummed hex. ---
+static int16_t* g_rec_buf = nullptr;
+static volatile uint32_t g_rec_cap = 0, g_rec_pos = 0;
+static volatile bool g_rec_active = false;
+extern "C" bool pyxis_record_active() { return g_rec_active; }
+extern "C" void pyxis_record_write_ch0(const int16_t* readBuf, int samplesRead) {
+    if (!g_rec_active || !g_rec_buf) return;
+    int n = samplesRead / 2;  // CH0 = even indices of the interleaved I2S read
+    for (int i = 0; i < n; i++) {
+        if (g_rec_pos >= g_rec_cap) { g_rec_active = false; return; }
+        g_rec_buf[g_rec_pos++] = readBuf[i * 2];
+    }
+}
+
+static void udp_audio_dest_init() {
+    memset(&udp_audio_dest, 0, sizeof(udp_audio_dest));
+    udp_audio_dest.sin_family = AF_INET;
+    udp_audio_dest.sin_port = htons(9998);
+    udp_audio_dest.sin_addr.s_addr = inet_addr("239.0.99.99");
+    udp_audio_dest_ready = true;
+}
+
+// Same guards as udp_send(): WiFi connected + socket valid + logging ready
+// (logging-ready implies the socket was bound to a live WiFi iface).
+static void udp_audio_send(const void* data, size_t len) {
+    if (udp_log_sock < 0 || !udp_log_ready || WiFi.status() != WL_CONNECTED) return;
+    if (!udp_audio_dest_ready) udp_audio_dest_init();
+    sendto(udp_log_sock, data, len, 0,
+           (struct sockaddr*)&udp_audio_dest, sizeof(udp_audio_dest));
+}
+
+// Arm/disarm the decoded-PCM dump. Arming resets the running byte offset to 0.
+extern "C" void pyxis_audio_dump_arm(bool on) {
+    if (on) {
+        g_audio_dump_offset = 0;
+        if (!udp_audio_dest_ready) udp_audio_dest_init();
+    }
+    g_audio_dump_armed = on;
+}
+
+// Dump decoded PCM (int16 LE mono @ 8 kHz). Self-gates on the arm flag and is
+// a cheap early-return when disarmed. Chunks into datagrams whose payload is
+// [uint32 LE byte_offset][<=1280 PCM bytes] (<=1284 total), advancing the
+// running offset by the number of PCM bytes emitted.
+extern "C" void pyxis_audio_dump(const void* pcm, size_t bytes) {
+    if (!g_audio_dump_armed || pcm == nullptr || bytes == 0) return;
+    const uint8_t* p = (const uint8_t*)pcm;
+    size_t remaining = bytes;
+    while (remaining > 0) {
+        size_t chunk = remaining > 1280 ? 1280 : remaining;
+        uint8_t dgram[1284];
+        uint32_t off = g_audio_dump_offset;
+        dgram[0] = (uint8_t)(off & 0xFF);
+        dgram[1] = (uint8_t)((off >> 8) & 0xFF);
+        dgram[2] = (uint8_t)((off >> 16) & 0xFF);
+        dgram[3] = (uint8_t)((off >> 24) & 0xFF);
+        memcpy(dgram + 4, p, chunk);
+        udp_audio_send(dgram, chunk + 4);
+        p += chunk;
+        remaining -= chunk;
+        g_audio_dump_offset += (uint32_t)chunk;
+    }
+}
+
 // Forward declarations
 void start_tcp_interface();
 void start_auto_interface();
@@ -2258,6 +2348,110 @@ static void handle_test_hook_command(const String& line) {
         Serial.print(freq);
         Serial.print(" amp=");
         Serial.println(amp, 3);
+    }
+    else if (cmd == "T:LOOPBACK") {
+        // T:LOOPBACK <on|off> — self-contained audio loopback test mode.
+        // "on" resets the PCM byte offset to 0, starts mic capture + speaker
+        // playback, enables the local loopback path (capture -> encode ->
+        // frame -> parse -> decode, all on core 1) and arms the decoded-PCM
+        // dump over UDP multicast 239.0.99.99:9998 for the Mac harness.
+        // "off" stops/disarms. The Codec2 mode is whatever T:CALL_PROFILE
+        // selected. Does NOT require a real call/link.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        String on_off = args;
+        on_off.trim();
+        bool enabled  = (on_off == "on"  || on_off == "1" || on_off == "true");
+        bool disabled = (on_off == "off" || on_off == "0" || on_off == "false");
+        if (!enabled && !disabled) {
+            Serial.println("T:ERR usage: T:LOOPBACK on|off");
+            return;
+        }
+        if (enabled) {
+            ui_manager->start_loopback();
+            Serial.print("T:OK loopback=on active=");
+            Serial.println(ui_manager->is_loopback() ? "1" : "0");
+        } else {
+            ui_manager->stop_loopback();
+            Serial.println("T:OK loopback=off");
+        }
+    }
+    else if (cmd == "T:RAWMIC") {
+        // T:RAWMIC <on|off> — like T:LOOPBACK, but dumps the RAW de-interleaved mic
+        // PCM (pre-filter, pre-codec) over UDP 239.0.99.99:9998 instead of the decoded
+        // round-trip. Isolates the ES7210 capture from the codec so the harness sees
+        // exactly what the mic produces. Reuses the loopback plumbing; the playback
+        // decoded-dump is suppressed while g_rawmic_mode is set.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        String on_off = args;
+        on_off.trim();
+        bool enabled  = on_off.startsWith("on") || on_off == "1" || on_off == "true";
+        bool disabled = (on_off == "off" || on_off == "0" || on_off == "false");
+        if (!enabled && !disabled) {
+            Serial.println("T:ERR usage: T:RAWMIC on[ stage]|off  (stage 0=rawI2S 1=pre-filter 2=post-filter)");
+            return;
+        }
+        if (enabled) {
+            // optional trailing stage: "T:RAWMIC on 2" -> dump the post-filter tap
+            int sp = on_off.indexOf(' ');
+            g_rawmic_stage = (sp >= 0) ? on_off.substring(sp + 1).toInt() : 0;
+            g_rawmic_mode = true;
+            ui_manager->start_loopback();
+            Serial.print("T:OK rawmic=on stage=");
+            Serial.print(g_rawmic_stage);
+            Serial.print(" active=");
+            Serial.println(ui_manager->is_loopback() ? "1" : "0");
+        } else {
+            ui_manager->stop_loopback();
+            g_rawmic_mode = false;
+            Serial.println("T:OK rawmic=off");
+        }
+    }
+    else if (cmd == "T:REG") {
+        // T:REG <hexaddr> [hexval] — read (1 arg) or write (2 args) an ES7210 register over I2C
+        // at runtime. Probes the mic analog config (MICBIAS 0x41/0x42, VMID 0x40, ADC DC-block
+        // HPF 0x22/0x23) live while capturing, without reflashing for each guess.
+        String a = args; a.trim();
+        if (a.length() == 0) { Serial.println("T:ERR usage: T:REG <hexaddr> [hexval]"); return; }
+        int sp = a.indexOf(' ');
+        if (sp < 0) {
+            int addr = (int)strtol(a.c_str(), nullptr, 16);
+            Serial.printf("T:OK reg[0x%02X]=0x%02X\n", addr & 0xff, pyxis_es7210_read_reg(addr) & 0xff);
+        } else {
+            int addr = (int)strtol(a.substring(0, sp).c_str(), nullptr, 16);
+            int val  = (int)strtol(a.substring(sp + 1).c_str(), nullptr, 16);
+            pyxis_es7210_write_reg(addr, val);
+            Serial.printf("T:OK wrote reg[0x%02X]=0x%02X\n", addr & 0xff, val & 0xff);
+        }
+    }
+    else if (cmd == "T:RECORD") {
+        // T:RECORD <secs> — record raw CH0 mic (16kHz) into a PSRAM buffer. Start the capture
+        // first with T:RAWMIC on (so any MICBIAS/regs set via T:REG persist), then T:RECORD.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        int secs = args.toInt(); if (secs < 1) secs = 6; if (secs > 12) secs = 12;
+        if (g_rec_buf) { free(g_rec_buf); g_rec_buf = nullptr; }
+        g_rec_cap = (uint32_t)secs * 16000;
+        g_rec_buf = (int16_t*)heap_caps_malloc((size_t)g_rec_cap * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+        if (!g_rec_buf) { Serial.println("T:ERR record alloc failed"); g_rec_cap = 0; return; }
+        g_rec_pos = 0;
+        if (!ui_manager->is_loopback()) ui_manager->start_loopback();
+        g_rec_active = true;
+        Serial.print("T:OK recording "); Serial.print(secs); Serial.print("s ");
+        Serial.print((unsigned long)g_rec_cap); Serial.println(" samples @16kHz raw CH0");
+    }
+    else if (cmd == "T:DUMPREC") {
+        // Transfer the recorded buffer as checksummed hex between REC_BEGIN/REC_END markers.
+        if (!g_rec_buf || g_rec_pos == 0) { Serial.println("T:ERR no recording"); return; }
+        uint32_t n = g_rec_pos, sum = 0;
+        for (uint32_t i = 0; i < n; i++) sum += (uint16_t)g_rec_buf[i];
+        Serial.print("REC_BEGIN "); Serial.print((unsigned long)n);
+        Serial.print(" 16000 "); Serial.println((unsigned long)sum);
+        static char line[520];
+        for (uint32_t i = 0; i < n; ) {
+            int p = 0;
+            for (int k = 0; k < 128 && i < n; k++, i++) p += sprintf(line + p, "%04X", (uint16_t)g_rec_buf[i]);
+            line[p] = 0; Serial.println(line);
+        }
+        Serial.println("REC_END");
     }
     else {
         Serial.print("T:ERR unknown cmd ");

@@ -16,6 +16,14 @@ using namespace Hardware::TDeck;
 
 static const char* TAG = "LXST:Playback";
 
+// Decoded-PCM tap for the firmware audio-loopback test harness (defined in
+// src/main.cpp). Self-gates on an arm flag, so it is a cheap no-op in normal
+// operation. Declared extern "C" to avoid pulling main.cpp headers in here.
+extern "C" void pyxis_audio_dump(const void* pcm, size_t bytes);
+// When raw-mic diagnostic mode is on, the capture task owns the UDP dump stream
+// (raw mic PCM); suppress the decoded-PCM dump here so they don't interleave.
+extern "C" bool pyxis_rawmic_mode();
+
 I2SPlayback::I2SPlayback() = default;
 
 I2SPlayback::~I2SPlayback() {
@@ -176,6 +184,13 @@ bool I2SPlayback::writeEncodedPacket(const uint8_t* data, int length) {
     }
     pcmSampleCount_.fetch_add((uint32_t)decodedSamples, std::memory_order_relaxed);
     pcmSumSquares_.fetch_add(sumsq, std::memory_order_relaxed);
+
+    // Audio-loopback test tap: dump the freshly decoded PCM (int16 LE mono,
+    // 8 kHz). No-op unless the loopback harness armed it via T:LOOPBACK on.
+    // Suppressed in raw-mic mode (the capture task owns the dump stream then).
+    if (!pyxis_rawmic_mode()) {
+        pyxis_audio_dump(decodeBuf_, (size_t)decodedSamples * sizeof(int16_t));
+    }
 
     // Write decoded PCM to ring buffer one frame at a time
     // (ring buffer only accepts exactly frameSamples_ per write)

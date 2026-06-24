@@ -10,7 +10,17 @@
 #include "es7210.h"
 
 #define I2S_DSP_MODE_A 0
-#define MCLK_DIV_FRE   512  // MCLK = sample_rate * 512 (4.096MHz at 8kHz)
+#define MCLK_DIV_FRE   256  // MCLK = sample_rate * 256 (2.048MHz at 8kHz = 256Fs, the ES7210's standard clock)
+// ATTEMPTED FIX (2026-06-23, from the Linux es7210 driver, rockchip-linux/kernel) -- STILL WARPS;
+// kept as the reference-CORRECT baseline. The ES7210 internal modem needs 512Fs and is designed to
+// take a 256Fs MCLK + internal doubler (REG02=RATIO_256=0xC1: doubler ON, dll bypassed). pyxis was on
+// a non-standard 512Fs-direct path (4.096MHz, REG02=0x81). Switching to the standard 256Fs+doubler
+// here (via the {2048000,8000} coeff row, doubler=1) STILL warps the ADC: 800Hz captured as ~1000Hz
+// (+25%). EVERY clock config warps differently and NONE zero it: 512Fs +17%, 256Fs+dbl +25%, 2048Fs
+// +22%, 16kHz -86%. So the fault is BELOW the register config -- the actual MCLK signal reaching the
+// ES7210 (pin 5), or a board/chip anomaly. Resolve with a scope on MCLK(5)/LRCK/SDOUT, or test
+// whether a known-good firmware (LilyGO mic example / Sideband) captures clean on THIS board (board
+// defect vs software). Harness: tools/voice_test/inject_sweep.py (warp ratio must -> 1.0).
 
 #define ES7210_MCLK_SOURCE            FROM_CLOCK_DOUBLE_PIN
 #define FROM_PAD_PIN                  0
@@ -42,6 +52,7 @@ static const struct _coeff_div_es7210 coeff_div[] = {
     {16384000,  8000 ,  0x00,  0x04,  0x01,  0x00,  0x20,  0x00,    0x08,  0x00},
     {19200000,  8000 ,  0x00,  0x1e,  0x00,  0x01,  0x28,  0x00,    0x09,  0x60},
     {4096000,   8000 ,  0x00,  0x01,  0x01,  0x00,  0x20,  0x00,    0x02,  0x00},
+    {2048000,   8000 ,  0x00,  0x01,  0x01,  0x01,  0x20,  0x00,    0x01,  0x00},  // 256Fs: doubler ON -> REG02=0xC1, lrck_div=256 (ES7210 standard 8kHz clock)
     {11289600,  11025,  0x00,  0x02,  0x01,  0x00,  0x20,  0x00,    0x01,  0x00},
     {12288000,  12000,  0x00,  0x02,  0x01,  0x00,  0x20,  0x00,    0x04,  0x00},
     {19200000,  12000,  0x00,  0x14,  0x00,  0x01,  0x28,  0x00,    0x06,  0x40},
@@ -231,8 +242,29 @@ esp_err_t es7210_adc_init(TwoWire *tw, audio_hal_codec_config_t *codec_cfg)
     ret |= es7210_config_sample(i2s_cfg->samples);
     ret |= es7210_mic_select(mic_select);
     ret |= es7210_adc_set_gain_all(GAIN_0DB);
+    // DIAGNOSTIC (2026-06-24): the LilyGO/ESP-ADF-derived init above leaves several ADC +
+    // mic-power analog registers at reset defaults that the Linux es7210 driver
+    // (rockchip-linux/kernel) writes explicitly. The raw capture has ~7.6% ASYMMETRIC analog
+    // THD (a clean sine's positive half collapses) that intermodulates speech into "chiptune".
+    // Apply the Linux analog config: ADC dynamics/HPF (REG20-23) + mic ALC/power (REG47-4C).
+    ret |= es7210_write_reg(0x20, 0x0a);
+    ret |= es7210_write_reg(0x21, 0x2a);
+    ret |= es7210_write_reg(0x22, 0x0a);
+    ret |= es7210_write_reg(0x23, 0x2a);
+    ret |= es7210_write_reg(0x47, 0x08);
+    ret |= es7210_write_reg(0x48, 0x08);
+    ret |= es7210_write_reg(0x49, 0x08);
+    ret |= es7210_write_reg(0x4A, 0x08);
+    ret |= es7210_write_reg(0x4B, 0x0F);
+    ret |= es7210_write_reg(0x4C, 0x0F);
     return ESP_OK;
 }
+
+// Runtime register poke for the T:REG diagnostic harness — write/read any ES7210 register
+// over I2C while capturing, to probe the mic analog config (MICBIAS REG41/42, VMID REG40,
+// ADC DC-block HPF REG22/23, etc.) without reflashing for every guess.
+extern "C" void pyxis_es7210_write_reg(int addr, int val) { es7210_write_reg((uint8_t)addr, (uint8_t)val); }
+extern "C" int  pyxis_es7210_read_reg(int addr) { return es7210_read_reg((uint8_t)addr); }
 
 esp_err_t es7210_adc_deinit()
 {

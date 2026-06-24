@@ -48,6 +48,10 @@ CONFIG_SPIRAM_USE_MALLOC=y
 # This reduces internal heap fragmentation at cost of slightly slower access
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=64
 # Reserve this much internal RAM for DMA/ISR (bytes)
+# NOTE: framework=arduino uses PRECOMPILED ESP-IDF libs, so this file is NOT consumed
+# by the tdeck build — internal-RAM placement is controlled via build_flags + custom
+# allocators in platformio.ini (RNS_PSRAM_ALLOCATOR, NIMBLE_MEM_ALLOC_MODE_EXTERNAL)
+# and lib/lv_mem_hybrid.h, not here.
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 
 # ============================================================================

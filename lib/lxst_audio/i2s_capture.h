@@ -137,7 +137,7 @@ private:
 
     bool filtersEnabled_ = true;
 
-    static constexpr int I2S_SAMPLE_RATE = 8000;   // I2S runs at 8kHz — matches Codec2 directly, no resampling needed
+    static constexpr int I2S_SAMPLE_RATE = 16000;  // EXACT-LilyGO test: 16kHz capture, decimated 2:1 to 8kHz. (ES7210 ADC warp unresolved -- see es7210.cpp.)
     static constexpr int CODEC_SAMPLE_RATE = 8000; // Codec2 expects 8kHz
     // Accumulate this many codec frames before filter+encode.
     // Matches Columba's 200ms batch (1600 samples for Codec2 3200).

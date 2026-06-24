@@ -20,6 +20,10 @@
 
 using namespace RNS;
 
+// Arm/disarm the decoded-PCM dump used by the audio-loopback test mode.
+// Defined in src/main.cpp (owns the UDP multicast socket).
+extern "C" void pyxis_audio_dump_arm(bool on);
+
 // NVS keys for propagation settings
 static const char* NVS_NAMESPACE = "propagation";
 static const char* KEY_AUTO_SELECT = "auto_select";
@@ -43,10 +47,13 @@ public:
 };
 static std::shared_ptr<LXSTAnnounceHandler> s_lxst_announce_handler;
 
-// Default preferred profile: Codec2-700C (ULBW). Sized to fit a LoRa
-// SF7-9 link with header overhead. T:CALL_PROFILE in the test hooks
-// changes this between calls.
-int UIManager::_preferred_profile = UIManager::LXST_PROFILE_ULBW;
+// Default preferred profile: Codec2-1600 (VLBW). Good quality at low CPU and the
+// right default for WiFi/IP calls (where most calls run with the app). 700C (ULBW)
+// is BOTH the lowest quality AND the heaviest Codec2 mode (newamp1) -- reserve it for
+// marginal LoRa links by selecting ULBW (via the call profile setting / T:CALL_PROFILE
+// hook). TODO: auto-select per active interface (WiFi->LBW/3200, LoRa-only->ULBW/700C).
+// See the LXST voice audit (2026-06-23).
+int UIManager::_preferred_profile = UIManager::LXST_PROFILE_VLBW;
 
 int UIManager::profile_to_codec2_mode(int profile) {
     switch (profile) {
@@ -77,6 +84,7 @@ UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::Me
       _ble_interface(nullptr),
       _initialized(false),
       _call_state(CallState::IDLE),
+      _call_loopback(false),
       _lxst_audio(nullptr),
       _call_start_ms(0),
       _call_timeout_ms(0),
@@ -1137,7 +1145,9 @@ void UIManager::call_send_signal(int signal) {
 
 void UIManager::call_send_audio_batch(const uint8_t* batch_data, int batch_len,
                                       int batch_count, int total_frames) {
-    if (!_call_link || _call_link.status() != Type::Link::ACTIVE) {
+    // Loopback test mode has no link — skip the link guard and route the
+    // built wire packet back through the RX parser instead of sending it.
+    if (!_call_loopback && (!_call_link || _call_link.status() != Type::Link::ACTIVE)) {
         if (_call_audio_tx_count == 0) {
             char dbg[64];
             snprintf(dbg, sizeof(dbg), "LXST: TX drop: link=%p status=%d",
@@ -1153,8 +1163,11 @@ void UIManager::call_send_audio_batch(const uint8_t* batch_data, int batch_len,
     // Each batch = [codec_type(0x02)] + [mode_header] + [10 * raw_codec2].
     // Columba's native ring buffer expects exactly frameSamples (1600) decoded
     // samples per writeEncodedPacket call.  For Codec2 3200: 10 * 160 = 1600.
-    // batch_data contains batch_count concatenated batches of 82 bytes each.
-    static constexpr int BATCH_BYTES = 82;  // codec_type(1) + mode(1) + 10*8
+    // batch_len is the EXACT byte length of one batch, computed by the caller from
+    // the real encoded size (codec_type + mode_header + N*raw_codec2). It VARIES by
+    // Codec2 mode: 42 bytes for 700C (4 bytes/frame), 82 for 1600/3200 (8/frame).
+    // (Previously hardcoded to 82, which shipped 40 bytes of uninitialized stack and
+    // a lying bin8 length on every 700C packet -- the voice-quality root cause.)
 
     uint8_t packet_buf[256];
     int pos = 0;
@@ -1165,17 +1178,19 @@ void UIManager::call_send_audio_batch(const uint8_t* batch_data, int batch_len,
     if (batch_count == 1) {
         // Single batch: bare bin8
         packet_buf[pos++] = 0xC4;               // bin8
-        packet_buf[pos++] = (uint8_t)BATCH_BYTES;
-        memcpy(packet_buf + pos, batch_data, BATCH_BYTES);
-        pos += BATCH_BYTES;
+        packet_buf[pos++] = (uint8_t)batch_len;
+        memcpy(packet_buf + pos, batch_data, batch_len);
+        pos += batch_len;
     } else {
-        // Multiple batches: fixarray(N) of bin8 entries
+        // Multiple batches: fixarray(N) of bin8 entries, each batch_len bytes (all
+        // share one Codec2 mode). NOTE: pyxis only ever sends batch_count==1 today;
+        // true variable-length multi-batch would need per-batch lengths passed in.
         packet_buf[pos++] = 0x90 | (uint8_t)batch_count;  // fixarray(N), N≤15
         for (int b = 0; b < batch_count; b++) {
             packet_buf[pos++] = 0xC4;               // bin8
-            packet_buf[pos++] = (uint8_t)BATCH_BYTES;
-            memcpy(packet_buf + pos, batch_data + b * BATCH_BYTES, BATCH_BYTES);
-            pos += BATCH_BYTES;
+            packet_buf[pos++] = (uint8_t)batch_len;
+            memcpy(packet_buf + pos, batch_data + b * batch_len, batch_len);
+            pos += batch_len;
         }
     }
 
@@ -1192,6 +1207,15 @@ void UIManager::call_send_audio_batch(const uint8_t* batch_data, int batch_len,
         INFO(dbg);
     }
 
+    if (_call_loopback) {
+        // Loopback: feed the just-built wire packet straight back through the
+        // RX parser so the real framing + parse + decode path runs locally.
+        // call_on_packet() does NOT re-enter pump_call_tx(), so this is a
+        // bounded synchronous chain (no infinite loop, all on core 1).
+        call_on_packet(Bytes(packet_buf, pos));
+        return;
+    }
+
     try {
         Bytes audio_data(packet_buf, pos);
         Packet packet(_call_link, audio_data);
@@ -1204,8 +1228,9 @@ void UIManager::call_send_audio_batch(const uint8_t* batch_data, int batch_len,
 }
 
 void UIManager::call_rx_audio_frame(const uint8_t* frame, size_t frame_len) {
-    // Guard: packets can arrive after hangup from the network pipeline
-    if (!_lxst_audio || _call_state == CallState::IDLE) return;
+    // Guard: packets can arrive after hangup from the network pipeline.
+    // In loopback mode _call_state stays IDLE, so bypass the IDLE guard.
+    if (!_lxst_audio || (!_call_loopback && _call_state == CallState::IDLE)) return;
 
     // Wire format: [codec_type_byte] + [mode_header + codec2_subframes...]
     // codec_type: 0x00=Raw, 0x01=Opus, 0x02=Codec2 (matches LXST Codecs/__init__.py)
@@ -1324,7 +1349,8 @@ void UIManager::call_on_packet(const Bytes& data) {
         //   - fixarray: batched frames [bin8(...), bin8(...), ...]
         // Audio buffer writes don't touch LVGL — safe to process here
 
-        if ((_call_state != CallState::ACTIVE && _call_state != CallState::CONNECTING)
+        // Loopback test mode routes audio here with _call_state == IDLE.
+        if ((!_call_loopback && _call_state != CallState::ACTIVE && _call_state != CallState::CONNECTING)
             || !_lxst_audio) {
             return;
         }
@@ -1523,9 +1549,12 @@ void UIManager::call_ended() {
 }
 
 void UIManager::pump_call_tx() {
-    if (_call_state == CallState::IDLE) return;
+    // In loopback test mode _call_state is IDLE and there is no link, but mic
+    // capture is running — drain the encoded packets and feed the local
+    // loopback (see call_send_audio_batch). All bypasses gate on _call_loopback.
+    if (!_call_loopback && _call_state == CallState::IDLE) return;
     if (!_lxst_audio || !_lxst_audio->isCapturing()) return;
-    if (!_call_link || _call_link.status() != Type::Link::ACTIVE) return;
+    if (!_call_loopback && (!_call_link || _call_link.status() != Type::Link::ACTIVE)) return;
 
     int available = _lxst_audio->capturePacketsAvailable();
 
@@ -1556,6 +1585,62 @@ void UIManager::pump_call_tx() {
             INFO(dbg);
         }
     }
+}
+
+void UIManager::start_loopback() {
+    // Don't stomp a live real call. (The harness never overlaps the two, but
+    // be defensive: a real call owns _lxst_audio and must not be torn down.)
+    if (_call_state != CallState::IDLE) {
+        WARNING("LXST: Loopback refused — call in progress");
+        return;
+    }
+
+    // Always (re)create the pipeline so it picks up the currently selected
+    // profile/codec mode (driven by T:CALL_PROFILE). Mirrors call_answer().
+    if (_lxst_audio) {
+        _lxst_audio->stopCapture();
+        _lxst_audio->stopPlayback();
+        _lxst_audio->deinit();
+        delete _lxst_audio;
+        _lxst_audio = nullptr;
+    }
+    _call_audio_rx_count = 0;
+    _call_audio_tx_count = 0;
+
+    _lxst_audio = new LXSTAudio();
+    int codec_mode = profile_to_codec2_mode(_preferred_profile);
+    if (codec_mode < 0) codec_mode = CODEC2_MODE_700C;
+    if (!_lxst_audio->init(codec_mode)) {
+        WARNING("LXST: Loopback audio init failed");
+        delete _lxst_audio;
+        _lxst_audio = nullptr;
+        return;
+    }
+    // Same start path a real call uses: mic + speaker simultaneously, so
+    // isCapturing() (pump_call_tx) and isPlaying() (writeEncodedPacket) hold.
+    if (!_lxst_audio->startFullDuplex()) {
+        WARNING("LXST: Loopback full-duplex start failed");
+    }
+
+    _call_loopback = true;       // enable bypass branches BEFORE arming the dump
+    pyxis_audio_dump_arm(true);  // resets the running PCM byte offset to 0
+    INFO("LXST: Loopback started (codec mode set by profile)");
+}
+
+void UIManager::stop_loopback() {
+    // Disarm + clear the flag FIRST so pump_call_tx()/writeEncodedPacket()
+    // stop touching _lxst_audio before we tear it down.
+    _call_loopback = false;
+    pyxis_audio_dump_arm(false);
+
+    if (_lxst_audio) {
+        _lxst_audio->stopCapture();
+        _lxst_audio->stopPlayback();
+        _lxst_audio->deinit();
+        delete _lxst_audio;
+        _lxst_audio = nullptr;
+    }
+    INFO("LXST: Loopback stopped");
 }
 
 void UIManager::call_update() {

@@ -44,16 +44,21 @@ bool LXSTAudio::init(int codec2Mode, uint8_t micGain) {
         cfg.codec_mode = AUDIO_HAL_CODEC_MODE_ENCODE;
         cfg.i2s_iface.mode = AUDIO_HAL_MODE_SLAVE;
         cfg.i2s_iface.fmt = AUDIO_HAL_I2S_NORMAL;
-        cfg.i2s_iface.samples = AUDIO_HAL_08K_SAMPLES;
+        cfg.i2s_iface.samples = AUDIO_HAL_16K_SAMPLES;  // EXACT-LilyGO test: 16kHz (es7210 256Fs); i2s_capture decimates 2:1 to Codec2's 8kHz
         cfg.i2s_iface.bits = AUDIO_HAL_BIT_LENGTH_16BITS;
 
         uint32_t ret_val = ESP_OK;
         ret_val |= es7210_adc_init(&Wire, &cfg);
         ret_val |= es7210_adc_config_i2s(cfg.codec_mode, &cfg.i2s_iface);
+        // ROOT-CAUSE FIX: was (es7210_gain_value_t)micGain (default 7 = 21dB), which
+        // SATURATED the ES7210 ADC to the negative rail (0x8000 spikes) + a huge noise
+        // floor (rms 7003 in silence) + spectral-peak shift that LOOKED like a +17-25%
+        // pitch warp. At 0dB the capture is pristine (tones land at ratio 1.000, conc 0.90)
+        // but too quiet. 12dB = a clean middle: real signal level, well below saturation.
         ret_val |= es7210_adc_set_gain(
             (es7210_input_mics_t)(ES7210_INPUT_MIC1 | ES7210_INPUT_MIC2 |
                                   ES7210_INPUT_MIC3 | ES7210_INPUT_MIC4),
-            (es7210_gain_value_t)micGain);
+            GAIN_12DB);
         ret_val |= es7210_adc_ctrl_state(cfg.codec_mode, AUDIO_HAL_CTRL_START);
 
         if (ret_val != ESP_OK) {

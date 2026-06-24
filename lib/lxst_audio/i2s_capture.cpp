@@ -21,6 +21,11 @@ static const char* TAG = "LXST:Capture";
 
 // Defined in main.cpp — sends to both Serial and UDP
 extern "C" void pyxis_log(const char* msg);
+extern "C" void pyxis_audio_dump(const void* pcm, size_t bytes);
+extern "C" bool pyxis_rawmic_mode();
+extern "C" int pyxis_rawmic_stage();
+extern "C" bool pyxis_record_active();
+extern "C" void pyxis_record_write_ch0(const int16_t* readBuf, int samplesRead);
 
 I2SCapture::I2SCapture() = default;
 
@@ -54,9 +59,9 @@ bool I2SCapture::init() {
     // takes ~20ms; 16 × 64 = 1024 samples = 64ms headroom prevents DMA overflow.
     i2s_config.dma_buf_count = 16;
     i2s_config.dma_buf_len = 64;
-    i2s_config.use_apll = true;   // APLL gives accurate audio clocks (vs main PLL integer dividers)
+    i2s_config.use_apll = false;  // Match the working LilyGO T-Deck mic example. APLL + fixed_mclk (the old config) warped the ES7210 capture; the reference uses the main PLL with mclk_multiple.
     i2s_config.tx_desc_auto_clear = true;
-    i2s_config.fixed_mclk = 4096000;                    // Force 4.096MHz MCLK (matches ES7210 coeff table for 8kHz)
+    i2s_config.fixed_mclk = 0;                          // Let the driver derive MCLK from mclk_multiple (256 * 8kHz = 2.048MHz = 256Fs), exactly like the LilyGO mic example. Forcing fixed_mclk + use_apll warped the ES7210 capture. See es7210.cpp MCLK_DIV_FRE.
     i2s_config.mclk_multiple = I2S_MCLK_MULTIPLE_256;   // Ignored when fixed_mclk is set
     i2s_config.bits_per_chan = I2S_BITS_PER_CHAN_16BIT;
     // TDM channel mask — required for ES7210 on T-Deck Plus
@@ -219,6 +224,12 @@ void I2SCapture::captureLoop() {
 
         int samplesRead = bytesRead / sizeof(int16_t);
 
+        // Raw-mic recorder: capture CH0 to a frame-aligned PSRAM buffer for a reliable,
+        // checksummed serial transfer (bypasses the lossy/offset-fragile UDP dump path).
+        if (pyxis_record_active()) {
+            pyxis_record_write_ch0(readBuf, samplesRead);
+        }
+
         // Dump first raw I2S samples on each capture start
         if (framesEncoded == 0 && samplesRead >= 16 && totalSamples == 0) {
             char rawdump[192];
@@ -229,12 +240,21 @@ void I2SCapture::captureLoop() {
             pyxis_log(rawdump);
         }
 
-        // TDM deinterleave — extract CH0 (mic) at 8kHz.
-        // readBuf is [CH0,CH1,CH0,CH1,...], CH0 at even indices.
-        int ch0Count = samplesRead / 2;
+        // RAW-MIC DIAGNOSTIC stage 0: the FULL interleaved I2S read (both TDM channels,
+        // 16kHz int16) — for de-interleave/channel + noise-floor analysis. Stages 1/2
+        // (post-decimate pre-filter, and post-filter pre-codec) are tapped below to
+        // localize where speech is lost in the DSP.
+        if (pyxis_rawmic_mode() && pyxis_rawmic_stage() == 0) {
+            pyxis_audio_dump(readBuf, bytesRead);
+        }
+
+        // TDM deinterleave CH0 (mic) at 16kHz, then 2:1 decimate to Codec2's 8kHz (2-tap avg
+        // of adjacent 16kHz CH0 samples = readBuf[4i] and readBuf[4i+2]).
+        int ch0Count = samplesRead / 4;
         for (int i = 0; i < ch0Count; i++) {
-            ch0Buf[i] = readBuf[i * 2];
-            int16_t v = ch0Buf[i] < 0 ? -ch0Buf[i] : ch0Buf[i];
+            int32_t s = ((int32_t)readBuf[4 * i] + (int32_t)readBuf[4 * i + 2]) / 2;
+            ch0Buf[i] = (int16_t)s;
+            int16_t v = (int16_t)(s < 0 ? -s : s);
             if (v > runningPeak) runningPeak = v;
         }
 
@@ -275,6 +295,10 @@ void I2SCapture::captureLoop() {
 
             if (accumCount_ == frameSamples_) {
                 // Full frame ready — process it
+                // RAWMIC stage 1: decimated mic PCM (8kHz) BEFORE filters + inject.
+                if (pyxis_rawmic_mode() && pyxis_rawmic_stage() == 1) {
+                    pyxis_audio_dump(accumBuffer_, (size_t)frameSamples_ * sizeof(int16_t));
+                }
                 int16_t* frameData = muted_.load(std::memory_order_relaxed)
                     ? silenceBuf_ : accumBuffer_;
 
@@ -330,6 +354,10 @@ void I2SCapture::captureLoop() {
                 if (filtersEnabled_ && filterChain_ && !muted_.load(std::memory_order_relaxed)
                         && !injectSine_.load(std::memory_order_relaxed)) {
                     filterChain_->process(frameData, frameSamples_, CODEC_SAMPLE_RATE);
+                }
+                // RAWMIC stage 2: mic PCM (8kHz) AFTER filters, just before Codec2 encode.
+                if (pyxis_rawmic_mode() && pyxis_rawmic_stage() == 2) {
+                    pyxis_audio_dump(frameData, (size_t)frameSamples_ * sizeof(int16_t));
                 }
 
                 // Log PCM levels for first few frames and periodically
