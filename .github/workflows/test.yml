@@ -74,3 +74,99 @@ jobs:
           pio test -e native17 -f test_example
           pio test -e native17 -f test_collections
           pio test -e native17 -f test_interop
+
+  python-interop:
+    # Hook equivalent to reticulum-kt's `:rns-test:test` and
+    # reticulum-swift's `Tests/ReticulumSwiftTests/Interop/` — every PR is
+    # gated on the microReticulum conformance bridge still producing
+    # byte-equivalent output to canonical Python RNS for the deselect-set
+    # locked in reticulum-conformance/.github/workflows/microreticulum.yml.
+    #
+    # Builds the bridge against THIS pyxis branch's submodule (so a
+    # submodule-pin bump in a PR is checked against python before merge,
+    # not after).
+    name: Python interop (microReticulum bridge vs Python RNS)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout pyxis
+        uses: actions/checkout@v4
+        with:
+          path: pyxis
+          submodules: recursive
+
+      - name: Checkout reticulum-conformance
+        uses: actions/checkout@v4
+        with:
+          repository: torlando-tech/reticulum-conformance
+          path: reticulum-conformance
+
+      - name: Checkout Reticulum (markqvist)
+        uses: actions/checkout@v4
+        with:
+          repository: markqvist/Reticulum
+          path: Reticulum
+
+      - name: Checkout LXMF (markqvist)
+        uses: actions/checkout@v4
+        with:
+          repository: markqvist/LXMF
+          path: LXMF
+
+      - name: Set up CMake
+        uses: lukka/get-cmake@v4.3.2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pytest deps
+        working-directory: reticulum-conformance
+        run: pip install -r requirements.txt
+
+      - name: Configure bridge against THIS pyxis branch
+        working-directory: reticulum-conformance/impls/microreticulum
+        run: |
+          cmake -B build \
+            -DMICRORETICULUM_DIR=${{ github.workspace }}/pyxis/deps/microReticulum
+
+      - name: Build bridge
+        working-directory: reticulum-conformance/impls/microreticulum
+        run: cmake --build build --parallel
+
+      - name: Run conformance vs Python RNS
+        working-directory: reticulum-conformance
+        env:
+          CONFORMANCE_MICRORETICULUM_BRIDGE_CMD: ${{ github.workspace }}/reticulum-conformance/impls/microreticulum/build/microReticulumBridge
+          PYTHON_RNS_PATH: ${{ github.workspace }}/Reticulum
+          PYTHON_LXMF_PATH: ${{ github.workspace }}/LXMF
+        run: |
+          # Same deselect set as reticulum-conformance/.github/workflows/microreticulum.yml
+          pytest tests/ \
+            --impl microreticulum \
+            --ignore=tests/wire \
+            --ignore=tests/behavioral \
+            --ignore=tests/lxmf \
+            --ignore=tests/test_lxmf.py \
+            --ignore=tests/test_ratchet.py \
+            --ignore=tests/test_ratchet_lifecycle.py \
+            --ignore=tests/test_compression.py \
+            --ignore=tests/test_channel.py \
+            --deselect tests/test_crypto.py::test_hkdf_with_info \
+            --deselect tests/test_crypto.py::test_aes_encrypt_decrypt \
+            --deselect tests/test_identity.py::test_identity_encrypt_decrypt \
+            --deselect tests/test_token.py::test_token_cross_decrypt \
+            --deselect tests/test_announce.py::test_announce_pack_unpack \
+            --deselect tests/test_announce.py::test_announce_verify \
+            --deselect tests/test_link.py::test_link_encrypt_decrypt \
+            --deselect tests/test_link.py::test_link_request_pack_unpack \
+            --deselect tests/test_link.py::test_link_rtt_pack_unpack \
+            --deselect tests/test_transport.py::test_path_request_pack_unpack \
+            --deselect tests/test_transport.py::test_packet_hashlist_pack_unpack \
+            --deselect tests/test_ifac.py::test_ifac_mask_packet \
+            --deselect tests/test_transport.py::test_ifac_mask_packet \
+            --deselect tests/test_transport.py::test_ifac_unmask_packet \
+            --deselect tests/test_transport.py::test_ifac_cross_mask_unmask \
+            --deselect tests/test_transport.py::test_ifac_wrong_key_rejected \
+            --deselect tests/test_transport.py::test_ifac_mask_small_ifac_size \
+            -v
