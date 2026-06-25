@@ -14,8 +14,12 @@
 extern "C" {
 #endif
 
-/* Threshold: allocations larger than this go to PSRAM */
-#define LV_MEM_HYBRID_PSRAM_THRESHOLD 1024
+/* Threshold: allocations larger than this go to PSRAM.
+ * Lowered 1024->256 (2026-06-24): pushes most small LVGL objects (styles, obj
+ * metadata, labels, anim descriptors) into PSRAM, de-fragmenting the scarce
+ * ~57-66KB internal block so the LXST audio pipeline can allocate reliably
+ * during a call. UI alloc latency on PSRAM is imperceptible. */
+#define LV_MEM_HYBRID_PSRAM_THRESHOLD 256
 
 /* Track which allocations went to PSRAM vs internal RAM */
 /* We use a simple heuristic: PSRAM addresses are above 0x3C000000 on ESP32-S3 */
