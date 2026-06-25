@@ -10,17 +10,12 @@
 #include "es7210.h"
 
 #define I2S_DSP_MODE_A 0
-#define MCLK_DIV_FRE   256  // MCLK = sample_rate * 256 (2.048MHz at 8kHz = 256Fs, the ES7210's standard clock)
-// ATTEMPTED FIX (2026-06-23, from the Linux es7210 driver, rockchip-linux/kernel) -- STILL WARPS;
-// kept as the reference-CORRECT baseline. The ES7210 internal modem needs 512Fs and is designed to
-// take a 256Fs MCLK + internal doubler (REG02=RATIO_256=0xC1: doubler ON, dll bypassed). pyxis was on
-// a non-standard 512Fs-direct path (4.096MHz, REG02=0x81). Switching to the standard 256Fs+doubler
-// here (via the {2048000,8000} coeff row, doubler=1) STILL warps the ADC: 800Hz captured as ~1000Hz
-// (+25%). EVERY clock config warps differently and NONE zero it: 512Fs +17%, 256Fs+dbl +25%, 2048Fs
-// +22%, 16kHz -86%. So the fault is BELOW the register config -- the actual MCLK signal reaching the
-// ES7210 (pin 5), or a board/chip anomaly. Resolve with a scope on MCLK(5)/LRCK/SDOUT, or test
-// whether a known-good firmware (LilyGO mic example / Sideband) captures clean on THIS board (board
-// defect vs software). Harness: tools/voice_test/inject_sweep.py (warp ratio must -> 1.0).
+#define MCLK_DIV_FRE   768  // MCLK = sample_rate * 768 (12.288MHz at 16kHz). 12.288MHz is a standard
+// audio rate the ESP32-S3 APLL locks CLEANLY (use_apll=true + fixed_mclk in i2s_capture.cpp). The
+// {12288000,16000} coeff row divides it (adc_div=3) down to the 8.192MHz sigma-delta modulator clock
+// with far lower relative jitter than the 256Fs/4.096MHz row. The raw ES7210 capture was garbled
+// ("oscillating static that builds") because a jittery MCLK feeds the modulator directly -- its DLL is
+// bypassed (no on-chip cleanup) -- so the source MCLK must be a clean, exact, high-rate clock.
 
 #define ES7210_MCLK_SOURCE            FROM_CLOCK_DOUBLE_PIN
 #define FROM_PAD_PIN                  0

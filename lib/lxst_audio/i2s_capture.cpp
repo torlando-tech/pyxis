@@ -59,9 +59,9 @@ bool I2SCapture::init() {
     // takes ~20ms; 16 × 64 = 1024 samples = 64ms headroom prevents DMA overflow.
     i2s_config.dma_buf_count = 16;
     i2s_config.dma_buf_len = 64;
-    i2s_config.use_apll = false;  // Match the working LilyGO T-Deck mic example. APLL + fixed_mclk (the old config) warped the ES7210 capture; the reference uses the main PLL with mclk_multiple.
+    i2s_config.use_apll = true;   // EXACT low-jitter MCLK via the APLL. CRITICAL: at our 256Fs config the ES7210 DLL is BYPASSED (REG02=0xC1) -- zero on-chip clock cleanup -- so source MCLK jitter feeds the sigma-delta modulator directly. use_apll=false makes 4.096MHz by a fractional-N divide (39.0625, dithered) whose jitter destabilizes the modulator on broadband speech (silence/tones stay clean) -> "oscillating static". (The LilyGO example uses main-PLL but is VAD-only, which tolerates it.)
     i2s_config.tx_desc_auto_clear = true;
-    i2s_config.fixed_mclk = 0;                          // Let the driver derive MCLK from mclk_multiple (256 * 8kHz = 2.048MHz = 256Fs), exactly like the LilyGO mic example. Forcing fixed_mclk + use_apll warped the ES7210 capture. See es7210.cpp MCLK_DIV_FRE.
+    i2s_config.fixed_mclk = 12288000;                   // Force the APLL to an EXACT 12.288MHz (768Fs at 16kHz). A standard audio rate the APLL locks cleanly; 3x higher than 4.096MHz so MCLK jitter into the ES7210's (DLL-bypassed) sigma-delta modulator is far lower. Pairs with es7210.cpp MCLK_DIV_FRE=768 + the {12288000,16000} coeff (REG02=0xC3).
     i2s_config.mclk_multiple = I2S_MCLK_MULTIPLE_256;   // Ignored when fixed_mclk is set
     i2s_config.bits_per_chan = I2S_BITS_PER_CHAN_16BIT;
     // TDM channel mask — required for ES7210 on T-Deck Plus

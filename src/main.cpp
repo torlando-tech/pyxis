@@ -232,10 +232,11 @@ static volatile bool g_rec_active = false;
 extern "C" bool pyxis_record_active() { return g_rec_active; }
 extern "C" void pyxis_record_write_ch0(const int16_t* readBuf, int samplesRead) {
     if (!g_rec_active || !g_rec_buf) return;
-    int n = samplesRead / 2;  // CH0 = even indices of the interleaved I2S read
-    for (int i = 0; i < n; i++) {
+    // Record the FULL interleaved read (both TDM channels) so the harness can de-interleave
+    // CH0 (even) AND CH1 (odd) offboard and check which channel actually carries the voice.
+    for (int i = 0; i < samplesRead; i++) {
         if (g_rec_pos >= g_rec_cap) { g_rec_active = false; return; }
-        g_rec_buf[g_rec_pos++] = readBuf[i * 2];
+        g_rec_buf[g_rec_pos++] = readBuf[i];
     }
 }
 
@@ -2427,16 +2428,16 @@ static void handle_test_hook_command(const String& line) {
         // T:RECORD <secs> — record raw CH0 mic (16kHz) into a PSRAM buffer. Start the capture
         // first with T:RAWMIC on (so any MICBIAS/regs set via T:REG persist), then T:RECORD.
         if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
-        int secs = args.toInt(); if (secs < 1) secs = 6; if (secs > 12) secs = 12;
+        int secs = args.toInt(); if (secs < 1) secs = 6; if (secs > 8) secs = 8;
         if (g_rec_buf) { free(g_rec_buf); g_rec_buf = nullptr; }
-        g_rec_cap = (uint32_t)secs * 16000;
+        g_rec_cap = (uint32_t)secs * 32000;  // full interleaved: 16kHz * 2 TDM channels
         g_rec_buf = (int16_t*)heap_caps_malloc((size_t)g_rec_cap * sizeof(int16_t), MALLOC_CAP_SPIRAM);
         if (!g_rec_buf) { Serial.println("T:ERR record alloc failed"); g_rec_cap = 0; return; }
         g_rec_pos = 0;
         if (!ui_manager->is_loopback()) ui_manager->start_loopback();
         g_rec_active = true;
         Serial.print("T:OK recording "); Serial.print(secs); Serial.print("s ");
-        Serial.print((unsigned long)g_rec_cap); Serial.println(" samples @16kHz raw CH0");
+        Serial.print((unsigned long)g_rec_cap); Serial.println(" samples (16kHz x2ch interleaved)");
     }
     else if (cmd == "T:DUMPREC") {
         // Transfer the recorded buffer as checksummed hex between REC_BEGIN/REC_END markers.

@@ -23,6 +23,7 @@ extern "C" void pyxis_audio_dump(const void* pcm, size_t bytes);
 // When raw-mic diagnostic mode is on, the capture task owns the UDP dump stream
 // (raw mic PCM); suppress the decoded-PCM dump here so they don't interleave.
 extern "C" bool pyxis_rawmic_mode();
+extern "C" bool pyxis_record_active();
 
 I2SPlayback::I2SPlayback() = default;
 
@@ -184,6 +185,11 @@ bool I2SPlayback::writeEncodedPacket(const uint8_t* data, int length) {
     }
     pcmSampleCount_.fetch_add((uint32_t)decodedSamples, std::memory_order_relaxed);
     pcmSumSquares_.fetch_add(sumsq, std::memory_order_relaxed);
+
+    // MUTE the speaker during raw-mic recording: do NOT feed decoded PCM to the playback
+    // ring, so the T-Deck speaker can't play the loopback round-trip back into the adjacent
+    // mic (acoustic feedback -> "oscillating static that builds"). Decode+metrics still run.
+    if (pyxis_record_active()) return true;
 
     // Audio-loopback test tap: dump the freshly decoded PCM (int16 LE mono,
     // 8 kHz). No-op unless the loopback harness armed it via T:LOOPBACK on.
