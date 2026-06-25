@@ -1153,8 +1153,12 @@ void UIManager::call_send_audio_batch(const uint8_t* batch_data, int batch_len,
     // Each batch = [codec_type(0x02)] + [mode_header] + [10 * raw_codec2].
     // Columba's native ring buffer expects exactly frameSamples (1600) decoded
     // samples per writeEncodedPacket call.  For Codec2 3200: 10 * 160 = 1600.
-    // batch_data contains batch_count concatenated batches of 82 bytes each.
-    static constexpr int BATCH_BYTES = 82;  // codec_type(1) + mode(1) + 10*8
+    // batch_data contains batch_count concatenated batches of batch_len bytes each.
+    // FIX: was a hardcoded BATCH_BYTES=82 (correct only for 8-byte/frame modes like
+    // 3200/1600); the shipping ULBW default is Codec2-700C at 4 B/frame -> the real batch
+    // is 42 B. The 82 mis-sized every 700C packet on the wire (40 B of uninitialized stack
+    // + a bin8 length that lies): pyxis<->pyxis SILENCE, pyxis->length-driven peer GARBAGE.
+    // Use batch_len, the exact length the caller already computed.
 
     uint8_t packet_buf[256];
     int pos = 0;
@@ -1165,17 +1169,17 @@ void UIManager::call_send_audio_batch(const uint8_t* batch_data, int batch_len,
     if (batch_count == 1) {
         // Single batch: bare bin8
         packet_buf[pos++] = 0xC4;               // bin8
-        packet_buf[pos++] = (uint8_t)BATCH_BYTES;
-        memcpy(packet_buf + pos, batch_data, BATCH_BYTES);
-        pos += BATCH_BYTES;
+        packet_buf[pos++] = (uint8_t)batch_len;
+        memcpy(packet_buf + pos, batch_data, batch_len);
+        pos += batch_len;
     } else {
         // Multiple batches: fixarray(N) of bin8 entries
         packet_buf[pos++] = 0x90 | (uint8_t)batch_count;  // fixarray(N), N≤15
         for (int b = 0; b < batch_count; b++) {
             packet_buf[pos++] = 0xC4;               // bin8
-            packet_buf[pos++] = (uint8_t)BATCH_BYTES;
-            memcpy(packet_buf + pos, batch_data + b * BATCH_BYTES, BATCH_BYTES);
-            pos += BATCH_BYTES;
+            packet_buf[pos++] = (uint8_t)batch_len;
+            memcpy(packet_buf + pos, batch_data + b * batch_len, batch_len);
+            pos += batch_len;
         }
     }
 
