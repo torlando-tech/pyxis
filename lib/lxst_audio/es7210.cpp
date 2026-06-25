@@ -231,6 +231,23 @@ esp_err_t es7210_adc_init(TwoWire *tw, audio_hal_codec_config_t *codec_cfg)
     ret |= es7210_config_sample(i2s_cfg->samples);
     ret |= es7210_mic_select(mic_select);
     ret |= es7210_adc_set_gain_all(GAIN_0DB);
+
+    // A/B CANDIDATE (2026-06-24): the LilyGO/ESP-ADF-derived init above leaves several ADC +
+    // mic-power analog registers at reset defaults that the Linux es7210 driver
+    // (rockchip-linux/kernel) writes explicitly: ADC dynamics/HPF (REG20-23) + mic ALC/power
+    // (REG47-4C). These were added while chasing an asymmetric-THD theory that the acoustic
+    // feedback later explained; whether they measurably help mic quality is UNVERIFIED and
+    // needs an A/B test against a clean acoustic source. Isolated here so main = the "without" leg.
+    ret |= es7210_write_reg(0x20, 0x0a);
+    ret |= es7210_write_reg(0x21, 0x2a);
+    ret |= es7210_write_reg(0x22, 0x0a);
+    ret |= es7210_write_reg(0x23, 0x2a);
+    ret |= es7210_write_reg(0x47, 0x08);
+    ret |= es7210_write_reg(0x48, 0x08);
+    ret |= es7210_write_reg(0x49, 0x08);
+    ret |= es7210_write_reg(0x4A, 0x08);
+    ret |= es7210_write_reg(0x4B, 0x0F);
+    ret |= es7210_write_reg(0x4C, 0x0F);
     return ESP_OK;
 }
 
