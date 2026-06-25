@@ -50,10 +50,15 @@ bool LXSTAudio::init(int codec2Mode, uint8_t micGain) {
         uint32_t ret_val = ESP_OK;
         ret_val |= es7210_adc_init(&Wire, &cfg);
         ret_val |= es7210_adc_config_i2s(cfg.codec_mode, &cfg.i2s_iface);
+        // ROOT-CAUSE FIX: was (es7210_gain_value_t)micGain (default 7 = 21dB), which
+        // SATURATED the ES7210 ADC to the negative rail (0x8000 spikes) + a huge noise
+        // floor (rms 7003 in silence) + a spectral-peak shift that LOOKED like a +17-25%
+        // pitch warp. At 0dB the capture is pristine (tones land at ratio 1.000) but too
+        // quiet; 12dB is a clean middle: real signal level, well below saturation.
         ret_val |= es7210_adc_set_gain(
             (es7210_input_mics_t)(ES7210_INPUT_MIC1 | ES7210_INPUT_MIC2 |
                                   ES7210_INPUT_MIC3 | ES7210_INPUT_MIC4),
-            (es7210_gain_value_t)micGain);
+            GAIN_12DB);
         ret_val |= es7210_adc_ctrl_state(cfg.codec_mode, AUDIO_HAL_CTRL_START);
 
         if (ret_val != ESP_OK) {
