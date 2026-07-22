@@ -14,6 +14,7 @@
 #include "audio_filters.h"
 #include "encoded_ring_buffer.h"
 #include <Arduino.h>
+#include <freertos/semphr.h>
 
 using namespace Hardware::TDeck;
 
@@ -139,6 +140,16 @@ bool I2SCapture::configureEncoder(Codec2Wrapper* codec, bool enableFilters) {
 bool I2SCapture::start() {
     if (!i2sInitialized_ || !codec_ || capturing_.load()) return false;
 
+    if (taskExited_) {
+        vSemaphoreDelete(static_cast<SemaphoreHandle_t>(taskExited_));
+        taskExited_ = nullptr;
+    }
+    taskExited_ = static_cast<void*>(xSemaphoreCreateBinary());
+    if (!taskExited_) {
+        ESP_LOGE(TAG, "Failed to create capture-exit semaphore");
+        return false;
+    }
+
     // Set capturing BEFORE starting task to avoid race (same pattern as LXST-kt)
     capturing_.store(true, std::memory_order_relaxed);
 
@@ -150,6 +161,8 @@ bool I2SCapture::start() {
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create capture task");
         capturing_.store(false, std::memory_order_relaxed);
+        vSemaphoreDelete(static_cast<SemaphoreHandle_t>(taskExited_));
+        taskExited_ = nullptr;
         return false;
     }
 
@@ -158,14 +171,25 @@ bool I2SCapture::start() {
 }
 
 void I2SCapture::stop() {
-    if (!capturing_.load()) return;
-
     capturing_.store(false, std::memory_order_relaxed);
 
-    // Wait for task to exit
-    if (taskHandle_) {
-        vTaskDelay(pdMS_TO_TICKS(50));
+    // Stop I2S first so a task blocked in i2s_read() wakes immediately, then
+    // wait for explicit task-exit acknowledgement before releasing its driver,
+    // codec, ring, or owning object.
+    TaskHandle_t task = static_cast<TaskHandle_t>(taskHandle_);
+    if (task && i2sInitialized_) i2s_stop(I2S_NUM_1);
+    if (task && taskExited_) {
+        if (xSemaphoreTake(static_cast<SemaphoreHandle_t>(taskExited_),
+                           pdMS_TO_TICKS(500)) != pdTRUE) {
+            ESP_LOGE(TAG, "Capture task exit timed out; force deleting task");
+            vTaskDelete(task);
+        }
         taskHandle_ = nullptr;
+    }
+
+    if (taskExited_) {
+        vSemaphoreDelete(static_cast<SemaphoreHandle_t>(taskExited_));
+        taskExited_ = nullptr;
     }
 
     if (i2sInitialized_) {
@@ -193,6 +217,10 @@ void I2SCapture::releaseBuffers() {
 void I2SCapture::captureTask(void* param) {
     auto* self = static_cast<I2SCapture*>(param);
     self->captureLoop();
+    self->capturing_.store(false, std::memory_order_relaxed);
+    self->taskHandle_ = nullptr;
+    auto done = static_cast<SemaphoreHandle_t>(self->taskExited_);
+    if (done) xSemaphoreGive(done);
     vTaskDelete(NULL);
 }
 

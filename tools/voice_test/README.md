@@ -37,3 +37,34 @@ summary table.
 Lower-bitrate profiles (700C) score lower by design; compare profiles and before/after
 firmware changes. The venv was created with `uv venv --python 3.12` +
 `numpy scipy soundfile sounddevice pyserial pystoi`.
+
+## Sideband/LXST end-to-end regression
+
+`sideband_e2e.py` uses the Mac's real RNS/LXST/Sideband Python stack and the
+T-Deck serial hooks to verify:
+
+- Pyxis calls Sideband and exchanges synthetic Codec2 audio in both directions.
+- Sideband calls Pyxis and exchanges synthetic Codec2 audio in both directions.
+- Pyxis still accepts another incoming call after both calls and hangups.
+- Every Pyxis decode succeeds and produces non-zero PCM.
+
+Build the test firmware with the Mac TCP server baked in, then upload it:
+
+```bash
+export PYXIS_TEST_TCP_HOST=10.0.0.145 PYXIS_TEST_TCP_PORT=4242
+/opt/homebrew/bin/pio run -e tdeck -t upload --upload-port /dev/cu.usbmodem101
+```
+
+Run from the Mac with its Reticulum venv (defaults to the local TCP server on
+`127.0.0.1:4242`):
+
+```bash
+~/.reticulum-host/venv/bin/python tools/voice_test/sideband_e2e.py
+```
+
+Optional overrides: `PYXIS_SERIAL_PORT`, `PYXIS_RNS_HOST`,
+`PYXIS_RNS_PORT`, and `PYXIS_CALL_SECONDS`. Each run uses a fresh Sideband
+identity and isolated RNS storage so stale cached paths cannot false-pass setup.
+On Apple Silicon the harness re-executes itself with `/opt/homebrew/lib` on
+`DYLD_LIBRARY_PATH`, allowing LXST/PyOgg to load Homebrew `libopus` for incoming
+calls.

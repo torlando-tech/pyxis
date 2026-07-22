@@ -11,6 +11,7 @@
 #include "codec_wrapper.h"
 #include "packet_ring_buffer.h"
 #include <Arduino.h>
+#include <freertos/semphr.h>
 
 using namespace Hardware::TDeck;
 
@@ -62,6 +63,16 @@ bool I2SPlayback::configureDecoder(Codec2Wrapper* codec) {
 
 bool I2SPlayback::start() {
     if (!codec_ || playing_.load()) return false;
+
+    if (taskExited_) {
+        vSemaphoreDelete(static_cast<SemaphoreHandle_t>(taskExited_));
+        taskExited_ = nullptr;
+    }
+    taskExited_ = static_cast<void*>(xSemaphoreCreateBinary());
+    if (!taskExited_) {
+        ESP_LOGE(TAG, "Failed to create playback-exit semaphore");
+        return false;
+    }
 
     // Caller (LXSTAudio) is responsible for calling tone_deinit() first.
     // Defensively uninstall in case it wasn't done.
@@ -118,6 +129,8 @@ bool I2SPlayback::start() {
         playing_.store(false, std::memory_order_relaxed);
         i2s_driver_uninstall(I2S_NUM_0);
         i2sInitialized_ = false;
+        vSemaphoreDelete(static_cast<SemaphoreHandle_t>(taskExited_));
+        taskExited_ = nullptr;
         return false;
     }
 
@@ -126,13 +139,24 @@ bool I2SPlayback::start() {
 }
 
 void I2SPlayback::stop() {
-    if (!playing_.load()) return;
-
     playing_.store(false, std::memory_order_relaxed);
 
-    if (taskHandle_) {
-        vTaskDelay(pdMS_TO_TICKS(50));
+    // Stop I2S to unblock a pending i2s_write(), then join the playback task
+    // before uninstalling the driver or releasing task-owned buffers.
+    TaskHandle_t task = static_cast<TaskHandle_t>(taskHandle_);
+    if (task && i2sInitialized_) i2s_stop(I2S_NUM_0);
+    if (task && taskExited_) {
+        if (xSemaphoreTake(static_cast<SemaphoreHandle_t>(taskExited_),
+                           pdMS_TO_TICKS(500)) != pdTRUE) {
+            ESP_LOGE(TAG, "Playback task exit timed out; force deleting task");
+            vTaskDelete(task);
+        }
         taskHandle_ = nullptr;
+    }
+
+    if (taskExited_) {
+        vSemaphoreDelete(static_cast<SemaphoreHandle_t>(taskExited_));
+        taskExited_ = nullptr;
     }
 
     if (i2sInitialized_) {
@@ -222,6 +246,10 @@ int I2SPlayback::bufferedFrames() const {
 void I2SPlayback::playbackTask(void* param) {
     auto* self = static_cast<I2SPlayback*>(param);
     self->playbackLoop();
+    self->playing_.store(false, std::memory_order_relaxed);
+    self->taskHandle_ = nullptr;
+    auto done = static_cast<SemaphoreHandle_t>(self->taskExited_);
+    if (done) xSemaphoreGive(done);
     vTaskDelete(NULL);
 }
 

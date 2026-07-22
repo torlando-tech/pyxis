@@ -105,6 +105,7 @@ private:
     std::atomic<bool> playing_{false};
     std::atomic<bool> muted_{false};
     void* taskHandle_ = nullptr;
+    void* taskExited_ = nullptr;  // FreeRTOS binary semaphore; task signals before delete
 
     Codec2Wrapper* codec_ = nullptr;  // Shared, not owned
     PacketRingBuffer* pcmRing_ = nullptr;

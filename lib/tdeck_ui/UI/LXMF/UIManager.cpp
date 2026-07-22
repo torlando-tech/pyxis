@@ -107,6 +107,10 @@ UIManager::~UIManager() {
     }
     delete _lxst_audio;
 
+    // This pointer owns the long-lived incoming-destination callback, not only
+    // the current call. Clear it only when the manager itself is destroyed.
+    if (s_call_instance == this) s_call_instance = nullptr;
+
     if (_conversation_list_screen) delete _conversation_list_screen;
     if (_chat_screen) delete _chat_screen;
     if (_compose_screen) delete _compose_screen;
@@ -940,7 +944,6 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
 
     _call_peer_hash = peer_hash;
     _call_muted = false;
-    s_call_instance = this;
 
     lxst_breadcrumb(2, ESP.getFreeHeap());
 
@@ -948,7 +951,6 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
     Identity peer_identity = Identity::recall(peer_hash);
     if (!peer_identity) {
         WARNING("LXST: Peer identity not known, cannot establish link");
-        s_call_instance = nullptr;
         return;
     }
 
@@ -1061,9 +1063,9 @@ void UIManager::call_hangup() {
     INFO("LXST: Hanging up");
 
     // Set IDLE first — prevents pump_call_tx() (which runs without LVGL lock)
-    // from accessing _lxst_audio after we delete it.
+    // from accessing _lxst_audio after we delete it. s_call_instance remains
+    // installed because it owns the long-lived incoming destination callback.
     _call_state = CallState::IDLE;
-    s_call_instance = nullptr;
 
     // Stop audio
     if (_lxst_audio) {
@@ -1521,9 +1523,9 @@ void UIManager::call_ended() {
     INFO("LXST: Call ended");
 
     // Set IDLE first — prevents pump_call_tx() (which runs without LVGL lock)
-    // from accessing _lxst_audio after we delete it.
+    // from accessing _lxst_audio after we delete it. s_call_instance remains
+    // installed because it owns the long-lived incoming destination callback.
     _call_state = CallState::IDLE;
-    s_call_instance = nullptr;
 
     // Stop audio
     if (_lxst_audio) {

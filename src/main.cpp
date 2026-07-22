@@ -619,6 +619,11 @@ void load_app_settings() {
 
     // Interfaces
     app_settings.tcp_enabled = prefs.getBool("tcp_en", true);
+#ifdef PYXIS_TEST_HOOKS
+    // The test transport must be enabled after reading NVS; setting this beside
+    // the earlier host/port override would be overwritten by tcp_en above.
+    app_settings.tcp_enabled = true;
+#endif
     app_settings.lora_enabled = prefs.getBool("lora_en", false);
     app_settings.lora_frequency = prefs.getFloat("lora_freq", 927.25f);
     app_settings.lora_bandwidth = prefs.getFloat("lora_bw", 50.0f);
@@ -2062,7 +2067,10 @@ static void handle_test_hook_command(const String& line) {
         if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
         RNS::Bytes dest_hash = parse_hex_arg(args);
         if (dest_hash.size() != 16) { Serial.println("T:ERR bad hex"); return; }
-        ui_manager->test_call_initiate(dest_hash);
+        // Serial hooks run on loopTask, outside the LVGL task. The production
+        // call path mutates screens immediately, so hold the same LVGL lock as
+        // other cross-task UI operations.
+        { LVGL_LOCK(); ui_manager->test_call_initiate(dest_hash); }
         Serial.println(String("T:OK calling=") + args);
     }
     else if (cmd == "T:CALL_STATE") {
@@ -2074,7 +2082,9 @@ static void handle_test_hook_command(const String& line) {
     else if (cmd == "T:CALL_HANGUP") {
         // T:CALL_HANGUP — tear down the active call.
         if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
-        ui_manager->test_call_hangup();
+        // call_hangup() refreshes/deletes LVGL objects; invoking it unlocked
+        // from loopTask corrupts LVGL's event list once playback is active.
+        { LVGL_LOCK(); ui_manager->test_call_hangup(); }
         Serial.println("T:OK hung_up");
     }
     else if (cmd == "T:CALL_ANSWER") {
