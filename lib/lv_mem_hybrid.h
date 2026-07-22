@@ -21,10 +21,6 @@ extern "C" {
  * during a call. UI alloc latency on PSRAM is imperceptible. */
 #define LV_MEM_HYBRID_PSRAM_THRESHOLD 256
 
-/* Track which allocations went to PSRAM vs internal RAM */
-/* We use a simple heuristic: PSRAM addresses are above 0x3C000000 on ESP32-S3 */
-#define IS_PSRAM_ADDR(ptr) ((uintptr_t)(ptr) >= 0x3C000000)
-
 static inline void* lv_mem_hybrid_alloc(size_t size) {
     void* ptr;
 
@@ -61,15 +57,16 @@ static inline void* lv_mem_hybrid_realloc(void* ptr, size_t size) {
 
     /* heap_caps_realloc has libc realloc semantics and can move an allocation
      * between capability sets while preserving min(old_size, size) bytes. */
-    uint32_t preferred_caps;
-    uint32_t fallback_caps;
-    if (IS_PSRAM_ADDR(ptr) || size >= LV_MEM_HYBRID_PSRAM_THRESHOLD) {
-        preferred_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-        fallback_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
-    } else {
-        preferred_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
-        fallback_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-    }
+    const uint32_t preferred_caps =
+        (size >= LV_MEM_HYBRID_PSRAM_THRESHOLD
+             ? MALLOC_CAP_SPIRAM
+             : MALLOC_CAP_INTERNAL) |
+        MALLOC_CAP_8BIT;
+    const uint32_t fallback_caps =
+        (size >= LV_MEM_HYBRID_PSRAM_THRESHOLD
+             ? MALLOC_CAP_INTERNAL
+             : MALLOC_CAP_SPIRAM) |
+        MALLOC_CAP_8BIT;
 
     void* new_ptr = heap_caps_realloc(ptr, size, preferred_caps);
     if (new_ptr) return new_ptr;
