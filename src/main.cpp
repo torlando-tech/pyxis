@@ -257,9 +257,15 @@ static int16_t* g_rec_buf = nullptr;
 static volatile uint32_t g_rec_cap = 0, g_rec_pos = 0;
 static volatile bool g_rec_active = false;
 static SemaphoreHandle_t g_rec_mutex = nullptr;
-extern "C" bool pyxis_record_active() { return g_rec_active; }
+extern "C" bool pyxis_record_active() {
+    if (!g_rec_mutex) return false;
+    if (xSemaphoreTake(g_rec_mutex, portMAX_DELAY) != pdTRUE) return false;
+    bool active = g_rec_active;
+    xSemaphoreGive(g_rec_mutex);
+    return active;
+}
 extern "C" void pyxis_record_write_ch0(const int16_t* readBuf, int samplesRead) {
-    if (!g_rec_active || !g_rec_mutex) return;
+    if (!g_rec_mutex) return;
     if (xSemaphoreTake(g_rec_mutex, portMAX_DELAY) != pdTRUE) return;
     if (!g_rec_active || !g_rec_buf) {
         xSemaphoreGive(g_rec_mutex);
@@ -1550,6 +1556,12 @@ void setup() {
     Serial.begin(115200);
     delay(100);
 
+    // Create diagnostic recorder synchronization before any audio task starts.
+    g_rec_mutex = xSemaphoreCreateMutex();
+    if (!g_rec_mutex) {
+        ERROR("Failed to create recorder mutex; T:RECORD will be unavailable");
+    }
+
     INFO("\n");
     INFO("╔══════════════════════════════════════╗");
     INFO("║   LXMF Messenger for T-Deck Plus    ║");
@@ -2488,8 +2500,7 @@ static void handle_test_hook_command(const String& line) {
         // first with T:RAWMIC on (so any MICBIAS/regs set via T:REG persist), then T:RECORD.
         if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
         int secs = args.toInt(); if (secs < 1) secs = 6; if (secs > 8) secs = 8;
-        if (!g_rec_mutex) g_rec_mutex = xSemaphoreCreateMutex();
-        if (!g_rec_mutex) { Serial.println("T:ERR record mutex alloc failed"); return; }
+        if (!g_rec_mutex) { Serial.println("T:ERR record mutex unavailable"); return; }
 
         uint32_t new_cap = (uint32_t)secs * 32000;  // full interleaved: 16kHz * 2 TDM channels
         int16_t* new_buf = (int16_t*)heap_caps_malloc((size_t)new_cap * sizeof(int16_t), MALLOC_CAP_SPIRAM);
@@ -2516,17 +2527,28 @@ static void handle_test_hook_command(const String& line) {
         Serial.print((unsigned long)g_rec_cap); Serial.println(" samples (16kHz x2ch interleaved)");
     }
     else if (cmd == "T:DUMPREC") {
-        // Transfer the recorded buffer as checksummed hex between REC_BEGIN/REC_END markers.
-        if (g_rec_active) { Serial.println("T:ERR recording active"); return; }
-        if (!g_rec_buf || g_rec_pos == 0) { Serial.println("T:ERR no recording"); return; }
-        uint32_t n = g_rec_pos, sum = 0;
-        for (uint32_t i = 0; i < n; i++) sum += (uint16_t)g_rec_buf[i];
+        // Transfer a completed recording as checksummed hex between REC_BEGIN/REC_END markers.
+        // Snapshot under the recorder mutex; serial commands run on loopTask, so no new
+        // recording can replace this buffer until the dump command returns.
+        if (!g_rec_mutex) { Serial.println("T:ERR no recording"); return; }
+        xSemaphoreTake(g_rec_mutex, portMAX_DELAY);
+        if (g_rec_active) {
+            xSemaphoreGive(g_rec_mutex);
+            Serial.println("T:ERR recording active");
+            return;
+        }
+        int16_t* dump_buf = g_rec_buf;
+        uint32_t n = g_rec_pos;
+        xSemaphoreGive(g_rec_mutex);
+        if (!dump_buf || n == 0) { Serial.println("T:ERR no recording"); return; }
+        uint32_t sum = 0;
+        for (uint32_t i = 0; i < n; i++) sum += (uint16_t)dump_buf[i];
         Serial.print("REC_BEGIN "); Serial.print((unsigned long)n);
         Serial.print(" 16000 "); Serial.println((unsigned long)sum);
         static char line[520];
         for (uint32_t i = 0; i < n; ) {
             int p = 0;
-            for (int k = 0; k < 128 && i < n; k++, i++) p += sprintf(line + p, "%04X", (uint16_t)g_rec_buf[i]);
+            for (int k = 0; k < 128 && i < n; k++, i++) p += sprintf(line + p, "%04X", (uint16_t)dump_buf[i]);
             line[p] = 0; Serial.println(line);
         }
         Serial.println("REC_END");
