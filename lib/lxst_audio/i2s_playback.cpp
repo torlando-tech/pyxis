@@ -56,6 +56,12 @@ bool I2SPlayback::configureDecoder(Codec2Wrapper* codec) {
     dropBuf_ = static_cast<int16_t*>(
         heap_caps_malloc(sizeof(int16_t) * frameSamples_, MALLOC_CAP_SPIRAM));
 
+    if (!pcmRing_ || !decodeBuf_ || !dropBuf_) {
+        ESP_LOGE(TAG, "Playback buffer allocation failed");
+        releaseBuffers();
+        return false;
+    }
+
     ESP_LOGI(TAG, "Decoder configured: Codec2 mode %d, %d samples/frame",
              codec_->libraryMode(), frameSamples_);
     return true;
@@ -270,6 +276,11 @@ void I2SPlayback::playbackLoop() {
     // Silence frame for underruns
     int16_t* silenceFrame = static_cast<int16_t*>(
         heap_caps_calloc(frameSamples_, sizeof(int16_t), MALLOC_CAP_SPIRAM));
+    if (!silenceFrame) {
+        ESP_LOGE(TAG, "Failed to allocate silence frame");
+        free(frameBuf);
+        return;
+    }
 
     uint32_t framesPlayed = 0;
 

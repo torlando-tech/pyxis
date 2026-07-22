@@ -9,6 +9,8 @@
 #include <Hardware/TDeck/Config.h>
 #include <Arduino.h>
 #include <driver/i2s.h>
+#include <esp_heap_caps.h>
+
 #include "es7210.h"
 #include "i2s_capture.h"
 #include "i2s_playback.h"
@@ -18,6 +20,17 @@
 using namespace Hardware::TDeck;
 
 static const char* TAG = "LXST:Audio";
+extern "C" void pyxis_log(const char* msg);
+
+static void log_audio_heap(const char* stage) {
+    char buf[112];
+    snprintf(buf, sizeof(buf), "[AUDIO] %s internal=%u largest=%u",
+             stage,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+    pyxis_log(buf);
+}
+
 
 LXSTAudio::LXSTAudio() = default;
 
@@ -32,6 +45,7 @@ bool LXSTAudio::init(int codec2Mode, uint8_t micGain) {
     }
 
     codec2Mode_ = codec2Mode;
+
 
     Serial.printf("[AUDIO] Init starting (heap=%lu)...\n", (unsigned long)esp_get_free_heap_size());
 
@@ -109,34 +123,22 @@ bool LXSTAudio::init(int codec2Mode, uint8_t micGain) {
         Serial.println("[AUDIO] ES7210 re-started with I2S clocks active");
     }
 
-    // Create separate Codec2 instances for encode and decode to avoid mutex
-    // contention during full-duplex calls (capture task + main thread decode)
+    // Keep Codec2 in internal RAM: its tight DSP loops become watchdog-prone
+    // when the state is placed in PSRAM. One shared state is sufficient for
+    // full duplex because Codec2Wrapper serializes encode/decode with a mutex,
+    // and LXST negotiates one profile for both directions.
     encodeCodec_ = new Codec2Wrapper();
-    if (!encodeCodec_->create(codec2Mode)) {
-        Serial.println("[AUDIO] Codec2 encoder create FAILED");
+    if (!encodeCodec_ || !encodeCodec_->create(codec2Mode)) {
+        Serial.println("[AUDIO] Codec2 create FAILED");
         delete capture_;
         capture_ = nullptr;
         delete encodeCodec_;
         encodeCodec_ = nullptr;
         return false;
     }
-    Serial.printf("[AUDIO] Codec2 encoder created (heap=%lu)\n", (unsigned long)esp_get_free_heap_size());
+    decodeCodec_ = encodeCodec_;
+    Serial.printf("[AUDIO] Shared Codec2 created (heap=%lu)\n", (unsigned long)esp_get_free_heap_size());
 
-    decodeCodec_ = new Codec2Wrapper();
-    if (!decodeCodec_->create(codec2Mode)) {
-        Serial.println("[AUDIO] Codec2 decoder create FAILED");
-        delete capture_;
-        capture_ = nullptr;
-        encodeCodec_->destroy();
-        delete encodeCodec_;
-        encodeCodec_ = nullptr;
-        delete decodeCodec_;
-        decodeCodec_ = nullptr;
-        return false;
-    }
-    Serial.printf("[AUDIO] Codec2 decoder created (heap=%lu)\n", (unsigned long)esp_get_free_heap_size());
-
-    // Configure encoder on capture side (owns its codec instance)
     if (!capture_->configureEncoder(encodeCodec_, true)) {
         Serial.println("[AUDIO] Capture encoder config FAILED");
         delete capture_;
@@ -144,15 +146,12 @@ bool LXSTAudio::init(int codec2Mode, uint8_t micGain) {
         encodeCodec_->destroy();
         delete encodeCodec_;
         encodeCodec_ = nullptr;
-        decodeCodec_->destroy();
-        delete decodeCodec_;
         decodeCodec_ = nullptr;
         return false;
     }
 
-    // Create playback engine with its own codec instance
     playback_ = new I2SPlayback();
-    if (!playback_->configureDecoder(decodeCodec_)) {
+    if (!playback_ || !playback_->configureDecoder(decodeCodec_)) {
         ESP_LOGE(TAG, "Playback decoder config failed");
         delete capture_;
         capture_ = nullptr;
@@ -161,8 +160,6 @@ bool LXSTAudio::init(int codec2Mode, uint8_t micGain) {
         encodeCodec_->destroy();
         delete encodeCodec_;
         encodeCodec_ = nullptr;
-        decodeCodec_->destroy();
-        delete decodeCodec_;
         decodeCodec_ = nullptr;
         return false;
     }
@@ -191,16 +188,13 @@ void LXSTAudio::deinit() {
         playback_ = nullptr;
     }
 
+    // encodeCodec_ and decodeCodec_ intentionally alias one mutex-protected
+    // Codec2 state; destroy it exactly once.
+    decodeCodec_ = nullptr;
     if (encodeCodec_) {
         encodeCodec_->destroy();
         delete encodeCodec_;
         encodeCodec_ = nullptr;
-    }
-
-    if (decodeCodec_) {
-        decodeCodec_->destroy();
-        delete decodeCodec_;
-        decodeCodec_ = nullptr;
     }
 
     initialized_ = false;
@@ -301,27 +295,35 @@ bool LXSTAudio::startFullDuplex() {
 
     // Release I2S_NUM_0 from tone generator
     Notification::tone_deinit();
+    log_audio_heap("after tone release");
 
-    // Start playback (speaker) first — I2S_NUM_0
-    if (!playback_->isPlaying()) {
-        ESP_LOGI(TAG, "Starting playback (heap=%lu)...", (unsigned long)esp_get_free_heap_size());
-        if (!playback_->start()) {
-            ESP_LOGE(TAG, "Failed to start playback for full-duplex");
-            return false;
-        }
-        ESP_LOGI(TAG, "Playback started (heap=%lu)", (unsigned long)esp_get_free_heap_size());
-    }
-
-    // Start capture (mic) — I2S_NUM_1
+    // Start capture first. Its larger contiguous stack must be allocated before
+    // playback fragments the remaining internal heap. Codec2 encoding itself is
+    // deferred to loopTask, so the capture task only needs 8 KiB.
     if (!capture_->isCapturing()) {
         ESP_LOGI(TAG, "Starting capture (heap=%lu)...", (unsigned long)esp_get_free_heap_size());
         if (!capture_->start()) {
             ESP_LOGE(TAG, "Failed to start capture for full-duplex");
-            playback_->stop();
-            playback_->configureDecoder(decodeCodec_);
+            log_audio_heap("capture start FAILED");
             return false;
         }
+        log_audio_heap("capture started");
         ESP_LOGI(TAG, "Capture started (heap=%lu)", (unsigned long)esp_get_free_heap_size());
+    }
+
+    // Start playback (speaker) second — I2S_NUM_0.
+    if (!playback_->isPlaying()) {
+        ESP_LOGI(TAG, "Starting playback (heap=%lu)...", (unsigned long)esp_get_free_heap_size());
+        if (!playback_->start()) {
+            ESP_LOGE(TAG, "Failed to start playback for full-duplex");
+            log_audio_heap("playback start FAILED");
+            capture_->stop();
+            capture_->init();
+            capture_->configureEncoder(encodeCodec_, true);
+            return false;
+        }
+        log_audio_heap("playback started");
+        ESP_LOGI(TAG, "Playback started (heap=%lu)", (unsigned long)esp_get_free_heap_size());
     }
 
     state_ = State::FULL_DUPLEX;

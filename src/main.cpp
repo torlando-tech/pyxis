@@ -157,6 +157,21 @@ static int udp_log_sock = -1;
 static struct sockaddr_in udp_log_dest;
 static bool udp_log_ready = false;
 
+// Crash-phase evidence that survives panic/watchdog resets without writing
+// flash from the real-time audio task.
+RTC_NOINIT_ATTR static uint32_t g_audio_phase_magic;
+RTC_NOINIT_ATTR static uint32_t g_audio_phase;
+static constexpr uint32_t AUDIO_PHASE_MAGIC = 0x50595841;
+static esp_reset_reason_t g_boot_reset_reason = ESP_RST_UNKNOWN;
+static uint8_t g_boot_lxst_step = 0;
+static uint32_t g_boot_lxst_heap = 0;
+static uint32_t g_boot_lxst_stack = 0;
+
+extern "C" void pyxis_audio_phase(uint32_t phase) {
+    g_audio_phase = phase;
+    g_audio_phase_magic = AUDIO_PHASE_MAGIC;
+}
+
 static void udp_log_init() {
     if (udp_log_sock >= 0) close(udp_log_sock);  // Re-init safe
     udp_log_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -837,6 +852,14 @@ void on_wifi_connected() {
             }
         });
         INFO("UDP log broadcasting on port 9999");
+        if (g_boot_reset_reason != ESP_RST_POWERON || g_boot_lxst_step > 0 ||
+                g_audio_phase_magic == AUDIO_PHASE_MAGIC) {
+            WARNINGF("BOOT CRASH EVIDENCE: reset=%d lxst_step=%u heap=%u stack=%u audio_phase=%u",
+                     (int)g_boot_reset_reason, (unsigned)g_boot_lxst_step,
+                     (unsigned)g_boot_lxst_heap, (unsigned)g_boot_lxst_stack,
+                     g_audio_phase_magic == AUDIO_PHASE_MAGIC ? (unsigned)g_audio_phase : 0U);
+            g_audio_phase_magic = 0;
+        }
     }
 }
 
@@ -1535,16 +1558,19 @@ void setup() {
     Hardware::TDeck::Display::init_hardware_only();
 
     // Capture ESP reset reason early (before WiFi) — logged after WiFi init for UDP visibility
-    esp_reset_reason_t _boot_reset_reason = esp_reset_reason();
+    g_boot_reset_reason = esp_reset_reason();
 
     // Check for LXST crash breadcrumb from previous boot
     {
         Preferences _dbg;
         _dbg.begin("lxst_dbg", true);
         uint8_t step = _dbg.getUChar("step", 0);
+        g_boot_lxst_step = step;
         if (step > 0) {
             uint32_t heap = _dbg.getUInt("heap", 0);
             uint32_t stack = _dbg.getUInt("stack", 0);
+            g_boot_lxst_heap = heap;
+            g_boot_lxst_stack = stack;
             char buf[80];
             snprintf(buf, sizeof(buf), "LXST CRASH: last step=%u heap=%u stack=%u", step, heap, stack);
             WARNING(buf);
@@ -1607,7 +1633,7 @@ void setup() {
     // Log ESP reset reason after WiFi so it reaches UDP logs
     {
         const char* reason_str = "UNKNOWN";
-        switch (_boot_reset_reason) {
+        switch (g_boot_reset_reason) {
             case ESP_RST_POWERON:  reason_str = "POWERON"; break;
             case ESP_RST_SW:       reason_str = "SOFTWARE"; break;
             case ESP_RST_PANIC:    reason_str = "PANIC"; break;
@@ -1619,8 +1645,8 @@ void setup() {
             case ESP_RST_SDIO:     reason_str = "SDIO"; break;
             default: break;
         }
-        if (_boot_reset_reason != ESP_RST_POWERON) {
-            WARNING("Reset reason: " + std::string(reason_str) + " (" + std::to_string((int)_boot_reset_reason) + ")");
+        if (g_boot_reset_reason != ESP_RST_POWERON) {
+            WARNING("Reset reason: " + std::string(reason_str) + " (" + std::to_string((int)g_boot_reset_reason) + ")");
         } else {
             INFO("Reset reason: " + std::string(reason_str));
         }
@@ -2626,6 +2652,28 @@ void loop() {
                                         (lora_interface && lora_interface->online()) ||
                                         (ble_interface && ble_interface->online());
             if (router && has_online_interface) {
+                // Cached paths can retain a usable receiving_interface even if
+                // a dynamically restarted interface is absent from Transport's
+                // broadcast table. Repair only missing active registrations.
+                auto ensure_registered = [](Interface* iface, const char* label) {
+                    if (!iface || !iface->online()) return;
+                    auto& table = Transport::get_interfaces();
+                    if (table.find(iface->get_hash()) == table.end()) {
+                        WARNINGF("Announce egress: restoring missing %s interface registration", label);
+                        Transport::register_interface(*iface);
+                    }
+                };
+                ensure_registered(tcp_interface, "TCP");
+                ensure_registered(lora_interface, "LoRa");
+                ensure_registered(ble_interface, "BLE");
+                const auto& announce_interfaces = Transport::get_interfaces();
+                INFOF("Announce egress: registered_interfaces=%u", (unsigned)announce_interfaces.size());
+                for (const auto& entry : announce_interfaces) {
+                    const Interface& iface = entry.second;
+                    INFOF("Announce egress interface: %s online=%s out=%s mode=%u",
+                          iface.toString().c_str(), iface.online() ? "yes" : "no",
+                          iface.OUT() ? "yes" : "no", (unsigned)iface.mode());
+                }
                 router->announce();
                 if (ui_manager) {
                     ui_manager->announce_lxst();

@@ -27,6 +27,7 @@ extern "C" bool pyxis_rawmic_mode();
 extern "C" int pyxis_rawmic_stage();
 extern "C" bool pyxis_record_active();
 extern "C" void pyxis_record_write_ch0(const int16_t* readBuf, int samplesRead);
+extern "C" void pyxis_audio_phase(uint32_t phase);
 
 I2SCapture::I2SCapture() = default;
 
@@ -112,8 +113,12 @@ bool I2SCapture::configureEncoder(Codec2Wrapper* codec, bool enableFilters) {
     frameSamples_ = codec_->samplesPerFrame() * FRAMES_PER_BATCH;
     filtersEnabled_ = enableFilters;
 
-    // Allocate ring buffer in PSRAM
-    encodedRing_ = new EncodedRingBuffer(ENCODED_RING_SLOTS, ENCODED_RING_MAX_BYTES);
+    // Queue filtered PCM in PSRAM. Encoding is deferred to loopTask; Codec2's
+    // DSP stack overflowed the memory-constrained capture task at phase 110.
+    encodedRing_ = new EncodedRingBuffer(
+        PCM_RING_SLOTS, frameSamples_ * static_cast<int>(sizeof(int16_t)));
+    encodePcmBuffer_ = static_cast<int16_t*>(
+        heap_caps_malloc(sizeof(int16_t) * frameSamples_, MALLOC_CAP_SPIRAM));
 
     // Allocate accumulation buffer in PSRAM
     accumBuffer_ = static_cast<int16_t*>(
@@ -129,6 +134,13 @@ bool I2SCapture::configureEncoder(Codec2Wrapper* codec, bool enableFilters) {
     // AGC boosts quiet sections; 12dB max prevents noise pumping during silence.
     if (enableFilters) {
         filterChain_ = new VoiceFilterChain(1, 300.0f, 3400.0f, -12.0f, 12.0f);
+    }
+
+    if (!encodedRing_ || !encodePcmBuffer_ || !accumBuffer_ || !silenceBuf_ ||
+            (enableFilters && !filterChain_)) {
+        ESP_LOGE(TAG, "Capture buffer allocation failed");
+        releaseBuffers();
+        return false;
     }
 
     ESP_LOGI(TAG, "Encoder configured: Codec2 mode %d, %d samples/batch (%d x %d), %d bytes/frame, filters=%d",
@@ -207,6 +219,8 @@ void I2SCapture::releaseBuffers() {
     filterChain_ = nullptr;
     delete encodedRing_;
     encodedRing_ = nullptr;
+    free(encodePcmBuffer_);
+    encodePcmBuffer_ = nullptr;
     free(accumBuffer_);
     accumBuffer_ = nullptr;
     free(silenceBuf_);
@@ -378,6 +392,7 @@ void I2SCapture::captureLoop() {
                     frameData = accumBuffer_;
                 }
 
+                pyxis_audio_phase(100);  // entering filter/encode batch
                 // Apply voice filters (skip if injecting test sine)
                 if (filtersEnabled_ && filterChain_ && !muted_.load(std::memory_order_relaxed)
                         && !injectSine_.load(std::memory_order_relaxed)) {
@@ -402,26 +417,20 @@ void I2SCapture::captureLoop() {
                     pyxis_log(logbuf);
                 }
 
-                // Encode
-                int encodedLen = codec_->encode(frameData, frameSamples_,
-                                                encodeBuf_, sizeof(encodeBuf_));
-                if (encodedLen > 0) {
+                const int pcmBytes = frameSamples_ * static_cast<int>(sizeof(int16_t));
+                if (encodedRing_ && encodedRing_->write(
+                        reinterpret_cast<const uint8_t*>(frameData), pcmBytes)) {
                     framesEncoded++;
                     if (framesEncoded <= 3 || (framesEncoded % 500 == 0)) {
-                        char logbuf[128];
-                        char hex[64];
-                        int hpos = 0;
-                        for (int h = 0; h < encodedLen && h < 20 && hpos < 60; h++)
-                            hpos += snprintf(hex + hpos, 64 - hpos, "%02X ", encodeBuf_[h]);
-                        snprintf(logbuf, sizeof(logbuf), "[CAP] Encoded #%lu: %d bytes: %s",
-                                 (unsigned long)framesEncoded, encodedLen, hex);
+                        char logbuf[112];
+                        snprintf(logbuf, sizeof(logbuf),
+                                 "[CAP] Queued PCM #%lu: %d bytes stack_free=%u",
+                                 (unsigned long)framesEncoded, pcmBytes,
+                                 (unsigned)uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t));
                         pyxis_log(logbuf);
                     }
-                }
-                if (encodedLen > 0 && encodedRing_) {
-                    if (!encodedRing_->write(encodeBuf_, encodedLen)) {
-                        ringDrops++;
-                    }
+                } else {
+                    ringDrops++;
                 }
 
                 accumCount_ = 0;
@@ -433,8 +442,22 @@ void I2SCapture::captureLoop() {
 }
 
 bool I2SCapture::readEncodedPacket(uint8_t* dest, int maxLength, int* actualLength) {
-    if (!encodedRing_) return false;
-    return encodedRing_->read(dest, maxLength, actualLength);
+    if (!encodedRing_ || !encodePcmBuffer_ || !codec_ || !actualLength) return false;
+    int pcmBytes = 0;
+    const int expectedBytes = frameSamples_ * static_cast<int>(sizeof(int16_t));
+    if (!encodedRing_->read(reinterpret_cast<uint8_t*>(encodePcmBuffer_),
+                            expectedBytes, &pcmBytes) || pcmBytes != expectedBytes) {
+        *actualLength = 0;
+        return false;
+    }
+
+    // Codec2 now runs on loopTask, which already has a large stack. Encode and
+    // decode are also naturally serialized when LXSTAudio shares one codec.
+    pyxis_audio_phase(110);
+    int encodedLen = codec_->encode(encodePcmBuffer_, frameSamples_, dest, maxLength);
+    pyxis_audio_phase(111);
+    *actualLength = encodedLen > 0 ? encodedLen : 0;
+    return encodedLen > 0;
 }
 
 int I2SCapture::availablePackets() const {

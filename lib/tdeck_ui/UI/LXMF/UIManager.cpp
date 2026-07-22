@@ -17,6 +17,7 @@
 #include <microReticulum/Packet.h>
 #include <microReticulum/Transport.h>
 #include <microReticulum/Destination.h>
+#include <esp_heap_caps.h>
 
 using namespace RNS;
 
@@ -933,9 +934,12 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
     }
     lxst_breadcrumb(1, ESP.getFreeHeap());
 
-    // Check heap before attempting — Link establishment needs ~10KB for crypto
+    // Link establishment needs roughly 10 KiB for crypto. The former 40 KiB
+    // threshold rejected valid calls on the complete UI build, whose steady
+    // state is about 30 KiB internal free. Audio allocations are now directed
+    // to PSRAM and its task stacks are bounded, so retain a 24 KiB floor.
     size_t free_heap = ESP.getFreeHeap();
-    if (free_heap < 40000) {
+    if (free_heap < 24000) {
         char buf[64];
         snprintf(buf, sizeof(buf), "LXST: Insufficient heap (%u bytes), aborting call", (unsigned)free_heap);
         WARNING(buf);
@@ -1458,10 +1462,15 @@ void UIManager::call_process_signal(uint8_t signal) {
                     call_ended();
                     return;
                 }
+                INFOF("LXST: Audio initialized (internal=%u largest=%u)",
+                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
                 lxst_breadcrumb(22, ESP.getFreeHeap());
                 // Start full-duplex audio (mic + speaker)
                 if (!_lxst_audio->startFullDuplex()) {
                     WARNING("LXST: Full-duplex start failed");
+                    call_ended();
+                    return;
                 }
                 lxst_breadcrumb(23, ESP.getFreeHeap());
 
@@ -1486,6 +1495,8 @@ void UIManager::call_process_signal(uint8_t signal) {
                 if (!_lxst_audio->isPlaying()) {
                     if (!_lxst_audio->startFullDuplex()) {
                         WARNING("LXST: Full-duplex start failed");
+                        call_ended();
+                        return;
                     }
                 }
                 lxst_breadcrumb(26, ESP.getFreeHeap());
@@ -1508,6 +1519,8 @@ void UIManager::call_process_signal(uint8_t signal) {
                 if (_lxst_audio && !_lxst_audio->isPlaying()) {
                     if (!_lxst_audio->startFullDuplex()) {
                         WARNING("LXST: Full-duplex start failed");
+                        call_ended();
+                        return;
                     }
                 }
                 INFO("LXST: Call active (full-duplex)");
@@ -1908,12 +1921,20 @@ void UIManager::call_answer() {
             return;
         }
     }
+    INFOF("LXST: Audio initialized (internal=%u largest=%u)",
+          (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     lxst_breadcrumb(32, ESP.getFreeHeap());
 
     // Start full-duplex audio (mic + speaker)
     if (!_lxst_audio->startFullDuplex()) {
         WARNING("LXST: Full-duplex start failed");
+        call_ended();
+        return;
     }
+    INFOF("LXST: Full-duplex ready (internal=%u largest=%u)",
+          (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
     lxst_breadcrumb(33, ESP.getFreeHeap());
 
     // Send profile preference (default ULBW = Codec2-700C). Answerer
