@@ -8,6 +8,9 @@
 #include <microReticulum/Log.h>
 #include <driver/gpio.h>
 
+// Defined in main.cpp; mirrors input diagnostics to Serial and UDP logging.
+extern "C" void pyxis_log(const char* msg);
+
 using namespace RNS;
 
 namespace Hardware {
@@ -21,8 +24,7 @@ volatile int16_t Trackball::_pulse_left = 0;
 volatile int16_t Trackball::_pulse_right = 0;
 volatile uint32_t Trackball::_last_pulse_time = 0;
 
-bool Trackball::_button_pressed = false;
-uint32_t Trackball::_last_button_time = 0;
+ButtonDebouncer Trackball::_button_debouncer(Trk::DEBOUNCE_MS);
 Trackball::State Trackball::_state;
 bool Trackball::_initialized = false;
 
@@ -96,7 +98,8 @@ bool Trackball::init_hardware_only() {
     // Initialize state
     _state.delta_x = 0;
     _state.delta_y = 0;
-    _state.button_pressed = false;
+    _state.button_pressed = _button_debouncer.update(
+        digitalRead(Pin::TRACKBALL_BUTTON) == LOW, millis());
     _state.timestamp = millis();
 
     _initialized = true;
@@ -211,6 +214,7 @@ void Trackball::lvgl_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
         // Button just released - queue ENTER key for press/release cycle
         button_was_pressed = false;
         pending_key = LV_KEY_ENTER;
+        pyxis_log("[INPUT] trackball enter=release");
         // Fall through to let pending_key logic handle it
     }
 
@@ -304,20 +308,14 @@ void Trackball::lvgl_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
 }
 
 bool Trackball::read_button_debounced() {
-    bool current = (digitalRead(Pin::TRACKBALL_BUTTON) == LOW);  // Active low
-    uint32_t now = millis();
-
-    // Debounce: only accept change if stable for debounce period
-    if (current != _button_pressed) {
-        if (now - _last_button_time > Trk::DEBOUNCE_MS) {
-            _last_button_time = now;
-            return current;
-        }
-    } else {
-        _last_button_time = now;
+    const bool raw_pressed = (digitalRead(Pin::TRACKBALL_BUTTON) == LOW);
+    const bool stable_pressed = _button_debouncer.update(raw_pressed, millis());
+    if (_button_debouncer.changed()) {
+        pyxis_log(stable_pressed
+            ? "[INPUT] trackball button=pressed"
+            : "[INPUT] trackball button=released");
     }
-
-    return _button_pressed;
+    return stable_pressed;
 }
 
 // ISR handlers - MUST be in IRAM for ESP32

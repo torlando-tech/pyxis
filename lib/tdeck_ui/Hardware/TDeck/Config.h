@@ -119,8 +119,9 @@ namespace Tch {
 }
 
 namespace Trk {
-    // Debounce timing
-    constexpr uint32_t DEBOUNCE_MS = 10;
+    // GPIO 0 is susceptible to short transients. Require a stable level on
+    // both edges before turning the trackball button into LV_KEY_ENTER.
+    constexpr uint32_t DEBOUNCE_MS = 50;
 
     // Pulse counting for movement speed
     constexpr uint32_t PULSE_RESET_MS = 50;  // Reset pulse count after 50ms idle

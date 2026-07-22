@@ -7,6 +7,9 @@
 
 #include <microReticulum/Log.h>
 
+// Defined in main.cpp; mirrors input diagnostics to Serial and UDP logging.
+extern "C" void pyxis_log(const char* msg);
+
 using namespace RNS;
 
 namespace Hardware {
@@ -110,6 +113,12 @@ uint8_t Keyboard::poll() {
     if (key == KEY_NONE || key == 0xFF) {
         return 0;
     }
+
+    // Source-tag every accepted hardware key so phantom Enter/newline reports
+    // can be distinguished from the trackball's synthetic LV_KEY_ENTER.
+    char diag[64];
+    snprintf(diag, sizeof(diag), "[INPUT] keyboard key=0x%02X", key);
+    pyxis_log(diag);
 
     // Add key to buffer
     buffer_push((char)key);

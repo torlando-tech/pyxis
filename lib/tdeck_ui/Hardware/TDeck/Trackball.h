@@ -5,6 +5,7 @@
 #define HARDWARE_TDECK_TRACKBALL_H
 
 #include "Config.h"
+#include "ButtonDebouncer.h"
 
 #ifdef ARDUINO
 #include <Arduino.h>
@@ -107,9 +108,9 @@ private:
     static volatile int16_t _pulse_right;
     static volatile uint32_t _last_pulse_time;
 
-    // Button state
-    static bool _button_pressed;
-    static uint32_t _last_button_time;
+    // Symmetric button debounce state. GPIO 0 is a strapping/noise-sensitive
+    // input, so both press and release must remain stable before LVGL sees them.
+    static ButtonDebouncer _button_debouncer;
 
     // State tracking
     static State _state;

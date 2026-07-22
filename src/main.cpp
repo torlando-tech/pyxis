@@ -179,7 +179,19 @@ static void udp_log_init() {
     memset(&udp_log_dest, 0, sizeof(udp_log_dest));
     udp_log_dest.sin_family = AF_INET;
     udp_log_dest.sin_port = htons(9999);
+#ifdef PYXIS_TEST_HOOKS
+    // Diagnostic builds send logs directly to the configured harness host.
+    // Multicast delivery can disappear after OTA on dual-interface macOS hosts,
+    // while unicast gives the input-source capture a deterministic destination.
+    const char* diagnostic_host = PYXIS_TEST_TCP_HOST;
+    if (diagnostic_host && diagnostic_host[0] != '\0') {
+        udp_log_dest.sin_addr.s_addr = inet_addr(diagnostic_host);
+    } else {
+        udp_log_dest.sin_addr.s_addr = inet_addr("239.0.99.99");
+    }
+#else
     udp_log_dest.sin_addr.s_addr = inet_addr("239.0.99.99");
+#endif
 }
 
 // UDP send — no locking needed.  sendto() is non-blocking (O_NONBLOCK) and
