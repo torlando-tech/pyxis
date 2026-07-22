@@ -256,15 +256,26 @@ extern "C" int  pyxis_es7210_read_reg(int addr);
 static int16_t* g_rec_buf = nullptr;
 static volatile uint32_t g_rec_cap = 0, g_rec_pos = 0;
 static volatile bool g_rec_active = false;
+static SemaphoreHandle_t g_rec_mutex = nullptr;
 extern "C" bool pyxis_record_active() { return g_rec_active; }
 extern "C" void pyxis_record_write_ch0(const int16_t* readBuf, int samplesRead) {
-    if (!g_rec_active || !g_rec_buf) return;
+    if (!g_rec_active || !g_rec_mutex) return;
+    if (xSemaphoreTake(g_rec_mutex, portMAX_DELAY) != pdTRUE) return;
+    if (!g_rec_active || !g_rec_buf) {
+        xSemaphoreGive(g_rec_mutex);
+        return;
+    }
     // Record the FULL interleaved read (both TDM channels) so the harness can de-interleave
     // CH0 (even) AND CH1 (odd) offboard and check which channel actually carries the voice.
-    for (int i = 0; i < samplesRead; i++) {
-        if (g_rec_pos >= g_rec_cap) { g_rec_active = false; return; }
+    for (int i = 0; g_rec_active && i < samplesRead; i++) {
+        if (g_rec_pos >= g_rec_cap) {
+            g_rec_active = false;
+            break;
+        }
         g_rec_buf[g_rec_pos++] = readBuf[i];
     }
+    if (g_rec_pos >= g_rec_cap) g_rec_active = false;
+    xSemaphoreGive(g_rec_mutex);
 }
 
 static void udp_audio_dest_init() {
@@ -2477,18 +2488,36 @@ static void handle_test_hook_command(const String& line) {
         // first with T:RAWMIC on (so any MICBIAS/regs set via T:REG persist), then T:RECORD.
         if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
         int secs = args.toInt(); if (secs < 1) secs = 6; if (secs > 8) secs = 8;
-        if (g_rec_buf) { free(g_rec_buf); g_rec_buf = nullptr; }
-        g_rec_cap = (uint32_t)secs * 32000;  // full interleaved: 16kHz * 2 TDM channels
-        g_rec_buf = (int16_t*)heap_caps_malloc((size_t)g_rec_cap * sizeof(int16_t), MALLOC_CAP_SPIRAM);
-        if (!g_rec_buf) { Serial.println("T:ERR record alloc failed"); g_rec_cap = 0; return; }
-        g_rec_pos = 0;
+        if (!g_rec_mutex) g_rec_mutex = xSemaphoreCreateMutex();
+        if (!g_rec_mutex) { Serial.println("T:ERR record mutex alloc failed"); return; }
+
+        uint32_t new_cap = (uint32_t)secs * 32000;  // full interleaved: 16kHz * 2 TDM channels
+        int16_t* new_buf = (int16_t*)heap_caps_malloc((size_t)new_cap * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+        if (!new_buf) { Serial.println("T:ERR record alloc failed"); return; }
+
         if (!ui_manager->is_loopback()) ui_manager->start_loopback();
+        if (!ui_manager->is_loopback()) {
+            free(new_buf);
+            Serial.println("T:ERR record capture start failed");
+            return;
+        }
+
+        xSemaphoreTake(g_rec_mutex, portMAX_DELAY);
+        int16_t* old_buf = g_rec_buf;
+        g_rec_active = false;
+        g_rec_buf = new_buf;
+        g_rec_cap = new_cap;
+        g_rec_pos = 0;
         g_rec_active = true;
+        xSemaphoreGive(g_rec_mutex);
+        if (old_buf) free(old_buf);
+
         Serial.print("T:OK recording "); Serial.print(secs); Serial.print("s ");
         Serial.print((unsigned long)g_rec_cap); Serial.println(" samples (16kHz x2ch interleaved)");
     }
     else if (cmd == "T:DUMPREC") {
         // Transfer the recorded buffer as checksummed hex between REC_BEGIN/REC_END markers.
+        if (g_rec_active) { Serial.println("T:ERR recording active"); return; }
         if (!g_rec_buf || g_rec_pos == 0) { Serial.println("T:ERR no recording"); return; }
         uint32_t n = g_rec_pos, sum = 0;
         for (uint32_t i = 0; i < n; i++) sum += (uint16_t)g_rec_buf[i];
@@ -2652,28 +2681,6 @@ void loop() {
                                         (lora_interface && lora_interface->online()) ||
                                         (ble_interface && ble_interface->online());
             if (router && has_online_interface) {
-                // Cached paths can retain a usable receiving_interface even if
-                // a dynamically restarted interface is absent from Transport's
-                // broadcast table. Repair only missing active registrations.
-                auto ensure_registered = [](Interface* iface, const char* label) {
-                    if (!iface || !iface->online()) return;
-                    auto& table = Transport::get_interfaces();
-                    if (table.find(iface->get_hash()) == table.end()) {
-                        WARNINGF("Announce egress: restoring missing %s interface registration", label);
-                        Transport::register_interface(*iface);
-                    }
-                };
-                ensure_registered(tcp_interface, "TCP");
-                ensure_registered(lora_interface, "LoRa");
-                ensure_registered(ble_interface, "BLE");
-                const auto& announce_interfaces = Transport::get_interfaces();
-                INFOF("Announce egress: registered_interfaces=%u", (unsigned)announce_interfaces.size());
-                for (const auto& entry : announce_interfaces) {
-                    const Interface& iface = entry.second;
-                    INFOF("Announce egress interface: %s online=%s out=%s mode=%u",
-                          iface.toString().c_str(), iface.online() ? "yes" : "no",
-                          iface.OUT() ? "yes" : "no", (unsigned)iface.mode());
-                }
                 router->announce();
                 if (ui_manager) {
                     ui_manager->announce_lxst();

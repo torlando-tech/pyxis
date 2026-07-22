@@ -1635,6 +1635,10 @@ void UIManager::start_loopback() {
     // isCapturing() (pump_call_tx) and isPlaying() (writeEncodedPacket) hold.
     if (!_lxst_audio->startFullDuplex()) {
         WARNING("LXST: Loopback full-duplex start failed");
+        _lxst_audio->deinit();
+        delete _lxst_audio;
+        _lxst_audio = nullptr;
+        return;
     }
 
     _call_loopback = true;       // enable bypass branches BEFORE arming the dump

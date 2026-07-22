@@ -59,37 +59,23 @@ static inline void* lv_mem_hybrid_realloc(void* ptr, size_t size) {
         return NULL;
     }
 
-    /* Determine where the original allocation was */
-    if (IS_PSRAM_ADDR(ptr)) {
-        /* Was in PSRAM, keep it there */
-        void* new_ptr = heap_caps_realloc(ptr, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (new_ptr) return new_ptr;
-        /* Fall back to internal if PSRAM realloc fails */
-        new_ptr = heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        if (new_ptr) {
-            /* Copy and free old - can't use realloc across memory types */
-            /* We don't know old size, so this is a best-effort fallback */
-            heap_caps_free(ptr);
-            return new_ptr;
-        }
-        return NULL;
+    /* heap_caps_realloc has libc realloc semantics and can move an allocation
+     * between capability sets while preserving min(old_size, size) bytes. */
+    uint32_t preferred_caps;
+    uint32_t fallback_caps;
+    if (IS_PSRAM_ADDR(ptr) || size >= LV_MEM_HYBRID_PSRAM_THRESHOLD) {
+        preferred_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+        fallback_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
     } else {
-        /* Was in internal RAM */
-        if (size >= LV_MEM_HYBRID_PSRAM_THRESHOLD) {
-            /* Growing to large size - move to PSRAM */
-            void* new_ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-            if (new_ptr) {
-                heap_caps_free(ptr);
-                return new_ptr;
-            }
-            /* Fall back to internal realloc */
-        }
-        /* Keep in internal RAM */
-        void* new_ptr = heap_caps_realloc(ptr, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        if (new_ptr) return new_ptr;
-        /* Fall back to PSRAM */
-        return heap_caps_realloc(ptr, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        preferred_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+        fallback_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
     }
+
+    void* new_ptr = heap_caps_realloc(ptr, size, preferred_caps);
+    if (new_ptr) return new_ptr;
+
+    /* realloc failure leaves ptr valid, so trying the alternate heap is safe. */
+    return heap_caps_realloc(ptr, size, fallback_caps);
 }
 
 #ifdef __cplusplus
