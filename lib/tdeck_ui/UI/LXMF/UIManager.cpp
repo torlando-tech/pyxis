@@ -387,10 +387,11 @@ void UIManager::update() {
     }
     LVGL_LOCK();
 
-    // Outgoing starts are initiated only here on loopTask. Reticulum callback
-    // dispatch also runs on loopTask, in a later reticulum->loop() iteration,
-    // so Link construction, exact-ID publication, and state assignment finish
-    // before an establishment response can be processed.
+    // Outgoing starts are initiated here while the recursive LVGL mutex is
+    // held. Interface workers (notably BLE) can synchronously dispatch
+    // Reticulum callbacks on their own tasks, so every call-lifecycle callback
+    // takes this same mutex. A response therefore cannot run until Link
+    // construction, exact-ID publication, and state assignment finish.
     CallStartMailbox::PeerHash startPeerHash{};
     if (_call_starts.take(startPeerHash)) {
         if (_call_state == CallState::IDLE &&
@@ -1059,9 +1060,10 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
     lxst_breadcrumb(4, ESP.getFreeHeap());
 
     // Reserve a generation only after the outgoing call has passed its
-    // acceptance checks. Call initiation and Reticulum callback dispatch are
-    // serialized on loopTask; the atomic reservation remains the definitive
-    // admission check against an incoming owner accepted before this update.
+    // acceptance checks. update() holds the recursive LVGL mutex across this
+    // entire initiation, and call-lifecycle callbacks take the same mutex even
+    // when an interface task dispatches them. The atomic reservation remains
+    // the definitive ownership check.
     const uint32_t generation = call_begin_generation();
     if (generation == 0) {
         WARNING("LXST: Another call was accepted concurrently");
@@ -1986,6 +1988,7 @@ void UIManager::call_update() {
 
 void UIManager::on_call_link_established(Link& link) {
     if (!s_call_instance) return;
+    LVGL_LOCK();
     auto* self = s_call_instance;
 
     CallLinkOwnership::LinkId link_id{};
@@ -2019,6 +2022,7 @@ void UIManager::on_call_link_established(Link& link) {
 
 void UIManager::on_call_link_closed(Link& link) {
     if (!s_call_instance) return;
+    LVGL_LOCK();
     auto* self = s_call_instance;
 
     CallLinkOwnership::LinkId link_id{};
@@ -2044,6 +2048,7 @@ void UIManager::on_call_link_closed(Link& link) {
 
 void UIManager::on_call_link_packet(const Bytes& plaintext, const Packet& packet) {
     if (!s_call_instance) return;
+    LVGL_LOCK();
     auto* self = s_call_instance;
     const Link& callback_link = packet.link();
     CallLinkOwnership::LinkId link_id{};
@@ -2067,6 +2072,7 @@ void UIManager::on_lxst_link_established(Link& link) {
         link.teardown();
         return;
     }
+    LVGL_LOCK();
     auto* self = s_call_instance;
 
     CallLinkOwnership::LinkId link_id{};
@@ -2076,9 +2082,9 @@ void UIManager::on_lxst_link_established(Link& link) {
         return;
     }
 
-    // Incoming and outgoing admissions are ordered on loopTask. The atomic
-    // generation reservation remains the definitive decision and protects
-    // against any future callback execution-context changes.
+    // Incoming and outgoing admissions are ordered by the recursive LVGL
+    // mutex, including when an interface worker dispatches this callback. The
+    // atomic generation reservation remains the definitive ownership decision.
     const uint32_t generation = self->call_begin_generation();
     lxst_breadcrumb(10, ESP.getFreeHeap());
     INFO("LXST: Incoming link established");
@@ -2134,6 +2140,7 @@ void UIManager::on_lxst_link_established(Link& link) {
 
 void UIManager::on_lxst_caller_identified(const Link& link, const Identity& identity) {
     if (!s_call_instance) return;
+    LVGL_LOCK();
     auto* self = s_call_instance;
     lxst_breadcrumb(15, ESP.getFreeHeap());
 
