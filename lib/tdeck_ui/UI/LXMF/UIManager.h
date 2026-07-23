@@ -406,7 +406,10 @@ private:
     uint32_t _call_timeout_ms;     // millis() deadline for current wait state
     bool _call_muted;
     volatile bool _call_answer_pending;  // Set by LVGL task, consumed by main loop
-    volatile bool _call_link_closed_pending;  // Set by link callback, consumed by call_update
+    // Owning generation set by the link callback and consumed by call_update.
+    // A generation, rather than a boolean, prevents a delayed close from ending
+    // a subsequently admitted call.
+    std::atomic<uint32_t> _call_link_closed_generation{0};
     // Signal queue: written by Reticulum thread, consumed by call_update under LVGL lock
     static constexpr int SIGNAL_QUEUE_SIZE = 8;
     volatile uint8_t _call_signal_queue[SIGNAL_QUEUE_SIZE];

@@ -117,7 +117,7 @@ UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::Me
       _call_timeout_ms(0),
       _call_muted(false),
       _call_answer_pending(false),
-      _call_link_closed_pending(false),
+      _call_link_closed_generation(0),
       _call_signal_write(0),
       _call_signal_read(0),
       _call_audio_rx_count(0),
@@ -1061,11 +1061,13 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
     lxst_breadcrumb(5, ESP.getFreeHeap());
 
     _call_dest_hash = peer_dest.hash();
+    _call_answer_pending = false;
     _call_audio_rx_count = 0;
     _call_audio_tx_count = 0;
-    _call_link_closed_pending = false;
+    _call_link_closed_generation.store(0, std::memory_order_release);
     _call_signal_write = 0;
     _call_signal_read = 0;
+    _call_commands.take();
 
     {
         std::string dh = peer_dest.hash().toHex().substr(0, 16);
@@ -1168,11 +1170,15 @@ void UIManager::call_hangup() {
 
     _call_peer_hash = Bytes();
     _call_dest_hash = Bytes();
+    _call_start_ms = 0;
     _call_timeout_ms = 0;
+    _call_muted = false;
     _call_answer_pending = false;
-    _call_link_closed_pending = false;
+    _call_link_closed_generation.store(0, std::memory_order_release);
     _call_signal_write = 0;
     _call_signal_read = 0;
+    _call_audio_rx_count = 0;
+    _call_audio_tx_count = 0;
     _call_commands.take();
     _call_state = CallState::IDLE;
     call_clear_generation(generation);
@@ -1689,11 +1695,15 @@ void UIManager::call_ended() {
 
     _call_peer_hash = Bytes();
     _call_dest_hash = Bytes();
+    _call_start_ms = 0;
     _call_timeout_ms = 0;
+    _call_muted = false;
     _call_answer_pending = false;
-    _call_link_closed_pending = false;
+    _call_link_closed_generation.store(0, std::memory_order_release);
     _call_signal_write = 0;
     _call_signal_read = 0;
+    _call_audio_rx_count = 0;
+    _call_audio_tx_count = 0;
     _call_commands.take();
     _call_state = CallState::IDLE;
     call_clear_generation(generation);
@@ -1792,9 +1802,13 @@ void UIManager::stop_loopback() {
 void UIManager::call_update() {
     uint32_t now = millis();
 
-    // Process deferred link closed (set by Reticulum callback, consumed here under LVGL lock)
-    if (_call_link_closed_pending) {
-        _call_link_closed_pending = false;
+    // Consume exactly one deferred close. It may have been stored by an old
+    // callback after teardown cleared the slot, so revalidate both generation
+    // and the current stored owner before allowing it to end a call.
+    const uint32_t closed_generation =
+        _call_link_closed_generation.exchange(0, std::memory_order_acq_rel);
+    if (closed_generation != 0 &&
+        call_owns_link(_call_link, closed_generation)) {
         call_ended();
         return;
     }
@@ -1924,45 +1938,61 @@ void UIManager::call_update() {
 
 void UIManager::on_call_link_established(Link& link) {
     if (!s_call_instance) return;
+    auto* self = s_call_instance;
+
+    const uint32_t generation =
+        self->_call_link_generation.load(std::memory_order_acquire);
+    if (!self->call_owns_link(link, generation) ||
+        self->_call_state != CallState::LINK_ESTABLISHING) {
+        WARNING("LXST: Stale outgoing link established (ignoring)");
+        return;
+    }
 
     char buf[80];
     snprintf(buf, sizeof(buf), "LXST: Outgoing link established (status=%d)", (int)link.status());
     INFO(buf);
 
-    // Update stored link with the established reference and register callbacks
-    s_call_instance->_call_link = link;
-    s_call_instance->_call_link.set_packet_callback(on_call_link_packet);
-    s_call_instance->_call_link.set_link_closed_callback(on_call_link_closed);
+    // The initiating link is already the stored generation owner. Register on
+    // that owner without allowing a callback argument to overwrite it.
+    self->_call_link.set_packet_callback(on_call_link_packet);
+    self->_call_link.set_link_closed_callback(on_call_link_closed);
     INFO("LXST: Packet callback registered on outgoing link");
 
     // Transition to waiting for STATUS_AVAILABLE
-    s_call_instance->_call_state = CallState::WAIT_AVAILABLE;
-    s_call_instance->_call_timeout_ms = millis() + 10000;  // 10s timeout
+    self->_call_state = CallState::WAIT_AVAILABLE;
+    self->_call_timeout_ms = millis() + 10000;  // 10s timeout
     INFO("LXST: Waiting for STATUS_AVAILABLE (10s timeout)");
 }
 
 void UIManager::on_call_link_closed(Link& link) {
     if (!s_call_instance) return;
+    auto* self = s_call_instance;
 
-    // Ignore stale link closures (e.g. old link teardown completing after a
-    // new call started). A missing current link is stale too: teardown may
-    // have reset _call_link before its later close callback is dispatched.
-    if (!s_call_instance->_call_link || link != s_call_instance->_call_link) {
+    const uint32_t generation =
+        self->_call_link_generation.load(std::memory_order_acquire);
+    if (!self->call_owns_link(link, generation)) {
         WARNING("LXST: Stale link closed (ignoring)");
         return;
     }
 
     WARNING("LXST: Link closed (deferred)");
 
-    // Don't call call_ended() here — defer to call_update() on loopTask.
-    if (s_call_instance->_call_state != CallState::IDLE) {
-        s_call_instance->_call_link_closed_pending = true;
-    }
+    // Don't call call_ended() here — defer the owning generation to
+    // call_update() on loopTask, which revalidates ownership after exchange.
+    self->_call_link_closed_generation.store(generation, std::memory_order_release);
 }
 
 void UIManager::on_call_link_packet(const Bytes& plaintext, const Packet& packet) {
     if (!s_call_instance) return;
-    s_call_instance->call_on_packet(plaintext);
+    auto* self = s_call_instance;
+    const Link& callback_link = packet.link();
+    const uint32_t generation =
+        self->_call_link_generation.load(std::memory_order_acquire);
+    if (!self->call_owns_link(callback_link, generation)) {
+        WARNING("LXST: Stale link packet (ignoring)");
+        return;
+    }
+    self->call_on_packet(plaintext);
 }
 
 // ── LXST Incoming Call Callbacks ──
@@ -2001,7 +2031,7 @@ void UIManager::on_lxst_link_established(Link& link) {
     self->_call_dest_hash = Bytes();
     self->_call_muted = false;
     self->_call_answer_pending = false;
-    self->_call_link_closed_pending = false;
+    self->_call_link_closed_generation.store(0, std::memory_order_release);
     self->_call_signal_write = 0;
     self->_call_signal_read = 0;
     self->_call_audio_rx_count = 0;

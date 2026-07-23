@@ -30,4 +30,4 @@ def test_call_generation_guard(tmp_path):
     assert compiled.returncode == 0, compiled.stderr
     ran = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30)
     assert ran.returncode == 0, ran.stdout + ran.stderr
-    assert "8 passed, 0 failed" in ran.stdout
+    assert "9 passed, 0 failed" in ran.stdout
