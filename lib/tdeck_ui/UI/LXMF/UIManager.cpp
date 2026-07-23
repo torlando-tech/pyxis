@@ -332,7 +332,9 @@ bool UIManager::init() {
 
     // Set up answer callback for incoming calls (deferred to main loop)
     _call_screen->set_answer_callback(
-        [this]() { _call_answer_pending = true; }
+        [this]() {
+            _call_answer_pending.store(true, std::memory_order_release);
+        }
     );
 
     // Load conversations and show conversation list
@@ -384,6 +386,21 @@ void UIManager::update() {
         _settings_screen->tick();  // keep the live clock / GPS / system readouts ticking
     }
     LVGL_LOCK();
+
+    // Outgoing starts are initiated only here on loopTask. Reticulum callback
+    // dispatch also runs on loopTask, in a later reticulum->loop() iteration,
+    // so Link construction, exact-ID publication, and state assignment finish
+    // before an establishment response can be processed.
+    CallStartMailbox::PeerHash startPeerHash{};
+    if (_call_starts.take(startPeerHash)) {
+        if (_call_state == CallState::IDLE &&
+            call_current_generation() == 0) {
+            call_initiate(Bytes(startPeerHash.data(), startPeerHash.size()));
+        } else {
+            WARNING("LXST: Discarding stale/busy call start request");
+        }
+    }
+
     // Process outbound LXMF messages
     _router.process_outbound();
 
@@ -667,12 +684,18 @@ bool UIManager::on_send_message_from_chat(const String& content) {
 
 void UIManager::on_call_from_chat() {
     if (!_current_peer_hash) return;
-    if (_call_state != CallState::IDLE) {
-        WARNING("Already in a call");
+    if (_current_peer_hash.size() != CallStartMailbox::PeerHash{}.size()) {
+        WARNING("LXST: Call peer hash is not exactly 16 bytes");
         return;
     }
 
-    call_initiate(_current_peer_hash);
+    CallStartMailbox::PeerHash peerHash{};
+    for (size_t i = 0; i < peerHash.size(); ++i) {
+        peerHash[i] = _current_peer_hash[i];
+    }
+    if (!_call_starts.request(peerHash)) {
+        WARNING("LXST: Call start already pending");
+    }
 }
 
 bool UIManager::on_send_message_from_compose(const Bytes& dest_hash, const String& message) {
@@ -1036,8 +1059,9 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
     lxst_breadcrumb(4, ESP.getFreeHeap());
 
     // Reserve a generation only after the outgoing call has passed its
-    // acceptance checks. Incoming-link callbacks can race this LVGL path, so
-    // the atomic reservation is the definitive admission check.
+    // acceptance checks. Call initiation and Reticulum callback dispatch are
+    // serialized on loopTask; the atomic reservation remains the definitive
+    // admission check against an incoming owner accepted before this update.
     const uint32_t generation = call_begin_generation();
     if (generation == 0) {
         WARNING("LXST: Another call was accepted concurrently");
@@ -1057,7 +1081,7 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
     lxst_breadcrumb(5, ESP.getFreeHeap());
 
     _call_dest_hash = peer_dest.hash();
-    _call_answer_pending = false;
+    _call_answer_pending.store(false, std::memory_order_release);
     _call_audio_rx_count = 0;
     _call_audio_tx_count = 0;
     _call_signal_write = 0;
@@ -1125,7 +1149,7 @@ bool UIManager::test_call_set_profile(int profile) {
 
 bool UIManager::test_call_answer() {
     if (_call_state != CallState::INCOMING_RINGING) return false;
-    _call_answer_pending = true;
+    _call_answer_pending.store(true, std::memory_order_release);
     return true;
 }
 
@@ -1178,7 +1202,7 @@ void UIManager::call_hangup() {
     _call_start_ms = 0;
     _call_timeout_ms = 0;
     _call_muted = false;
-    _call_answer_pending = false;
+    _call_answer_pending.store(false, std::memory_order_release);
     _call_signal_write = 0;
     _call_signal_read = 0;
     _call_audio_rx_count = 0;
@@ -1720,7 +1744,7 @@ void UIManager::call_ended() {
     _call_start_ms = 0;
     _call_timeout_ms = 0;
     _call_muted = false;
-    _call_answer_pending = false;
+    _call_answer_pending.store(false, std::memory_order_release);
     _call_signal_write = 0;
     _call_signal_read = 0;
     _call_audio_rx_count = 0;
@@ -1839,8 +1863,7 @@ void UIManager::call_update() {
     }
 
     // Process deferred answer (set by LVGL task, consumed here on main thread)
-    if (_call_answer_pending) {
-        _call_answer_pending = false;
+    if (_call_answer_pending.exchange(false, std::memory_order_acq_rel)) {
         call_answer();
     }
 
@@ -2053,8 +2076,9 @@ void UIManager::on_lxst_link_established(Link& link) {
         return;
     }
 
-    // Incoming callbacks race outgoing initiation and other incoming links.
-    // The atomic generation reservation is the definitive admission decision.
+    // Incoming and outgoing admissions are ordered on loopTask. The atomic
+    // generation reservation remains the definitive decision and protects
+    // against any future callback execution-context changes.
     const uint32_t generation = self->call_begin_generation();
     lxst_breadcrumb(10, ESP.getFreeHeap());
     INFO("LXST: Incoming link established");
@@ -2086,7 +2110,7 @@ void UIManager::on_lxst_link_established(Link& link) {
     self->_call_peer_hash = Bytes();
     self->_call_dest_hash = Bytes();
     self->_call_muted = false;
-    self->_call_answer_pending = false;
+    self->_call_answer_pending.store(false, std::memory_order_release);
     self->_call_signal_write = 0;
     self->_call_signal_read = 0;
     self->_call_audio_rx_count = 0;

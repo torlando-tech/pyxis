@@ -12,10 +12,13 @@
 namespace UI {
 namespace LXMF {
 
-// Lock-free-shaped publication of the exact 128-bit Reticulum link ID together
-// with its call generation. Atomic words avoid data races while the generation
-// acts as a publication seqlock, so readers never accept a torn ID. Writers are
-// serialized by CallGenerationGuard in UIManager.
+// Publication of the exact 128-bit Reticulum link ID together with its call
+// generation. Writers are serialized by CallGenerationGuard in UIManager.
+// Every publication-marker and ID-word operation is sequentially consistent:
+// in that single total order, a reader that observes any replacement ID word
+// must have its final generation read after the writer's preceding detach (0),
+// and therefore cannot accept the old nonzero generation. A reader accepts only
+// equal nonzero generation reads around all four exact ID words.
 class CallLinkOwnership {
 public:
     using LinkId = std::array<uint8_t, 16>;
@@ -24,26 +27,26 @@ public:
     bool publish(uint32_t generation, const LinkId& id) {
         if (generation == 0 || generation > MAX_GENERATION) return false;
 
-        // Detach the previous publication before changing any ID word. Readers
-        // that began against the old owner reject it on their final generation
-        // read even if they observe a mixture of old and new words.
-        _generation.store(0, std::memory_order_release);
+        // Detach the previous publication before changing any ID word. The SC
+        // total-order argument documented above makes mixed snapshots reject.
+        _generation.store(0, std::memory_order_seq_cst);
         for (size_t word = 0; word < _id_words.size(); ++word) {
-            _id_words[word].store(packWord(id, word), std::memory_order_relaxed);
+            _id_words[word].store(packWord(id, word),
+                                  std::memory_order_seq_cst);
         }
-        _close_state.store(generation << 1, std::memory_order_release);
-        _generation.store(generation, std::memory_order_release);
+        _close_state.store(generation << 1, std::memory_order_seq_cst);
+        _generation.store(generation, std::memory_order_seq_cst);
         return true;
     }
 
     bool owns(uint32_t generation, const LinkId& id) const {
         if (generation == 0 ||
-            _generation.load(std::memory_order_acquire) != generation) {
+            _generation.load(std::memory_order_seq_cst) != generation) {
             return false;
         }
 
         for (size_t word = 0; word < _id_words.size(); ++word) {
-            if (_id_words[word].load(std::memory_order_relaxed) !=
+            if (_id_words[word].load(std::memory_order_seq_cst) !=
                 packWord(id, word)) {
                 return false;
             }
@@ -51,11 +54,12 @@ public:
 
         // A writer may have detached and started replacing the ID after the
         // first generation read. Accept only a stable publication.
-        return _generation.load(std::memory_order_acquire) == generation;
+        return _generation.load(std::memory_order_seq_cst) == generation;
     }
 
     uint32_t generationFor(const LinkId& id) const {
-        const uint32_t generation = _generation.load(std::memory_order_acquire);
+        const uint32_t generation =
+            _generation.load(std::memory_order_seq_cst);
         return owns(generation, id) ? generation : 0;
     }
 
@@ -64,24 +68,24 @@ public:
 
         uint32_t expected = generation << 1;
         return _close_state.compare_exchange_strong(
-            expected, expected | 1u, std::memory_order_acq_rel,
-            std::memory_order_acquire);
+            expected, expected | 1u, std::memory_order_seq_cst,
+            std::memory_order_seq_cst);
     }
 
     // Returns the generation whose pending close was consumed, or zero. The
     // exact encoded generation prevents an old callback from clearing or
     // replacing a newer owner's pending close.
     uint32_t takeClosed() {
-        const uint32_t generation = _generation.load(std::memory_order_acquire);
+        const uint32_t generation = _generation.load(std::memory_order_seq_cst);
         if (generation == 0) return 0;
 
         uint32_t expected = (generation << 1) | 1u;
         if (!_close_state.compare_exchange_strong(
-                expected, generation << 1, std::memory_order_acq_rel,
-                std::memory_order_acquire)) {
+                expected, generation << 1, std::memory_order_seq_cst,
+                std::memory_order_seq_cst)) {
             return 0;
         }
-        return _generation.load(std::memory_order_acquire) == generation
+        return _generation.load(std::memory_order_seq_cst) == generation
                    ? generation
                    : 0;
     }
@@ -91,8 +95,8 @@ public:
 
         uint32_t expected_generation = generation;
         if (!_generation.compare_exchange_strong(
-                expected_generation, 0, std::memory_order_acq_rel,
-                std::memory_order_acquire)) {
+                expected_generation, 0, std::memory_order_seq_cst,
+                std::memory_order_seq_cst)) {
             return false;
         }
 
@@ -100,11 +104,11 @@ public:
         // only this generation's two exact states until neither remains; a
         // newer generation's slot is never overwritten.
         for (;;) {
-            uint32_t state = _close_state.load(std::memory_order_acquire);
+            uint32_t state = _close_state.load(std::memory_order_seq_cst);
             if ((state >> 1) != generation) break;
             if (_close_state.compare_exchange_weak(
-                    state, 0, std::memory_order_acq_rel,
-                    std::memory_order_acquire)) {
+                    state, 0, std::memory_order_seq_cst,
+                    std::memory_order_seq_cst)) {
                 break;
             }
         }

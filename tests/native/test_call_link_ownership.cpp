@@ -177,35 +177,56 @@ static void invalid_generations_are_never_published() {
     EXPECT_EQ(ownership.generationFor(a), 0u);
 }
 
-static void concurrent_publication_never_accepts_a_torn_128_bit_id() {
+static void concurrent_publication_never_accepts_mixed_128_bit_ids() {
     CallLinkOwnership ownership;
     CallLinkOwnership::LinkId a{};
     CallLinkOwnership::LinkId b{};
-    CallLinkOwnership::LinkId torn{};
     a.fill(0x11);
     b.fill(0xee);
-    for (size_t i = 0; i < torn.size(); ++i) {
-        torn[i] = i < torn.size() / 2 ? a[i] : b[i];
+
+    std::array<CallLinkOwnership::LinkId, 4> mixed{};
+    for (size_t i = 0; i < a.size(); ++i) {
+        mixed[0][i] = i < 8 ? a[i] : b[i];
+        mixed[1][i] = (i & 1u) == 0 ? a[i] : b[i];
+        mixed[2][i] = i < 4 || (i >= 8 && i < 12) ? a[i] : b[i];
+        mixed[3][i] = i < 12 ? b[i] : a[i];
     }
     EXPECT_TRUE(ownership.publish(1, a));
 
+    std::atomic<bool> publishing{false};
     std::atomic<bool> done{false};
-    std::atomic<bool> accepted_torn{false};
+    std::atomic<bool> acceptedMixed{false};
+    std::atomic<uint64_t> completedChecks{0};
+    std::atomic<uint64_t> concurrentChecks{0};
     std::thread reader([&] {
         while (!done.load(std::memory_order_acquire)) {
-            if (ownership.generationFor(torn) != 0) {
-                accepted_torn.store(true, std::memory_order_release);
-                return;
+            for (const auto& candidate : mixed) {
+                if (ownership.generationFor(candidate) != 0) {
+                    acceptedMixed.store(true, std::memory_order_release);
+                    return;
+                }
+                completedChecks.fetch_add(1, std::memory_order_relaxed);
+                if (publishing.load(std::memory_order_acquire)) {
+                    concurrentChecks.fetch_add(1, std::memory_order_relaxed);
+                }
             }
         }
     });
+
+    publishing.store(true, std::memory_order_release);
+    while (concurrentChecks.load(std::memory_order_acquire) == 0) {
+        std::this_thread::yield();
+    }
     for (uint32_t generation = 2; generation < 100002; ++generation) {
         EXPECT_TRUE(ownership.publish(
             generation, (generation & 1u) == 0 ? b : a));
     }
+    publishing.store(false, std::memory_order_release);
     done.store(true, std::memory_order_release);
     reader.join();
-    EXPECT_TRUE(!accepted_torn.load(std::memory_order_acquire));
+    EXPECT_TRUE(completedChecks.load(std::memory_order_acquire) > 0);
+    EXPECT_TRUE(concurrentChecks.load(std::memory_order_acquire) > 0);
+    EXPECT_TRUE(!acceptedMixed.load(std::memory_order_acquire));
 }
 
 int main() {
@@ -216,7 +237,7 @@ int main() {
     RUN(stale_clear_cannot_detach_or_clear_new_owner_close);
     RUN(concurrent_stale_and_current_close_publication_is_exact);
     RUN(invalid_generations_are_never_published);
-    RUN(concurrent_publication_never_accepts_a_torn_128_bit_id);
+    RUN(concurrent_publication_never_accepts_mixed_128_bit_ids);
     std::printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

@@ -7,6 +7,7 @@
 #ifdef ARDUINO
 #include <Arduino.h>
 #include <lvgl.h>
+#include <atomic>
 #include <functional>
 #include "ConversationListScreen.h"
 #include "ChatScreen.h"
@@ -18,6 +19,7 @@
 #include "PropagationNodesScreen.h"
 #include "CallScreen.h"
 #include "CallCommandMailbox.h"
+#include "CallStartMailbox.h"
 #include "CallGenerationGuard.h"
 #include "CallLinkOwnership.h"
 #include "LXMF/LXMRouter.h"
@@ -400,13 +402,15 @@ private:
     // takes the safe NoneConstructor branch. Same fix as DirectLinkSlot.
     RNS::Link _call_link{RNS::Type::NONE};
     LXSTAudio* _lxst_audio;
+    CallStartMailbox _call_starts;
     CallCommandMailbox _call_commands;
     CallGenerationGuard _call_generation_guard;
     CallLinkOwnership _call_link_ownership;
     uint32_t _call_start_ms;       // millis() when call became ACTIVE
     uint32_t _call_timeout_ms;     // millis() deadline for current wait state
     bool _call_muted;
-    volatile bool _call_answer_pending;  // Set by LVGL task, consumed by main loop
+    // Set by the LVGL task and consumed/reset by loopTask.
+    std::atomic<bool> _call_answer_pending;
 
     // Signal queue: written by Reticulum thread, consumed by call_update under LVGL lock
     static constexpr int SIGNAL_QUEUE_SIZE = 8;
