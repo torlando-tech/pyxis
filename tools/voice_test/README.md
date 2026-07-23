@@ -47,6 +47,15 @@ T-Deck serial hooks to verify:
 - Sideband calls Pyxis and exchanges synthetic Codec2 audio in both directions.
 - Pyxis still accepts another incoming call after both calls and hangups.
 - Every Pyxis decode succeeds and produces non-zero PCM.
+- A raw LXST caller can hold the incoming reservation without identifying; a
+  second raw link receives `STATUS_BUSY` and cannot replace it.
+- A local `T:CALL` request cannot displace an incoming link that is still
+  identifying.
+- Closing reserved caller A and then ringing caller B isolates B from a feasible
+  late action and queued callback drain from A.
+- A non-identifying caller is closed after the 15-second firmware timeout, and a
+  subsequent normal call still rings, answers, reaches `ACTIVE`, exchanges audio
+  in both directions, and hangs up cleanly.
 
 Build the test firmware with the Mac TCP server baked in, then upload it:
 
@@ -63,8 +72,17 @@ Run from the Mac with its Reticulum venv (defaults to the local TCP server on
 ```
 
 Optional overrides: `PYXIS_SERIAL_PORT`, `PYXIS_RNS_HOST`,
-`PYXIS_RNS_PORT`, and `PYXIS_CALL_SECONDS`. Each run uses a fresh Sideband
-identity and isolated RNS storage so stale cached paths cannot false-pass setup.
+`PYXIS_RNS_PORT`, `PYXIS_CALL_SECONDS`, and
+`PYXIS_IDENTIFY_TIMEOUT_MARGIN` (seconds beyond the fixed 15-second firmware
+identification timeout; default `3`, must be positive). Each run uses a fresh
+Sideband identity and isolated RNS storage so stale cached paths cannot false-pass setup.
 On Apple Silicon the harness re-executes itself with `/opt/homebrew/lib` on
 `DYLD_LIBRARY_PATH`, allowing LXST/PyOgg to load Homebrew `libopus` for incoming
 calls.
+
+The contention cases use the pinned Reticulum 1.3.8 `Identity`, `Destination`,
+and `Link` APIs directly. They require current Pyxis and Sideband LXST announces,
+the TCP Reticulum hub, a serial-connected T-Deck running the test-hooks firmware,
+and the Mac Reticulum environment shown above. Run the host-native generation
+guard tests separately for the deterministic portable stale-callback model; the
+raw-link stale-action case is an additional physical integration check.

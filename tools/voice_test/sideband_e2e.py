@@ -22,6 +22,7 @@ sys.path.append(os.path.join(HOME, "Library", "Python", "3.9", "lib", "python", 
 import numpy as np
 import serial
 import RNS
+from RNS.vendor import umsgpack as msgpack
 import LXST.Sources as Sources
 import LXST.Sinks as Sinks
 from LXST.Codecs.Codec2 import Codec2
@@ -31,6 +32,16 @@ from sideband.voice import ReticulumTelephone
 PORT = os.environ.get("PYXIS_SERIAL_PORT") or sorted(glob.glob("/dev/cu.usbmodem*"))[0]
 PROFILE = Profiles.BANDWIDTH_ULTRA_LOW
 RUN_SECONDS = float(os.environ.get("PYXIS_CALL_SECONDS", "7"))
+IDENTIFY_TIMEOUT_SECONDS = 15.0
+IDENTIFY_TIMEOUT_MARGIN = float(os.environ.get("PYXIS_IDENTIFY_TIMEOUT_MARGIN", "3"))
+
+if not math.isfinite(IDENTIFY_TIMEOUT_MARGIN) or IDENTIFY_TIMEOUT_MARGIN <= 0:
+    raise ValueError("PYXIS_IDENTIFY_TIMEOUT_MARGIN must be a positive finite number")
+
+FIELD_SIGNALLING = 0x00
+STATUS_BUSY = 0x00
+STATUS_AVAILABLE = 0x03
+STATUS_RINGING = 0x04
 
 class Stats:
     lock = threading.Lock()
@@ -148,6 +159,152 @@ class Dev:
         return False,seen
     def close(self): self.s.close()
 
+class RawCaller:
+    """A deliberately manual LXST caller backed by one fresh RNS identity.
+
+    This uses the RNS 1.3.8 Link API directly instead of Telephone, since
+    Telephone automatically identifies as soon as STATUS_AVAILABLE arrives.
+    """
+    def __init__(self, destination_hash, label):
+        self.label = label
+        self.identity = RNS.Identity()
+        self.destination_hash = bytes(destination_hash)
+        remote_identity = RNS.Identity.recall(self.destination_hash)
+        if remote_identity is None:
+            raise RuntimeError(
+                f"{label}: no recalled identity for LXST destination "
+                f"{self.destination_hash.hex()}; wait for a current Pyxis announce"
+            )
+        self.destination = RNS.Destination(
+            remote_identity, RNS.Destination.OUT, RNS.Destination.SINGLE,
+            "lxst", "telephony")
+        if self.destination.hash != self.destination_hash:
+            raise RuntimeError(
+                f"{label}: recalled identity produced {self.destination.hash.hex()}, "
+                f"expected {self.destination_hash.hex()}"
+            )
+        self._established = threading.Event()
+        self._closed = threading.Event()
+        self._condition = threading.Condition()
+        self._signals = []
+        self._packet_errors = []
+        self.link = RNS.Link(
+            self.destination,
+            established_callback=self._on_established,
+            closed_callback=self._on_closed)
+
+    def _on_established(self, link):
+        link.set_packet_callback(self._on_packet)
+        self._established.set()
+        print(f"{self.label} RAW_LINK_ESTABLISHED id={link.link_id.hex()}", flush=True)
+
+    def _on_closed(self, link):
+        self._closed.set()
+        with self._condition:
+            self._condition.notify_all()
+        print(f"{self.label} RAW_LINK_CLOSED reason={link.teardown_reason}", flush=True)
+
+    def _on_packet(self, data, packet):
+        try:
+            unpacked = msgpack.unpackb(data)
+            if not isinstance(unpacked, dict) or FIELD_SIGNALLING not in unpacked:
+                return
+            signals = unpacked[FIELD_SIGNALLING]
+            if not isinstance(signals, list):
+                signals = [signals]
+            if not all(isinstance(signal, int) for signal in signals):
+                raise ValueError(f"non-integer signalling values: {signals!r}")
+            with self._condition:
+                self._signals.extend(signals)
+                self._condition.notify_all()
+            print(f"{self.label} RAW_SIGNALS={signals}", flush=True)
+        except Exception as exc:
+            with self._condition:
+                self._packet_errors.append(repr(exc))
+                self._condition.notify_all()
+            print(f"{self.label} RAW_PACKET_ERROR={exc!r}", flush=True)
+
+    @property
+    def signals(self):
+        with self._condition:
+            return tuple(self._signals)
+
+    @property
+    def is_open(self):
+        return self.link.status != RNS.Link.CLOSED
+
+    def wait_established(self, timeout=20):
+        if not self._established.wait(timeout):
+            raise AssertionError(
+                f"{self.label}: raw link did not establish in {timeout}s "
+                f"(status={self.link.status}, closed={self._closed.is_set()})")
+        return self
+
+    def wait_signal(self, signal, timeout=8):
+        deadline = time.time()+timeout
+        with self._condition:
+            while signal not in self._signals and time.time() < deadline:
+                self._condition.wait(deadline-time.time())
+            if self._packet_errors:
+                raise AssertionError(
+                    f"{self.label}: failed to decode LXST packet(s): {self._packet_errors}")
+            if signal not in self._signals:
+                raise AssertionError(
+                    f"{self.label}: did not receive signal 0x{signal:02x} in {timeout}s; "
+                    f"received={self._signals}, closed={self._closed.is_set()}")
+        return self
+
+    def wait_closed(self, timeout=8):
+        if not self._closed.wait(timeout):
+            raise AssertionError(
+                f"{self.label}: link did not close in {timeout}s "
+                f"(status={self.link.status}, signals={self.signals})")
+        return self
+
+    def identify(self, allow_closed=False):
+        if not self._established.is_set():
+            raise RuntimeError(f"{self.label}: cannot identify before link establishment")
+        if not self.is_open:
+            if allow_closed:
+                # RNS 1.3.8 identify() intentionally becomes a no-op unless the
+                # initiator link is ACTIVE. Calling it exercises the feasible
+                # late-action path without fabricating a Reticulum callback.
+                self.link.identify(self.identity)
+                return False
+            raise RuntimeError(f"{self.label}: cannot identify on a closed link")
+        self.link.identify(self.identity)
+        return True
+
+    def close(self, timeout=8):
+        if self.link.status != RNS.Link.CLOSED:
+            self.link.teardown()
+        if self._established.is_set():
+            self.wait_closed(timeout)
+
+def assert_state_for(dev, wanted, duration, label):
+    deadline=time.time()+duration; seen=[]
+    while time.time()<deadline:
+        state=dev.state(); seen.append(state)
+        if state != wanted:
+            raise AssertionError(
+                f"{label}: expected state {wanted} for {duration}s, "
+                f"observed {state}; history={seen}")
+        time.sleep(0.25)
+    return seen
+
+def cleanup_raw_callers(dev, *callers):
+    try:
+        if dev.state() != "IDLE": dev.cmd("T:CALL_HANGUP")
+    finally:
+        for caller in callers:
+            if caller is not None:
+                try: caller.close()
+                except Exception as exc:
+                    print(f"{caller.label} RAW_CLEANUP={exc!r}", flush=True)
+        ok,seen=dev.wait_state("IDLE",15)
+        if not ok:
+            raise AssertionError(f"raw-call cleanup did not reach IDLE; states={seen}")
+
 def val(resp,key):
     m=re.search(rf"\b{re.escape(key)}=([0-9]+)",resp or "")
     return int(m.group(1)) if m else -1
@@ -232,6 +389,119 @@ def main():
     phone.announce()
     results=[]
     try:
+        # Both directions need a current announce before the raw-link cases.
+        phone.announce(); dev.cmd("T:ANNLXST")
+        assert wait_path_pyxis(dev,side_dest,45),"Pyxis did not learn Sideband LXST path"
+        assert wait_path_rns(bytes.fromhex(py_dest),45),"Sideband did not learn Pyxis LXST path"
+
+        # Contention 1: B must be rejected without displacing unidentified A.
+        a=b=None
+        try:
+            print("TEST_IDENTIFY_CONTENTION raw A then raw B",flush=True)
+            a=RawCaller(bytes.fromhex(py_dest),"CONTENTION_A")
+            a.wait_established()
+            a.wait_signal(STATUS_AVAILABLE)
+            ok,seen=dev.wait_state("INCOMING_IDENTIFYING",10)
+            print("TEST_IDENTIFY_CONTENTION states_to_identifying",seen,flush=True)
+            assert ok,"Pyxis did not reserve caller A while awaiting identity"
+            b=RawCaller(bytes.fromhex(py_dest),"CONTENTION_B")
+            b.wait_established()
+            b.wait_signal(STATUS_BUSY).wait_closed()
+            assert_state_for(dev,"INCOMING_IDENTIFYING",1.0,"caller B rejection")
+            assert a.is_open,"caller A was closed when caller B was rejected"
+            a.identify(); a.wait_signal(STATUS_RINGING)
+            ok,seen=dev.wait_state("INCOMING_RINGING",10)
+            assert ok,f"caller A did not ring after identification; states={seen}"
+            results.append(("unidentified_owner_rejects_second_link",True,
+                            {"a_signals":a.signals,"b_signals":b.signals,"states":seen}))
+        finally:
+            cleanup_raw_callers(dev,a,b)
+
+        # Contention 2: a local outgoing request cannot steal A's reservation.
+        a=None
+        try:
+            print("TEST_IDENTIFY_OUTGOING outgoing request while raw A owns",flush=True)
+            a=RawCaller(bytes.fromhex(py_dest),"OUTGOING_RACE_A")
+            a.wait_established()
+            a.wait_signal(STATUS_AVAILABLE)
+            ok,seen=dev.wait_state("INCOMING_IDENTIFYING",10)
+            assert ok,f"Pyxis did not enter identifying before outgoing race; states={seen}"
+            response,_=dev.cmd("T:CALL "+side_dest)
+            assert response is not None,"T:CALL did not return during identification contention"
+            stable=assert_state_for(dev,"INCOMING_IDENTIFYING",1.0,"outgoing initiation")
+            assert a.is_open,"outgoing initiation displaced caller A"
+            assert not phone.is_in_call and not phone.telephone.active_call, \
+                "Sideband received an outgoing call while caller A owned Pyxis"
+            a.identify(); a.wait_signal(STATUS_RINGING)
+            ok,seen=dev.wait_state("INCOMING_RINGING",10)
+            assert ok,f"caller A did not ring after outgoing race; states={seen}"
+            results.append(("outgoing_cannot_displace_unidentified_owner",True,
+                            {"call_response":response,"stable":stable,"a_signals":a.signals}))
+        finally:
+            cleanup_raw_callers(dev,a)
+
+        # Stale A must not affect a later generation owned by identified B.
+        a=b=None
+        try:
+            print("TEST_STALE_LINK close A then identify B",flush=True)
+            a=RawCaller(bytes.fromhex(py_dest),"STALE_A")
+            a.wait_established()
+            a.wait_signal(STATUS_AVAILABLE)
+            ok,seen=dev.wait_state("INCOMING_IDENTIFYING",10)
+            assert ok,f"Pyxis did not reserve stale caller A; states={seen}"
+            a.close(); ok,seen=dev.wait_state("IDLE",15)
+            assert ok,f"Pyxis did not release caller A; states={seen}"
+            b=RawCaller(bytes.fromhex(py_dest),"STALE_B")
+            b.wait_established()
+            b.wait_signal(STATUS_AVAILABLE); b.identify(); b.wait_signal(STATUS_RINGING)
+            ok,seen=dev.wait_state("INCOMING_RINGING",10)
+            assert ok,f"caller B did not ring; states={seen}"
+            late_sent=a.identify(allow_closed=True)
+            assert not late_sent,"closed caller A unexpectedly sent a late identification"
+            stable=assert_state_for(dev,"INCOMING_RINGING",1.0,"stale caller A drain")
+            assert b.is_open,"stale caller A action closed current caller B"
+            results.append(("stale_link_cannot_displace_new_owner",True,
+                            {"late_identify_sent":late_sent,"stable":stable,"b_signals":b.signals}))
+        finally:
+            cleanup_raw_callers(dev,a,b)
+
+        # Identification timeout must close A and leave the incoming destination
+        # reusable for a complete, audio-bearing Sideband call.
+        a=None
+        try:
+            print("TEST_IDENTIFY_TIMEOUT wait for raw A timeout",flush=True)
+            a=RawCaller(bytes.fromhex(py_dest),"TIMEOUT_A")
+            a.wait_established()
+            a.wait_signal(STATUS_AVAILABLE)
+            ok,seen=dev.wait_state("INCOMING_IDENTIFYING",10)
+            assert ok,f"Pyxis did not enter identifying before timeout; states={seen}"
+            wait_seconds=IDENTIFY_TIMEOUT_SECONDS+IDENTIFY_TIMEOUT_MARGIN
+            print(f"TEST_IDENTIFY_TIMEOUT sleeping={wait_seconds:.1f}s",flush=True)
+            time.sleep(wait_seconds)
+            ok,seen=dev.wait_state("IDLE",5)
+            assert ok, \
+                f"Pyxis was not IDLE after {wait_seconds:.1f}s identification timeout; states={seen}"
+            a.wait_closed(5)
+        finally:
+            cleanup_raw_callers(dev,a)
+
+        dev.cmd("T:ANNLXST"); assert wait_path_rns(bytes.fromhex(py_dest),20)
+        print("TEST_IDENTIFY_TIMEOUT recovery Sideband -> Pyxis",flush=True)
+        recovery_dial=phone.dial(bytes.fromhex(py_id),profile=PROFILE)
+        assert recovery_dial!="no_path","timeout recovery call had no path"
+        ok,seen=dev.wait_state("INCOMING_RINGING",25)
+        assert ok,f"timeout recovery call did not ring; states={seen}"
+        print("TEST_IDENTIFY_TIMEOUT answer",dev.cmd("T:CALL_ANSWER")[0],flush=True)
+        ok,seen_active=dev.wait_state("ACTIVE",25)
+        assert ok,f"timeout recovery call did not become active; states={seen_active}"
+        deadline=time.time()+15
+        while not phone.is_in_call and time.time()<deadline: time.sleep(.2)
+        assert phone.is_in_call,"Sideband did not become active after identification timeout"
+        ok,data=run_audio(dev,"TEST_IDENTIFY_TIMEOUT")
+        results.append(("identification_timeout_recovery_bidirectional",ok,
+                        {"dial":recovery_dial,"ring_states":seen,"audio":data}))
+        phone.hangup(); dev.wait_state("IDLE",15); time.sleep(1)
+
         # Pyxis -> Sideband first. This proves Pyxis learned the fresh peer
         # announce before testing the reciprocal incoming route.
         phone.announce(); dev.cmd("T:ANNLXST")
