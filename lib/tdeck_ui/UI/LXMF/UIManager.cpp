@@ -117,7 +117,6 @@ UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::Me
       _call_timeout_ms(0),
       _call_muted(false),
       _call_answer_pending(false),
-      _call_link_closed_generation(0),
       _call_signal_write(0),
       _call_signal_read(0),
       _call_audio_rx_count(0),
@@ -1044,9 +1043,6 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
         WARNING("LXST: Another call was accepted concurrently");
         return;
     }
-    // Publish link ownership before any state belonging to this call. The
-    // generation guard remains reserved until owner-side teardown completes.
-    _call_link_generation.store(generation, std::memory_order_release);
     _call_peer_hash = peer_hash;
     _call_muted = false;
 
@@ -1064,7 +1060,6 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
     _call_answer_pending = false;
     _call_audio_rx_count = 0;
     _call_audio_tx_count = 0;
-    _call_link_closed_generation.store(0, std::memory_order_release);
     _call_signal_write = 0;
     _call_signal_read = 0;
     _call_commands.take();
@@ -1078,9 +1073,15 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
     }
 
     if (Transport::has_path(peer_dest.hash())) {
-        // Path known — create link immediately
+        // Register lifecycle callbacks in the constructor before the link
+        // request is sent. Publish the exact ID as soon as it returns.
         INFO("LXST: Creating link...");
         _call_link = Link(peer_dest, on_call_link_established, on_call_link_closed);
+        if (!call_publish_link(_call_link, generation)) {
+            WARNING("LXST: Link has invalid ID, aborting call");
+            call_ended();
+            return;
+        }
         _call_state = CallState::LINK_ESTABLISHING;
         _call_timeout_ms = millis() + 30000;
         INFO("LXST: Link establishing, 30s timeout");
@@ -1156,6 +1157,10 @@ void UIManager::call_hangup() {
     const uint32_t generation =
         call_current_generation();
 
+    // Detach callback ownership before touching the shared Link. Keep call
+    // admission reserved until all owner-side teardown completes.
+    _call_link_ownership.clear(generation);
+
     // call_hangup() is an owner operation: production UI paths reach it only
     // through update() on loopTask, which also owns pump_call_tx(). Keep the
     // generation reserved until teardown is complete so a concurrent incoming
@@ -1174,7 +1179,6 @@ void UIManager::call_hangup() {
     _call_timeout_ms = 0;
     _call_muted = false;
     _call_answer_pending = false;
-    _call_link_closed_generation.store(0, std::memory_order_release);
     _call_signal_write = 0;
     _call_signal_read = 0;
     _call_audio_rx_count = 0;
@@ -1218,14 +1222,8 @@ uint32_t UIManager::call_begin_generation() {
 }
 
 void UIManager::call_clear_generation(uint32_t expected_generation) {
-    if (!_call_generation_guard.owns(expected_generation)) return;
-
-    // Keep the guard reserved while detaching link ownership. A stale teardown
-    // can neither clear a newer link owner nor release a newer reservation.
-    uint32_t expected_link_generation = expected_generation;
-    _call_link_generation.compare_exchange_strong(
-        expected_link_generation, 0, std::memory_order_acq_rel,
-        std::memory_order_acquire);
+    // Callback ownership was detached before Link teardown/reset. Release call
+    // admission last so a new owner cannot overlap old owner-side cleanup.
     _call_generation_guard.release(expected_generation);
 }
 
@@ -1233,11 +1231,27 @@ uint32_t UIManager::call_current_generation() const {
     return _call_generation_guard.current();
 }
 
-bool UIManager::call_owns_link(const Link& link, uint32_t generation) const {
+bool UIManager::call_extract_link_id(
+    const Link& link, CallLinkOwnership::LinkId& id) {
+    // link_id() asserts on a default/invalid Link in pinned microReticulum.
+    if (!link) return false;
+    const Bytes& link_id = link.link_id();
+    if (link_id.size() != id.size()) return false;
+    for (size_t i = 0; i < id.size(); ++i) id[i] = link_id[i];
+    return true;
+}
+
+bool UIManager::call_publish_link(const Link& link, uint32_t generation) {
+    CallLinkOwnership::LinkId id{};
+    return call_extract_link_id(link, id) &&
+           _call_link_ownership.publish(generation, id);
+}
+
+bool UIManager::call_owns_link(
+    const CallLinkOwnership::LinkId& id, uint32_t generation) const {
     return generation != 0 &&
            _call_generation_guard.owns(generation) &&
-           _call_link_generation.load(std::memory_order_acquire) == generation &&
-           _call_link && _call_link == link;
+           _call_link_ownership.owns(generation, id);
 }
 
 void UIManager::call_teardown_audio() {
@@ -1250,7 +1264,11 @@ void UIManager::call_teardown_audio() {
 }
 
 void UIManager::call_send_signal(int signal) {
-    if (!_call_link || _call_link.status() != Type::Link::ACTIVE) return;
+    call_send_signal_on_link(_call_link, signal);
+}
+
+void UIManager::call_send_signal_on_link(const Link& link, int signal) {
+    if (!link || link.status() != Type::Link::ACTIVE) return;
 
     // Msgpack: {0x00: [signal]}
     // fixmap(1) + key(0) + fixarray(1) + msgpack-encoded integer
@@ -1280,7 +1298,7 @@ void UIManager::call_send_signal(int signal) {
 
     try {
         Bytes signal_data(msgpack_buf, len);
-        Packet packet(_call_link, signal_data);
+        Packet packet(link, signal_data);
         packet.send();
 
         char buf[48];
@@ -1685,6 +1703,10 @@ void UIManager::call_ended() {
     const uint32_t generation =
         call_current_generation();
 
+    // Reject all callbacks before shared Link teardown/reset. Keep the call
+    // generation reserved until owner-side cleanup is complete.
+    _call_link_ownership.clear(generation);
+
     call_teardown_audio();
 
     // Teardown link
@@ -1699,7 +1721,6 @@ void UIManager::call_ended() {
     _call_timeout_ms = 0;
     _call_muted = false;
     _call_answer_pending = false;
-    _call_link_closed_generation.store(0, std::memory_order_release);
     _call_signal_write = 0;
     _call_signal_read = 0;
     _call_audio_rx_count = 0;
@@ -1802,13 +1823,9 @@ void UIManager::stop_loopback() {
 void UIManager::call_update() {
     uint32_t now = millis();
 
-    // Consume exactly one deferred close. It may have been stored by an old
-    // callback after teardown cleared the slot, so revalidate both generation
-    // and the current stored owner before allowing it to end a call.
-    const uint32_t closed_generation =
-        _call_link_closed_generation.exchange(0, std::memory_order_acq_rel);
-    if (closed_generation != 0 &&
-        call_owns_link(_call_link, closed_generation)) {
+    // Consume only the current owner's atomically generation-bound close. No
+    // shared Link read is needed on this callback-to-loopTask handoff.
+    if (_call_link_ownership.takeClosed() != 0) {
         call_ended();
         return;
     }
@@ -1856,7 +1873,15 @@ void UIManager::call_update() {
             }
             Destination peer_dest(peer_identity, Type::Destination::OUT,
                                   Type::Destination::SINGLE, "lxst", "telephony");
+            const uint32_t generation = call_current_generation();
+            // Register callbacks before the constructor sends the link request,
+            // then publish its exact ID immediately after construction.
             _call_link = Link(peer_dest, on_call_link_established, on_call_link_closed);
+            if (!call_publish_link(_call_link, generation)) {
+                WARNING("LXST: Link has invalid ID, aborting call");
+                call_ended();
+                return;
+            }
             _call_state = CallState::LINK_ESTABLISHING;
             _call_timeout_ms = millis() + 30000;
             INFO("LXST: Link establishing, 30s timeout");
@@ -1940,9 +1965,14 @@ void UIManager::on_call_link_established(Link& link) {
     if (!s_call_instance) return;
     auto* self = s_call_instance;
 
+    CallLinkOwnership::LinkId link_id{};
+    if (!call_extract_link_id(link, link_id)) {
+        WARNING("LXST: Established link has invalid ID (ignoring)");
+        return;
+    }
     const uint32_t generation =
-        self->_call_link_generation.load(std::memory_order_acquire);
-    if (!self->call_owns_link(link, generation) ||
+        self->_call_link_ownership.generationFor(link_id);
+    if (!self->call_owns_link(link_id, generation) ||
         self->_call_state != CallState::LINK_ESTABLISHING) {
         WARNING("LXST: Stale outgoing link established (ignoring)");
         return;
@@ -1952,10 +1982,10 @@ void UIManager::on_call_link_established(Link& link) {
     snprintf(buf, sizeof(buf), "LXST: Outgoing link established (status=%d)", (int)link.status());
     INFO(buf);
 
-    // The initiating link is already the stored generation owner. Register on
-    // that owner without allowing a callback argument to overwrite it.
-    self->_call_link.set_packet_callback(on_call_link_packet);
-    self->_call_link.set_link_closed_callback(on_call_link_closed);
+    // Register through the validated callback argument; never read the
+    // manager's shared Link object from a transport-thread callback.
+    link.set_packet_callback(on_call_link_packet);
+    link.set_link_closed_callback(on_call_link_closed);
     INFO("LXST: Packet callback registered on outgoing link");
 
     // Transition to waiting for STATUS_AVAILABLE
@@ -1968,27 +1998,39 @@ void UIManager::on_call_link_closed(Link& link) {
     if (!s_call_instance) return;
     auto* self = s_call_instance;
 
+    CallLinkOwnership::LinkId link_id{};
+    if (!call_extract_link_id(link, link_id)) {
+        WARNING("LXST: Closed link has invalid ID (ignoring)");
+        return;
+    }
     const uint32_t generation =
-        self->_call_link_generation.load(std::memory_order_acquire);
-    if (!self->call_owns_link(link, generation)) {
+        self->_call_link_ownership.generationFor(link_id);
+    if (!self->call_owns_link(link_id, generation)) {
         WARNING("LXST: Stale link closed (ignoring)");
         return;
     }
 
     WARNING("LXST: Link closed (deferred)");
 
-    // Don't call call_ended() here — defer the owning generation to
-    // call_update() on loopTask, which revalidates ownership after exchange.
-    self->_call_link_closed_generation.store(generation, std::memory_order_release);
+    // Bind pending and generation in one CAS. If ownership changed after the
+    // validation above, this exact old state cannot overwrite the new slot.
+    if (!self->_call_link_ownership.markClosed(generation, link_id)) {
+        WARNING("LXST: Link owner changed before close deferral (ignoring)");
+    }
 }
 
 void UIManager::on_call_link_packet(const Bytes& plaintext, const Packet& packet) {
     if (!s_call_instance) return;
     auto* self = s_call_instance;
     const Link& callback_link = packet.link();
+    CallLinkOwnership::LinkId link_id{};
+    if (!call_extract_link_id(callback_link, link_id)) {
+        WARNING("LXST: Packet link has invalid ID (ignoring)");
+        return;
+    }
     const uint32_t generation =
-        self->_call_link_generation.load(std::memory_order_acquire);
-    if (!self->call_owns_link(callback_link, generation)) {
+        self->_call_link_ownership.generationFor(link_id);
+    if (!self->call_owns_link(link_id, generation)) {
         WARNING("LXST: Stale link packet (ignoring)");
         return;
     }
@@ -2003,6 +2045,13 @@ void UIManager::on_lxst_link_established(Link& link) {
         return;
     }
     auto* self = s_call_instance;
+
+    CallLinkOwnership::LinkId link_id{};
+    if (!call_extract_link_id(link, link_id)) {
+        WARNING("LXST: Incoming link has invalid ID (rejecting)");
+        link.teardown();
+        return;
+    }
 
     // Incoming callbacks race outgoing initiation and other incoming links.
     // The atomic generation reservation is the definitive admission decision.
@@ -2021,17 +2070,23 @@ void UIManager::on_lxst_link_established(Link& link) {
         return;
     }
 
-    // Publish ownership and the identifying state before installing callbacks
-    // or sending availability. No ringing UI or tone is shown in this state.
+    // Store the accepted Link before publishing its exact 128-bit ID. No
+    // callbacks are installed on the stored owner until publication and call
+    // state initialization are complete.
     lxst_breadcrumb(11, ESP.getFreeHeap());
-    self->_call_link_generation.store(generation, std::memory_order_release);
     self->_call_link = link;
+    if (!self->_call_link_ownership.publish(generation, link_id)) {
+        WARNING("LXST: Incoming link has invalid ID (rejecting)");
+        self->_call_link.teardown();
+        self->_call_link = Link(Type::NONE);
+        self->_call_generation_guard.release(generation);
+        return;
+    }
     self->_call_state = CallState::INCOMING_IDENTIFYING;
     self->_call_peer_hash = Bytes();
     self->_call_dest_hash = Bytes();
     self->_call_muted = false;
     self->_call_answer_pending = false;
-    self->_call_link_closed_generation.store(0, std::memory_order_release);
     self->_call_signal_write = 0;
     self->_call_signal_read = 0;
     self->_call_audio_rx_count = 0;
@@ -2039,14 +2094,14 @@ void UIManager::on_lxst_link_established(Link& link) {
     self->_call_commands.take();
     self->_call_timeout_ms = millis() + INCOMING_IDENTIFY_TIMEOUT_MS;
 
-    // Wait for the accepted caller to identify and observe link closure through
-    // the stored owner link, whose shared-object identity is generation-bound.
-    self->_call_link.set_remote_identified_callback(on_lxst_caller_identified);
-    self->_call_link.set_link_closed_callback(on_call_link_closed);
+    // Wait for the accepted caller to identify and observe closure. Install on
+    // the validated callback argument, not the manager's shared Link handle.
+    link.set_remote_identified_callback(on_lxst_caller_identified);
+    link.set_link_closed_callback(on_call_link_closed);
 
     // Send STATUS_AVAILABLE
     lxst_breadcrumb(12, ESP.getFreeHeap());
-    self->call_send_signal(LXST_STATUS_AVAILABLE);
+    call_send_signal_on_link(link, LXST_STATUS_AVAILABLE);
 
     lxst_breadcrumb(13, ESP.getFreeHeap());
     INFO("LXST: Waiting for caller identity (15s timeout)");
@@ -2058,11 +2113,16 @@ void UIManager::on_lxst_caller_identified(const Link& link, const Identity& iden
     auto* self = s_call_instance;
     lxst_breadcrumb(15, ESP.getFreeHeap());
 
-    // Bind identity to both the current owner link and its generation. A stale
-    // callback must not tear down or mutate a newer call.
+    CallLinkOwnership::LinkId link_id{};
+    if (!call_extract_link_id(link, link_id)) {
+        WARNING("LXST: Identified link has invalid ID (ignoring)");
+        return;
+    }
+    // Bind identity to the exact current owner ID and generation. Validation
+    // never reads the manager's shared Link object.
     const uint32_t generation =
-        self->_call_link_generation.load(std::memory_order_acquire);
-    if (!self->call_owns_link(link, generation) ||
+        self->_call_link_ownership.generationFor(link_id);
+    if (!self->call_owns_link(link_id, generation) ||
         self->_call_state != CallState::INCOMING_IDENTIFYING) {
         WARNING("LXST: Stale caller identified (ignoring)");
         return;
@@ -2074,15 +2134,17 @@ void UIManager::on_lxst_caller_identified(const Link& link, const Identity& iden
     // Store peer info
     self->_call_peer_hash = identity.hash();
 
-    // Set packet callback for signalling + audio on this link
-    self->_call_link.set_packet_callback(on_call_link_packet);
+    // Set callbacks and send through a callback-local shared-object copy, not
+    // through the manager's concurrently resettable Link handle.
+    Link callback_link(link);
+    callback_link.set_packet_callback(on_call_link_packet);
 
     // Identification completed for the reserved owner; ringing can now become
     // visible and actionable on the next call_update().
     self->_call_state = CallState::INCOMING_RINGING;
 
     // Send STATUS_RINGING
-    self->call_send_signal(LXST_STATUS_RINGING);
+    call_send_signal_on_link(callback_link, LXST_STATUS_RINGING);
 
     // Incoming ringing UI will be shown in call_update().
     self->_call_timeout_ms = millis() + 60000;  // 60s ring timeout

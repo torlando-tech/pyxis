@@ -19,6 +19,7 @@
 #include "CallScreen.h"
 #include "CallCommandMailbox.h"
 #include "CallGenerationGuard.h"
+#include "CallLinkOwnership.h"
 #include "LXMF/LXMRouter.h"
 #include "LXMF/PropagationNodeManager.h"
 #include "LXMF/MessageStore.h"
@@ -401,15 +402,12 @@ private:
     LXSTAudio* _lxst_audio;
     CallCommandMailbox _call_commands;
     CallGenerationGuard _call_generation_guard;
-    std::atomic<uint32_t> _call_link_generation{0};
+    CallLinkOwnership _call_link_ownership;
     uint32_t _call_start_ms;       // millis() when call became ACTIVE
     uint32_t _call_timeout_ms;     // millis() deadline for current wait state
     bool _call_muted;
     volatile bool _call_answer_pending;  // Set by LVGL task, consumed by main loop
-    // Owning generation set by the link callback and consumed by call_update.
-    // A generation, rather than a boolean, prevents a delayed close from ending
-    // a subsequently admitted call.
-    std::atomic<uint32_t> _call_link_closed_generation{0};
+
     // Signal queue: written by Reticulum thread, consumed by call_update under LVGL lock
     static constexpr int SIGNAL_QUEUE_SIZE = 8;
     volatile uint8_t _call_signal_queue[SIGNAL_QUEUE_SIZE];
@@ -430,7 +428,11 @@ private:
     uint32_t call_begin_generation();
     void call_clear_generation(uint32_t expected_generation);
     uint32_t call_current_generation() const;
-    bool call_owns_link(const RNS::Link& link, uint32_t generation) const;
+    static bool call_extract_link_id(
+        const RNS::Link& link, CallLinkOwnership::LinkId& id);
+    bool call_publish_link(const RNS::Link& link, uint32_t generation);
+    bool call_owns_link(
+        const CallLinkOwnership::LinkId& id, uint32_t generation) const;
     void call_teardown_audio();
     void call_update();  // Called from update() — pumps audio packets + state machine
 
@@ -439,6 +441,7 @@ private:
 
     // Send a signalling byte over the call link
     void call_send_signal(int signal);
+    static void call_send_signal_on_link(const RNS::Link& link, int signal);
 
     // Send batched audio frames over the call link (10 sub-frames per batch)
     void call_send_audio_batch(const uint8_t* batch_data, int batch_len, int batch_count, int total_frames);

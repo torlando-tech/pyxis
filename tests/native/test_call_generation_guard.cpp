@@ -146,69 +146,6 @@ static void incoming_then_outgoing_admission_sequence() {
     EXPECT_EQ(guard.current(), 0u);
 }
 
-enum class CallbackEvent {
-    Identity,
-    Close,
-    Packet,
-};
-
-// Portable model of UIManager's callback admission predicate. LinkKey models
-// Reticulum shared-object identity without importing the embedded dependency.
-enum class LinkKey {
-    None,
-    A,
-    B,
-};
-
-class CallbackOwnershipModel {
-public:
-    void admit(LinkKey link, uint32_t generation) {
-        _link = link;
-        _generation = generation;
-    }
-
-    void release(uint32_t generation) {
-        if (_generation == generation) {
-            _link = LinkKey::None;
-            _generation = 0;
-        }
-    }
-
-    bool accepts(CallbackEvent, LinkKey link, uint32_t generation) const {
-        return generation != 0 && generation == _generation &&
-               link != LinkKey::None && link == _link;
-    }
-
-private:
-    LinkKey _link{LinkKey::None};
-    uint32_t _generation{0};
-};
-
-static void callbacks_require_current_link_and_generation() {
-    constexpr uint32_t g1 = 1;
-    constexpr uint32_t g2 = 2;
-    constexpr CallbackEvent events[] = {
-        CallbackEvent::Identity,
-        CallbackEvent::Close,
-        CallbackEvent::Packet,
-    };
-
-    CallbackOwnershipModel model;
-    model.admit(LinkKey::A, g1);
-    for (CallbackEvent event : events) {
-        EXPECT_TRUE(model.accepts(event, LinkKey::A, g1));
-    }
-
-    model.release(g1);
-    model.admit(LinkKey::B, g2);
-    for (CallbackEvent event : events) {
-        EXPECT_TRUE(!model.accepts(event, LinkKey::A, g1));
-        EXPECT_TRUE(!model.accepts(event, LinkKey::B, g1));
-        EXPECT_TRUE(!model.accepts(event, LinkKey::A, g2));
-        EXPECT_TRUE(model.accepts(event, LinkKey::B, g2));
-    }
-}
-
 int main() {
     RUN(first_reservation_is_nonzero_and_owned);
     RUN(reservation_while_owned_fails);
@@ -218,7 +155,6 @@ int main() {
     RUN(exactly_one_thread_wins_reservation_race);
     RUN(stale_token_cannot_release_new_winner);
     RUN(incoming_then_outgoing_admission_sequence);
-    RUN(callbacks_require_current_link_and_generation);
     std::printf("%d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

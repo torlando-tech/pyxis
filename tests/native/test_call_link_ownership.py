@@ -1,4 +1,4 @@
-"""Compile and execute the portable LXST call-generation guard regression."""
+"""Compile and execute exact LXST link ownership/close regressions."""
 
 import shutil
 import subprocess
@@ -7,14 +7,14 @@ from pathlib import Path
 import pytest
 
 HERE = Path(__file__).resolve().parent
-TEST_SOURCE = HERE / "test_call_generation_guard.cpp"
+TEST_SOURCE = HERE / "test_call_link_ownership.cpp"
 
 
-def test_call_generation_guard(tmp_path):
+def test_call_link_ownership(tmp_path):
     cxx = shutil.which("c++")
     if not cxx:
         pytest.skip("no C++ compiler found")
-    binary = tmp_path / "test_call_generation_guard"
+    binary = tmp_path / "test_call_link_ownership"
     cmd = [
         cxx,
         "-std=c++17",
