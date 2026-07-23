@@ -27,8 +27,8 @@
 // the FS for hundreds of ms during block erase) — under live announce
 // flood, SPIFFS's flush_buffer() returns false from FileStore::put,
 // surfacing as "Failed to add destination to path table" spam.
-// LittleFS reuses the same partition (label "spiffs") and reformats it
-// on first boot.
+// LittleFS reuses the same persistent partition (label "spiffs"). Mount
+// failures must never format it: the partition contains user conversations.
 #include <microStore/Adapters/LittleFSFileSystem.h>
 #include <microReticulum/Identity.h>
 #include <microReticulum/Destination.h>
@@ -936,8 +936,8 @@ void setup_hardware() {
     // Pyxis's lib/universal_filesystem/ is now dead code on this build path and
     // can be deleted once the graft lands.
     static microStore::Adapters::LittleFSFileSystem fs;
-    if (!fs.init()) {
-        ERROR("FileSystem mount failed!");
+    if (!fs.init(false)) {
+        ERROR("FileSystem mount failed; preserving persistent data");
     } else {
         INFO("FileSystem mounted");
         RNS::Utilities::OS::register_filesystem(fs);

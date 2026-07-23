@@ -1,6 +1,7 @@
 """
 PlatformIO pre-build script: patches the libdeps copy of microStore's
-LittleFSFileSystem adapter so every file path is normalized to a leading "/".
+LittleFSFileSystem adapter so every file path is normalized to a leading "/"
+and mount failures never format the persistent user-data partition.
 
 Why: ESP32's Arduino LittleFS/VFS rejects any path that does not start with
 "/" (it logs nothing and returns an invalid File). But microStore's own
@@ -16,7 +17,8 @@ This is a platform-correctness concern that belongs in the ESP32 adapter, so
 we normalize "./x" / "x" -> "/x" at each LittleFS.* call site there. Native
 builds (PosixFileSystem) are unaffected — they don't use this adapter.
 
-Idempotent: detects the already-patched state via the _pyxis_norm_path marker.
+Idempotent: path normalization and non-destructive mounting have independent
+markers so an existing libdeps tree receives newly added safety patches.
 
 TODO(upstream): attermann/microStore's LittleFSFileSystem adapter should
 normalize paths to a leading "/" itself (file an issue / PR on the fork).
@@ -30,7 +32,9 @@ from _build_helpers import env_libdeps_dir  # per-env libdeps path; never hardco
 ADAPTER_H = env_libdeps_dir(env, "microStore", "include", "microStore", "Adapters", "LittleFSFileSystem.h")
 TRANSPORT_CPP = env_libdeps_dir(env, "microReticulum", "src", "microReticulum", "Transport.cpp")
 
-MARKER = "_pyxis_norm_path"
+PATH_MARKER = "_pyxis_norm_path"
+SAFE_MOUNT = "LittleFS.begin(false, _basepath)"
+DESTRUCTIVE_MOUNT = "LittleFS.begin(true, _basepath)"
 
 HELPER = """namespace microStore { namespace Adapters {
 
@@ -86,30 +90,43 @@ def main():
         return
     with open(ADAPTER_H) as f:
         src = f.read()
-    if MARKER in src:
-        print("[patch_littlefs_paths] already patched; skipping")
-        return
+    changed = False
 
-    if "#include <string>" not in src:
-        src = src.replace("#include <LittleFS.h>",
-                          "#include <LittleFS.h>\n#include <string>", 1)
+    if PATH_MARKER in src:
+        print("[patch_littlefs_paths] path normalization already patched")
+    else:
+        if "#include <string>" not in src:
+            src = src.replace("#include <LittleFS.h>",
+                              "#include <LittleFS.h>\n#include <string>", 1)
 
-    # Inject the helper by expanding the namespace-open line.
-    anchor = "namespace microStore { namespace Adapters {"
-    if anchor not in src:
-        print(f"[patch_littlefs_paths] FATAL: namespace anchor not found in {ADAPTER_H}")
-        sys.exit(1)
-    src = src.replace(anchor, HELPER, 1)
-
-    for old, new in REPLACEMENTS:
-        if old not in src:
-            print(f"[patch_littlefs_paths] FATAL: expected call site not found: {old!r}")
+        # Inject the helper by expanding the namespace-open line.
+        anchor = "namespace microStore { namespace Adapters {"
+        if anchor not in src:
+            print(f"[patch_littlefs_paths] FATAL: namespace anchor not found in {ADAPTER_H}")
             sys.exit(1)
-        src = src.replace(old, new)
+        src = src.replace(anchor, HELPER, 1)
 
-    with open(ADAPTER_H, "w") as f:
-        f.write(src)
-    print("[patch_littlefs_paths] normalized LittleFS adapter paths to leading '/'")
+        for old, new in REPLACEMENTS:
+            if old not in src:
+                print(f"[patch_littlefs_paths] FATAL: expected call site not found: {old!r}")
+                sys.exit(1)
+            src = src.replace(old, new)
+        changed = True
+        print("[patch_littlefs_paths] normalized LittleFS adapter paths to leading '/'")
+
+    if SAFE_MOUNT in src:
+        print("[patch_littlefs_paths] non-destructive LittleFS mount already patched")
+    elif DESTRUCTIVE_MOUNT in src:
+        src = src.replace(DESTRUCTIVE_MOUNT, SAFE_MOUNT, 1)
+        changed = True
+        print("[patch_littlefs_paths] disabled LittleFS format-on-mount-failure")
+    else:
+        print(f"[patch_littlefs_paths] FATAL: LittleFS mount call not found in {ADAPTER_H}")
+        sys.exit(1)
+
+    if changed:
+        with open(ADAPTER_H, "w") as f:
+            f.write(src)
 
 
 main()
