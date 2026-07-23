@@ -19,6 +19,7 @@ System Python 3.9 has pytest pre-installed; Homebrew Python does not.
 - `native/test_ble_operation_queue.{cpp,py}` — GATT op queue: FIFO, busy-state, timeout, clearForConnection, builder
 - `native/test_ring_buffers.{cpp,py}` — PCM + encoded SPSC ring buffers, including 100k-frame multithreaded producer/consumer stress
 - `native/test_audio_filters.{cpp,py}` — VoiceFilterChain frequency response, peak limiting, multichannel
+- `native/test_call_command_mailbox.{cpp,py}` — generation-scoped LXST hangup/mute command handoff and producer/consumer stress
 
 ### Adding a new native C++ test
 

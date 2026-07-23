@@ -17,6 +17,7 @@
 #include "SettingsScreen.h"
 #include "PropagationNodesScreen.h"
 #include "CallScreen.h"
+#include "CallCommandMailbox.h"
 #include "LXMF/LXMRouter.h"
 #include "LXMF/PropagationNodeManager.h"
 #include "LXMF/MessageStore.h"
@@ -200,7 +201,7 @@ public:
     /** Initiate an outgoing call to peer (calls private call_initiate). */
     void test_call_initiate(const RNS::Bytes& peer_hash) { call_initiate(peer_hash); }
 
-    /** Hang up the active call (calls private call_hangup). */
+    /** Hang up the active call on loopTask (calls private call_hangup). */
     void test_call_hangup() { call_hangup(); }
 
     /**
@@ -393,6 +394,9 @@ private:
     // takes the safe NoneConstructor branch. Same fix as DirectLinkSlot.
     RNS::Link _call_link{RNS::Type::NONE};
     LXSTAudio* _lxst_audio;
+    CallCommandMailbox _call_commands;
+    std::atomic<uint32_t> _call_generation{0};
+    std::atomic<uint32_t> _call_generation_counter{1};
     uint32_t _call_start_ms;       // millis() when call became ACTIVE
     uint32_t _call_timeout_ms;     // millis() deadline for current wait state
     bool _call_muted;
@@ -413,6 +417,11 @@ private:
     void call_initiate(const RNS::Bytes& peer_hash);
     void call_hangup();
     void call_set_mute(bool muted);
+    void call_request_hangup();
+    void call_request_mute(bool muted);
+    bool call_begin_generation();
+    void call_clear_generation(uint32_t expected_generation);
+    void call_teardown_audio();
     void call_update();  // Called from update() — pumps audio packets + state machine
 
     // Process a received signalling byte (runs under LVGL lock in call_update)
