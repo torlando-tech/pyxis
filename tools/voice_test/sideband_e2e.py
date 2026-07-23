@@ -197,8 +197,9 @@ class RawCaller:
             established_callback=self._on_established,
             closed_callback=self._on_closed)
         # Ordinary Link packets are dropped when no packet callback is present.
-        # Register synchronously after construction so STATUS_AVAILABLE/BUSY
-        # cannot race the asynchronous established callback.
+        # Register at the earliest point supported by the public RNS API. A very
+        # small constructor-return window remains because Link.__init__() does
+        # not accept a packet callback.
         self.link.set_packet_callback(self._on_packet)
 
     def _on_established(self, link):
@@ -263,18 +264,25 @@ class RawCaller:
                         f"{self.label}: raw link did not establish in {timeout}s "
                         f"(status={self.link.status}, signals={self._signals}, "
                         f"closed={self._closed.is_set()})")
-                self._condition.wait(max(0, remaining))
+                # Poll status too: some proof-validation failures set CLOSED
+                # without invoking the close callback.
+                self._condition.wait(min(0.1, max(0, remaining)))
         return self
 
     def wait_signal(self, signal, timeout=8):
         deadline = time.monotonic()+timeout
+        close_drain_deadline = None
         with self._condition:
             while signal not in self._signals:
+                now = time.monotonic()
                 if self._closed.is_set() or self.link.status == RNS.Link.CLOSED:
-                    raise AssertionError(
-                        f"{self.label}: link closed before signal 0x{signal:02x}; "
-                        f"received={self._signals}")
-                remaining = deadline-time.monotonic()
+                    # Packet callbacks run on worker threads while close can be
+                    # synchronous. Allow an already-queued BUSY packet to drain.
+                    if close_drain_deadline is None:
+                        close_drain_deadline = min(deadline, now+1.0)
+                effective_deadline = (min(deadline, close_drain_deadline)
+                                      if close_drain_deadline is not None else deadline)
+                remaining = effective_deadline-now
                 if remaining <= 0:
                     break
                 self._condition.wait(max(0, remaining))
@@ -282,9 +290,10 @@ class RawCaller:
                 raise AssertionError(
                     f"{self.label}: failed to decode LXST packet(s): {self._packet_errors}")
             if signal not in self._signals:
+                closed = self._closed.is_set() or self.link.status == RNS.Link.CLOSED
                 raise AssertionError(
                     f"{self.label}: did not receive signal 0x{signal:02x} in {timeout}s; "
-                    f"received={self._signals}, closed={self._closed.is_set()}")
+                    f"received={self._signals}, closed={closed}")
         return self
 
     def wait_closed(self, timeout=8):
@@ -410,6 +419,7 @@ def main():
     print(f"RNS_VERSION={RNS.__version__}",flush=True)
     dev=None
     phone=None
+    initial_ble_enabled=None
     results=[]
     try:
         dev=Dev()
@@ -433,7 +443,14 @@ def main():
         py_dest=(dev.cmd("T:LXSTDEST")[0] or "").split()[-1]
         print(f"SIDE_ID={side_id} SIDE_DEST={side_dest}",flush=True)
         print(f"PYXIS_ID={py_id} PYXIS_DEST={py_dest}",flush=True)
-        dev.cmd("T:BLE off",timeout=5)
+        ble_response,_=dev.cmd("T:BLE",timeout=5)
+        ble_match=re.search(r"\bble_enabled=([01])\b",ble_response or "")
+        assert ble_match, f"could not query initial BLE state: {ble_response!r}"
+        initial_ble_enabled = ble_match.group(1) == "1"
+        if initial_ble_enabled:
+            response,_=dev.cmd("T:BLE off",timeout=5)
+            assert response and response.startswith("T:OK"), \
+                f"could not disable BLE for voice harness: {response!r}"
         dev.cmd("T:CALL_PROFILE 0x10")
         dev.cmd("T:ANNLXST")
         phone.announce()
@@ -613,9 +630,14 @@ def main():
                 cleanup_errors.append(f"phone hangup: {exc!r}")
             try: phone.stop()
             except BaseException as exc: cleanup_errors.append(f"phone stop: {exc!r}")
-        if dev is not None:
-            try: dev.cmd("T:BLE on",timeout=5)
+        if dev is not None and initial_ble_enabled is not None:
+            try:
+                restore = "on" if initial_ble_enabled else "off"
+                response,_=dev.cmd("T:BLE "+restore,timeout=5)
+                if not response or not response.startswith("T:OK"):
+                    raise AssertionError(f"unexpected response {response!r}")
             except BaseException as exc: cleanup_errors.append(f"BLE restore: {exc!r}")
+        if dev is not None:
             try: dev.close()
             except BaseException as exc: cleanup_errors.append(f"serial close: {exc!r}")
         if cleanup_errors:
