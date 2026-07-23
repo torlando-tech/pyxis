@@ -1177,7 +1177,15 @@ bool BLEInterface::start_task(int priority, int core) {
     BaseType_t result = xTaskCreatePinnedToCore(
         ble_task,
         "ble",
-        12288,          // 12KB stack (string ops in debug logs need headroom)
+        24576,          // 24KB — this task's loop() processes deferred BLE-received RNS
+                        // packets inline: Transport inbound -> destination/path resolution
+                        // -> microStore `get` (a ~1KB value buffer) -> filestore read, and
+                        // can reach Resource::assemble()'s bz2 decompress. That is the SAME
+                        // deep chain loopTask and the capture task run, both sized at 24576.
+                        // At the old 12288 a path lookup during an active call (BLE-routed,
+                        // ~50 pkt/s) overflowed the stack ("stack overflow in task ble" ->
+                        // PANIC ~seconds into a call); idle it survived because path lookups
+                        // are rare. Size for the workload, matching the other RNS tasks.
         this,
         priority,
         &_task_handle,

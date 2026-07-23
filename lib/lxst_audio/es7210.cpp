@@ -10,7 +10,12 @@
 #include "es7210.h"
 
 #define I2S_DSP_MODE_A 0
-#define MCLK_DIV_FRE   512  // MCLK = sample_rate * 512 (4.096MHz at 8kHz)
+#define MCLK_DIV_FRE   768  // MCLK = sample_rate * 768 (12.288MHz at 16kHz). 12.288MHz is a standard
+// audio rate the ESP32-S3 APLL locks CLEANLY (use_apll=true + fixed_mclk in i2s_capture.cpp). The
+// {12288000,16000} coeff row divides it (adc_div=3) down to the 8.192MHz sigma-delta modulator clock
+// with far lower relative jitter than the 256Fs/4.096MHz row. The raw ES7210 capture was garbled
+// ("oscillating static that builds") because a jittery MCLK feeds the modulator directly -- its DLL is
+// bypassed (no on-chip cleanup) -- so the source MCLK must be a clean, exact, high-rate clock.
 
 #define ES7210_MCLK_SOURCE            FROM_CLOCK_DOUBLE_PIN
 #define FROM_PAD_PIN                  0
@@ -42,6 +47,7 @@ static const struct _coeff_div_es7210 coeff_div[] = {
     {16384000,  8000 ,  0x00,  0x04,  0x01,  0x00,  0x20,  0x00,    0x08,  0x00},
     {19200000,  8000 ,  0x00,  0x1e,  0x00,  0x01,  0x28,  0x00,    0x09,  0x60},
     {4096000,   8000 ,  0x00,  0x01,  0x01,  0x00,  0x20,  0x00,    0x02,  0x00},
+    {2048000,   8000 ,  0x00,  0x01,  0x01,  0x01,  0x20,  0x00,    0x01,  0x00},  // 256Fs: doubler ON -> REG02=0xC1, lrck_div=256 (ES7210 standard 8kHz clock)
     {11289600,  11025,  0x00,  0x02,  0x01,  0x00,  0x20,  0x00,    0x01,  0x00},
     {12288000,  12000,  0x00,  0x02,  0x01,  0x00,  0x20,  0x00,    0x04,  0x00},
     {19200000,  12000,  0x00,  0x14,  0x00,  0x01,  0x28,  0x00,    0x06,  0x40},
@@ -231,8 +237,29 @@ esp_err_t es7210_adc_init(TwoWire *tw, audio_hal_codec_config_t *codec_cfg)
     ret |= es7210_config_sample(i2s_cfg->samples);
     ret |= es7210_mic_select(mic_select);
     ret |= es7210_adc_set_gain_all(GAIN_0DB);
+    // DIAGNOSTIC (2026-06-24): the LilyGO/ESP-ADF-derived init above leaves several ADC +
+    // mic-power analog registers at reset defaults that the Linux es7210 driver
+    // (rockchip-linux/kernel) writes explicitly. The raw capture has ~7.6% ASYMMETRIC analog
+    // THD (a clean sine's positive half collapses) that intermodulates speech into "chiptune".
+    // Apply the Linux analog config: ADC dynamics/HPF (REG20-23) + mic ALC/power (REG47-4C).
+    ret |= es7210_write_reg(0x20, 0x0a);
+    ret |= es7210_write_reg(0x21, 0x2a);
+    ret |= es7210_write_reg(0x22, 0x0a);
+    ret |= es7210_write_reg(0x23, 0x2a);
+    ret |= es7210_write_reg(0x47, 0x08);
+    ret |= es7210_write_reg(0x48, 0x08);
+    ret |= es7210_write_reg(0x49, 0x08);
+    ret |= es7210_write_reg(0x4A, 0x08);
+    ret |= es7210_write_reg(0x4B, 0x0F);
+    ret |= es7210_write_reg(0x4C, 0x0F);
     return ESP_OK;
 }
+
+// Runtime register poke for the T:REG diagnostic harness — write/read any ES7210 register
+// over I2C while capturing, to probe the mic analog config (MICBIAS REG41/42, VMID REG40,
+// ADC DC-block HPF REG22/23, etc.) without reflashing for every guess.
+extern "C" void pyxis_es7210_write_reg(int addr, int val) { es7210_write_reg((uint8_t)addr, (uint8_t)val); }
+extern "C" int  pyxis_es7210_read_reg(int addr) { return es7210_read_reg((uint8_t)addr); }
 
 esp_err_t es7210_adc_deinit()
 {

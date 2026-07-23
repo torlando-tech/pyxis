@@ -157,6 +157,21 @@ static int udp_log_sock = -1;
 static struct sockaddr_in udp_log_dest;
 static bool udp_log_ready = false;
 
+// Crash-phase evidence that survives panic/watchdog resets without writing
+// flash from the real-time audio task.
+RTC_NOINIT_ATTR static uint32_t g_audio_phase_magic;
+RTC_NOINIT_ATTR static uint32_t g_audio_phase;
+static constexpr uint32_t AUDIO_PHASE_MAGIC = 0x50595841;
+static esp_reset_reason_t g_boot_reset_reason = ESP_RST_UNKNOWN;
+static uint8_t g_boot_lxst_step = 0;
+static uint32_t g_boot_lxst_heap = 0;
+static uint32_t g_boot_lxst_stack = 0;
+
+extern "C" void pyxis_audio_phase(uint32_t phase) {
+    g_audio_phase = phase;
+    g_audio_phase_magic = AUDIO_PHASE_MAGIC;
+}
+
 static void udp_log_init() {
     if (udp_log_sock >= 0) close(udp_log_sock);  // Re-init safe
     udp_log_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -179,7 +194,19 @@ static void udp_log_init() {
     memset(&udp_log_dest, 0, sizeof(udp_log_dest));
     udp_log_dest.sin_family = AF_INET;
     udp_log_dest.sin_port = htons(9999);
+#ifdef PYXIS_TEST_HOOKS
+    // Diagnostic builds send logs directly to the configured harness host.
+    // Multicast delivery can disappear after OTA on dual-interface macOS hosts,
+    // while unicast gives the input-source capture a deterministic destination.
+    const char* diagnostic_host = PYXIS_TEST_TCP_HOST;
+    if (diagnostic_host && diagnostic_host[0] != '\0') {
+        udp_log_dest.sin_addr.s_addr = inet_addr(diagnostic_host);
+    } else {
+        udp_log_dest.sin_addr.s_addr = inet_addr("239.0.99.99");
+    }
+#else
     udp_log_dest.sin_addr.s_addr = inet_addr("239.0.99.99");
+#endif
 }
 
 // UDP send — no locking needed.  sendto() is non-blocking (O_NONBLOCK) and
@@ -196,6 +223,114 @@ extern "C" void pyxis_log(const char* msg) {
     Serial.println(msg);
     if (udp_log_ready) {
         udp_send(msg, strlen(msg));
+    }
+}
+
+// --- Audio loopback PCM dump (test harness) ---------------------------------
+// In LOOPBACK test mode the decoded PCM is streamed over a SECOND multicast
+// destination (239.0.99.99:9998) so the Mac harness can score voice quality.
+// Reuses udp_log_sock — it's already bound to the WiFi station interface for
+// multicast output (IP_MULTICAST_IF set in udp_log_init), so we only need a
+// second dest sockaddr. The group/port are interface-independent, so this dest
+// survives WiFi reconnects (which only re-bind the socket, not the dest).
+static struct sockaddr_in udp_audio_dest;
+static bool udp_audio_dest_ready = false;
+static volatile bool g_audio_dump_armed = false;
+static uint32_t g_audio_dump_offset = 0;
+// When true, the capture task dumps the RAW de-interleaved mic PCM (pre-filter,
+// pre-codec) over UDP and the playback path SKIPS its decoded-PCM dump, so the
+// harness sees exactly what the ES7210 produces, isolated from the codec.
+static volatile bool g_rawmic_mode = false;
+extern "C" bool pyxis_rawmic_mode() { return g_rawmic_mode; }
+// Which pipeline stage the raw-mic tap dumps: 0=raw I2S (16kHz interleaved),
+// 1=post-decimate pre-filter (8kHz), 2=post-filter pre-codec (8kHz). Lets the
+// harness localize where speech is lost in the DSP without reflashing.
+static volatile int g_rawmic_stage = 0;
+extern "C" int pyxis_rawmic_stage() { return g_rawmic_stage; }
+// Runtime ES7210 register poke (defined in es7210.cpp) for the T:REG diagnostic.
+extern "C" void pyxis_es7210_write_reg(int addr, int val);
+extern "C" int  pyxis_es7210_read_reg(int addr);
+// --- Raw-mic recorder: the capture task fills a frame-aligned PSRAM buffer in order
+// (no UDP loss / offset / de-interleave fragility), then T:DUMPREC transfers it over the
+// reliable USB-serial link as checksummed hex. ---
+static int16_t* g_rec_buf = nullptr;
+static volatile uint32_t g_rec_cap = 0, g_rec_pos = 0;
+static volatile bool g_rec_active = false;
+static SemaphoreHandle_t g_rec_mutex = nullptr;
+extern "C" bool pyxis_record_active() {
+    if (!g_rec_mutex) return false;
+    if (xSemaphoreTake(g_rec_mutex, portMAX_DELAY) != pdTRUE) return false;
+    bool active = g_rec_active;
+    xSemaphoreGive(g_rec_mutex);
+    return active;
+}
+extern "C" void pyxis_record_write_ch0(const int16_t* readBuf, int samplesRead) {
+    if (!g_rec_mutex) return;
+    if (xSemaphoreTake(g_rec_mutex, portMAX_DELAY) != pdTRUE) return;
+    if (!g_rec_active || !g_rec_buf) {
+        xSemaphoreGive(g_rec_mutex);
+        return;
+    }
+    // Record the FULL interleaved read (both TDM channels) so the harness can de-interleave
+    // CH0 (even) AND CH1 (odd) offboard and check which channel actually carries the voice.
+    for (int i = 0; g_rec_active && i < samplesRead; i++) {
+        if (g_rec_pos >= g_rec_cap) {
+            g_rec_active = false;
+            break;
+        }
+        g_rec_buf[g_rec_pos++] = readBuf[i];
+    }
+    if (g_rec_pos >= g_rec_cap) g_rec_active = false;
+    xSemaphoreGive(g_rec_mutex);
+}
+
+static void udp_audio_dest_init() {
+    memset(&udp_audio_dest, 0, sizeof(udp_audio_dest));
+    udp_audio_dest.sin_family = AF_INET;
+    udp_audio_dest.sin_port = htons(9998);
+    udp_audio_dest.sin_addr.s_addr = inet_addr("239.0.99.99");
+    udp_audio_dest_ready = true;
+}
+
+// Same guards as udp_send(): WiFi connected + socket valid + logging ready
+// (logging-ready implies the socket was bound to a live WiFi iface).
+static void udp_audio_send(const void* data, size_t len) {
+    if (udp_log_sock < 0 || !udp_log_ready || WiFi.status() != WL_CONNECTED) return;
+    if (!udp_audio_dest_ready) udp_audio_dest_init();
+    sendto(udp_log_sock, data, len, 0,
+           (struct sockaddr*)&udp_audio_dest, sizeof(udp_audio_dest));
+}
+
+// Arm/disarm the decoded-PCM dump. Arming resets the running byte offset to 0.
+extern "C" void pyxis_audio_dump_arm(bool on) {
+    if (on) {
+        g_audio_dump_offset = 0;
+        if (!udp_audio_dest_ready) udp_audio_dest_init();
+    }
+    g_audio_dump_armed = on;
+}
+
+// Dump decoded PCM (int16 LE mono @ 8 kHz). Self-gates on the arm flag and is
+// a cheap early-return when disarmed. Chunks into datagrams whose payload is
+// [uint32 LE byte_offset][<=1280 PCM bytes] (<=1284 total), advancing the
+// running offset by the number of PCM bytes emitted.
+extern "C" void pyxis_audio_dump(const void* pcm, size_t bytes) {
+    if (!g_audio_dump_armed || pcm == nullptr || bytes == 0) return;
+    const uint8_t* p = (const uint8_t*)pcm;
+    size_t remaining = bytes;
+    while (remaining > 0) {
+        size_t chunk = remaining > 1280 ? 1280 : remaining;
+        uint8_t dgram[1284];
+        uint32_t off = g_audio_dump_offset;
+        dgram[0] = (uint8_t)(off & 0xFF);
+        dgram[1] = (uint8_t)((off >> 8) & 0xFF);
+        dgram[2] = (uint8_t)((off >> 16) & 0xFF);
+        dgram[3] = (uint8_t)((off >> 24) & 0xFF);
+        memcpy(dgram + 4, p, chunk);
+        udp_audio_send(dgram, chunk + 4);
+        p += chunk;
+        remaining -= chunk;
+        g_audio_dump_offset += (uint32_t)chunk;
     }
 }
 
@@ -528,6 +663,11 @@ void load_app_settings() {
 
     // Interfaces
     app_settings.tcp_enabled = prefs.getBool("tcp_en", true);
+#ifdef PYXIS_TEST_HOOKS
+    // The test transport must be enabled after reading NVS; setting this beside
+    // the earlier host/port override would be overwritten by tcp_en above.
+    app_settings.tcp_enabled = true;
+#endif
     app_settings.lora_enabled = prefs.getBool("lora_en", false);
     app_settings.lora_frequency = prefs.getFloat("lora_freq", 927.25f);
     app_settings.lora_bandwidth = prefs.getFloat("lora_bw", 50.0f);
@@ -729,6 +869,14 @@ void on_wifi_connected() {
             }
         });
         INFO("UDP log broadcasting on port 9999");
+        if (g_boot_reset_reason != ESP_RST_POWERON || g_boot_lxst_step > 0 ||
+                g_audio_phase_magic == AUDIO_PHASE_MAGIC) {
+            WARNINGF("BOOT CRASH EVIDENCE: reset=%d lxst_step=%u heap=%u stack=%u audio_phase=%u",
+                     (int)g_boot_reset_reason, (unsigned)g_boot_lxst_step,
+                     (unsigned)g_boot_lxst_heap, (unsigned)g_boot_lxst_stack,
+                     g_audio_phase_magic == AUDIO_PHASE_MAGIC ? (unsigned)g_audio_phase : 0U);
+            g_audio_phase_magic = 0;
+        }
     }
 }
 
@@ -1408,6 +1556,12 @@ void setup() {
     Serial.begin(115200);
     delay(100);
 
+    // Create diagnostic recorder synchronization before any audio task starts.
+    g_rec_mutex = xSemaphoreCreateMutex();
+    if (!g_rec_mutex) {
+        ERROR("Failed to create recorder mutex; T:RECORD will be unavailable");
+    }
+
     INFO("\n");
     INFO("╔══════════════════════════════════════╗");
     INFO("║   LXMF Messenger for T-Deck Plus    ║");
@@ -1427,16 +1581,19 @@ void setup() {
     Hardware::TDeck::Display::init_hardware_only();
 
     // Capture ESP reset reason early (before WiFi) — logged after WiFi init for UDP visibility
-    esp_reset_reason_t _boot_reset_reason = esp_reset_reason();
+    g_boot_reset_reason = esp_reset_reason();
 
     // Check for LXST crash breadcrumb from previous boot
     {
         Preferences _dbg;
         _dbg.begin("lxst_dbg", true);
         uint8_t step = _dbg.getUChar("step", 0);
+        g_boot_lxst_step = step;
         if (step > 0) {
             uint32_t heap = _dbg.getUInt("heap", 0);
             uint32_t stack = _dbg.getUInt("stack", 0);
+            g_boot_lxst_heap = heap;
+            g_boot_lxst_stack = stack;
             char buf[80];
             snprintf(buf, sizeof(buf), "LXST CRASH: last step=%u heap=%u stack=%u", step, heap, stack);
             WARNING(buf);
@@ -1499,7 +1656,7 @@ void setup() {
     // Log ESP reset reason after WiFi so it reaches UDP logs
     {
         const char* reason_str = "UNKNOWN";
-        switch (_boot_reset_reason) {
+        switch (g_boot_reset_reason) {
             case ESP_RST_POWERON:  reason_str = "POWERON"; break;
             case ESP_RST_SW:       reason_str = "SOFTWARE"; break;
             case ESP_RST_PANIC:    reason_str = "PANIC"; break;
@@ -1511,8 +1668,8 @@ void setup() {
             case ESP_RST_SDIO:     reason_str = "SDIO"; break;
             default: break;
         }
-        if (_boot_reset_reason != ESP_RST_POWERON) {
-            WARNING("Reset reason: " + std::string(reason_str) + " (" + std::to_string((int)_boot_reset_reason) + ")");
+        if (g_boot_reset_reason != ESP_RST_POWERON) {
+            WARNING("Reset reason: " + std::string(reason_str) + " (" + std::to_string((int)g_boot_reset_reason) + ")");
         } else {
             INFO("Reset reason: " + std::string(reason_str));
         }
@@ -1971,7 +2128,10 @@ static void handle_test_hook_command(const String& line) {
         if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
         RNS::Bytes dest_hash = parse_hex_arg(args);
         if (dest_hash.size() != 16) { Serial.println("T:ERR bad hex"); return; }
-        ui_manager->test_call_initiate(dest_hash);
+        // Serial hooks run on loopTask, outside the LVGL task. The production
+        // call path mutates screens immediately, so hold the same LVGL lock as
+        // other cross-task UI operations.
+        { LVGL_LOCK(); ui_manager->test_call_initiate(dest_hash); }
         Serial.println(String("T:OK calling=") + args);
     }
     else if (cmd == "T:CALL_STATE") {
@@ -1983,7 +2143,9 @@ static void handle_test_hook_command(const String& line) {
     else if (cmd == "T:CALL_HANGUP") {
         // T:CALL_HANGUP — tear down the active call.
         if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
-        ui_manager->test_call_hangup();
+        // call_hangup() refreshes/deletes LVGL objects; invoking it unlocked
+        // from loopTask corrupts LVGL's event list once playback is active.
+        { LVGL_LOCK(); ui_manager->test_call_hangup(); }
         Serial.println("T:OK hung_up");
     }
     else if (cmd == "T:CALL_ANSWER") {
@@ -2258,6 +2420,138 @@ static void handle_test_hook_command(const String& line) {
         Serial.print(freq);
         Serial.print(" amp=");
         Serial.println(amp, 3);
+    }
+    else if (cmd == "T:LOOPBACK") {
+        // T:LOOPBACK <on|off> — self-contained audio loopback test mode.
+        // "on" resets the PCM byte offset to 0, starts mic capture + speaker
+        // playback, enables the local loopback path (capture -> encode ->
+        // frame -> parse -> decode, all on core 1) and arms the decoded-PCM
+        // dump over UDP multicast 239.0.99.99:9998 for the Mac harness.
+        // "off" stops/disarms. The Codec2 mode is whatever T:CALL_PROFILE
+        // selected. Does NOT require a real call/link.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        String on_off = args;
+        on_off.trim();
+        bool enabled  = (on_off == "on"  || on_off == "1" || on_off == "true");
+        bool disabled = (on_off == "off" || on_off == "0" || on_off == "false");
+        if (!enabled && !disabled) {
+            Serial.println("T:ERR usage: T:LOOPBACK on|off");
+            return;
+        }
+        if (enabled) {
+            ui_manager->start_loopback();
+            Serial.print("T:OK loopback=on active=");
+            Serial.println(ui_manager->is_loopback() ? "1" : "0");
+        } else {
+            ui_manager->stop_loopback();
+            Serial.println("T:OK loopback=off");
+        }
+    }
+    else if (cmd == "T:RAWMIC") {
+        // T:RAWMIC <on|off> — like T:LOOPBACK, but dumps the RAW de-interleaved mic
+        // PCM (pre-filter, pre-codec) over UDP 239.0.99.99:9998 instead of the decoded
+        // round-trip. Isolates the ES7210 capture from the codec so the harness sees
+        // exactly what the mic produces. Reuses the loopback plumbing; the playback
+        // decoded-dump is suppressed while g_rawmic_mode is set.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        String on_off = args;
+        on_off.trim();
+        bool enabled  = on_off.startsWith("on") || on_off == "1" || on_off == "true";
+        bool disabled = (on_off == "off" || on_off == "0" || on_off == "false");
+        if (!enabled && !disabled) {
+            Serial.println("T:ERR usage: T:RAWMIC on[ stage]|off  (stage 0=rawI2S 1=pre-filter 2=post-filter)");
+            return;
+        }
+        if (enabled) {
+            // optional trailing stage: "T:RAWMIC on 2" -> dump the post-filter tap
+            int sp = on_off.indexOf(' ');
+            g_rawmic_stage = (sp >= 0) ? on_off.substring(sp + 1).toInt() : 0;
+            g_rawmic_mode = true;
+            ui_manager->start_loopback();
+            Serial.print("T:OK rawmic=on stage=");
+            Serial.print(g_rawmic_stage);
+            Serial.print(" active=");
+            Serial.println(ui_manager->is_loopback() ? "1" : "0");
+        } else {
+            ui_manager->stop_loopback();
+            g_rawmic_mode = false;
+            Serial.println("T:OK rawmic=off");
+        }
+    }
+    else if (cmd == "T:REG") {
+        // T:REG <hexaddr> [hexval] — read (1 arg) or write (2 args) an ES7210 register over I2C
+        // at runtime. Probes the mic analog config (MICBIAS 0x41/0x42, VMID 0x40, ADC DC-block
+        // HPF 0x22/0x23) live while capturing, without reflashing for each guess.
+        String a = args; a.trim();
+        if (a.length() == 0) { Serial.println("T:ERR usage: T:REG <hexaddr> [hexval]"); return; }
+        int sp = a.indexOf(' ');
+        if (sp < 0) {
+            int addr = (int)strtol(a.c_str(), nullptr, 16);
+            Serial.printf("T:OK reg[0x%02X]=0x%02X\n", addr & 0xff, pyxis_es7210_read_reg(addr) & 0xff);
+        } else {
+            int addr = (int)strtol(a.substring(0, sp).c_str(), nullptr, 16);
+            int val  = (int)strtol(a.substring(sp + 1).c_str(), nullptr, 16);
+            pyxis_es7210_write_reg(addr, val);
+            Serial.printf("T:OK wrote reg[0x%02X]=0x%02X\n", addr & 0xff, val & 0xff);
+        }
+    }
+    else if (cmd == "T:RECORD") {
+        // T:RECORD <secs> — record raw CH0 mic (16kHz) into a PSRAM buffer. Start the capture
+        // first with T:RAWMIC on (so any MICBIAS/regs set via T:REG persist), then T:RECORD.
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        int secs = args.toInt(); if (secs < 1) secs = 6; if (secs > 8) secs = 8;
+        if (!g_rec_mutex) { Serial.println("T:ERR record mutex unavailable"); return; }
+
+        uint32_t new_cap = (uint32_t)secs * 32000;  // full interleaved: 16kHz * 2 TDM channels
+        int16_t* new_buf = (int16_t*)heap_caps_malloc((size_t)new_cap * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+        if (!new_buf) { Serial.println("T:ERR record alloc failed"); return; }
+
+        if (!ui_manager->is_loopback()) ui_manager->start_loopback();
+        if (!ui_manager->is_loopback()) {
+            free(new_buf);
+            Serial.println("T:ERR record capture start failed");
+            return;
+        }
+
+        xSemaphoreTake(g_rec_mutex, portMAX_DELAY);
+        int16_t* old_buf = g_rec_buf;
+        g_rec_active = false;
+        g_rec_buf = new_buf;
+        g_rec_cap = new_cap;
+        g_rec_pos = 0;
+        g_rec_active = true;
+        xSemaphoreGive(g_rec_mutex);
+        if (old_buf) free(old_buf);
+
+        Serial.print("T:OK recording "); Serial.print(secs); Serial.print("s ");
+        Serial.print((unsigned long)g_rec_cap); Serial.println(" samples (16kHz x2ch interleaved)");
+    }
+    else if (cmd == "T:DUMPREC") {
+        // Transfer a completed recording as checksummed hex between REC_BEGIN/REC_END markers.
+        // Snapshot under the recorder mutex; serial commands run on loopTask, so no new
+        // recording can replace this buffer until the dump command returns.
+        if (!g_rec_mutex) { Serial.println("T:ERR no recording"); return; }
+        xSemaphoreTake(g_rec_mutex, portMAX_DELAY);
+        if (g_rec_active) {
+            xSemaphoreGive(g_rec_mutex);
+            Serial.println("T:ERR recording active");
+            return;
+        }
+        int16_t* dump_buf = g_rec_buf;
+        uint32_t n = g_rec_pos;
+        xSemaphoreGive(g_rec_mutex);
+        if (!dump_buf || n == 0) { Serial.println("T:ERR no recording"); return; }
+        uint32_t sum = 0;
+        for (uint32_t i = 0; i < n; i++) sum += (uint16_t)dump_buf[i];
+        Serial.print("REC_BEGIN "); Serial.print((unsigned long)n);
+        Serial.print(" 16000 "); Serial.println((unsigned long)sum);
+        static char line[520];
+        for (uint32_t i = 0; i < n; ) {
+            int p = 0;
+            for (int k = 0; k < 128 && i < n; k++, i++) p += sprintf(line + p, "%04X", (uint16_t)dump_buf[i]);
+            line[p] = 0; Serial.println(line);
+        }
+        Serial.println("REC_END");
     }
     else {
         Serial.print("T:ERR unknown cmd ");

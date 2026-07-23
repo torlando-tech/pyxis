@@ -11,10 +11,20 @@
 #include "codec_wrapper.h"
 #include "packet_ring_buffer.h"
 #include <Arduino.h>
+#include <freertos/semphr.h>
 
 using namespace Hardware::TDeck;
 
 static const char* TAG = "LXST:Playback";
+
+// Decoded-PCM tap for the firmware audio-loopback test harness (defined in
+// src/main.cpp). Self-gates on an arm flag, so it is a cheap no-op in normal
+// operation. Declared extern "C" to avoid pulling main.cpp headers in here.
+extern "C" void pyxis_audio_dump(const void* pcm, size_t bytes);
+// When raw-mic diagnostic mode is on, the capture task owns the UDP dump stream
+// (raw mic PCM); suppress the decoded-PCM dump here so they don't interleave.
+extern "C" bool pyxis_rawmic_mode();
+extern "C" bool pyxis_record_active();
 
 I2SPlayback::I2SPlayback() = default;
 
@@ -46,6 +56,12 @@ bool I2SPlayback::configureDecoder(Codec2Wrapper* codec) {
     dropBuf_ = static_cast<int16_t*>(
         heap_caps_malloc(sizeof(int16_t) * frameSamples_, MALLOC_CAP_SPIRAM));
 
+    if (!pcmRing_ || !decodeBuf_ || !dropBuf_) {
+        ESP_LOGE(TAG, "Playback buffer allocation failed");
+        releaseBuffers();
+        return false;
+    }
+
     ESP_LOGI(TAG, "Decoder configured: Codec2 mode %d, %d samples/frame",
              codec_->libraryMode(), frameSamples_);
     return true;
@@ -53,6 +69,16 @@ bool I2SPlayback::configureDecoder(Codec2Wrapper* codec) {
 
 bool I2SPlayback::start() {
     if (!codec_ || playing_.load()) return false;
+
+    if (taskExited_) {
+        vSemaphoreDelete(static_cast<SemaphoreHandle_t>(taskExited_));
+        taskExited_ = nullptr;
+    }
+    taskExited_ = static_cast<void*>(xSemaphoreCreateBinary());
+    if (!taskExited_) {
+        ESP_LOGE(TAG, "Failed to create playback-exit semaphore");
+        return false;
+    }
 
     // Caller (LXSTAudio) is responsible for calling tone_deinit() first.
     // Defensively uninstall in case it wasn't done.
@@ -109,6 +135,8 @@ bool I2SPlayback::start() {
         playing_.store(false, std::memory_order_relaxed);
         i2s_driver_uninstall(I2S_NUM_0);
         i2sInitialized_ = false;
+        vSemaphoreDelete(static_cast<SemaphoreHandle_t>(taskExited_));
+        taskExited_ = nullptr;
         return false;
     }
 
@@ -117,13 +145,24 @@ bool I2SPlayback::start() {
 }
 
 void I2SPlayback::stop() {
-    if (!playing_.load()) return;
-
     playing_.store(false, std::memory_order_relaxed);
 
-    if (taskHandle_) {
-        vTaskDelay(pdMS_TO_TICKS(50));
+    // Stop I2S to unblock a pending i2s_write(), then join the playback task
+    // before uninstalling the driver or releasing task-owned buffers.
+    TaskHandle_t task = static_cast<TaskHandle_t>(taskHandle_);
+    if (task && i2sInitialized_) i2s_stop(I2S_NUM_0);
+    if (task && taskExited_) {
+        if (xSemaphoreTake(static_cast<SemaphoreHandle_t>(taskExited_),
+                           pdMS_TO_TICKS(500)) != pdTRUE) {
+            ESP_LOGE(TAG, "Playback task exit timed out; force deleting task");
+            vTaskDelete(task);
+        }
         taskHandle_ = nullptr;
+    }
+
+    if (taskExited_) {
+        vSemaphoreDelete(static_cast<SemaphoreHandle_t>(taskExited_));
+        taskExited_ = nullptr;
     }
 
     if (i2sInitialized_) {
@@ -177,6 +216,18 @@ bool I2SPlayback::writeEncodedPacket(const uint8_t* data, int length) {
     pcmSampleCount_.fetch_add((uint32_t)decodedSamples, std::memory_order_relaxed);
     pcmSumSquares_.fetch_add(sumsq, std::memory_order_relaxed);
 
+    // MUTE the speaker during raw-mic recording: do NOT feed decoded PCM to the playback
+    // ring, so the T-Deck speaker can't play the loopback round-trip back into the adjacent
+    // mic (acoustic feedback -> "oscillating static that builds"). Decode+metrics still run.
+    if (pyxis_record_active()) return true;
+
+    // Audio-loopback test tap: dump the freshly decoded PCM (int16 LE mono,
+    // 8 kHz). No-op unless the loopback harness armed it via T:LOOPBACK on.
+    // Suppressed in raw-mic mode (the capture task owns the dump stream then).
+    if (!pyxis_rawmic_mode()) {
+        pyxis_audio_dump(decodeBuf_, (size_t)decodedSamples * sizeof(int16_t));
+    }
+
     // Write decoded PCM to ring buffer one frame at a time
     // (ring buffer only accepts exactly frameSamples_ per write)
     int numFrames = decodedSamples / frameSamples_;
@@ -201,6 +252,10 @@ int I2SPlayback::bufferedFrames() const {
 void I2SPlayback::playbackTask(void* param) {
     auto* self = static_cast<I2SPlayback*>(param);
     self->playbackLoop();
+    self->playing_.store(false, std::memory_order_relaxed);
+    self->taskHandle_ = nullptr;
+    auto done = static_cast<SemaphoreHandle_t>(self->taskExited_);
+    if (done) xSemaphoreGive(done);
     vTaskDelete(NULL);
 }
 
@@ -221,6 +276,11 @@ void I2SPlayback::playbackLoop() {
     // Silence frame for underruns
     int16_t* silenceFrame = static_cast<int16_t*>(
         heap_caps_calloc(frameSamples_, sizeof(int16_t), MALLOC_CAP_SPIRAM));
+    if (!silenceFrame) {
+        ESP_LOGE(TAG, "Failed to allocate silence frame");
+        free(frameBuf);
+        return;
+    }
 
     uint32_t framesPlayed = 0;
 

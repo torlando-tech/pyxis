@@ -102,6 +102,7 @@ private:
     std::atomic<bool> capturing_{false};
     std::atomic<bool> muted_{false};
     void* taskHandle_ = nullptr;
+    void* taskExited_ = nullptr;  // FreeRTOS binary semaphore; task signals before delete
 
     // Test injection (see setInjectSine). When injectSine_ is true,
     // the capture path replaces accumulated mic samples with a
@@ -122,6 +123,8 @@ private:
     // Audio pipeline components
     Codec2Wrapper* codec_ = nullptr;  // Shared, not owned
     VoiceFilterChain* filterChain_ = nullptr;
+    // SPSC queue of filtered PCM batches. The capture task only performs I2S
+    // and filtering; loopTask performs Codec2 encoding and transmission.
     EncodedRingBuffer* encodedRing_ = nullptr;
 
     // Accumulation buffer: I2S delivers variable bursts, we need fixed-size frames
@@ -129,23 +132,24 @@ private:
     int accumCount_ = 0;
     int frameSamples_ = 0;  // Codec2 samples per frame (e.g., 320 for 700C, 160 for 1600/3200)
 
-    // Pre-allocated encode output buffer
-    uint8_t encodeBuf_[256];
+    // PSRAM staging buffer used by loopTask while encoding queued PCM.
+    int16_t* encodePcmBuffer_ = nullptr;
 
     // Silence buffer for mute
     int16_t* silenceBuf_ = nullptr;
 
     bool filtersEnabled_ = true;
 
-    static constexpr int I2S_SAMPLE_RATE = 8000;   // I2S runs at 8kHz — matches Codec2 directly, no resampling needed
+    static constexpr int I2S_SAMPLE_RATE = 16000;  // EXACT-LilyGO test: 16kHz capture, decimated 2:1 to 8kHz. (ES7210 ADC warp unresolved -- see es7210.cpp.)
     static constexpr int CODEC_SAMPLE_RATE = 8000; // Codec2 expects 8kHz
     // Accumulate this many codec frames before filter+encode.
     // Matches Columba's 200ms batch (1600 samples for Codec2 3200).
     // The AGC needs large blocks for stable gain tracking.
     static constexpr int FRAMES_PER_BATCH = 10;
-    static constexpr int ENCODED_RING_SLOTS = 128;
-    static constexpr int ENCODED_RING_MAX_BYTES = 256;
-    static constexpr int CAPTURE_TASK_STACK = 24576;  // 24KB — pyxis_log→sendto uses ~4KB lwIP stack
+    static constexpr int PCM_RING_SLOTS = 8;
+    // Codec2 no longer runs on this task. 8 KiB covers local I2S buffers,
+    // filters and bounded diagnostic sendto without starving playback.
+    static constexpr int CAPTURE_TASK_STACK = 8192;
     static constexpr int CAPTURE_TASK_PRIORITY = 5;
     static constexpr int CAPTURE_TASK_CORE = 0;
 };

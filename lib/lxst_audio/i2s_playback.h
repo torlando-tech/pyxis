@@ -105,6 +105,7 @@ private:
     std::atomic<bool> playing_{false};
     std::atomic<bool> muted_{false};
     void* taskHandle_ = nullptr;
+    void* taskExited_ = nullptr;  // FreeRTOS binary semaphore; task signals before delete
 
     Codec2Wrapper* codec_ = nullptr;  // Shared, not owned
     PacketRingBuffer* pcmRing_ = nullptr;
@@ -128,7 +129,7 @@ private:
     static constexpr int SAMPLE_RATE = 8000;
     static constexpr int PCM_RING_FRAMES = 50;
     static constexpr int PREBUFFER_FRAMES = 15;
-    static constexpr int PLAYBACK_TASK_STACK = 8192;
+    static constexpr int PLAYBACK_TASK_STACK = 4096;
     static constexpr int PLAYBACK_TASK_PRIORITY = 5;
     static constexpr int PLAYBACK_TASK_CORE = 0;
 };

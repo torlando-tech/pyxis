@@ -28,6 +28,7 @@ sys.path.insert(0, env.get("PROJECT_DIR", "."))  # noqa: F821
 from _build_helpers import env_libdeps_dir  # per-env libdeps path; never hardcode the env
 
 ADAPTER_H = env_libdeps_dir(env, "microStore", "include", "microStore", "Adapters", "LittleFSFileSystem.h")
+TRANSPORT_CPP = env_libdeps_dir(env, "microReticulum", "src", "microReticulum", "Transport.cpp")
 
 MARKER = "_pyxis_norm_path"
 
@@ -57,7 +58,28 @@ REPLACEMENTS = [
 ]
 
 
+def patch_transport_path_store():
+    """Use an ESP32-valid absolute prefix for microReticulum's path store."""
+    if not os.path.exists(TRANSPORT_CPP):
+        print(f"[patch_littlefs_paths] {TRANSPORT_CPP} not present yet; skipping")
+        return
+    with open(TRANSPORT_CPP) as f:
+        src = f.read()
+    old = 'Utilities::OS::get_filesystem(), "./path_store", false'
+    new = 'Utilities::OS::get_filesystem(), "/path_store", false'
+    if new in src:
+        print("[patch_littlefs_paths] Transport path-store prefix already absolute")
+        return
+    if old not in src:
+        print(f"[patch_littlefs_paths] FATAL: path-store initializer not found in {TRANSPORT_CPP}")
+        sys.exit(1)
+    with open(TRANSPORT_CPP, "w") as f:
+        f.write(src.replace(old, new, 1))
+    print("[patch_littlefs_paths] changed Transport path-store prefix to '/path_store'")
+
+
 def main():
+    patch_transport_path_store()
     if not os.path.exists(ADAPTER_H):
         # libdeps not fetched yet on a clean tree — PIO runs this again post-fetch.
         print(f"[patch_littlefs_paths] {ADAPTER_H} not present yet; skipping")

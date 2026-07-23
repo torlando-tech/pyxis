@@ -14,12 +14,12 @@
 extern "C" {
 #endif
 
-/* Threshold: allocations larger than this go to PSRAM */
-#define LV_MEM_HYBRID_PSRAM_THRESHOLD 1024
-
-/* Track which allocations went to PSRAM vs internal RAM */
-/* We use a simple heuristic: PSRAM addresses are above 0x3C000000 on ESP32-S3 */
-#define IS_PSRAM_ADDR(ptr) ((uintptr_t)(ptr) >= 0x3C000000)
+/* Threshold: allocations larger than this go to PSRAM.
+ * Lowered 1024->256 (2026-06-24): pushes most small LVGL objects (styles, obj
+ * metadata, labels, anim descriptors) into PSRAM, de-fragmenting the scarce
+ * ~57-66KB internal block so the LXST audio pipeline can allocate reliably
+ * during a call. UI alloc latency on PSRAM is imperceptible. */
+#define LV_MEM_HYBRID_PSRAM_THRESHOLD 256
 
 static inline void* lv_mem_hybrid_alloc(size_t size) {
     void* ptr;
@@ -55,37 +55,24 @@ static inline void* lv_mem_hybrid_realloc(void* ptr, size_t size) {
         return NULL;
     }
 
-    /* Determine where the original allocation was */
-    if (IS_PSRAM_ADDR(ptr)) {
-        /* Was in PSRAM, keep it there */
-        void* new_ptr = heap_caps_realloc(ptr, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (new_ptr) return new_ptr;
-        /* Fall back to internal if PSRAM realloc fails */
-        new_ptr = heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        if (new_ptr) {
-            /* Copy and free old - can't use realloc across memory types */
-            /* We don't know old size, so this is a best-effort fallback */
-            heap_caps_free(ptr);
-            return new_ptr;
-        }
-        return NULL;
-    } else {
-        /* Was in internal RAM */
-        if (size >= LV_MEM_HYBRID_PSRAM_THRESHOLD) {
-            /* Growing to large size - move to PSRAM */
-            void* new_ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-            if (new_ptr) {
-                heap_caps_free(ptr);
-                return new_ptr;
-            }
-            /* Fall back to internal realloc */
-        }
-        /* Keep in internal RAM */
-        void* new_ptr = heap_caps_realloc(ptr, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        if (new_ptr) return new_ptr;
-        /* Fall back to PSRAM */
-        return heap_caps_realloc(ptr, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    }
+    /* heap_caps_realloc has libc realloc semantics and can move an allocation
+     * between capability sets while preserving min(old_size, size) bytes. */
+    const uint32_t preferred_caps =
+        (size >= LV_MEM_HYBRID_PSRAM_THRESHOLD
+             ? MALLOC_CAP_SPIRAM
+             : MALLOC_CAP_INTERNAL) |
+        MALLOC_CAP_8BIT;
+    const uint32_t fallback_caps =
+        (size >= LV_MEM_HYBRID_PSRAM_THRESHOLD
+             ? MALLOC_CAP_INTERNAL
+             : MALLOC_CAP_SPIRAM) |
+        MALLOC_CAP_8BIT;
+
+    void* new_ptr = heap_caps_realloc(ptr, size, preferred_caps);
+    if (new_ptr) return new_ptr;
+
+    /* realloc failure leaves ptr valid, so trying the alternate heap is safe. */
+    return heap_caps_realloc(ptr, size, fallback_caps);
 }
 
 #ifdef __cplusplus

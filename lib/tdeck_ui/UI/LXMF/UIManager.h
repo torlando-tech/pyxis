@@ -79,6 +79,16 @@ public:
     void pump_call_tx();
 
     /**
+     * Audio loopback test mode (firmware-local). Captures mic -> encode ->
+     * frame -> parse -> decode entirely on-device and dumps the decoded PCM
+     * over UDP for an automated harness to score. Uses the Codec2 mode set by
+     * the preferred profile (T:CALL_PROFILE). No real call/link required.
+     */
+    void start_loopback();
+    void stop_loopback();
+    bool is_loopback() const { return _call_loopback; }
+
+    /**
      * Show conversation list screen
      */
     void show_conversation_list();
@@ -344,14 +354,14 @@ private:
 
     // LXST profile negotiation
     static constexpr int LXST_PREFERRED_PROFILE = 0xFF;
-    static constexpr int LXST_PROFILE_ULBW      = 0x10;  // Codec2 700C  (~700 bps)  — LoRa-friendly default
-    static constexpr int LXST_PROFILE_VLBW      = 0x20;  // Codec2 1600bps
-    static constexpr int LXST_PROFILE_LBW       = 0x30;  // Codec2 3200bps
+    static constexpr int LXST_PROFILE_ULBW      = 0x10;  // Codec2 700C  (~700 bps)  — heaviest CPU; reserve for marginal LoRa
+    static constexpr int LXST_PROFILE_VLBW      = 0x20;  // Codec2 1600bps — DEFAULT (good quality, low CPU)
+    static constexpr int LXST_PROFILE_LBW       = 0x30;  // Codec2 3200bps — best quality + lowest CPU; fast links
 
-    // The profile we ASK the remote for and CONFIGURE locally on every
-    // new call. Defaults to ULBW (Codec2-700C) since pyxis is targeted
-    // at LoRa where 3200 bps would saturate even SF7 BW125. Test
-    // harness can override via T:CALL_PROFILE.
+    // The profile we ASK the remote for and CONFIGURE locally on every new call.
+    // Defaults to VLBW (Codec2-1600): 700C is the heaviest AND lowest-quality mode,
+    // so it is reserved for marginal LoRa links (select ULBW there). Test harness can
+    // override via T:CALL_PROFILE.
     static int _preferred_profile;
 
     // Map profile byte to the Codec2 library mode constant
@@ -371,6 +381,11 @@ private:
     };
 
     CallState _call_state;
+    // Audio loopback test mode active: relaxes call/link state gates in the
+    // TX pump, the wire-packet send site, and the RX parse/decode path so the
+    // pipeline runs locally without a real call. Every loopback bypass is
+    // gated strictly on this flag — real calls are unaffected.
+    bool _call_loopback;
     RNS::Bytes _call_peer_hash;
     RNS::Bytes _call_dest_hash;   // LXST destination hash (for deferred link creation)
     // Vanilla upstream Link's default ctor crashes in load_private_key()
