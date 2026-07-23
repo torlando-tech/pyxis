@@ -130,7 +130,7 @@ UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::Me
 UIManager::~UIManager() {
     // Clean up call state
     if (_call_state != CallState::IDLE ||
-        _call_generation.load(std::memory_order_acquire) != 0) {
+        call_current_generation() != 0) {
         call_hangup();
     }
     call_teardown_audio();
@@ -393,7 +393,7 @@ void UIManager::update() {
 
     // Consume UI commands unconditionally. LVGL callbacks only publish into
     // the mailbox; loopTask remains the sole owner of the audio pipeline.
-    const uint32_t generation = _call_generation.load(std::memory_order_acquire);
+    const uint32_t generation = call_current_generation();
     const CallCommandMailbox::Command command =
         _call_commands.takeForGeneration(generation);
     if (command.action == CallCommandMailbox::Action::HANGUP) {
@@ -405,7 +405,7 @@ void UIManager::update() {
     // Pump voice call state while a call is active or its generation remains
     // reserved during owner-side teardown.
     if (_call_state != CallState::IDLE ||
-        _call_generation.load(std::memory_order_acquire) != 0) {
+        call_current_generation() != 0) {
         call_update();
     }
 
@@ -1039,10 +1039,14 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
     // Reserve a generation only after the outgoing call has passed its
     // acceptance checks. Incoming-link callbacks can race this LVGL path, so
     // the atomic reservation is the definitive admission check.
-    if (!call_begin_generation()) {
+    const uint32_t generation = call_begin_generation();
+    if (generation == 0) {
         WARNING("LXST: Another call was accepted concurrently");
         return;
     }
+    // Publish link ownership before any state belonging to this call. The
+    // generation guard remains reserved until owner-side teardown completes.
+    _call_link_generation.store(generation, std::memory_order_release);
     _call_peer_hash = peer_hash;
     _call_muted = false;
 
@@ -1147,7 +1151,7 @@ void UIManager::call_hangup() {
     INFO("LXST: Hanging up");
 
     const uint32_t generation =
-        _call_generation.load(std::memory_order_acquire);
+        call_current_generation();
 
     // call_hangup() is an owner operation: production UI paths reach it only
     // through update() on loopTask, which also owns pump_call_tx(). Keep the
@@ -1162,7 +1166,13 @@ void UIManager::call_hangup() {
     }
 
     _call_peer_hash = Bytes();
+    _call_dest_hash = Bytes();
+    _call_timeout_ms = 0;
+    _call_answer_pending = false;
     _call_link_closed_pending = false;
+    _call_signal_write = 0;
+    _call_signal_read = 0;
+    _call_commands.take();
     _call_state = CallState::IDLE;
     call_clear_generation(generation);
 
@@ -1188,31 +1198,39 @@ void UIManager::call_set_mute(bool muted) {
 
 void UIManager::call_request_hangup() {
     _call_commands.requestHangup(
-        _call_generation.load(std::memory_order_acquire));
+        call_current_generation());
 }
 
 void UIManager::call_request_mute(bool muted) {
     _call_commands.requestMute(
-        _call_generation.load(std::memory_order_acquire), muted);
+        call_current_generation(), muted);
 }
 
-bool UIManager::call_begin_generation() {
-    uint32_t generation = 0;
-    while (generation == 0) {
-        generation = _call_generation_counter.fetch_add(
-            1, std::memory_order_relaxed) & CallCommandMailbox::MAX_GENERATION;
-    }
-    uint32_t expected = 0;
-    return _call_generation.compare_exchange_strong(
-        expected, generation, std::memory_order_acq_rel,
-        std::memory_order_acquire);
+uint32_t UIManager::call_begin_generation() {
+    return _call_generation_guard.tryReserve();
 }
 
 void UIManager::call_clear_generation(uint32_t expected_generation) {
-    if (expected_generation == 0) return;
-    _call_generation.compare_exchange_strong(
-        expected_generation, 0, std::memory_order_acq_rel,
+    if (!_call_generation_guard.owns(expected_generation)) return;
+
+    // Keep the guard reserved while detaching link ownership. A stale teardown
+    // can neither clear a newer link owner nor release a newer reservation.
+    uint32_t expected_link_generation = expected_generation;
+    _call_link_generation.compare_exchange_strong(
+        expected_link_generation, 0, std::memory_order_acq_rel,
         std::memory_order_acquire);
+    _call_generation_guard.release(expected_generation);
+}
+
+uint32_t UIManager::call_current_generation() const {
+    return _call_generation_guard.current();
+}
+
+bool UIManager::call_owns_link(const Link& link, uint32_t generation) const {
+    return generation != 0 &&
+           _call_generation_guard.owns(generation) &&
+           _call_link_generation.load(std::memory_order_acquire) == generation &&
+           _call_link && _call_link == link;
 }
 
 void UIManager::call_teardown_audio() {
@@ -1658,7 +1676,7 @@ void UIManager::call_ended() {
     INFO("LXST: Call ended");
 
     const uint32_t generation =
-        _call_generation.load(std::memory_order_acquire);
+        call_current_generation();
 
     call_teardown_audio();
 
@@ -1669,7 +1687,13 @@ void UIManager::call_ended() {
     }
 
     _call_peer_hash = Bytes();
+    _call_dest_hash = Bytes();
+    _call_timeout_ms = 0;
+    _call_answer_pending = false;
     _call_link_closed_pending = false;
+    _call_signal_write = 0;
+    _call_signal_read = 0;
+    _call_commands.take();
     _call_state = CallState::IDLE;
     call_clear_generation(generation);
 
@@ -1722,7 +1746,7 @@ void UIManager::start_loopback() {
     // Don't stomp a live real call. (The harness never overlaps the two, but
     // be defensive: a real call owns _lxst_audio and must not be torn down.)
     if (_call_state != CallState::IDLE ||
-        _call_generation.load(std::memory_order_acquire) != 0) {
+        call_current_generation() != 0) {
         WARNING("LXST: Loopback refused — call in progress");
         return;
     }
@@ -1989,12 +2013,14 @@ void UIManager::on_lxst_caller_identified(const Link& link, const Identity& iden
 
     // Reserve admission only once the incoming call is identified and is about
     // to become actionable. A newer accepted call wins this CAS.
-    if (!self->call_begin_generation()) {
+    const uint32_t generation = self->call_begin_generation();
+    if (generation == 0) {
         WARNING("LXST: Caller identified after another call was accepted (ignoring)");
         return;
     }
 
     // The generation is now reserved for this current identified link.
+    self->_call_link_generation.store(generation, std::memory_order_release);
     self->_call_state = CallState::INCOMING_RINGING;
 
     // Store peer info

@@ -18,6 +18,7 @@
 #include "PropagationNodesScreen.h"
 #include "CallScreen.h"
 #include "CallCommandMailbox.h"
+#include "CallGenerationGuard.h"
 #include "LXMF/LXMRouter.h"
 #include "LXMF/PropagationNodeManager.h"
 #include "LXMF/MessageStore.h"
@@ -395,8 +396,8 @@ private:
     RNS::Link _call_link{RNS::Type::NONE};
     LXSTAudio* _lxst_audio;
     CallCommandMailbox _call_commands;
-    std::atomic<uint32_t> _call_generation{0};
-    std::atomic<uint32_t> _call_generation_counter{1};
+    CallGenerationGuard _call_generation_guard;
+    std::atomic<uint32_t> _call_link_generation{0};
     uint32_t _call_start_ms;       // millis() when call became ACTIVE
     uint32_t _call_timeout_ms;     // millis() deadline for current wait state
     bool _call_muted;
@@ -419,8 +420,10 @@ private:
     void call_set_mute(bool muted);
     void call_request_hangup();
     void call_request_mute(bool muted);
-    bool call_begin_generation();
+    uint32_t call_begin_generation();
     void call_clear_generation(uint32_t expected_generation);
+    uint32_t call_current_generation() const;
+    bool call_owns_link(const RNS::Link& link, uint32_t generation) const;
     void call_teardown_audio();
     void call_update();  // Called from update() — pumps audio packets + state machine
 
