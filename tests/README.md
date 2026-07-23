@@ -13,12 +13,14 @@ Native C++ tests of pyxis-unique code (BLE fragmenter, HDLC, etc.) and Python te
 System Python 3.9 has pytest pre-installed; Homebrew Python does not.
 
 - `build_scripts/test_patch_nimble.py` — verifies `patch_nimble.py` idempotency, drift detection, missing-file handling
+- `build_scripts/test_patch_littlefs_paths.py` — verifies non-destructive LittleFS mounting, patch idempotency/drift handling, and persistent-partition isolation
 - `native/test_hdlc.{cpp,py}` — HDLC escape/unescape/frame round-trip + golden vector against Python RNS
 - `native/test_ble_fragmenter.{cpp,py}` — BLEFragmenter ↔ BLEReassembler: in-order, out-of-order, duplicate, dropped+timeout, per-peer isolation, MTU change
 - `native/test_ble_peer_manager.{cpp,py}` — connection-map state machine: discover, identity promotion, blacklist, handle map cleanup, MAC rotation, pool exhaustion
 - `native/test_ble_operation_queue.{cpp,py}` — GATT op queue: FIFO, busy-state, timeout, clearForConnection, builder
 - `native/test_ring_buffers.{cpp,py}` — PCM + encoded SPSC ring buffers, including 100k-frame multithreaded producer/consumer stress
 - `native/test_audio_filters.{cpp,py}` — VoiceFilterChain frequency response, peak limiting, multichannel
+- `native/test_call_command_mailbox.{cpp,py}` — generation-scoped LXST hangup/mute command handoff and producer/consumer stress
 
 ### Adding a new native C++ test
 

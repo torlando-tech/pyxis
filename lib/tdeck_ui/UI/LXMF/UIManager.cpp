@@ -103,10 +103,11 @@ UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::Me
 
 UIManager::~UIManager() {
     // Clean up call state
-    if (_call_state != CallState::IDLE) {
+    if (_call_state != CallState::IDLE ||
+        _call_generation.load(std::memory_order_acquire) != 0) {
         call_hangup();
     }
-    delete _lxst_audio;
+    call_teardown_audio();
 
     // This pointer owns the long-lived incoming-destination callback, not only
     // the current call. Clear it only when the manager itself is destroyed.
@@ -250,11 +251,11 @@ bool UIManager::init() {
 
     // Set up callbacks for call screen
     _call_screen->set_hangup_callback(
-        [this]() { call_hangup(); }
+        [this]() { call_request_hangup(); }
     );
 
     _call_screen->set_mute_callback(
-        [this](bool muted) { call_set_mute(muted); }
+        [this](bool muted) { call_request_mute(muted); }
     );
 
     // Load settings from NVS
@@ -364,8 +365,21 @@ void UIManager::update() {
     // Process inbound LXMF messages
     _router.process_inbound();
 
-    // Pump voice call state machine
-    if (_call_state != CallState::IDLE) {
+    // Consume UI commands unconditionally. LVGL callbacks only publish into
+    // the mailbox; loopTask remains the sole owner of the audio pipeline.
+    const uint32_t generation = _call_generation.load(std::memory_order_acquire);
+    const CallCommandMailbox::Command command =
+        _call_commands.takeForGeneration(generation);
+    if (command.action == CallCommandMailbox::Action::HANGUP) {
+        call_hangup();
+    } else if (command.action == CallCommandMailbox::Action::MUTE) {
+        call_set_mute(command.muted);
+    }
+
+    // Pump voice call state while a call is active or its generation remains
+    // reserved during owner-side teardown.
+    if (_call_state != CallState::IDLE ||
+        _call_generation.load(std::memory_order_acquire) != 0) {
         call_update();
     }
 
@@ -946,9 +960,6 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
         return;
     }
 
-    _call_peer_hash = peer_hash;
-    _call_muted = false;
-
     lxst_breadcrumb(2, ESP.getFreeHeap());
 
     // Look up peer identity
@@ -965,6 +976,16 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
                           Type::Destination::SINGLE, "lxst", "telephony");
 
     lxst_breadcrumb(4, ESP.getFreeHeap());
+
+    // Reserve a generation only after the outgoing call has passed its
+    // acceptance checks. Incoming-link callbacks can race this LVGL path, so
+    // the atomic reservation is the definitive admission check.
+    if (!call_begin_generation()) {
+        WARNING("LXST: Another call was accepted concurrently");
+        return;
+    }
+    _call_peer_hash = peer_hash;
+    _call_muted = false;
 
     // Show call screen
     _call_screen->set_peer(peer_dest.hash());
@@ -1066,19 +1087,14 @@ const char* UIManager::test_call_state_name() const {
 void UIManager::call_hangup() {
     INFO("LXST: Hanging up");
 
-    // Set IDLE first — prevents pump_call_tx() (which runs without LVGL lock)
-    // from accessing _lxst_audio after we delete it. s_call_instance remains
-    // installed because it owns the long-lived incoming destination callback.
-    _call_state = CallState::IDLE;
+    const uint32_t generation =
+        _call_generation.load(std::memory_order_acquire);
 
-    // Stop audio
-    if (_lxst_audio) {
-        _lxst_audio->stopCapture();
-        _lxst_audio->stopPlayback();
-        _lxst_audio->deinit();
-        delete _lxst_audio;
-        _lxst_audio = nullptr;
-    }
+    // call_hangup() is an owner operation: production UI paths reach it only
+    // through update() on loopTask, which also owns pump_call_tx(). Keep the
+    // generation reserved until teardown is complete so a concurrent incoming
+    // callback cannot install a newer call over the old audio pointer.
+    call_teardown_audio();
 
     // Teardown link
     if (_call_link) {
@@ -1087,6 +1103,9 @@ void UIManager::call_hangup() {
     }
 
     _call_peer_hash = Bytes();
+    _call_link_closed_pending = false;
+    _call_state = CallState::IDLE;
+    call_clear_generation(generation);
 
     // Return to chat screen
     if (_call_screen) {
@@ -1102,7 +1121,48 @@ void UIManager::call_set_mute(bool muted) {
     if (_lxst_audio) {
         _lxst_audio->setCaptureMute(muted);
     }
+    if (_call_screen) {
+        _call_screen->set_muted(muted);
+    }
     INFO(muted ? "LXST: Mic muted" : "LXST: Mic unmuted");
+}
+
+void UIManager::call_request_hangup() {
+    _call_commands.requestHangup(
+        _call_generation.load(std::memory_order_acquire));
+}
+
+void UIManager::call_request_mute(bool muted) {
+    _call_commands.requestMute(
+        _call_generation.load(std::memory_order_acquire), muted);
+}
+
+bool UIManager::call_begin_generation() {
+    uint32_t generation = 0;
+    while (generation == 0) {
+        generation = _call_generation_counter.fetch_add(
+            1, std::memory_order_relaxed) & CallCommandMailbox::MAX_GENERATION;
+    }
+    uint32_t expected = 0;
+    return _call_generation.compare_exchange_strong(
+        expected, generation, std::memory_order_acq_rel,
+        std::memory_order_acquire);
+}
+
+void UIManager::call_clear_generation(uint32_t expected_generation) {
+    if (expected_generation == 0) return;
+    _call_generation.compare_exchange_strong(
+        expected_generation, 0, std::memory_order_acq_rel,
+        std::memory_order_acquire);
+}
+
+void UIManager::call_teardown_audio() {
+    if (!_lxst_audio) return;
+    _lxst_audio->stopCapture();
+    _lxst_audio->stopPlayback();
+    _lxst_audio->deinit();
+    delete _lxst_audio;
+    _lxst_audio = nullptr;
 }
 
 void UIManager::call_send_signal(int signal) {
@@ -1472,6 +1532,7 @@ void UIManager::call_process_signal(uint8_t signal) {
                     call_ended();
                     return;
                 }
+                _lxst_audio->setCaptureMute(_call_muted);
                 lxst_breadcrumb(23, ESP.getFreeHeap());
 
             } else if (signal == LXST_STATUS_ESTABLISHED) {
@@ -1498,6 +1559,7 @@ void UIManager::call_process_signal(uint8_t signal) {
                         call_ended();
                         return;
                     }
+                    _lxst_audio->setCaptureMute(_call_muted);
                 }
                 lxst_breadcrumb(26, ESP.getFreeHeap());
                 INFO("LXST: Call active (caller, full-duplex)");
@@ -1522,6 +1584,7 @@ void UIManager::call_process_signal(uint8_t signal) {
                         call_ended();
                         return;
                     }
+                    _lxst_audio->setCaptureMute(_call_muted);
                 }
                 INFO("LXST: Call active (full-duplex)");
             }
@@ -1535,19 +1598,10 @@ void UIManager::call_process_signal(uint8_t signal) {
 void UIManager::call_ended() {
     INFO("LXST: Call ended");
 
-    // Set IDLE first — prevents pump_call_tx() (which runs without LVGL lock)
-    // from accessing _lxst_audio after we delete it. s_call_instance remains
-    // installed because it owns the long-lived incoming destination callback.
-    _call_state = CallState::IDLE;
+    const uint32_t generation =
+        _call_generation.load(std::memory_order_acquire);
 
-    // Stop audio
-    if (_lxst_audio) {
-        _lxst_audio->stopCapture();
-        _lxst_audio->stopPlayback();
-        _lxst_audio->deinit();
-        delete _lxst_audio;
-        _lxst_audio = nullptr;
-    }
+    call_teardown_audio();
 
     // Teardown link
     if (_call_link) {
@@ -1556,6 +1610,9 @@ void UIManager::call_ended() {
     }
 
     _call_peer_hash = Bytes();
+    _call_link_closed_pending = false;
+    _call_state = CallState::IDLE;
+    call_clear_generation(generation);
 
     _call_screen->set_state(CallScreen::CallState::ENDED);
 
@@ -1605,20 +1662,15 @@ void UIManager::pump_call_tx() {
 void UIManager::start_loopback() {
     // Don't stomp a live real call. (The harness never overlaps the two, but
     // be defensive: a real call owns _lxst_audio and must not be torn down.)
-    if (_call_state != CallState::IDLE) {
+    if (_call_state != CallState::IDLE ||
+        _call_generation.load(std::memory_order_acquire) != 0) {
         WARNING("LXST: Loopback refused — call in progress");
         return;
     }
 
     // Always (re)create the pipeline so it picks up the currently selected
     // profile/codec mode (driven by T:CALL_PROFILE). Mirrors call_answer().
-    if (_lxst_audio) {
-        _lxst_audio->stopCapture();
-        _lxst_audio->stopPlayback();
-        _lxst_audio->deinit();
-        delete _lxst_audio;
-        _lxst_audio = nullptr;
-    }
+    call_teardown_audio();
     _call_audio_rx_count = 0;
     _call_audio_tx_count = 0;
 
@@ -1627,17 +1679,14 @@ void UIManager::start_loopback() {
     if (codec_mode < 0) codec_mode = CODEC2_MODE_700C;
     if (!_lxst_audio->init(codec_mode)) {
         WARNING("LXST: Loopback audio init failed");
-        delete _lxst_audio;
-        _lxst_audio = nullptr;
+        call_teardown_audio();
         return;
     }
     // Same start path a real call uses: mic + speaker simultaneously, so
     // isCapturing() (pump_call_tx) and isPlaying() (writeEncodedPacket) hold.
     if (!_lxst_audio->startFullDuplex()) {
         WARNING("LXST: Loopback full-duplex start failed");
-        _lxst_audio->deinit();
-        delete _lxst_audio;
-        _lxst_audio = nullptr;
+        call_teardown_audio();
         return;
     }
 
@@ -1652,13 +1701,7 @@ void UIManager::stop_loopback() {
     _call_loopback = false;
     pyxis_audio_dump_arm(false);
 
-    if (_lxst_audio) {
-        _lxst_audio->stopCapture();
-        _lxst_audio->stopPlayback();
-        _lxst_audio->deinit();
-        delete _lxst_audio;
-        _lxst_audio = nullptr;
-    }
+    call_teardown_audio();
     INFO("LXST: Loopback stopped");
 }
 
@@ -1813,16 +1856,17 @@ void UIManager::on_call_link_established(Link& link) {
 void UIManager::on_call_link_closed(Link& link) {
     if (!s_call_instance) return;
 
-    // Ignore stale link closures (e.g. old link teardown completing after new call started)
-    if (s_call_instance->_call_link && link != s_call_instance->_call_link) {
+    // Ignore stale link closures (e.g. old link teardown completing after a
+    // new call started). A missing current link is stale too: teardown may
+    // have reset _call_link before its later close callback is dispatched.
+    if (!s_call_instance->_call_link || link != s_call_instance->_call_link) {
         WARNING("LXST: Stale link closed (ignoring)");
         return;
     }
 
     WARNING("LXST: Link closed (deferred)");
 
-    // Don't call call_ended() here — runs on Reticulum thread without LVGL lock.
-    // Defer to call_update() which runs under LVGL lock.
+    // Don't call call_ended() here — defer to call_update() on loopTask.
     if (s_call_instance->_call_state != CallState::IDLE) {
         s_call_instance->_call_link_closed_pending = true;
     }
@@ -1873,8 +1917,26 @@ void UIManager::on_lxst_caller_identified(const Link& link, const Identity& iden
     auto* self = s_call_instance;
     lxst_breadcrumb(15, ESP.getFreeHeap());
 
+    // Identification can arrive after another call replaced this pending link.
+    // Reticulum invokes this callback synchronously from loopTask, so equality
+    // with the current owner link is sufficient here; do not mutate newer state.
+    if (!self->_call_link || link != self->_call_link) {
+        WARNING("LXST: Stale caller identified (ignoring)");
+        return;
+    }
+
     std::string hash_hex = identity.hash().toHex().substr(0, 16);
     INFO(("LXST: Caller identified: " + hash_hex + "...").c_str());
+
+    // Reserve admission only once the incoming call is identified and is about
+    // to become actionable. A newer accepted call wins this CAS.
+    if (!self->call_begin_generation()) {
+        WARNING("LXST: Caller identified after another call was accepted (ignoring)");
+        return;
+    }
+
+    // The generation is now reserved for this current identified link.
+    self->_call_state = CallState::INCOMING_RINGING;
 
     // Store peer info
     self->_call_peer_hash = identity.hash();
@@ -1885,8 +1947,7 @@ void UIManager::on_lxst_caller_identified(const Link& link, const Identity& iden
     // Send STATUS_RINGING
     self->call_send_signal(LXST_STATUS_RINGING);
 
-    // Transition to incoming ringing — UI will be shown in call_update()
-    self->_call_state = CallState::INCOMING_RINGING;
+    // Incoming ringing UI will be shown in call_update().
     self->_call_timeout_ms = millis() + 60000;  // 60s ring timeout
     lxst_breadcrumb(16, ESP.getFreeHeap());
 }
@@ -1936,6 +1997,7 @@ void UIManager::call_answer() {
         call_ended();
         return;
     }
+    _lxst_audio->setCaptureMute(_call_muted);
     INFOF("LXST: Full-duplex ready (internal=%u largest=%u)",
           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));

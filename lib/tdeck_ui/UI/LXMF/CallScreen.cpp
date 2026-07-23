@@ -219,8 +219,9 @@ void CallScreen::on_mute_clicked(lv_event_t* event) {
         return;
     }
     if (self->_mute_callback) {
+        // Track requested state for rapid-toggle parity, but leave appearance
+        // unchanged until UIManager confirms the owner-applied mute state.
         self->_muted = !self->_muted;
-        self->set_muted(self->_muted);
         self->_mute_callback(self->_muted);
     }
 }
