@@ -498,9 +498,19 @@ def main():
         while not phone.is_in_call and time.time()<deadline: time.sleep(.2)
         assert phone.is_in_call,"Sideband did not become active after identification timeout"
         ok,data=run_audio(dev,"TEST_IDENTIFY_TIMEOUT")
+        phone.hangup()
+        idle_ok,hangup_states=dev.wait_state("IDLE",15)
+        assert idle_ok, \
+            f"timeout recovery hangup did not return Pyxis to IDLE; states={hangup_states}"
+        hangup_deadline=time.time()+15
+        while (phone.is_in_call or phone.telephone.active_call) and time.time()<hangup_deadline:
+            time.sleep(.2)
+        assert not phone.is_in_call and not phone.telephone.active_call, \
+            "timeout recovery hangup did not close the Sideband call/link"
         results.append(("identification_timeout_recovery_bidirectional",ok,
-                        {"dial":recovery_dial,"ring_states":seen,"audio":data}))
-        phone.hangup(); dev.wait_state("IDLE",15); time.sleep(1)
+                        {"dial":recovery_dial,"ring_states":seen,"audio":data,
+                         "hangup_states":hangup_states}))
+        time.sleep(1)
 
         # Pyxis -> Sideband first. This proves Pyxis learned the fresh peer
         # announce before testing the reciprocal incoming route.
