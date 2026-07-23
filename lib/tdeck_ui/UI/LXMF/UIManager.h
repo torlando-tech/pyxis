@@ -351,6 +351,9 @@ private:
     static constexpr uint8_t LXST_STATUS_CONNECTING   = 0x05;
     static constexpr uint8_t LXST_STATUS_ESTABLISHED  = 0x06;
 
+    // An accepted incoming link must identify before it can start ringing.
+    static constexpr uint32_t INCOMING_IDENTIFY_TIMEOUT_MS = 15000;
+
     // LXST codec type bytes (match LXST Codecs/__init__.py)
     static constexpr uint8_t LXST_CODEC_CODEC2 = 0x02;
 
@@ -377,6 +380,7 @@ private:
         WAIT_AVAILABLE,     // Outgoing: link up, waiting for STATUS_AVAILABLE
         WAIT_RINGING,       // Outgoing: sent identify, waiting for STATUS_RINGING
         RINGING,            // Outgoing: remote is ringing
+        INCOMING_IDENTIFYING, // Incoming: link reserved, waiting for caller identity
         INCOMING_RINGING,   // Incoming: waiting for user to answer/reject
         CONNECTING,         // Both: opening audio pipelines
         ACTIVE,             // Both: voice flowing

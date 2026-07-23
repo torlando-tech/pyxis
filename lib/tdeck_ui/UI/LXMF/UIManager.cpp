@@ -1139,6 +1139,7 @@ const char* UIManager::test_call_state_name() const {
         case CallState::WAIT_AVAILABLE:     return "WAIT_AVAILABLE";
         case CallState::WAIT_RINGING:       return "WAIT_RINGING";
         case CallState::RINGING:            return "RINGING";
+        case CallState::INCOMING_IDENTIFYING: return "INCOMING_IDENTIFYING";
         case CallState::INCOMING_RINGING:   return "INCOMING_RINGING";
         case CallState::CONNECTING:         return "CONNECTING";
         case CallState::ACTIVE:             return "ACTIVE";
@@ -1868,6 +1869,10 @@ void UIManager::call_update() {
                 WARNING("LXST: Ring timed out (no answer)");
                 call_ended();
                 return;
+            case CallState::INCOMING_IDENTIFYING:
+                WARNING("LXST: Incoming caller identification timed out");
+                call_ended();
+                return;
             case CallState::INCOMING_RINGING:
                 WARNING("LXST: Incoming call timed out (no answer)");
                 call_ended();
@@ -1963,13 +1968,20 @@ void UIManager::on_call_link_packet(const Bytes& plaintext, const Packet& packet
 // ── LXST Incoming Call Callbacks ──
 
 void UIManager::on_lxst_link_established(Link& link) {
-    if (!s_call_instance) return;
+    if (!s_call_instance) {
+        link.teardown();
+        return;
+    }
     auto* self = s_call_instance;
+
+    // Incoming callbacks race outgoing initiation and other incoming links.
+    // The atomic generation reservation is the definitive admission decision.
+    const uint32_t generation = self->call_begin_generation();
     lxst_breadcrumb(10, ESP.getFreeHeap());
     INFO("LXST: Incoming link established");
-
-    if (self->_call_state != CallState::IDLE) {
-        // Already in a call — send busy directly on the new link
+    if (generation == 0) {
+        // Another call owns the manager. Reject using only this callback's link;
+        // never touch the stored owner link or any owner-side call state.
         INFO("LXST: Busy, rejecting incoming link");
         uint8_t busy_buf[4] = { 0x81, 0x00, 0x91, LXST_STATUS_BUSY };
         Bytes busy_data(busy_buf, 4);
@@ -1979,19 +1991,35 @@ void UIManager::on_lxst_link_established(Link& link) {
         return;
     }
 
-    // Accept the incoming link
+    // Publish ownership and the identifying state before installing callbacks
+    // or sending availability. No ringing UI or tone is shown in this state.
     lxst_breadcrumb(11, ESP.getFreeHeap());
+    self->_call_link_generation.store(generation, std::memory_order_release);
     self->_call_link = link;
+    self->_call_state = CallState::INCOMING_IDENTIFYING;
+    self->_call_peer_hash = Bytes();
+    self->_call_dest_hash = Bytes();
     self->_call_muted = false;
+    self->_call_answer_pending = false;
+    self->_call_link_closed_pending = false;
+    self->_call_signal_write = 0;
+    self->_call_signal_read = 0;
+    self->_call_audio_rx_count = 0;
+    self->_call_audio_tx_count = 0;
+    self->_call_commands.take();
+    self->_call_timeout_ms = millis() + INCOMING_IDENTIFY_TIMEOUT_MS;
+
+    // Wait for the accepted caller to identify and observe link closure through
+    // the stored owner link, whose shared-object identity is generation-bound.
+    self->_call_link.set_remote_identified_callback(on_lxst_caller_identified);
+    self->_call_link.set_link_closed_callback(on_call_link_closed);
 
     // Send STATUS_AVAILABLE
     lxst_breadcrumb(12, ESP.getFreeHeap());
     self->call_send_signal(LXST_STATUS_AVAILABLE);
 
-    // Wait for caller to identify themselves
     lxst_breadcrumb(13, ESP.getFreeHeap());
-    link.set_remote_identified_callback(on_lxst_caller_identified);
-    link.set_link_closed_callback(on_call_link_closed);
+    INFO("LXST: Waiting for caller identity (15s timeout)");
     lxst_breadcrumb(14, ESP.getFreeHeap());
 }
 
@@ -2000,10 +2028,12 @@ void UIManager::on_lxst_caller_identified(const Link& link, const Identity& iden
     auto* self = s_call_instance;
     lxst_breadcrumb(15, ESP.getFreeHeap());
 
-    // Identification can arrive after another call replaced this pending link.
-    // Reticulum invokes this callback synchronously from loopTask, so equality
-    // with the current owner link is sufficient here; do not mutate newer state.
-    if (!self->_call_link || link != self->_call_link) {
+    // Bind identity to both the current owner link and its generation. A stale
+    // callback must not tear down or mutate a newer call.
+    const uint32_t generation =
+        self->_call_link_generation.load(std::memory_order_acquire);
+    if (!self->call_owns_link(link, generation) ||
+        self->_call_state != CallState::INCOMING_IDENTIFYING) {
         WARNING("LXST: Stale caller identified (ignoring)");
         return;
     }
@@ -2011,23 +2041,15 @@ void UIManager::on_lxst_caller_identified(const Link& link, const Identity& iden
     std::string hash_hex = identity.hash().toHex().substr(0, 16);
     INFO(("LXST: Caller identified: " + hash_hex + "...").c_str());
 
-    // Reserve admission only once the incoming call is identified and is about
-    // to become actionable. A newer accepted call wins this CAS.
-    const uint32_t generation = self->call_begin_generation();
-    if (generation == 0) {
-        WARNING("LXST: Caller identified after another call was accepted (ignoring)");
-        return;
-    }
-
-    // The generation is now reserved for this current identified link.
-    self->_call_link_generation.store(generation, std::memory_order_release);
-    self->_call_state = CallState::INCOMING_RINGING;
-
     // Store peer info
     self->_call_peer_hash = identity.hash();
 
     // Set packet callback for signalling + audio on this link
     self->_call_link.set_packet_callback(on_call_link_packet);
+
+    // Identification completed for the reserved owner; ringing can now become
+    // visible and actionable on the next call_update().
+    self->_call_state = CallState::INCOMING_RINGING;
 
     // Send STATUS_RINGING
     self->call_send_signal(LXST_STATUS_RINGING);
