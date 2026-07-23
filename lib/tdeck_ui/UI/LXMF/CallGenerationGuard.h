@@ -10,9 +10,10 @@
 namespace UI {
 namespace LXMF {
 
-// Lock-free admission guard for call setup. Each successful reservation owns a
+// Atomic admission guard for call setup. Each successful reservation owns a
 // generation until that exact generation releases it; generation zero always
-// means "unowned".
+// means "unowned". Generations eventually repeat after the finite token space
+// wraps, so a token retained for a full cycle can exhibit ABA.
 class CallGenerationGuard {
 public:
     static constexpr uint32_t MAX_GENERATION = 0x7fffffffu;

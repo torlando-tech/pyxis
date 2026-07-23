@@ -20,6 +20,7 @@ def test_call_generation_guard(tmp_path):
         "-std=c++17",
         "-Wall",
         "-Wextra",
+        "-Werror",
         "-pthread",
         str(TEST_SOURCE),
         "-o",

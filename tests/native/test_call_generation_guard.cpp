@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <stdexcept>
 #include <thread>
 
@@ -89,23 +90,34 @@ static void next_reservation_has_distinct_generation() {
 }
 
 static void exactly_one_thread_wins_reservation_race() {
-    CallGenerationGuard guard;
-    std::atomic<bool> start{false};
-    uint32_t first = 0;
-    uint32_t second = 0;
-    std::thread a([&] {
-        while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
-        first = guard.tryReserve();
-    });
-    std::thread b([&] {
-        while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
-        second = guard.tryReserve();
-    });
-    start.store(true, std::memory_order_release);
-    a.join();
-    b.join();
-    EXPECT_TRUE((first == 0) != (second == 0));
-    EXPECT_EQ(guard.current(), first != 0 ? first : second);
+    constexpr int kRaceIterations = 1000;
+    for (int iteration = 0; iteration < kRaceIterations; ++iteration) {
+        CallGenerationGuard guard;
+        std::atomic<unsigned> ready{0};
+        std::atomic<bool> start{false};
+        uint32_t first = 0;
+        uint32_t second = 0;
+
+        auto reserve = [&](uint32_t& result) {
+            ready.fetch_add(1, std::memory_order_release);
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            result = guard.tryReserve();
+        };
+
+        std::thread a(reserve, std::ref(first));
+        std::thread b(reserve, std::ref(second));
+        while (ready.load(std::memory_order_acquire) != 2) {
+            std::this_thread::yield();
+        }
+        start.store(true, std::memory_order_release);
+        a.join();
+        b.join();
+
+        EXPECT_TRUE((first == 0) != (second == 0));
+        EXPECT_EQ(guard.current(), first != 0 ? first : second);
+    }
 }
 
 static void stale_token_cannot_release_new_winner() {
