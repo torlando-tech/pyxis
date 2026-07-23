@@ -202,8 +202,17 @@ public:
      * commands defined in main.cpp under PYXIS_TEST_HOOKS.
      */
 
-    /** Initiate an outgoing call to peer (calls private call_initiate). */
-    void test_call_initiate(const RNS::Bytes& peer_hash) { call_initiate(peer_hash); }
+    enum class TestCallInitiateResult {
+        FAILED,
+        BUSY,
+        STARTED,
+    };
+
+    /** Initiate an outgoing call and report its exact admission outcome. */
+    TestCallInitiateResult test_call_initiate(const RNS::Bytes& peer_hash) {
+        call_initiate(peer_hash);
+        return _test_call_initiate_result;
+    }
 
     /** Hang up the active call on loopTask (calls private call_hangup). */
     void test_call_hangup() { call_hangup(); }
@@ -406,6 +415,10 @@ private:
     CallCommandMailbox _call_commands;
     CallGenerationGuard _call_generation_guard;
     CallLinkOwnership _call_link_ownership;
+#ifdef PYXIS_TEST_HOOKS
+    TestCallInitiateResult _test_call_initiate_result =
+        TestCallInitiateResult::FAILED;
+#endif
     uint32_t _call_start_ms;       // millis() when call became ACTIVE
     uint32_t _call_timeout_ms;     // millis() deadline for current wait state
     bool _call_muted;

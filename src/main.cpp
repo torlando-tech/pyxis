@@ -2175,8 +2175,15 @@ static void handle_test_hook_command(const String& line) {
         // Serial hooks run on loopTask, outside the LVGL task. The production
         // call path mutates screens immediately, so hold the same LVGL lock as
         // other cross-task UI operations.
-        { LVGL_LOCK(); ui_manager->test_call_initiate(dest_hash); }
-        Serial.println(String("T:OK calling=") + args);
+        UI::LXMF::UIManager::TestCallInitiateResult result;
+        { LVGL_LOCK(); result = ui_manager->test_call_initiate(dest_hash); }
+        if (result == UI::LXMF::UIManager::TestCallInitiateResult::BUSY) {
+            Serial.println("T:ERR busy");
+        } else if (result == UI::LXMF::UIManager::TestCallInitiateResult::STARTED) {
+            Serial.println(String("T:OK calling=") + args);
+        } else {
+            Serial.println("T:ERR call_failed");
+        }
     }
     else if (cmd == "T:CALL_STATE") {
         // T:CALL_STATE — print the current call FSM state name.

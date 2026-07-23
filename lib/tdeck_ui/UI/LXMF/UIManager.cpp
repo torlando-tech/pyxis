@@ -1024,6 +1024,9 @@ static void lxst_breadcrumb(uint8_t step, uint32_t heap) {
 }
 
 void UIManager::call_initiate(const Bytes& peer_hash) {
+#ifdef PYXIS_TEST_HOOKS
+    _test_call_initiate_result = TestCallInitiateResult::FAILED;
+#endif
     {
         std::string h = peer_hash.toHex().substr(0, 16);
         INFO(("LXST: Initiating call to " + h + "...").c_str());
@@ -1066,6 +1069,9 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
     // the definitive ownership check.
     const uint32_t generation = call_begin_generation();
     if (generation == 0) {
+#ifdef PYXIS_TEST_HOOKS
+        _test_call_initiate_result = TestCallInitiateResult::BUSY;
+#endif
         WARNING("LXST: Another call was accepted concurrently");
         return;
     }
@@ -1118,6 +1124,10 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
         _call_state = CallState::PATH_REQUESTING;
         _call_timeout_ms = millis() + 10000;
     }
+
+#ifdef PYXIS_TEST_HOOKS
+    _test_call_initiate_result = TestCallInitiateResult::STARTED;
+#endif
 
     lxst_breadcrumb(7, ESP.getFreeHeap());
 }

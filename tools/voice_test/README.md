@@ -51,8 +51,9 @@ T-Deck serial hooks to verify:
   second raw link receives `STATUS_BUSY` and cannot replace it.
 - A local `T:CALL` request cannot displace an incoming link that is still
   identifying.
-- Closing reserved caller A and then ringing caller B isolates B from a feasible
-  late action and queued callback drain from A.
+- Closing reserved caller A and then ringing caller B proves that closed-link
+  `identify()` is a no-op and that B remains stable while A's queued callbacks
+  drain. The harness does not inject a fabricated stale callback.
 - A non-identifying caller is closed after the 15-second firmware timeout, and a
   subsequent normal call still rings, answers, reaches `ACTIVE`, exchanges audio
   in both directions, and hangs up cleanly.
@@ -63,6 +64,10 @@ Build the test firmware with the Mac TCP server baked in, then upload it:
 export PYXIS_TEST_TCP_HOST=10.0.0.145 PYXIS_TEST_TCP_PORT=4242
 /opt/homebrew/bin/pio run -e tdeck -t upload --upload-port /dev/cu.usbmodem101
 ```
+
+After testing, remove/disable `PYXIS_TEST_HOOKS` and the test TCP overrides and
+restore the normal release firmware on the device. Do not leave test-hook
+firmware deployed as the normal user build.
 
 Run from the Mac with its Reticulum venv (defaults to the local TCP server on
 `127.0.0.1:4242`):
@@ -80,9 +85,17 @@ On Apple Silicon the harness re-executes itself with `/opt/homebrew/lib` on
 `DYLD_LIBRARY_PATH`, allowing LXST/PyOgg to load Homebrew `libopus` for incoming
 calls.
 
-The contention cases use the pinned Reticulum 1.3.8 `Identity`, `Destination`,
-and `Link` APIs directly. They require current Pyxis and Sideband LXST announces,
-the TCP Reticulum hub, a serial-connected T-Deck running the test-hooks firmware,
-and the Mac Reticulum environment shown above. Run the host-native generation
-guard tests separately for the deterministic portable stale-callback model; the
-raw-link stale-action case is an additional physical integration check.
+The contention cases use the ordinary Reticulum `Identity`, `Destination`, and
+`Link` APIs directly and print the observed `RNS.__version__` at startup. The
+legacy Sideband environment was validated with RNS 1.3.8 for API compatibility;
+that is an observation, not a pin or downgrade recommendation. Torlando's
+security-patched deployments require RNS 1.3.9 or newer for Luthen. Use the
+current security-patched version and do not force an insecure rollback merely
+to run this harness.
+
+The physical run requires current Pyxis and Sideband LXST announces, the TCP
+Reticulum hub, a serial-connected T-Deck running the test-hooks firmware, and
+the Mac Reticulum environment shown above. Run the host-native generation guard
+tests separately for the deterministic portable stale-callback model. The
+physical closed-link case proves close/B-redial stability plus callback drain;
+it does not inject a stale callback.
