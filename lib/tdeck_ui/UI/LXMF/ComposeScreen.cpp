@@ -289,12 +289,10 @@ void ComposeScreen::on_send_clicked(lv_event_t* event) {
     Bytes dest_hash;
     dest_hash.assignHex(dest_hash_str.c_str());
 
-    if (screen->_send_callback) {
-        screen->_send_callback(dest_hash, message);
+    if (screen->_send_callback && screen->_send_callback(dest_hash, message)) {
+        // Clear only after persistence and queue admission succeed.
+        screen->clear();
     }
-
-    // Clear form
-    screen->clear();
 }
 
 bool ComposeScreen::validate_destination_hash(const String& hash_str) {

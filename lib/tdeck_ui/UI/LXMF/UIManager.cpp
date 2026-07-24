@@ -36,20 +36,26 @@ namespace LXMF {
 
 namespace {
 
+lv_obj_t* storage_error_dialog = nullptr;
+
 void close_storage_error(lv_event_t* event) {
     lv_obj_t* message_box = lv_event_get_current_target(event);
     if (lv_msgbox_get_active_btn(message_box) == 0) {
+        storage_error_dialog = nullptr;
         lv_msgbox_close(message_box);
     }
 }
 
 void show_storage_error(const char* message) {
+    // Coalesce receive bursts into one dialog rather than allocating one per
+    // rejected packet while storage remains unavailable.
+    if (storage_error_dialog) return;
     static const char* buttons[] = {"OK", ""};
-    lv_obj_t* message_box = lv_msgbox_create(
+    storage_error_dialog = lv_msgbox_create(
         nullptr, "Message not saved", message, buttons, false
     );
-    lv_obj_center(message_box);
-    lv_obj_add_event_cb(message_box, close_storage_error, LV_EVENT_VALUE_CHANGED, nullptr);
+    lv_obj_center(storage_error_dialog);
+    lv_obj_add_event_cb(storage_error_dialog, close_storage_error, LV_EVENT_VALUE_CHANGED, nullptr);
 }
 
 }  // namespace
@@ -190,7 +196,7 @@ bool UIManager::init() {
     );
 
     _chat_screen->set_send_message_callback(
-        [this](const String& content) { on_send_message_from_chat(content); }
+        [this](const String& content) { return on_send_message_from_chat(content); }
     );
 
     _chat_screen->set_call_callback(
@@ -204,7 +210,7 @@ bool UIManager::init() {
 
     _compose_screen->set_send_callback(
         [this](const Bytes& dest_hash, const String& message) {
-            on_send_message_from_compose(dest_hash, message);
+            return on_send_message_from_compose(dest_hash, message);
         }
     );
 
@@ -656,8 +662,8 @@ void UIManager::on_back_to_conversation_list() {
     show_conversation_list();
 }
 
-void UIManager::on_send_message_from_chat(const String& content) {
-    send_message(_current_peer_hash, content);
+bool UIManager::on_send_message_from_chat(const String& content) {
+    return send_message(_current_peer_hash, content);
 }
 
 void UIManager::on_call_from_chat() {
@@ -670,11 +676,12 @@ void UIManager::on_call_from_chat() {
     call_initiate(_current_peer_hash);
 }
 
-void UIManager::on_send_message_from_compose(const Bytes& dest_hash, const String& message) {
-    send_message(dest_hash, message);
+bool UIManager::on_send_message_from_compose(const Bytes& dest_hash, const String& message) {
+    if (!send_message(dest_hash, message)) return false;
 
-    // Switch to chat screen for this conversation
+    // Switch to chat screen only after the message is durably accepted.
     show_chat(dest_hash);
+    return true;
 }
 
 void UIManager::on_cancel_compose() {
@@ -787,7 +794,7 @@ void UIManager::set_rns_status(bool connected, const String& server_name) {
     }
 }
 
-void UIManager::send_message(const Bytes& dest_hash, const String& content) {
+bool UIManager::send_message(const Bytes& dest_hash, const String& content) {
     std::string hash_hex = dest_hash.toHex().substr(0, 8);
     std::string msg = "Sending message to " + hash_hex + "...";
     INFO(msg.c_str());
@@ -837,7 +844,7 @@ void UIManager::send_message(const Bytes& dest_hash, const String& content) {
     if (!_store.save_message(message)) {
         ERROR("Outgoing message persistence failed; message not queued");
         show_storage_error("Storage is unavailable. The message was not sent.");
-        return;
+        return false;
     }
 
     if (_current_screen == SCREEN_CHAT && _current_peer_hash == dest_hash) {
@@ -848,6 +855,7 @@ void UIManager::send_message(const Bytes& dest_hash, const String& content) {
     _router.handle_outbound(message);
 
     INFO("  Message queued for delivery");
+    return true;
 }
 
 void UIManager::on_message_received(::LXMF::LXMessage& message) {
@@ -906,11 +914,19 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
 }
 
 void UIManager::on_message_delivered(::LXMF::LXMessage& message) {
-    LVGL_LOCK();
     std::string hash_hex = message.hash().toHex().substr(0, 8);
     std::string msg = "Message delivered: " + hash_hex + "...";
     INFO(msg.c_str());
 
+    if (!_store.update_message_state(
+            message.hash(), ::LXMF::Type::Message::State::DELIVERED)) {
+        ERROR("Delivered message state persistence failed");
+        LVGL_LOCK();
+        show_storage_error("Delivery status could not be saved. Check device storage.");
+        return;
+    }
+
+    LVGL_LOCK();
     // Update UI if we're viewing this conversation
     if (_current_screen == SCREEN_CHAT && _current_peer_hash == message.destination_hash()) {
         _chat_screen->update_message_status(message.hash(), true);
@@ -918,11 +934,19 @@ void UIManager::on_message_delivered(::LXMF::LXMessage& message) {
 }
 
 void UIManager::on_message_failed(::LXMF::LXMessage& message) {
-    LVGL_LOCK();
     std::string hash_hex = message.hash().toHex().substr(0, 8);
     std::string msg = "Message delivery failed: " + hash_hex + "...";
     WARNING(msg.c_str());
 
+    if (!_store.update_message_state(
+            message.hash(), ::LXMF::Type::Message::State::FAILED)) {
+        ERROR("Failed message state persistence failed");
+        LVGL_LOCK();
+        show_storage_error("Delivery failure status could not be saved. Check device storage.");
+        return;
+    }
+
+    LVGL_LOCK();
     // Update UI if we're viewing this conversation
     if (_current_screen == SCREEN_CHAT && _current_peer_hash == message.destination_hash()) {
         _chat_screen->update_message_status(message.hash(), false);

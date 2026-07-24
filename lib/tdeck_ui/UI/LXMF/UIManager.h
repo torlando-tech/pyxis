@@ -318,9 +318,9 @@ private:
     void on_conversation_selected(const RNS::Bytes& peer_hash);
     void on_new_message();
     void on_back_to_conversation_list();
-    void on_send_message_from_chat(const String& content);
+    bool on_send_message_from_chat(const String& content);
     void on_call_from_chat();
-    void on_send_message_from_compose(const RNS::Bytes& dest_hash, const String& message);
+    bool on_send_message_from_compose(const RNS::Bytes& dest_hash, const String& message);
     void on_cancel_compose();
     void on_announce_selected(const RNS::Bytes& dest_hash);
     void on_back_from_announces();
@@ -334,7 +334,7 @@ private:
     void on_propagation_sync();
 
     // LXMF message handling
-    void send_message(const RNS::Bytes& dest_hash, const String& content);
+    bool send_message(const RNS::Bytes& dest_hash, const String& content);
 
     // UI updates
     void refresh_current_screen();

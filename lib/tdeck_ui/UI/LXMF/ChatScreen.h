@@ -61,7 +61,7 @@ public:
      * Callback types
      */
     using BackCallback = std::function<void()>;
-    using SendMessageCallback = std::function<void(const String& content)>;
+    using SendMessageCallback = std::function<bool(const String& content)>;
     using CallCallback = std::function<void()>;
 
     /**

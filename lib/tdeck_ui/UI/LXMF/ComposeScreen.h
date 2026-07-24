@@ -42,7 +42,7 @@ public:
      * Callback types
      */
     using CancelCallback = std::function<void()>;
-    using SendCallback = std::function<void(const RNS::Bytes& dest_hash, const String& message)>;
+    using SendCallback = std::function<bool(const RNS::Bytes& dest_hash, const String& message)>;
 
     /**
      * Create compose screen
