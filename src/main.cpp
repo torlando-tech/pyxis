@@ -12,6 +12,7 @@
 #include <esp_system.h>
 #include <esp_heap_caps.h>
 #include <esp_task_wdt.h>
+#include <esp_ota_ops.h>
 #include <new>  // placement new
 #include <soc/rtc_cntl_reg.h>
 
@@ -956,6 +957,30 @@ void setup_hardware() {
     INFO("Power enabled (early init)");
 }
 
+void confirm_running_firmware() {
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    if (!running) {
+        ERROR("Unable to identify running OTA partition");
+        return;
+    }
+
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    esp_err_t state_result = esp_ota_get_state_partition(running, &state);
+    INFOF("Running firmware: version=%s partition=%s subtype=%d address=0x%lx state=%d",
+          FIRMWARE_VERSION, running->label, static_cast<int>(running->subtype),
+          static_cast<unsigned long>(running->address), static_cast<int>(state));
+
+    if (state_result == ESP_OK &&
+        (state == ESP_OTA_IMG_NEW || state == ESP_OTA_IMG_PENDING_VERIFY)) {
+        esp_err_t result = esp_ota_mark_app_valid_cancel_rollback();
+        if (result == ESP_OK) {
+            INFO("Running firmware marked valid; OTA rollback cancelled");
+        } else {
+            ERRORF("Failed to mark running firmware valid: %s", esp_err_to_name(result));
+        }
+    }
+}
+
 void setup_lvgl_and_ui() {
     INFO("\n=== LVGL & UI Initialization ===");
 
@@ -1275,6 +1300,7 @@ void setup_ui_manager() {
     // Configure settings screen
     UI::LXMF::SettingsScreen* settings = ui_manager->get_settings_screen();
     if (settings) {
+        settings->set_firmware_version(FIRMWARE_VERSION);
         // Pass GPS for status display
         settings->set_gps(&gps);
 
@@ -1788,6 +1814,11 @@ void setup() {
         INFO(">>> APP DELIVERED CALLBACK EXIT");
         Serial.flush();
     });
+
+    // Columba writes app0 plus fresh OTA-selection data. This framework has
+    // bootloader rollback enabled, so confirm the app only after filesystem,
+    // LXMF, and UI initialization have all completed successfully.
+    confirm_running_firmware();
 
     // Boot profiling complete
     BOOT_PROFILE_COMPLETE();

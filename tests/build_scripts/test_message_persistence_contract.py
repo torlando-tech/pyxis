@@ -7,6 +7,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 UI_MANAGER = REPO_ROOT / "lib/tdeck_ui/UI/LXMF/UIManager.cpp"
 CHAT_SCREEN = REPO_ROOT / "lib/tdeck_ui/UI/LXMF/ChatScreen.cpp"
 COMPOSE_SCREEN = REPO_ROOT / "lib/tdeck_ui/UI/LXMF/ComposeScreen.cpp"
+MAIN = REPO_ROOT / "src/main.cpp"
 
 
 def function_body(source: str, signature: str, next_signature: str) -> str:
@@ -84,3 +85,17 @@ def test_storage_error_dialogs_are_coalesced():
     source = UI_MANAGER.read_text()
     assert "if (storage_error_dialog) return;" in source
     assert "storage_error_dialog = nullptr;" in source
+
+
+def test_successful_boot_cancels_ota_rollback_after_subsystems_initialize():
+    source = MAIN.read_text()
+    confirm = function_body(
+        source,
+        "void confirm_running_firmware()",
+        "void setup_lvgl_and_ui()",
+    )
+    assert "ESP_OTA_IMG_PENDING_VERIFY" in confirm
+    assert "esp_ota_mark_app_valid_cancel_rollback()" in confirm
+    setup = function_body(source, "void setup()", "void loop()")
+    assert setup.index("setup_lxmf();") < setup.index("setup_ui_manager();")
+    assert setup.index("setup_ui_manager();") < setup.index("confirm_running_firmware();")

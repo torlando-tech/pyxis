@@ -1312,6 +1312,13 @@ void SettingsScreen::set_lxmf_address(const Bytes& hash) {
     _lxmf_address = hash;
 }
 
+void SettingsScreen::set_firmware_version(const String& version) {
+    if (_label_firmware) {
+        String text = "Firmware: " + version;
+        lv_label_set_text(_label_firmware, text.c_str());
+    }
+}
+
 void SettingsScreen::set_gps(TinyGPSPlus* gps) {
     _gps = gps;
 }
