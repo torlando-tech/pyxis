@@ -34,6 +34,26 @@ static const char* KEY_STAMP_COST = "stamp_cost";
 namespace UI {
 namespace LXMF {
 
+namespace {
+
+void close_storage_error(lv_event_t* event) {
+    lv_obj_t* message_box = lv_event_get_current_target(event);
+    if (lv_msgbox_get_active_btn(message_box) == 0) {
+        lv_msgbox_close(message_box);
+    }
+}
+
+void show_storage_error(const char* message) {
+    static const char* buttons[] = {"OK", ""};
+    lv_obj_t* message_box = lv_msgbox_create(
+        nullptr, "Message not saved", message, buttons, false
+    );
+    lv_obj_center(message_box);
+    lv_obj_add_event_cb(message_box, close_storage_error, LV_EVENT_VALUE_CHANGED, nullptr);
+}
+
+}  // namespace
+
 // Static singleton for Link callbacks
 UIManager* UIManager::s_call_instance = nullptr;
 
@@ -811,13 +831,18 @@ void UIManager::send_message(const Bytes& dest_hash, const String& content) {
     // Pack the message to generate hash and signature before saving
     message.pack();
 
-    // Add to UI immediately (optimistic update)
+    // Do not transmit or display an outgoing message unless both its payload
+    // and conversation index were committed. Otherwise a reboot makes an
+    // apparently-sent message disappear from history.
+    if (!_store.save_message(message)) {
+        ERROR("Outgoing message persistence failed; message not queued");
+        show_storage_error("Storage is unavailable. The message was not sent.");
+        return;
+    }
+
     if (_current_screen == SCREEN_CHAT && _current_peer_hash == dest_hash) {
         _chat_screen->add_message(message, true);
     }
-
-    // Save to store (now has valid hash from pack())
-    _store.save_message(message);
 
     // Queue for sending (pack already called, will use cached packed data)
     _router.handle_outbound(message);
@@ -844,8 +869,14 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
     // (void)RNS::Identity::mark_persistent(message.source_hash());
 
     // Save to store — no LVGL lock; LittleFS GC is allowed to take its
-    // time without freezing the UI thread.
-    _store.save_message(message);
+    // time without freezing the UI thread. Do not present an in-memory-only
+    // message as durable conversation history.
+    if (!_store.save_message(message)) {
+        ERROR("Incoming message persistence failed; message not added to history");
+        LVGL_LOCK();
+        show_storage_error("An incoming message could not be saved. Check device storage.");
+        return;
+    }
 
     // Take the LVGL lock now for the UI-touching code below.
     LVGL_LOCK();
