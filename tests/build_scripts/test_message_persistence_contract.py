@@ -99,3 +99,11 @@ def test_successful_boot_cancels_ota_rollback_after_subsystems_initialize():
     setup = function_body(source, "void setup()", "void loop()")
     assert setup.index("setup_lxmf();") < setup.index("setup_ui_manager();")
     assert setup.index("setup_ui_manager();") < setup.index("confirm_running_firmware();")
+
+
+def test_system_info_reports_littlefs_not_unmounted_spiffs():
+    source = (REPO_ROOT / "lib/tdeck_ui/UI/LXMF/SettingsScreen.cpp").read_text()
+    assert '"Firmware: " FIRMWARE_VERSION' in source
+    assert "LittleFS.totalBytes()" in source
+    assert "LittleFS.usedBytes()" in source
+    assert "SPIFFS.totalBytes()" not in source

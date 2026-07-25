@@ -8,7 +8,7 @@
 
 #include <WiFi.h>
 #include "../LVGL/LVGLLock.h"
-#include <SPIFFS.h>
+#include <LittleFS.h>
 #include <TinyGPSPlus.h>
 #include <microReticulum/Log.h>
 #include <microReticulum/Utilities/OS.h>
@@ -753,7 +753,7 @@ void SettingsScreen::create_system_section(lv_obj_t* parent) {
 
     _label_identity_hash = create_label_row(parent, "Identity: --");
     _label_lxmf_address = create_label_row(parent, "LXMF: --");
-    _label_firmware = create_label_row(parent, "Firmware: v1.0.0");
+    _label_firmware = create_label_row(parent, "Firmware: " FIRMWARE_VERSION);
     _label_storage = create_label_row(parent, "Storage: --");
     _label_ram = create_label_row(parent, "RAM: --");
 }
@@ -1292,10 +1292,15 @@ void SettingsScreen::update_system_info() {
     }
 
     // Storage
-    size_t total = SPIFFS.totalBytes();
-    size_t used = SPIFFS.usedBytes();
-    size_t free = total - used;
-    String storage = "Storage: " + String(free / 1024) + " KB free";
+    size_t total = LittleFS.totalBytes();
+    size_t used = LittleFS.usedBytes();
+    String storage;
+    if (total == 0 || used > total) {
+        storage = "Storage: unavailable";
+    } else {
+        size_t free = total - used;
+        storage = "Storage: " + String(free / 1024) + " KB free";
+    }
     lv_label_set_text(_label_storage, storage.c_str());
 
     // RAM

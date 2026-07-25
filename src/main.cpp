@@ -1300,7 +1300,14 @@ void setup_ui_manager() {
     // Configure settings screen
     UI::LXMF::SettingsScreen* settings = ui_manager->get_settings_screen();
     if (settings) {
-        settings->set_firmware_version(FIRMWARE_VERSION);
+        String firmware_info = FIRMWARE_VERSION;
+        const esp_partition_t* running_partition = esp_ota_get_running_partition();
+        if (running_partition) {
+            firmware_info += " [";
+            firmware_info += running_partition->label;
+            firmware_info += "]";
+        }
+        settings->set_firmware_version(firmware_info);
         // Pass GPS for status display
         settings->set_gps(&gps);
 
@@ -1754,6 +1761,11 @@ void setup() {
     setup_ui_manager();
     BOOT_PROFILE_END("ui_manager");
 
+    // Confirm app0 as soon as the persistent store, LXMF router, and UI have
+    // all initialized successfully. Do not defer this behind announces or
+    // callback setup: a reset after this point must not roll back to app1.
+    confirm_running_firmware();
+
     // Now that UIManager has built screens and configured the active
     // one, start the LVGL render task. Doing this any earlier means
     // the LVGL task refreshes its empty default screen on top of the
@@ -1814,11 +1826,6 @@ void setup() {
         INFO(">>> APP DELIVERED CALLBACK EXIT");
         Serial.flush();
     });
-
-    // Columba writes app0 plus fresh OTA-selection data. This framework has
-    // bootloader rollback enabled, so confirm the app only after filesystem,
-    // LXMF, and UI initialization have all completed successfully.
-    confirm_running_firmware();
 
     // Boot profiling complete
     BOOT_PROFILE_COMPLETE();
