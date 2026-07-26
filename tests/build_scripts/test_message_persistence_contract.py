@@ -33,6 +33,19 @@ def test_outgoing_message_is_committed_before_display_and_send():
     assert "The message was not sent" in body
 
 
+def test_ui_messages_prefer_lora_safe_opportunistic_delivery():
+    source = UI_MANAGER.read_text()
+    body = function_body(
+        source,
+        "bool UIManager::send_message(",
+        "void UIManager::on_message_received(",
+    )
+    assert "::LXMF::Type::Message::OPPORTUNISTIC" in body
+    assert body.index("::LXMF::Type::Message::OPPORTUNISTIC") < body.index(
+        "_router.handle_outbound(message)"
+    )
+
+
 def test_incoming_message_is_committed_before_display():
     source = UI_MANAGER.read_text()
     body = function_body(

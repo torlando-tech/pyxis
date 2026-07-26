@@ -825,9 +825,17 @@ bool UIManager::send_message(const Bytes& dest_hash, const String& content) {
         WARNING("  Destination identity not known, message may fail until peer announces");
     }
 
-    // Create message with destination and source objects
-    // Source is needed for signing
-    ::LXMF::LXMessage message(destination, source, content_bytes, title);
+    // UI messages prefer single-packet opportunistic delivery on LoRa. The
+    // router automatically promotes messages that exceed the LoRa packet MDU
+    // to DIRECT, so this preserves large-message support without forcing every
+    // short message through the heavier link/resource path.
+    ::LXMF::LXMessage message(
+        destination,
+        source,
+        content_bytes,
+        title,
+        ::LXMF::Type::Message::OPPORTUNISTIC
+    );
 
     // If destination identity was unknown, manually set the destination hash
     if (!dest_identity) {
