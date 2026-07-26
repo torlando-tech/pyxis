@@ -849,6 +849,10 @@ bool UIManager::send_message(const Bytes& dest_hash, const String& content) {
     // Do not transmit or display an outgoing message unless both its payload
     // and conversation index were committed. Otherwise a reboot makes an
     // apparently-sent message disappear from history.
+    //
+    // This callback runs on LVGL's 8 KiB task. microLXMF must keep its
+    // transactional ConversationInfo rollback snapshot object-owned rather
+    // than local to save_message(); the snapshot itself is larger than 8 KiB.
     if (!_store.save_message(message)) {
         ERROR("Outgoing message persistence failed; message not queued");
         show_storage_error("Storage is unavailable. The message was not sent.");
