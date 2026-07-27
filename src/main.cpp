@@ -1761,11 +1761,6 @@ void setup() {
     setup_ui_manager();
     BOOT_PROFILE_END("ui_manager");
 
-    // Confirm app0 as soon as the persistent store, LXMF router, and UI have
-    // all initialized successfully. Do not defer this behind announces or
-    // callback setup: a reset after this point must not roll back to app1.
-    confirm_running_firmware();
-
     // Now that UIManager has built screens and configured the active
     // one, start the LVGL render task. Doing this any earlier means
     // the LVGL task refreshes its empty default screen on top of the
@@ -1781,6 +1776,14 @@ void setup() {
         while (1) delay(1000);
     }
     INFO("LVGL task started on core 1");
+
+    // Confirm app0 only after the persistent store, LXMF router, UI, and its
+    // render task have all initialized successfully. Starting the task is the
+    // final fallible boot gate; validating the image before it succeeds would
+    // strand the device on an image that can never present a usable UI.
+    // Announcements and callback registration remain outside the rollback
+    // gate because they are recoverable runtime operations.
+    confirm_running_firmware();
 
     // Send initial LXST voice destination announce
     if (ui_manager) {

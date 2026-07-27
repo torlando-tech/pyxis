@@ -111,7 +111,8 @@ def test_successful_boot_cancels_ota_rollback_after_subsystems_initialize():
     assert "esp_ota_mark_app_valid_cancel_rollback()" in confirm
     setup = function_body(source, "void setup()", "void loop()")
     assert setup.index("setup_lxmf();") < setup.index("setup_ui_manager();")
-    assert setup.index("setup_ui_manager();") < setup.index("confirm_running_firmware();")
+    assert setup.index("setup_ui_manager();") < setup.index("LVGLInit::start_task")
+    assert setup.index("LVGLInit::start_task") < setup.index("confirm_running_firmware();")
 
 
 def test_system_info_reports_littlefs_not_unmounted_spiffs():
