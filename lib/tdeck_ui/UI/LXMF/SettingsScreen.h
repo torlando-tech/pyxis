@@ -176,6 +176,9 @@ public:
      */
     void set_lxmf_address(const RNS::Bytes& hash);
 
+    /** Set the exact running firmware build for post-reboot verification. */
+    void set_firmware_version(const String& version);
+
     /**
      * Set GPS pointer for status display
      */

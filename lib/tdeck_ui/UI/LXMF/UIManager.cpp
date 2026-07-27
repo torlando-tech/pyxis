@@ -34,6 +34,32 @@ static const char* KEY_STAMP_COST = "stamp_cost";
 namespace UI {
 namespace LXMF {
 
+namespace {
+
+lv_obj_t* storage_error_dialog = nullptr;
+
+void close_storage_error(lv_event_t* event) {
+    lv_obj_t* message_box = lv_event_get_current_target(event);
+    if (lv_msgbox_get_active_btn(message_box) == 0) {
+        storage_error_dialog = nullptr;
+        lv_msgbox_close(message_box);
+    }
+}
+
+void show_storage_error(const char* message) {
+    // Coalesce receive bursts into one dialog rather than allocating one per
+    // rejected packet while storage remains unavailable.
+    if (storage_error_dialog) return;
+    static const char* buttons[] = {"OK", ""};
+    storage_error_dialog = lv_msgbox_create(
+        nullptr, "Message not saved", message, buttons, false
+    );
+    lv_obj_center(storage_error_dialog);
+    lv_obj_add_event_cb(storage_error_dialog, close_storage_error, LV_EVENT_VALUE_CHANGED, nullptr);
+}
+
+}  // namespace
+
 // Static singleton for Link callbacks
 UIManager* UIManager::s_call_instance = nullptr;
 
@@ -170,7 +196,7 @@ bool UIManager::init() {
     );
 
     _chat_screen->set_send_message_callback(
-        [this](const String& content) { on_send_message_from_chat(content); }
+        [this](const String& content) { return on_send_message_from_chat(content); }
     );
 
     _chat_screen->set_call_callback(
@@ -184,7 +210,7 @@ bool UIManager::init() {
 
     _compose_screen->set_send_callback(
         [this](const Bytes& dest_hash, const String& message) {
-            on_send_message_from_compose(dest_hash, message);
+            return on_send_message_from_compose(dest_hash, message);
         }
     );
 
@@ -636,8 +662,8 @@ void UIManager::on_back_to_conversation_list() {
     show_conversation_list();
 }
 
-void UIManager::on_send_message_from_chat(const String& content) {
-    send_message(_current_peer_hash, content);
+bool UIManager::on_send_message_from_chat(const String& content) {
+    return send_message(_current_peer_hash, content);
 }
 
 void UIManager::on_call_from_chat() {
@@ -650,11 +676,12 @@ void UIManager::on_call_from_chat() {
     call_initiate(_current_peer_hash);
 }
 
-void UIManager::on_send_message_from_compose(const Bytes& dest_hash, const String& message) {
-    send_message(dest_hash, message);
+bool UIManager::on_send_message_from_compose(const Bytes& dest_hash, const String& message) {
+    if (!send_message(dest_hash, message)) return false;
 
-    // Switch to chat screen for this conversation
+    // Switch to chat screen only after the message is durably accepted.
     show_chat(dest_hash);
+    return true;
 }
 
 void UIManager::on_cancel_compose() {
@@ -767,7 +794,7 @@ void UIManager::set_rns_status(bool connected, const String& server_name) {
     }
 }
 
-void UIManager::send_message(const Bytes& dest_hash, const String& content) {
+bool UIManager::send_message(const Bytes& dest_hash, const String& content) {
     std::string hash_hex = dest_hash.toHex().substr(0, 8);
     std::string msg = "Sending message to " + hash_hex + "...";
     INFO(msg.c_str());
@@ -798,9 +825,17 @@ void UIManager::send_message(const Bytes& dest_hash, const String& content) {
         WARNING("  Destination identity not known, message may fail until peer announces");
     }
 
-    // Create message with destination and source objects
-    // Source is needed for signing
-    ::LXMF::LXMessage message(destination, source, content_bytes, title);
+    // UI messages prefer single-packet opportunistic delivery on LoRa. The
+    // router automatically promotes messages that exceed the LoRa packet MDU
+    // to DIRECT, so this preserves large-message support without forcing every
+    // short message through the heavier link/resource path.
+    ::LXMF::LXMessage message(
+        destination,
+        source,
+        content_bytes,
+        title,
+        ::LXMF::Type::Message::OPPORTUNISTIC
+    );
 
     // If destination identity was unknown, manually set the destination hash
     if (!dest_identity) {
@@ -811,18 +846,28 @@ void UIManager::send_message(const Bytes& dest_hash, const String& content) {
     // Pack the message to generate hash and signature before saving
     message.pack();
 
-    // Add to UI immediately (optimistic update)
+    // Do not transmit or display an outgoing message unless both its payload
+    // and conversation index were committed. Otherwise a reboot makes an
+    // apparently-sent message disappear from history.
+    //
+    // This callback runs on LVGL's 8 KiB task. microLXMF must keep its
+    // transactional ConversationInfo rollback snapshot object-owned rather
+    // than local to save_message(); the snapshot itself is larger than 8 KiB.
+    if (!_store.save_message(message)) {
+        ERROR("Outgoing message persistence failed; message not queued");
+        show_storage_error("Storage is unavailable. The message was not sent.");
+        return false;
+    }
+
     if (_current_screen == SCREEN_CHAT && _current_peer_hash == dest_hash) {
         _chat_screen->add_message(message, true);
     }
-
-    // Save to store (now has valid hash from pack())
-    _store.save_message(message);
 
     // Queue for sending (pack already called, will use cached packed data)
     _router.handle_outbound(message);
 
     INFO("  Message queued for delivery");
+    return true;
 }
 
 void UIManager::on_message_received(::LXMF::LXMessage& message) {
@@ -844,8 +889,14 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
     // (void)RNS::Identity::mark_persistent(message.source_hash());
 
     // Save to store — no LVGL lock; LittleFS GC is allowed to take its
-    // time without freezing the UI thread.
-    _store.save_message(message);
+    // time without freezing the UI thread. Do not present an in-memory-only
+    // message as durable conversation history.
+    if (!_store.save_message(message)) {
+        ERROR("Incoming message persistence failed; message not added to history");
+        LVGL_LOCK();
+        show_storage_error("An incoming message could not be saved. Check device storage.");
+        return;
+    }
 
     // Take the LVGL lock now for the UI-touching code below.
     LVGL_LOCK();
@@ -875,11 +926,11 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
 }
 
 void UIManager::on_message_delivered(::LXMF::LXMessage& message) {
-    LVGL_LOCK();
     std::string hash_hex = message.hash().toHex().substr(0, 8);
     std::string msg = "Message delivered: " + hash_hex + "...";
     INFO(msg.c_str());
 
+    LVGL_LOCK();
     // Update UI if we're viewing this conversation
     if (_current_screen == SCREEN_CHAT && _current_peer_hash == message.destination_hash()) {
         _chat_screen->update_message_status(message.hash(), true);
@@ -887,11 +938,19 @@ void UIManager::on_message_delivered(::LXMF::LXMessage& message) {
 }
 
 void UIManager::on_message_failed(::LXMF::LXMessage& message) {
-    LVGL_LOCK();
     std::string hash_hex = message.hash().toHex().substr(0, 8);
     std::string msg = "Message delivery failed: " + hash_hex + "...";
     WARNING(msg.c_str());
 
+    if (!_store.update_message_state(
+            message.hash(), ::LXMF::Type::Message::State::FAILED)) {
+        ERROR("Failed message state persistence failed");
+        LVGL_LOCK();
+        show_storage_error("Delivery failure status could not be saved. Check device storage.");
+        return;
+    }
+
+    LVGL_LOCK();
     // Update UI if we're viewing this conversation
     if (_current_screen == SCREEN_CHAT && _current_peer_hash == message.destination_hash()) {
         _chat_screen->update_message_status(message.hash(), false);

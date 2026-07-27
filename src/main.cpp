@@ -12,6 +12,7 @@
 #include <esp_system.h>
 #include <esp_heap_caps.h>
 #include <esp_task_wdt.h>
+#include <esp_ota_ops.h>
 #include <new>  // placement new
 #include <soc/rtc_cntl_reg.h>
 
@@ -956,6 +957,30 @@ void setup_hardware() {
     INFO("Power enabled (early init)");
 }
 
+void confirm_running_firmware() {
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    if (!running) {
+        ERROR("Unable to identify running OTA partition");
+        return;
+    }
+
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    esp_err_t state_result = esp_ota_get_state_partition(running, &state);
+    INFOF("Running firmware: version=%s partition=%s subtype=%d address=0x%lx state=%d",
+          FIRMWARE_VERSION, running->label, static_cast<int>(running->subtype),
+          static_cast<unsigned long>(running->address), static_cast<int>(state));
+
+    if (state_result == ESP_OK &&
+        (state == ESP_OTA_IMG_NEW || state == ESP_OTA_IMG_PENDING_VERIFY)) {
+        esp_err_t result = esp_ota_mark_app_valid_cancel_rollback();
+        if (result == ESP_OK) {
+            INFO("Running firmware marked valid; OTA rollback cancelled");
+        } else {
+            ERRORF("Failed to mark running firmware valid: %s", esp_err_to_name(result));
+        }
+    }
+}
+
 void setup_lvgl_and_ui() {
     INFO("\n=== LVGL & UI Initialization ===");
 
@@ -1275,6 +1300,14 @@ void setup_ui_manager() {
     // Configure settings screen
     UI::LXMF::SettingsScreen* settings = ui_manager->get_settings_screen();
     if (settings) {
+        String firmware_info = FIRMWARE_VERSION;
+        const esp_partition_t* running_partition = esp_ota_get_running_partition();
+        if (running_partition) {
+            firmware_info += " [";
+            firmware_info += running_partition->label;
+            firmware_info += "]";
+        }
+        settings->set_firmware_version(firmware_info);
         // Pass GPS for status display
         settings->set_gps(&gps);
 
@@ -1744,6 +1777,14 @@ void setup() {
     }
     INFO("LVGL task started on core 1");
 
+    // Confirm app0 only after the persistent store, LXMF router, UI, and its
+    // render task have all initialized successfully. Starting the task is the
+    // final fallible boot gate; validating the image before it succeeds would
+    // strand the device on an image that can never present a usable UI.
+    // Announcements and callback registration remain outside the rollback
+    // gate because they are recoverable runtime operations.
+    confirm_running_firmware();
+
     // Send initial LXST voice destination announce
     if (ui_manager) {
         ui_manager->announce_lxst();
@@ -1764,7 +1805,10 @@ void setup() {
         if (message_store) {
             INFO(">>> Updating message state in store");
             Serial.flush();
-            message_store->update_message_state(msg_hash, LXMF::Type::Message::DELIVERED);
+            if (!message_store->update_message_state(msg_hash, LXMF::Type::Message::DELIVERED)) {
+				ERROR("Delivered message state persistence failed; UI status not advanced");
+				return;
+            }
             INFO(">>> State updated, loading full message");
             Serial.flush();
 
