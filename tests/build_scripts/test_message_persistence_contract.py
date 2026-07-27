@@ -69,6 +69,7 @@ def test_no_message_save_result_is_silently_ignored():
 
 def test_delivery_state_is_committed_before_ui_update():
     source = UI_MANAGER.read_text()
+    main = MAIN.read_text()
     delivered = function_body(
         source,
         "void UIManager::on_message_delivered(",
@@ -79,9 +80,17 @@ def test_delivery_state_is_committed_before_ui_update():
         "void UIManager::on_message_failed(",
         "void UIManager::refresh_current_screen(",
     )
-    assert delivered.index("_store.update_message_state(") < delivered.index(
-        "_chat_screen->update_message_status(message.hash(), true)"
+    callback = function_body(
+        main,
+        "router->register_delivered_callback(",
+        "// Boot profiling complete",
     )
+    assert "if (!message_store->update_message_state(" in callback
+    assert callback.index("message_store->update_message_state(") < callback.index(
+        "ui_manager->on_message_delivered(full_msg)"
+    )
+    assert "_store.update_message_state(" not in delivered
+    assert "_chat_screen->update_message_status(message.hash(), true)" in delivered
     assert failed.index("_store.update_message_state(") < failed.index(
         "_chat_screen->update_message_status(message.hash(), false)"
     )

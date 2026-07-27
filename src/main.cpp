@@ -1805,7 +1805,10 @@ void setup() {
         if (message_store) {
             INFO(">>> Updating message state in store");
             Serial.flush();
-            message_store->update_message_state(msg_hash, LXMF::Type::Message::DELIVERED);
+            if (!message_store->update_message_state(msg_hash, LXMF::Type::Message::DELIVERED)) {
+				ERROR("Delivered message state persistence failed; UI status not advanced");
+				return;
+            }
             INFO(">>> State updated, loading full message");
             Serial.flush();
 

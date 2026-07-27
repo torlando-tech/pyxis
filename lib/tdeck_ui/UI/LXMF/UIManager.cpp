@@ -930,14 +930,6 @@ void UIManager::on_message_delivered(::LXMF::LXMessage& message) {
     std::string msg = "Message delivered: " + hash_hex + "...";
     INFO(msg.c_str());
 
-    if (!_store.update_message_state(
-            message.hash(), ::LXMF::Type::Message::State::DELIVERED)) {
-        ERROR("Delivered message state persistence failed");
-        LVGL_LOCK();
-        show_storage_error("Delivery status could not be saved. Check device storage.");
-        return;
-    }
-
     LVGL_LOCK();
     // Update UI if we're viewing this conversation
     if (_current_screen == SCREEN_CHAT && _current_peer_hash == message.destination_hash()) {
