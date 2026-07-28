@@ -11,11 +11,20 @@ endif()
 if(NOT DEFINED MICROLXMF_SRC)
     message(FATAL_ERROR "MICROLXMF_SRC is required")
 endif()
+if(NOT DEFINED PYXIS_ROOT)
+    message(FATAL_ERROR "PYXIS_ROOT is required")
+endif()
 
 add_subdirectory(${MICROLXMF_BRIDGE_DIR} microlxmf-bridge)
 
-add_executable(test_pyxis_telemetry_field test_telemetry_field_roundtrip.cpp)
+add_executable(test_pyxis_telemetry_field
+    test_telemetry_field_roundtrip.cpp
+    ${PYXIS_ROOT}/lib/tdeck_ui/Telemetry/LocationTelemetryCodec.cpp
+)
 target_link_libraries(test_pyxis_telemetry_field PRIVATE MicroLXMFLib)
+target_include_directories(test_pyxis_telemetry_field PRIVATE
+    ${PYXIS_ROOT}/lib/tdeck_ui
+)
 target_compile_definitions(test_pyxis_telemetry_field PRIVATE
     MICROLXMF_NATIVE=1
     NATIVE=1

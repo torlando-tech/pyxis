@@ -417,7 +417,7 @@ FieldValueResult wrapLxmfBinaryFieldValue(
         output[3] = static_cast<uint8_t>(payload_size >> 8U);
         output[4] = static_cast<uint8_t>(payload_size);
     }
-    if (payload_size != 0) std::memcpy(output + header_size, payload, payload_size);
+    if (payload_size != 0) std::memmove(output + header_size, payload, payload_size);
     written = header_size + payload_size;
     return FieldValueResult::OK;
 }
@@ -473,13 +473,9 @@ EncodeResult encodeLocationTelemetry(
     Writer writer(temporary, sizeof(temporary));
     uint8_t word[4]{};
     uint8_t half[2]{};
-    const uint64_t sensor_timestamp = input.sensor_timestamp_seconds == 0
-                                          ? input.timestamp_seconds
-                                          : input.sensor_timestamp_seconds;
-
     bool ok = writer.writeByte(0x82U) &&
               writer.writeUnsigned(SID_TIME) &&
-              writer.writeUnsigned(sensor_timestamp) &&
+              writer.writeUnsigned(input.sensor_timestamp_seconds) &&
               writer.writeUnsigned(SID_LOCATION) &&
               writer.writeByte(0x97U);
 

@@ -41,6 +41,7 @@ def test_pinned_microlxmf_telemetry_field_roundtrip(tmp_path):
             str(build),
             f"-DMICROLXMF_BRIDGE_DIR={bridge}",
             f"-DMICROLXMF_SRC={source}",
+            f"-DPYXIS_ROOT={ROOT}",
             "-DCMAKE_BUILD_TYPE=Debug",
         ],
         capture_output=True,
