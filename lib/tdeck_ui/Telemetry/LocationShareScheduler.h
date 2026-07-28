@@ -104,7 +104,7 @@ struct ShareSession {
     bool awaiting_ack = false;
     ShareWorkType pending_type = ShareWorkType::LOCATION;
     uint64_t pending_token = 0;
-    uint64_t ack_deadline_millis = 0;
+    uint64_t ack_deadline_monotonic_millis = 0;
     uint8_t failure_count = 0;
 };
 
@@ -112,7 +112,7 @@ struct ShareWork {
     PeerId peer{};
     ShareWorkType type = ShareWorkType::LOCATION;
     uint64_t token = 0;
-    uint64_t ack_deadline_millis = 0;
+    uint64_t ack_deadline_monotonic_millis = 0;
     bool has_expiry = false;
     uint64_t expires_at_millis = 0;
     int32_t approx_radius_meters = 0;
@@ -143,12 +143,15 @@ public:
     bool cancelWithoutCease(const PeerId& peer);
 
     // WORK is a short exclusive queue-attempt lease. The caller must attempt
-    // queueing synchronously, acknowledge before ack_deadline_millis, and must
+    // queueing synchronously, acknowledge before the advertised monotonic
+    // deadline, and must
     // never enqueue the work after that deadline. stop() orders CEASE behind
     // an in-flight LOCATION; start()/restore() report BUSY instead of
-    // invalidating externally borrowed work.
+    // invalidating externally borrowed work. monotonic_now_millis must come
+    // from a non-wall-clock source that cannot move backward during a boot.
     SharePollResult poll(
-        uint64_t now_millis,
+        uint64_t wall_now_millis,
+        uint64_t monotonic_now_millis,
         bool current_location_valid,
         ShareWork& output);
 
@@ -156,7 +159,8 @@ public:
         const PeerId& peer,
         uint64_t token,
         bool queue_accepted,
-        uint64_t now_millis);
+        uint64_t wall_now_millis,
+        uint64_t monotonic_now_millis);
 
     bool get(const PeerId& peer, ShareSession& output) const;
     // Atomic: BUFFER_TOO_SMALL writes no entries and reports the required
@@ -186,11 +190,14 @@ private:
     uint64_t nextToken();
     void clear(std::size_t index);
     void observeClock(uint64_t now_millis);
+    bool observeMonotonic(uint64_t now_millis);
 
     Slot slots_[MAX_SHARE_SESSIONS]{};
     std::size_t size_ = 0;
     uint64_t next_token_ = 1;
     uint64_t last_observed_millis_ = 0;
+    uint64_t last_monotonic_millis_ = 0;
+    bool has_monotonic_observation_ = false;
 };
 
 }  // namespace Telemetry

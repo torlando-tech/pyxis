@@ -29,6 +29,24 @@ Telemetry::PeerId peer(uint8_t seed) {
     return id;
 }
 
+Telemetry::SharePollResult poll(
+    Telemetry::LocationShareScheduler& scheduler,
+    uint64_t wall_millis,
+    bool location_valid,
+    Telemetry::ShareWork& work) {
+    return scheduler.poll(wall_millis, wall_millis, location_valid, work);
+}
+
+Telemetry::ShareAckResult acknowledge(
+    Telemetry::LocationShareScheduler& scheduler,
+    const Telemetry::PeerId& id,
+    uint64_t token,
+    bool accepted,
+    uint64_t wall_millis) {
+    return scheduler.acknowledge(
+        id, token, accepted, wall_millis, wall_millis);
+}
+
 Telemetry::ShareStartOptions options(
     Telemetry::ShareDuration duration = Telemetry::ShareDuration::MINUTES_15,
     uint32_t cadence = 60000) {
@@ -43,7 +61,7 @@ void defaultsToNoSharing() {
     Telemetry::LocationShareScheduler scheduler;
     CHECK(scheduler.size() == 0);
     Telemetry::ShareWork work{};
-    CHECK(scheduler.poll(1000, true, work) == Telemetry::SharePollResult::NO_WORK);
+    CHECK(poll(scheduler, 1000, true, work) == Telemetry::SharePollResult::NO_WORK);
     Telemetry::ShareSession session{};
     CHECK(!scheduler.get(peer(1), session));
 }
@@ -113,24 +131,24 @@ void requestsImmediateWorkAndAdvancesOnlyAfterAcceptance() {
     CHECK(session.last_sent_millis == 0);
 
     Telemetry::ShareWork work{};
-    CHECK(scheduler.poll(now, false, work) == Telemetry::SharePollResult::NO_WORK);
-    CHECK(scheduler.poll(now, true, work) == Telemetry::SharePollResult::WORK);
+    CHECK(poll(scheduler, now, false, work) == Telemetry::SharePollResult::NO_WORK);
+    CHECK(poll(scheduler, now, true, work) == Telemetry::SharePollResult::WORK);
     CHECK(work.type == Telemetry::ShareWorkType::LOCATION);
     CHECK(work.has_expiry);
     CHECK(work.token != 0);
-    CHECK(scheduler.poll(now, true, work) == Telemetry::SharePollResult::NO_WORK);
+    CHECK(poll(scheduler, now, true, work) == Telemetry::SharePollResult::NO_WORK);
 
     CHECK(scheduler.get(peer(1), session));
     CHECK(!session.has_sent);
     const uint64_t token = session.pending_token;
-    CHECK(scheduler.acknowledge(peer(1), token, true, now + 10) ==
+    CHECK(acknowledge(scheduler, peer(1), token, true, now + 10) ==
           Telemetry::ShareAckResult::ACCEPTED);
     CHECK(scheduler.get(peer(1), session));
     CHECK(session.has_sent);
     CHECK(session.last_sent_millis == now + 10);
-    CHECK(scheduler.poll(now + 10 + 59999, true, work) ==
+    CHECK(poll(scheduler, now + 10 + 59999, true, work) ==
           Telemetry::SharePollResult::NO_WORK);
-    CHECK(scheduler.poll(now + 10 + 60000, true, work) ==
+    CHECK(poll(scheduler, now + 10 + 60000, true, work) ==
           Telemetry::SharePollResult::WORK);
 }
 
@@ -142,22 +160,22 @@ void retriesFailuresWithBoundedBackoffWithoutExtendingExpiry() {
           Telemetry::ShareSessionResult::STARTED);
 
     Telemetry::ShareWork work{};
-    CHECK(scheduler.poll(start, true, work) == Telemetry::SharePollResult::WORK);
-    CHECK(scheduler.acknowledge(peer(2), work.token, false, start) ==
+    CHECK(poll(scheduler, start, true, work) == Telemetry::SharePollResult::WORK);
+    CHECK(acknowledge(scheduler, peer(2), work.token, false, start) ==
           Telemetry::ShareAckResult::RETRY_SCHEDULED);
     Telemetry::ShareSession session{};
     CHECK(scheduler.get(peer(2), session));
     CHECK(!session.has_sent);
     CHECK(session.next_attempt_millis == start + Telemetry::INITIAL_RETRY_MILLIS);
     const uint64_t expiry = session.expires_at_millis;
-    CHECK(scheduler.poll(session.next_attempt_millis - 1, true, work) ==
+    CHECK(poll(scheduler, session.next_attempt_millis - 1, true, work) ==
           Telemetry::SharePollResult::NO_WORK);
-    CHECK(scheduler.poll(session.next_attempt_millis, true, work) ==
+    CHECK(poll(scheduler, session.next_attempt_millis, true, work) ==
           Telemetry::SharePollResult::WORK);
 
     uint64_t now = session.next_attempt_millis;
     for (int failure = 0; failure < 12; ++failure) {
-        CHECK(scheduler.acknowledge(peer(2), work.token, false, now) ==
+        CHECK(acknowledge(scheduler, peer(2), work.token, false, now) ==
               Telemetry::ShareAckResult::RETRY_SCHEDULED);
         CHECK(scheduler.get(peer(2), session));
         CHECK(session.next_attempt_millis >= now);
@@ -165,7 +183,7 @@ void retriesFailuresWithBoundedBackoffWithoutExtendingExpiry() {
         CHECK(session.expires_at_millis == expiry);
         now = session.next_attempt_millis;
         if (now >= expiry) break;
-        CHECK(scheduler.poll(now, true, work) == Telemetry::SharePollResult::WORK);
+        CHECK(poll(scheduler, now, true, work) == Telemetry::SharePollResult::WORK);
     }
 }
 
@@ -179,26 +197,26 @@ void expirationQueuesExactlyOneCeaseUntilAccepted() {
     const uint64_t expiry = session.expires_at_millis;
 
     Telemetry::ShareWork work{};
-    CHECK(scheduler.poll(expiry - 1, false, work) == Telemetry::SharePollResult::NO_WORK);
-    CHECK(scheduler.poll(expiry, false, work) == Telemetry::SharePollResult::WORK);
+    CHECK(poll(scheduler, expiry - 1, false, work) == Telemetry::SharePollResult::NO_WORK);
+    CHECK(poll(scheduler, expiry, false, work) == Telemetry::SharePollResult::WORK);
     CHECK(work.type == Telemetry::ShareWorkType::CEASE);
     const uint64_t first_token = work.token;
-    CHECK(scheduler.poll(expiry, false, work) == Telemetry::SharePollResult::NO_WORK);
-    CHECK(scheduler.acknowledge(peer(3), first_token, false, expiry) ==
+    CHECK(poll(scheduler, expiry, false, work) == Telemetry::SharePollResult::NO_WORK);
+    CHECK(acknowledge(scheduler, peer(3), first_token, false, expiry) ==
           Telemetry::ShareAckResult::RETRY_SCHEDULED);
     CHECK(scheduler.get(peer(3), session));
     CHECK(session.cease_pending);
-    CHECK(scheduler.poll(expiry + Telemetry::INITIAL_RETRY_MILLIS - 1,
+    CHECK(poll(scheduler, expiry + Telemetry::INITIAL_RETRY_MILLIS - 1,
                          false, work) == Telemetry::SharePollResult::NO_WORK);
-    CHECK(scheduler.poll(expiry + Telemetry::INITIAL_RETRY_MILLIS,
+    CHECK(poll(scheduler, expiry + Telemetry::INITIAL_RETRY_MILLIS,
                          false, work) == Telemetry::SharePollResult::WORK);
     CHECK(work.type == Telemetry::ShareWorkType::CEASE);
     CHECK(work.token != first_token);
-    CHECK(scheduler.acknowledge(peer(3), work.token, true,
+    CHECK(acknowledge(scheduler, peer(3), work.token, true,
                                 expiry + Telemetry::INITIAL_RETRY_MILLIS) ==
           Telemetry::ShareAckResult::CEASED);
     CHECK(scheduler.size() == 0);
-    CHECK(scheduler.poll(expiry + Telemetry::INITIAL_RETRY_MILLIS,
+    CHECK(poll(scheduler, expiry + Telemetry::INITIAL_RETRY_MILLIS,
                          true, work) == Telemetry::SharePollResult::NO_WORK);
 }
 
@@ -212,22 +230,22 @@ void unacknowledgedLocationLeaseCannotBlockExpiryForever() {
     const uint64_t expiry = session.expires_at_millis;
 
     Telemetry::ShareWork location_work{};
-    CHECK(scheduler.poll(expiry - 1, true, location_work) ==
+    CHECK(poll(scheduler, expiry - 1, true, location_work) ==
           Telemetry::SharePollResult::WORK);
     CHECK(location_work.type == Telemetry::ShareWorkType::LOCATION);
-    CHECK(location_work.ack_deadline_millis > expiry);
-    CHECK(scheduler.poll(expiry, false, location_work) ==
+    CHECK(location_work.ack_deadline_monotonic_millis > expiry);
+    CHECK(poll(scheduler, expiry, false, location_work) ==
           Telemetry::SharePollResult::NO_WORK);
 
     Telemetry::ShareWork cease_work{};
-    CHECK(scheduler.poll(location_work.ack_deadline_millis, false, cease_work) ==
+    CHECK(poll(scheduler, location_work.ack_deadline_monotonic_millis, false, cease_work) ==
           Telemetry::SharePollResult::WORK);
     CHECK(cease_work.type == Telemetry::ShareWorkType::CEASE);
-    CHECK(scheduler.acknowledge(peer(14), location_work.token, true,
-                                location_work.ack_deadline_millis) ==
+    CHECK(acknowledge(scheduler, peer(14), location_work.token, true,
+                                location_work.ack_deadline_monotonic_millis) ==
           Telemetry::ShareAckResult::STALE_TOKEN);
-    CHECK(scheduler.acknowledge(peer(14), cease_work.token, true,
-                                location_work.ack_deadline_millis) ==
+    CHECK(acknowledge(scheduler, peer(14), cease_work.token, true,
+                                location_work.ack_deadline_monotonic_millis) ==
           Telemetry::ShareAckResult::CEASED);
 }
 
@@ -238,7 +256,7 @@ void repeatedStopPreservesTheSingleOutstandingCease() {
     CHECK(scheduler.stop(peer(15), 1001) ==
           Telemetry::ShareSessionResult::STOPPING);
     Telemetry::ShareWork work{};
-    CHECK(scheduler.poll(1001, false, work) == Telemetry::SharePollResult::WORK);
+    CHECK(poll(scheduler, 1001, false, work) == Telemetry::SharePollResult::WORK);
     CHECK(work.type == Telemetry::ShareWorkType::CEASE);
     const uint64_t token = work.token;
     CHECK(scheduler.stop(peer(15), 1002) ==
@@ -247,8 +265,8 @@ void repeatedStopPreservesTheSingleOutstandingCease() {
     CHECK(scheduler.get(peer(15), session));
     CHECK(session.awaiting_ack);
     CHECK(session.pending_token == token);
-    CHECK(scheduler.poll(1002, false, work) == Telemetry::SharePollResult::NO_WORK);
-    CHECK(scheduler.acknowledge(peer(15), token, true, 1003) ==
+    CHECK(poll(scheduler, 1002, false, work) == Telemetry::SharePollResult::NO_WORK);
+    CHECK(acknowledge(scheduler, peer(15), token, true, 1003) ==
           Telemetry::ShareAckResult::CEASED);
 }
 
@@ -258,26 +276,26 @@ void serializesUpdateAndStopBehindOutstandingWork() {
     CHECK(scheduler.start(peer(4), options(), now) ==
           Telemetry::ShareSessionResult::STARTED);
     Telemetry::ShareWork work{};
-    CHECK(scheduler.poll(now, true, work) == Telemetry::SharePollResult::WORK);
+    CHECK(poll(scheduler, now, true, work) == Telemetry::SharePollResult::WORK);
     const uint64_t first_token = work.token;
 
     auto updated = options(Telemetry::ShareDuration::HOUR_1, 30000);
     CHECK(scheduler.start(peer(4), updated, now + 1) ==
           Telemetry::ShareSessionResult::BUSY);
     CHECK(!scheduler.cancelWithoutCease(peer(4)));
-    CHECK(scheduler.acknowledge(peer(4), first_token, true, now + 2) ==
+    CHECK(acknowledge(scheduler, peer(4), first_token, true, now + 2) ==
           Telemetry::ShareAckResult::ACCEPTED);
     CHECK(scheduler.start(peer(4), updated, now + 3) ==
           Telemetry::ShareSessionResult::UPDATED);
-    CHECK(scheduler.poll(now + 3, true, work) == Telemetry::SharePollResult::WORK);
+    CHECK(poll(scheduler, now + 3, true, work) == Telemetry::SharePollResult::WORK);
 
     CHECK(scheduler.stop(peer(4), now + 4) ==
           Telemetry::ShareSessionResult::STOPPING);
-    CHECK(scheduler.acknowledge(peer(4), work.token, true, now + 5) ==
+    CHECK(acknowledge(scheduler, peer(4), work.token, true, now + 5) ==
           Telemetry::ShareAckResult::ACCEPTED);
-    CHECK(scheduler.poll(now + 5, false, work) == Telemetry::SharePollResult::WORK);
+    CHECK(poll(scheduler, now + 5, false, work) == Telemetry::SharePollResult::WORK);
     CHECK(work.type == Telemetry::ShareWorkType::CEASE);
-    CHECK(scheduler.acknowledge(peer(4), work.token, true, now + 6) ==
+    CHECK(acknowledge(scheduler, peer(4), work.token, true, now + 6) ==
           Telemetry::ShareAckResult::CEASED);
     CHECK(scheduler.stop(peer(4), now + 7) ==
           Telemetry::ShareSessionResult::NOT_FOUND);
@@ -312,8 +330,8 @@ void restoresOnlyValidUnexpiredConsentAndRequiresGps() {
     CHECK(scheduler.restore(peer(5), record, 1999) ==
           Telemetry::ShareSessionResult::RESTORED);
     Telemetry::ShareWork work{};
-    CHECK(scheduler.poll(1999, false, work) == Telemetry::SharePollResult::NO_WORK);
-    CHECK(scheduler.poll(1999, true, work) == Telemetry::SharePollResult::WORK);
+    CHECK(poll(scheduler, 1999, false, work) == Telemetry::SharePollResult::NO_WORK);
+    CHECK(poll(scheduler, 1999, true, work) == Telemetry::SharePollResult::WORK);
     CHECK(work.type == Telemetry::ShareWorkType::LOCATION);
     CHECK(work.approx_radius_meters == 50);
 }
@@ -323,24 +341,27 @@ void handlesUnavailableAndBackwardClocksFailClosed() {
     CHECK(scheduler.start(peer(6), options(), 0) ==
           Telemetry::ShareSessionResult::CLOCK_UNAVAILABLE);
     Telemetry::ShareWork work{};
-    CHECK(scheduler.poll(0, true, work) ==
+    CHECK(poll(scheduler, 0, true, work) ==
           Telemetry::SharePollResult::CLOCK_UNAVAILABLE);
     CHECK(scheduler.size() == 0);
 
     CHECK(scheduler.start(peer(6), options(Telemetry::ShareDuration::INDEFINITE),
                           100000) == Telemetry::ShareSessionResult::STARTED);
-    CHECK(scheduler.poll(100000, true, work) == Telemetry::SharePollResult::WORK);
-    CHECK(scheduler.acknowledge(peer(6), work.token, true, 100000) ==
+    CHECK(scheduler.poll(100000, 1000, true, work) ==
+          Telemetry::SharePollResult::WORK);
+    CHECK(scheduler.acknowledge(peer(6), work.token, true, 100000, 1001) ==
           Telemetry::ShareAckResult::ACCEPTED);
-    CHECK(scheduler.poll(90000, true, work) == Telemetry::SharePollResult::WORK);
+    CHECK(scheduler.poll(90000, 1002, true, work) ==
+          Telemetry::SharePollResult::WORK);
     CHECK(work.type == Telemetry::ShareWorkType::LOCATION);
     const uint64_t invalid_clock =
         static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) + 1ULL;
-    CHECK(scheduler.acknowledge(peer(6), work.token, true, invalid_clock) ==
+    CHECK(scheduler.acknowledge(
+              peer(6), work.token, true, invalid_clock, 1003) ==
           Telemetry::ShareAckResult::CLOCK_UNAVAILABLE);
-    CHECK(scheduler.acknowledge(peer(6), work.token, true, 90000) ==
+    CHECK(scheduler.acknowledge(peer(6), work.token, true, 90000, 1003) ==
           Telemetry::ShareAckResult::ACCEPTED);
-    CHECK(scheduler.poll(invalid_clock, true, work) ==
+    CHECK(poll(scheduler, invalid_clock, true, work) ==
           Telemetry::SharePollResult::CLOCK_UNAVAILABLE);
     CHECK(scheduler.stop(peer(6), invalid_clock) ==
           Telemetry::ShareSessionResult::INVALID_ARGUMENT);
@@ -354,17 +375,86 @@ void rebasesExistingSessionsWhenAnotherSessionObservesClockRollback() {
     CHECK(scheduler.start(peer(12), indefinite, 100000) ==
           Telemetry::ShareSessionResult::STARTED);
     Telemetry::ShareWork work{};
-    CHECK(scheduler.poll(100000, true, work) == Telemetry::SharePollResult::WORK);
-    CHECK(scheduler.acknowledge(work.peer, work.token, true, 100000) ==
+    CHECK(scheduler.poll(100000, 1000, true, work) ==
+          Telemetry::SharePollResult::WORK);
+    CHECK(scheduler.acknowledge(
+              work.peer, work.token, true, 100000, 1001) ==
           Telemetry::ShareAckResult::ACCEPTED);
-    CHECK(scheduler.poll(100000, true, work) == Telemetry::SharePollResult::WORK);
-    CHECK(scheduler.acknowledge(work.peer, work.token, true, 100000) ==
+    CHECK(scheduler.poll(100000, 1002, true, work) ==
+          Telemetry::SharePollResult::WORK);
+    CHECK(scheduler.acknowledge(
+              work.peer, work.token, true, 100000, 1003) ==
           Telemetry::ShareAckResult::ACCEPTED);
 
     CHECK(scheduler.start(peer(13), indefinite, 90000) ==
           Telemetry::ShareSessionResult::STARTED);
-    CHECK(scheduler.poll(90000, true, work) == Telemetry::SharePollResult::WORK);
+    CHECK(scheduler.poll(90000, 1004, true, work) ==
+          Telemetry::SharePollResult::WORK);
     CHECK(work.peer.bytes[0] == 11);
+}
+
+void enforcesExclusiveMonotonicLeaseBoundaries() {
+    Telemetry::LocationShareScheduler scheduler;
+    CHECK(scheduler.start(peer(16),
+                          options(Telemetry::ShareDuration::INDEFINITE), 1000) ==
+          Telemetry::ShareSessionResult::STARTED);
+    Telemetry::ShareWork work{};
+    CHECK(scheduler.poll(1000, 5000, true, work) ==
+          Telemetry::SharePollResult::WORK);
+    CHECK(work.ack_deadline_monotonic_millis ==
+          5000 + Telemetry::ACKNOWLEDGEMENT_LEASE_MILLIS);
+    CHECK(scheduler.acknowledge(peer(16), work.token, true, 1000, 4999) ==
+          Telemetry::ShareAckResult::CLOCK_UNAVAILABLE);
+    CHECK(scheduler.acknowledge(peer(16), work.token, true, 1000,
+                                work.ack_deadline_monotonic_millis) ==
+          Telemetry::ShareAckResult::STALE_TOKEN);
+    Telemetry::ShareSession session{};
+    CHECK(scheduler.get(peer(16), session));
+    CHECK(!session.awaiting_ack);
+    CHECK(!session.has_sent);
+
+    Telemetry::LocationShareScheduler overflow;
+    CHECK(overflow.start(peer(17),
+                         options(Telemetry::ShareDuration::INDEFINITE), 1000) ==
+          Telemetry::ShareSessionResult::STARTED);
+    CHECK(overflow.poll(1000, std::numeric_limits<uint64_t>::max(), true, work) ==
+          Telemetry::SharePollResult::CLOCK_UNAVAILABLE);
+    CHECK(overflow.get(peer(17), session));
+    CHECK(!session.awaiting_ack);
+}
+
+void wallClockRollbackDoesNotChangeAnAdvertisedLease() {
+    Telemetry::LocationShareScheduler scheduler;
+    CHECK(scheduler.start(peer(18),
+                          options(Telemetry::ShareDuration::INDEFINITE), 100000) ==
+          Telemetry::ShareSessionResult::STARTED);
+    Telemetry::ShareWork work{};
+    CHECK(scheduler.poll(100000, 5000, true, work) ==
+          Telemetry::SharePollResult::WORK);
+    CHECK(work.ack_deadline_monotonic_millis == 6000);
+    CHECK(scheduler.poll(90000, 5500, true, work) ==
+          Telemetry::SharePollResult::NO_WORK);
+    CHECK(scheduler.acknowledge(peer(18), work.token, true, 90000, 5999) ==
+          Telemetry::ShareAckResult::ACCEPTED);
+}
+
+void wallClockMaximumDoesNotOverflowTheLeaseDomain() {
+    Telemetry::LocationShareScheduler scheduler;
+    const uint64_t wall_max =
+        static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+    CHECK(scheduler.start(peer(19),
+                          options(Telemetry::ShareDuration::INDEFINITE), wall_max) ==
+          Telemetry::ShareSessionResult::STARTED);
+    Telemetry::ShareWork work{};
+    CHECK(scheduler.poll(wall_max, 100, true, work) ==
+          Telemetry::SharePollResult::WORK);
+    CHECK(work.ack_deadline_monotonic_millis ==
+          100 + Telemetry::ACKNOWLEDGEMENT_LEASE_MILLIS);
+    CHECK(scheduler.acknowledge(peer(19), work.token, true, wall_max, 101) ==
+          Telemetry::ShareAckResult::ACCEPTED);
+    Telemetry::ShareSession session{};
+    CHECK(scheduler.get(peer(19), session));
+    CHECK(session.next_attempt_millis == wall_max);
 }
 
 void rejectsInvalidConfigurationAndCorruptRestoreState() {
@@ -439,7 +529,7 @@ void snapshotsOnlyDurableConsentFieldsIntoCallerStorage() {
                            saved_expiry + 1) ==
           Telemetry::ShareSessionResult::RESTORED);
     Telemetry::ShareWork work{};
-    CHECK(restored.poll(saved_expiry + 1, false, work) ==
+    CHECK(poll(restored, saved_expiry + 1, false, work) ==
           Telemetry::SharePollResult::WORK);
     CHECK(work.type == Telemetry::ShareWorkType::CEASE);
 
@@ -470,9 +560,9 @@ void survivesDeterministicHundredThousandOperationStress() {
             default:
                 break;
         }
-        if (scheduler.poll(operation, true, work) ==
+        if (poll(scheduler, operation, true, work) ==
             Telemetry::SharePollResult::WORK) {
-            scheduler.acknowledge(work.peer, work.token, (random & 0x10U) != 0,
+            acknowledge(scheduler, work.peer, work.token, (random & 0x10U) != 0,
                                   operation);
         }
         CHECK(scheduler.size() <= Telemetry::MAX_SHARE_SESSIONS);
@@ -489,11 +579,11 @@ void expirationPreemptsAQueuedRetry() {
     const uint64_t expiry = session.expires_at_millis;
 
     Telemetry::ShareWork work{};
-    CHECK(scheduler.poll(expiry - 1000, true, work) ==
+    CHECK(poll(scheduler, expiry - 1000, true, work) ==
           Telemetry::SharePollResult::WORK);
-    CHECK(scheduler.acknowledge(peer(7), work.token, false, expiry - 1000) ==
+    CHECK(acknowledge(scheduler, peer(7), work.token, false, expiry - 1000) ==
           Telemetry::ShareAckResult::RETRY_SCHEDULED);
-    CHECK(scheduler.poll(expiry, false, work) == Telemetry::SharePollResult::WORK);
+    CHECK(poll(scheduler, expiry, false, work) == Telemetry::SharePollResult::WORK);
     CHECK(work.type == Telemetry::ShareWorkType::CEASE);
 }
 
@@ -512,6 +602,9 @@ int main() {
     restoresOnlyValidUnexpiredConsentAndRequiresGps();
     handlesUnavailableAndBackwardClocksFailClosed();
     rebasesExistingSessionsWhenAnotherSessionObservesClockRollback();
+    enforcesExclusiveMonotonicLeaseBoundaries();
+    wallClockRollbackDoesNotChangeAnAdvertisedLease();
+    wallClockMaximumDoesNotOverflowTheLeaseDomain();
     rejectsInvalidConfigurationAndCorruptRestoreState();
     snapshotsOnlyDurableConsentFieldsIntoCallerStorage();
     expirationPreemptsAQueuedRetry();
