@@ -116,6 +116,32 @@ uint64_t LocationShareScheduler::retryDelay(uint8_t failure_count) {
     return delay > MAX_RETRY_MILLIS ? MAX_RETRY_MILLIS : delay;
 }
 
+void LocationShareScheduler::scheduleRejectedWork(
+    ShareSession& session,
+    ShareWorkType type,
+    uint64_t now_millis) {
+    session.awaiting_ack = false;
+    session.pending_token = 0;
+    session.ack_deadline_millis = 0;
+    if (type == ShareWorkType::LOCATION &&
+        (session.cease_pending ||
+         (session.has_expiry && now_millis >= session.expires_at_millis))) {
+        session.cease_pending = true;
+        session.failure_count = 0;
+        session.next_attempt_millis = now_millis;
+        return;
+    }
+    if (session.failure_count < std::numeric_limits<uint8_t>::max()) {
+        ++session.failure_count;
+    }
+    uint64_t next = boundedAdd(now_millis, retryDelay(session.failure_count));
+    if (type == ShareWorkType::LOCATION && session.has_expiry &&
+        next > session.expires_at_millis) {
+        next = session.expires_at_millis;
+    }
+    session.next_attempt_millis = next;
+}
+
 std::size_t LocationShareScheduler::find(const PeerId& peer) const {
     for (std::size_t index = 0; index < MAX_SHARE_SESSIONS; ++index) {
         if (slots_[index].occupied &&
@@ -149,9 +175,13 @@ void LocationShareScheduler::clear(std::size_t index) {
 void LocationShareScheduler::observeClock(uint64_t now_millis) {
     if (last_observed_millis_ != 0 && now_millis < last_observed_millis_) {
         for (std::size_t index = 0; index < MAX_SHARE_SESSIONS; ++index) {
-            if (slots_[index].occupied &&
-                !slots_[index].session.awaiting_ack) {
-                slots_[index].session.next_attempt_millis = now_millis;
+            if (!slots_[index].occupied) continue;
+            ShareSession& session = slots_[index].session;
+            if (session.awaiting_ack) {
+                session.ack_deadline_millis =
+                    boundedAdd(now_millis, ACKNOWLEDGEMENT_LEASE_MILLIS);
+            } else {
+                session.next_attempt_millis = now_millis;
             }
         }
     }
@@ -178,6 +208,9 @@ ShareSessionResult LocationShareScheduler::start(
 
     std::size_t target = find(peer);
     const bool updating = target != NO_SLOT;
+    if (updating && slots_[target].session.awaiting_ack) {
+        return ShareSessionResult::BUSY;
+    }
     if (!updating) {
         target = firstVacant();
         if (target == NO_SLOT) return ShareSessionResult::CAPACITY;
@@ -218,6 +251,9 @@ ShareSessionResult LocationShareScheduler::restore(
     observeClock(now_millis);
 
     std::size_t target = find(peer);
+    if (target != NO_SLOT && slots_[target].session.awaiting_ack) {
+        return ShareSessionResult::BUSY;
+    }
     if (target == NO_SLOT) {
         target = firstVacant();
         if (target == NO_SLOT) return ShareSessionResult::CAPACITY;
@@ -252,8 +288,9 @@ ShareSessionResult LocationShareScheduler::stop(
     observeClock(now_millis);
     ShareSession& session = slots_[index].session;
     session.cease_pending = true;
-    session.awaiting_ack = false;
-    session.pending_token = 0;
+    if (session.awaiting_ack) {
+        return ShareSessionResult::STOPPING;
+    }
     session.failure_count = 0;
     session.next_attempt_millis = now_millis;
     return ShareSessionResult::STOPPING;
@@ -262,6 +299,7 @@ ShareSessionResult LocationShareScheduler::stop(
 bool LocationShareScheduler::cancelWithoutCease(const PeerId& peer) {
     const std::size_t index = find(peer);
     if (index == NO_SLOT) return false;
+    if (slots_[index].session.awaiting_ack) return false;
     clear(index);
     return true;
 }
@@ -286,6 +324,11 @@ SharePollResult LocationShareScheduler::poll(
             session.failure_count = 0;
             if (!session.awaiting_ack) session.next_attempt_millis = now_millis;
         }
+        if (session.awaiting_ack &&
+            now_millis >= session.ack_deadline_millis) {
+            const ShareWorkType expired_type = session.pending_type;
+            scheduleRejectedWork(session, expired_type, now_millis);
+        }
         if (session.awaiting_ack || now_millis < session.next_attempt_millis) {
             continue;
         }
@@ -299,6 +342,8 @@ SharePollResult LocationShareScheduler::poll(
         candidate.peer = session.peer;
         candidate.type = type;
         candidate.token = nextToken();
+        candidate.ack_deadline_millis =
+            boundedAdd(now_millis, ACKNOWLEDGEMENT_LEASE_MILLIS);
         candidate.has_expiry = session.has_expiry;
         candidate.expires_at_millis = session.expires_at_millis;
         candidate.approx_radius_meters = session.approx_radius_meters;
@@ -306,6 +351,7 @@ SharePollResult LocationShareScheduler::poll(
         session.awaiting_ack = true;
         session.pending_type = type;
         session.pending_token = candidate.token;
+        session.ack_deadline_millis = candidate.ack_deadline_millis;
         output = candidate;
         return SharePollResult::WORK;
     }
@@ -333,6 +379,7 @@ ShareAckResult LocationShareScheduler::acknowledge(
     const ShareWorkType acknowledged_type = session.pending_type;
     session.awaiting_ack = false;
     session.pending_token = 0;
+    session.ack_deadline_millis = 0;
     if (queue_accepted) {
         session.failure_count = 0;
         if (acknowledged_type == ShareWorkType::CEASE) {
@@ -356,22 +403,7 @@ ShareAckResult LocationShareScheduler::acknowledge(
         return ShareAckResult::ACCEPTED;
     }
 
-    if (session.failure_count < std::numeric_limits<uint8_t>::max()) {
-        ++session.failure_count;
-    }
-    if (acknowledged_type == ShareWorkType::LOCATION && session.has_expiry &&
-        now_millis >= session.expires_at_millis) {
-        session.cease_pending = true;
-        session.failure_count = 0;
-        session.next_attempt_millis = now_millis;
-    } else {
-        uint64_t next = boundedAdd(now_millis, retryDelay(session.failure_count));
-        if (acknowledged_type == ShareWorkType::LOCATION && session.has_expiry &&
-            next > session.expires_at_millis) {
-            next = session.expires_at_millis;
-        }
-        session.next_attempt_millis = next;
-    }
+    scheduleRejectedWork(session, acknowledged_type, now_millis);
     return ShareAckResult::RETRY_SCHEDULED;
 }
 
@@ -384,14 +416,18 @@ bool LocationShareScheduler::get(
     return true;
 }
 
-std::size_t LocationShareScheduler::snapshot(
+ShareSnapshotResult LocationShareScheduler::snapshot(
     ShareRestoreEntry* output,
-    std::size_t capacity) const {
-    if (output == nullptr || capacity == 0) return 0;
+    std::size_t capacity,
+    std::size_t& written_or_required) const {
+    written_or_required = size_;
+    if (capacity < size_) return ShareSnapshotResult::BUFFER_TOO_SMALL;
+    if (size_ != 0 && output == nullptr) {
+        return ShareSnapshotResult::INVALID_ARGUMENT;
+    }
+
     std::size_t copied = 0;
-    for (std::size_t index = 0;
-         index < MAX_SHARE_SESSIONS && copied < capacity;
-         ++index) {
+    for (std::size_t index = 0; index < MAX_SHARE_SESSIONS; ++index) {
         if (!slots_[index].occupied) continue;
         const ShareSession& session = slots_[index].session;
         ShareRestoreEntry entry{};
@@ -405,7 +441,8 @@ std::size_t LocationShareScheduler::snapshot(
         entry.record.cease_pending = session.cease_pending;
         output[copied++] = entry;
     }
-    return copied;
+    written_or_required = copied;
+    return ShareSnapshotResult::OK;
 }
 
 }  // namespace Telemetry

@@ -13,6 +13,7 @@ constexpr uint32_t MIN_SHARE_CADENCE_MILLIS = 1000;
 constexpr uint32_t MAX_SHARE_CADENCE_MILLIS = 24U * 60U * 60U * 1000U;
 constexpr uint64_t INITIAL_RETRY_MILLIS = 5000;
 constexpr uint64_t MAX_RETRY_MILLIS = 5ULL * 60ULL * 1000ULL;
+constexpr uint64_t ACKNOWLEDGEMENT_LEASE_MILLIS = 1000;
 
 enum class ShareDuration : uint8_t {
     MINUTES_15,
@@ -32,6 +33,7 @@ enum class ShareSessionResult : uint8_t {
     CAPACITY,
     CLOCK_UNAVAILABLE,
     INVALID_ARGUMENT,
+    BUSY,
 };
 
 enum class ShareWorkType : uint8_t {
@@ -52,6 +54,12 @@ enum class ShareAckResult : uint8_t {
     STALE_TOKEN,
     NOT_FOUND,
     CLOCK_UNAVAILABLE,
+};
+
+enum class ShareSnapshotResult : uint8_t {
+    OK,
+    BUFFER_TOO_SMALL,
+    INVALID_ARGUMENT,
 };
 
 enum class MidnightResult : uint8_t {
@@ -96,6 +104,7 @@ struct ShareSession {
     bool awaiting_ack = false;
     ShareWorkType pending_type = ShareWorkType::LOCATION;
     uint64_t pending_token = 0;
+    uint64_t ack_deadline_millis = 0;
     uint8_t failure_count = 0;
 };
 
@@ -103,6 +112,7 @@ struct ShareWork {
     PeerId peer{};
     ShareWorkType type = ShareWorkType::LOCATION;
     uint64_t token = 0;
+    uint64_t ack_deadline_millis = 0;
     bool has_expiry = false;
     uint64_t expires_at_millis = 0;
     int32_t approx_radius_meters = 0;
@@ -132,6 +142,11 @@ public:
     ShareSessionResult stop(const PeerId& peer, uint64_t now_millis);
     bool cancelWithoutCease(const PeerId& peer);
 
+    // WORK is a short exclusive queue-attempt lease. The caller must attempt
+    // queueing synchronously, acknowledge before ack_deadline_millis, and must
+    // never enqueue the work after that deadline. stop() orders CEASE behind
+    // an in-flight LOCATION; start()/restore() report BUSY instead of
+    // invalidating externally borrowed work.
     SharePollResult poll(
         uint64_t now_millis,
         bool current_location_valid,
@@ -144,7 +159,12 @@ public:
         uint64_t now_millis);
 
     bool get(const PeerId& peer, ShareSession& output) const;
-    std::size_t snapshot(ShareRestoreEntry* output, std::size_t capacity) const;
+    // Atomic: BUFFER_TOO_SMALL writes no entries and reports the required
+    // capacity in written_or_required.
+    ShareSnapshotResult snapshot(
+        ShareRestoreEntry* output,
+        std::size_t capacity,
+        std::size_t& written_or_required) const;
     std::size_t size() const { return size_; }
 
 private:
@@ -157,6 +177,10 @@ private:
     static bool validCadence(uint32_t cadence_millis);
     static uint64_t boundedAdd(uint64_t value, uint64_t delta);
     static uint64_t retryDelay(uint8_t failure_count);
+    static void scheduleRejectedWork(
+        ShareSession& session,
+        ShareWorkType type,
+        uint64_t now_millis);
     std::size_t find(const PeerId& peer) const;
     std::size_t firstVacant() const;
     uint64_t nextToken();
