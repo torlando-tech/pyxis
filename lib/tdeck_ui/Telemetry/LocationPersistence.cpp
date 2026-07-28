@@ -119,7 +119,6 @@ LocationPersistenceResult TransactionalLocationPersistence::load(
     LocationStateSnapshot& output) {
     if (!storage_.available()) return LocationPersistenceResult::UNAVAILABLE;
 
-    bool saw_io_error = false;
     bool saw_invalid = false;
     std::size_t size = 0;
     CandidateResult result = readCandidate(LocationPersistenceSlot::LIVE, size);
@@ -129,7 +128,9 @@ LocationPersistenceResult TransactionalLocationPersistence::load(
                    ? LocationPersistenceResult::LOADED_LIVE
                    : LocationPersistenceResult::INVALID_STATE;
     }
-    saw_io_error = result == CandidateResult::IO_ERROR;
+    if (result == CandidateResult::IO_ERROR) {
+        return LocationPersistenceResult::IO_ERROR;
+    }
     saw_invalid = result == CandidateResult::INVALID;
 
     result = readCandidate(LocationPersistenceSlot::TEMP, size);
@@ -141,7 +142,9 @@ LocationPersistenceResult TransactionalLocationPersistence::load(
         repairFromTemp();
         return LocationPersistenceResult::RECOVERED_TEMP;
     }
-    saw_io_error = saw_io_error || result == CandidateResult::IO_ERROR;
+    if (result == CandidateResult::IO_ERROR) {
+        return LocationPersistenceResult::IO_ERROR;
+    }
     saw_invalid = saw_invalid || result == CandidateResult::INVALID;
 
     result = readCandidate(LocationPersistenceSlot::BACKUP, size);
@@ -153,10 +156,11 @@ LocationPersistenceResult TransactionalLocationPersistence::load(
         repairFromBackup(size);
         return LocationPersistenceResult::RECOVERED_BACKUP;
     }
-    saw_io_error = saw_io_error || result == CandidateResult::IO_ERROR;
+    if (result == CandidateResult::IO_ERROR) {
+        return LocationPersistenceResult::IO_ERROR;
+    }
     saw_invalid = saw_invalid || result == CandidateResult::INVALID;
 
-    if (saw_io_error) return LocationPersistenceResult::IO_ERROR;
     if (saw_invalid) return LocationPersistenceResult::INVALID_STATE;
     return LocationPersistenceResult::NOT_FOUND;
 }

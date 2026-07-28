@@ -216,6 +216,39 @@ void validatesTempBeforeReplacingLive() {
     CHECK(marker(output) == 30);
 }
 
+void transientHigherPriorityIoNeverFallsBackOrRepairs() {
+    FakeStorage storage;
+    put(storage, Telemetry::LocationPersistenceSlot::LIVE, state(20));
+    put(storage, Telemetry::LocationPersistenceSlot::BACKUP, state(10));
+    Telemetry::TransactionalLocationPersistence persistence(storage);
+    Telemetry::LocationStateSnapshot output = state(99);
+
+    storage.fail_at = 2;  // live stat succeeds, live read fails
+    CHECK(persistence.load(output) == Telemetry::LocationPersistenceResult::IO_ERROR);
+    CHECK(marker(output) == 99);
+    storage.fail_at = 0;
+    storage.operations = 0;
+    CHECK(persistence.load(output) == Telemetry::LocationPersistenceResult::LOADED_LIVE);
+    CHECK(marker(output) == 20);
+
+    FakeStorage temp_error;
+    put(temp_error, Telemetry::LocationPersistenceSlot::LIVE, state(30));
+    temp_error.slots[0].bytes[20] ^= 1U;
+    put(temp_error, Telemetry::LocationPersistenceSlot::TEMP, state(40));
+    put(temp_error, Telemetry::LocationPersistenceSlot::BACKUP, state(25));
+    Telemetry::TransactionalLocationPersistence temp_persistence(temp_error);
+    output = state(98);
+    temp_error.fail_at = 4;  // invalid live, then temporary read fails
+    CHECK(temp_persistence.load(output) ==
+          Telemetry::LocationPersistenceResult::IO_ERROR);
+    CHECK(marker(output) == 98);
+    temp_error.fail_at = 0;
+    temp_error.operations = 0;
+    CHECK(temp_persistence.load(output) ==
+          Telemetry::LocationPersistenceResult::RECOVERED_TEMP);
+    CHECK(marker(output) == 40);
+}
+
 }  // namespace
 
 int main() {
@@ -223,6 +256,7 @@ int main() {
     failsClosedWhenUnavailableMissingOrCorrupt();
     everyInterruptedSaveRetainsAValidGeneration();
     validatesTempBeforeReplacingLive();
+    transientHigherPriorityIoNeverFallsBackOrRepairs();
     std::cout << "location persistence: " << passed << " passed, "
               << failures << " failed\n";
     return failures == 0 ? 0 : 1;
