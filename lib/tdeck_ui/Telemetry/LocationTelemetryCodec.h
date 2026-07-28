@@ -24,6 +24,17 @@ struct LocationTelemetry {
     uint64_t sensor_timestamp_seconds = 0;
 };
 
+struct CustomLocationMeta {
+    bool has_cease = false;
+    bool cease = false;
+    bool has_expires = false;
+    uint64_t expires_millis = 0;
+    bool has_approx_radius = false;
+    uint32_t approx_radius_meters = 0;
+    bool has_timestamp = false;
+    uint64_t timestamp_millis = 0;
+};
+
 enum class DecodeResult : uint8_t {
     OK,
     INVALID_ARGUMENT,
@@ -43,6 +54,14 @@ enum class FieldValueResult : uint8_t {
     OK,
     INVALID_ARGUMENT,
     NOT_BINARY,
+    MALFORMED,
+    BUFFER_TOO_SMALL,
+};
+
+enum class CustomMetaResult : uint8_t {
+    OK,
+    EMPTY,
+    INVALID_ARGUMENT,
     MALFORMED,
     BUFFER_TOO_SMALL,
 };
@@ -75,6 +94,17 @@ DecodeResult decodeLocationTelemetry(
 
 EncodeResult encodeLocationTelemetry(
     const LocationTelemetry& input,
+    uint8_t* output,
+    std::size_t capacity,
+    std::size_t& written);
+
+CustomMetaResult decodeCustomLocationMeta(
+    const uint8_t* data,
+    std::size_t size,
+    CustomLocationMeta& output);
+
+CustomMetaResult encodeCustomLocationMeta(
+    const CustomLocationMeta& input,
     uint8_t* output,
     std::size_t capacity,
     std::size_t& written);

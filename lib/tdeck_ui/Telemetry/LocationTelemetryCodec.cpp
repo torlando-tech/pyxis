@@ -13,6 +13,8 @@ constexpr std::size_t MAX_LOCATION_ELEMENTS = 16;
 constexpr std::size_t MAX_SKIP_DEPTH = 8;
 constexpr std::size_t MAX_SKIP_ITEMS = 64;
 constexpr std::size_t MAX_ENCODED_TELEMETRY = 96;
+constexpr std::size_t MAX_CUSTOM_META_ENTRIES = 16;
+constexpr std::size_t MAX_ENCODED_CUSTOM_META = 128;
 
 class Cursor {
 public:
@@ -61,6 +63,45 @@ public:
         }
         if (signed_value && (bytes[0] & 0x80U) != 0) return false;
         value = decoded;
+        return true;
+    }
+
+    bool readBoolean(bool& value) {
+        uint8_t marker = 0;
+        if (!readByte(marker)) return false;
+        if (marker == 0xc2U) {
+            value = false;
+            return true;
+        }
+        if (marker == 0xc3U) {
+            value = true;
+            return true;
+        }
+        return false;
+    }
+
+    bool readString(BinaryView& value) {
+        uint8_t marker = 0;
+        if (!readByte(marker)) return false;
+
+        std::size_t length = 0;
+        if ((marker & 0xe0U) == 0xa0U) {
+            length = marker & 0x1fU;
+        } else if (marker == 0xd9U) {
+            uint8_t byte_length = 0;
+            if (!readByte(byte_length)) return false;
+            length = byte_length;
+        } else if (marker == 0xdaU) {
+            if (!readBigEndianSize(2, length)) return false;
+        } else if (marker == 0xdbU) {
+            if (!readBigEndianSize(4, length)) return false;
+        } else {
+            return false;
+        }
+
+        const uint8_t* bytes = nullptr;
+        if (!readBytes(length, bytes)) return false;
+        value = BinaryView{bytes, length};
         return true;
     }
 
@@ -262,6 +303,23 @@ public:
         return writeByte(0xcfU) && writeBigEndian(value, 8);
     }
 
+    bool writeBoolean(bool value) {
+        return writeByte(value ? 0xc3U : 0xc2U);
+    }
+
+    bool writeString(const char* value, std::size_t length) {
+        if (value == nullptr) return false;
+        if (length <= 31U) {
+            return writeByte(static_cast<uint8_t>(0xa0U | length)) &&
+                   writeBytes(reinterpret_cast<const uint8_t*>(value), length);
+        }
+        if (length <= 0xffU) {
+            return writeByte(0xd9U) && writeByte(static_cast<uint8_t>(length)) &&
+                   writeBytes(reinterpret_cast<const uint8_t*>(value), length);
+        }
+        return false;
+    }
+
     bool writeBinary(const uint8_t* data, std::size_t size) {
         if (size > 0xffU) return false;
         return writeByte(0xc4U) && writeByte(static_cast<uint8_t>(size)) &&
@@ -353,6 +411,12 @@ bool locationInRange(const LocationTelemetry& location) {
            location.latitude_e6 <= 90000000 &&
            location.longitude_e6 >= -180000000 &&
            location.longitude_e6 <= 180000000;
+}
+
+bool stringEquals(const BinaryView& value, const char* expected,
+                  std::size_t expected_size) {
+    return value.size == expected_size &&
+           std::memcmp(value.data, expected, expected_size) == 0;
 }
 
 }  // namespace
@@ -499,6 +563,102 @@ EncodeResult encodeLocationTelemetry(
     std::memcpy(output, temporary, writer.size());
     written = writer.size();
     return EncodeResult::OK;
+}
+
+CustomMetaResult decodeCustomLocationMeta(
+    const uint8_t* data,
+    std::size_t size,
+    CustomLocationMeta& output) {
+    if (data == nullptr || size == 0) return CustomMetaResult::INVALID_ARGUMENT;
+
+    Cursor cursor(data, size);
+    std::size_t map_size = 0;
+    if (!cursor.readMapSize(map_size) || map_size > MAX_CUSTOM_META_ENTRIES) {
+        return CustomMetaResult::MALFORMED;
+    }
+
+    CustomLocationMeta candidate{};
+    std::size_t skip_budget = MAX_SKIP_ITEMS;
+    for (std::size_t index = 0; index < map_size; ++index) {
+        BinaryView key{};
+        if (!cursor.readString(key)) return CustomMetaResult::MALFORMED;
+
+        if (stringEquals(key, "cease", 5)) {
+            if (candidate.has_cease || !cursor.readBoolean(candidate.cease)) {
+                return CustomMetaResult::MALFORMED;
+            }
+            candidate.has_cease = true;
+        } else if (stringEquals(key, "expires", 7)) {
+            if (candidate.has_expires ||
+                !cursor.readUnsigned(candidate.expires_millis)) {
+                return CustomMetaResult::MALFORMED;
+            }
+            candidate.has_expires = true;
+        } else if (stringEquals(key, "approxRadius", 12)) {
+            uint64_t radius = 0;
+            if (candidate.has_approx_radius || !cursor.readUnsigned(radius) ||
+                radius > std::numeric_limits<uint32_t>::max()) {
+                return CustomMetaResult::MALFORMED;
+            }
+            candidate.approx_radius_meters = static_cast<uint32_t>(radius);
+            candidate.has_approx_radius = true;
+        } else if (stringEquals(key, "ts", 2)) {
+            if (candidate.has_timestamp ||
+                !cursor.readUnsigned(candidate.timestamp_millis)) {
+                return CustomMetaResult::MALFORMED;
+            }
+            candidate.has_timestamp = true;
+        } else if (!cursor.skipValue(0, skip_budget)) {
+            return CustomMetaResult::MALFORMED;
+        }
+    }
+
+    if (!cursor.atEnd()) return CustomMetaResult::MALFORMED;
+    output = candidate;
+    return CustomMetaResult::OK;
+}
+
+CustomMetaResult encodeCustomLocationMeta(
+    const CustomLocationMeta& input,
+    uint8_t* output,
+    std::size_t capacity,
+    std::size_t& written) {
+    const std::size_t field_count =
+        static_cast<std::size_t>(input.has_cease) +
+        static_cast<std::size_t>(input.has_expires) +
+        static_cast<std::size_t>(input.has_approx_radius) +
+        static_cast<std::size_t>(input.has_timestamp);
+    if (field_count == 0) {
+        written = 0;
+        return CustomMetaResult::EMPTY;
+    }
+    if (output == nullptr) return CustomMetaResult::INVALID_ARGUMENT;
+
+    uint8_t temporary[MAX_ENCODED_CUSTOM_META]{};
+    Writer writer(temporary, sizeof(temporary));
+    bool ok = writer.writeByte(static_cast<uint8_t>(0x80U | field_count));
+    if (input.has_cease) {
+        ok = ok && writer.writeString("cease", 5) &&
+             writer.writeBoolean(input.cease);
+    }
+    if (input.has_expires) {
+        ok = ok && writer.writeString("expires", 7) &&
+             writer.writeUnsigned(input.expires_millis);
+    }
+    if (input.has_approx_radius) {
+        ok = ok && writer.writeString("approxRadius", 12) &&
+             writer.writeUnsigned(input.approx_radius_meters);
+    }
+    if (input.has_timestamp) {
+        ok = ok && writer.writeString("ts", 2) &&
+             writer.writeUnsigned(input.timestamp_millis);
+    }
+
+    if (!ok) return CustomMetaResult::INVALID_ARGUMENT;
+    if (capacity < writer.size()) return CustomMetaResult::BUFFER_TOO_SMALL;
+    std::memcpy(output, temporary, writer.size());
+    written = writer.size();
+    return CustomMetaResult::OK;
 }
 
 }  // namespace Telemetry
