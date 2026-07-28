@@ -16,6 +16,7 @@ struct LocationTelemetry {
     int32_t latitude_e6 = 0;
     int32_t longitude_e6 = 0;
     int32_t altitude_cm = 0;
+    // Sideband Location.speed is kilometres/hour, scaled by 100 on wire.
     uint32_t speed_centi_kmh = 0;
     int32_t bearing_cdeg = 0;
     uint16_t accuracy_cm = 0;
@@ -28,6 +29,14 @@ enum class DecodeResult : uint8_t {
     INVALID_ARGUMENT,
     MALFORMED,
     MISSING_LOCATION,
+    OUT_OF_RANGE,
+};
+
+enum class EncodeResult : uint8_t {
+    OK,
+    INVALID_ARGUMENT,
+    BUFFER_TOO_SMALL,
+    OUT_OF_RANGE,
 };
 
 enum class FieldValueResult : uint8_t {
@@ -35,9 +44,14 @@ enum class FieldValueResult : uint8_t {
     INVALID_ARGUMENT,
     NOT_BINARY,
     MALFORMED,
+    BUFFER_TOO_SMALL,
 };
 
 struct BinaryView {
+    BinaryView() = default;
+    BinaryView(const uint8_t* bytes, std::size_t length)
+        : data(bytes), size(length) {}
+
     const uint8_t* data = nullptr;
     std::size_t size = 0;
 };
@@ -47,10 +61,23 @@ FieldValueResult unwrapLxmfBinaryFieldValue(
     std::size_t raw_size,
     BinaryView& output);
 
+FieldValueResult wrapLxmfBinaryFieldValue(
+    const uint8_t* payload,
+    std::size_t payload_size,
+    uint8_t* output,
+    std::size_t capacity,
+    std::size_t& written);
+
 DecodeResult decodeLocationTelemetry(
     const uint8_t* data,
     std::size_t size,
     LocationTelemetry& output);
+
+EncodeResult encodeLocationTelemetry(
+    const LocationTelemetry& input,
+    uint8_t* output,
+    std::size_t capacity,
+    std::size_t& written);
 
 }  // namespace Telemetry
 

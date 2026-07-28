@@ -1,0 +1,48 @@
+{
+  "reference": {
+    "repository": "https://github.com/markqvist/Sideband.git",
+    "commit": "2000d81a44bff57e3b3cb7d45915ba29bbde4e18",
+    "source": "sbapp/sideband/sense.py Telemeter.packed and Location.pack"
+  },
+  "vectors": [
+    {
+      "name": "san_francisco",
+      "sensor_timestamp_seconds": 1700000000,
+      "latitude": 37.7749,
+      "longitude": -122.4194,
+      "altitude": 16.0,
+      "speed_kmh": 12.34,
+      "bearing": 42.0,
+      "accuracy": 3.5,
+      "location_timestamp_seconds": 1700000000,
+      "packed_hex": "8201ce6553f1000297c40402406634c404f8b40738c40400000640c404000004d2c40400001068c402015ece6553f100",
+      "microlxmf_raw_value_hex": "c4308201ce6553f1000297c40402406634c404f8b40738c40400000640c404000004d2c40400001068c402015ece6553f100"
+    },
+    {
+      "name": "bounds_signed",
+      "sensor_timestamp_seconds": 128,
+      "latitude": -90.0,
+      "longitude": 180.0,
+      "altitude": -123.45,
+      "speed_kmh": 0.0,
+      "bearing": -45.67,
+      "accuracy": 655.35,
+      "location_timestamp_seconds": 127,
+      "packed_hex": "8201cc800297c404faa2b580c4040aba9500c404ffffcfc7c40400000000c404ffffee29c402ffff7f",
+      "microlxmf_raw_value_hex": "c4298201cc800297c404faa2b580c4040aba9500c404ffffcfc7c40400000000c404ffffee29c402ffff7f"
+    },
+    {
+      "name": "southern",
+      "sensor_timestamp_seconds": 65536,
+      "latitude": -33.8688,
+      "longitude": 151.2093,
+      "altitude": 58.25,
+      "speed_kmh": 88.88,
+      "bearing": 359.99,
+      "accuracy": 0.01,
+      "location_timestamp_seconds": 65535,
+      "packed_hex": "8201ce000100000297c404fdfb3400c40409034554c404000016c1c404000022b8c40400008c9fc4020001cdffff",
+      "microlxmf_raw_value_hex": "c42e8201ce000100000297c404fdfb3400c40409034554c404000016c1c404000022b8c40400008c9fc4020001cdffff"
+    }
+  ]
+}
