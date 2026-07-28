@@ -21,6 +21,7 @@ struct PeerLocationRecord {
     LocationTelemetry location{};
     uint64_t source_timestamp_millis = 0;
     uint64_t received_at_millis = 0;
+    bool has_expiry = false;
     uint64_t expires_at_millis = 0;
     uint32_t approx_radius_meters = 0;
 };
@@ -64,7 +65,7 @@ private:
 
     std::size_t find(const PeerId& peer) const;
     std::size_t firstVacant() const;
-    std::size_t evictionCandidate() const;
+    std::size_t evictionCandidate(uint64_t now_millis) const;
     static bool peerEquals(const PeerId& left, const PeerId& right);
     static bool visible(const PeerLocationRecord& record,
                         uint64_t now_millis,

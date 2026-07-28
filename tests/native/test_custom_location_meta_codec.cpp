@@ -130,6 +130,15 @@ void rejectsMalformedAndPreservesOutput() {
     };
     constexpr uint8_t too_many_entries[] = {0xde, 0x00, 0x11};
     constexpr uint8_t huge_string[] = {0x81, 0xdb, 0xff, 0xff, 0xff, 0xff};
+    constexpr uint8_t timestamp_above_columba_long[] = {
+        0x81, 0xa2, 't', 's',
+        0xcf, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    constexpr uint8_t radius_above_columba_int[] = {
+        0x81,
+        0xac, 'a', 'p', 'p', 'r', 'o', 'x', 'R', 'a', 'd', 'i', 'u', 's',
+        0xce, 0x80, 0x00, 0x00, 0x00,
+    };
 
     struct Case { const uint8_t* data; std::size_t size; };
     const Case cases[] = {
@@ -139,6 +148,8 @@ void rejectsMalformedAndPreservesOutput() {
         {duplicate_cease, sizeof(duplicate_cease)},
         {too_many_entries, sizeof(too_many_entries)},
         {huge_string, sizeof(huge_string)},
+        {timestamp_above_columba_long, sizeof(timestamp_above_columba_long)},
+        {radius_above_columba_int, sizeof(radius_above_columba_int)},
     };
     const auto sentinel = expectedMeta();
     for (const auto& item : cases) {
@@ -165,6 +176,25 @@ void rejectsMalformedAndPreservesOutput() {
     CHECK(equalMeta(output, sentinel));
 }
 
+void rejectsOutboundValuesOutsideColumbaSignedDomains() {
+    uint8_t encoded[128]{};
+    std::size_t written = 0;
+
+    Telemetry::CustomLocationMeta meta{};
+    meta.has_timestamp = true;
+    meta.timestamp_millis = -1;
+    CHECK(Telemetry::encodeCustomLocationMeta(
+              meta, encoded, sizeof(encoded), written) ==
+          Telemetry::CustomMetaResult::INVALID_ARGUMENT);
+
+    meta = Telemetry::CustomLocationMeta{};
+    meta.has_approx_radius = true;
+    meta.approx_radius_meters = -1;
+    CHECK(Telemetry::encodeCustomLocationMeta(
+              meta, encoded, sizeof(encoded), written) ==
+          Telemetry::CustomMetaResult::INVALID_ARGUMENT);
+}
+
 }  // namespace
 
 int main() {
@@ -172,6 +202,7 @@ int main() {
     distinguishesAbsentFalseTrueAndEmpty();
     acceptsReorderedKeysAndSkipsUnknownNestedValues();
     rejectsMalformedAndPreservesOutput();
+    rejectsOutboundValuesOutsideColumbaSignedDomains();
     std::cout << "custom location metadata codec: " << passed << " passed, "
               << failures << " failed\n";
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

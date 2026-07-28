@@ -589,24 +589,31 @@ CustomMetaResult decodeCustomLocationMeta(
             }
             candidate.has_cease = true;
         } else if (stringEquals(key, "expires", 7)) {
-            if (candidate.has_expires ||
-                !cursor.readUnsigned(candidate.expires_millis)) {
+            uint64_t expires = 0;
+            if (candidate.has_expires || !cursor.readUnsigned(expires) ||
+                expires > static_cast<uint64_t>(
+                              std::numeric_limits<int64_t>::max())) {
                 return CustomMetaResult::MALFORMED;
             }
+            candidate.expires_millis = static_cast<int64_t>(expires);
             candidate.has_expires = true;
         } else if (stringEquals(key, "approxRadius", 12)) {
             uint64_t radius = 0;
             if (candidate.has_approx_radius || !cursor.readUnsigned(radius) ||
-                radius > std::numeric_limits<uint32_t>::max()) {
+                radius > static_cast<uint64_t>(
+                             std::numeric_limits<int32_t>::max())) {
                 return CustomMetaResult::MALFORMED;
             }
-            candidate.approx_radius_meters = static_cast<uint32_t>(radius);
+            candidate.approx_radius_meters = static_cast<int32_t>(radius);
             candidate.has_approx_radius = true;
         } else if (stringEquals(key, "ts", 2)) {
-            if (candidate.has_timestamp ||
-                !cursor.readUnsigned(candidate.timestamp_millis)) {
+            uint64_t timestamp = 0;
+            if (candidate.has_timestamp || !cursor.readUnsigned(timestamp) ||
+                timestamp > static_cast<uint64_t>(
+                                std::numeric_limits<int64_t>::max())) {
                 return CustomMetaResult::MALFORMED;
             }
+            candidate.timestamp_millis = static_cast<int64_t>(timestamp);
             candidate.has_timestamp = true;
         } else if (!cursor.skipValue(0, skip_budget)) {
             return CustomMetaResult::MALFORMED;
@@ -633,6 +640,11 @@ CustomMetaResult encodeCustomLocationMeta(
         return CustomMetaResult::EMPTY;
     }
     if (output == nullptr) return CustomMetaResult::INVALID_ARGUMENT;
+    if ((input.has_expires && input.expires_millis < 0) ||
+        (input.has_approx_radius && input.approx_radius_meters < 0) ||
+        (input.has_timestamp && input.timestamp_millis < 0)) {
+        return CustomMetaResult::INVALID_ARGUMENT;
+    }
 
     uint8_t temporary[MAX_ENCODED_CUSTOM_META]{};
     Writer writer(temporary, sizeof(temporary));
@@ -643,15 +655,16 @@ CustomMetaResult encodeCustomLocationMeta(
     }
     if (input.has_expires) {
         ok = ok && writer.writeString("expires", 7) &&
-             writer.writeUnsigned(input.expires_millis);
+             writer.writeUnsigned(static_cast<uint64_t>(input.expires_millis));
     }
     if (input.has_approx_radius) {
         ok = ok && writer.writeString("approxRadius", 12) &&
-             writer.writeUnsigned(input.approx_radius_meters);
+             writer.writeUnsigned(
+                 static_cast<uint64_t>(input.approx_radius_meters));
     }
     if (input.has_timestamp) {
         ok = ok && writer.writeString("ts", 2) &&
-             writer.writeUnsigned(input.timestamp_millis);
+             writer.writeUnsigned(static_cast<uint64_t>(input.timestamp_millis));
     }
 
     if (!ok) return CustomMetaResult::INVALID_ARGUMENT;

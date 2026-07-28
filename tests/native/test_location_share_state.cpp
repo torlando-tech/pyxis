@@ -161,13 +161,79 @@ void enforcesExpiryAndStaleDisplayBoundaries() {
     CHECK(store.size() == 0);
 
     Telemetry::CustomLocationMeta no_meta{};
-    CHECK(store.apply(id, location(20), no_meta, 1000) ==
+    CHECK(store.apply(id, location(1), no_meta, 1000) ==
           Telemetry::PeerLocationResult::INSERTED);
     CHECK(store.snapshot(1100, 100, snapshot, 2) == 1);
     CHECK(store.snapshot(1101, 100, snapshot, 2) == 0);
     CHECK(store.snapshot(999, 100, snapshot, 2) == 1);  // clock moved backward
     CHECK(store.prune(1100, 100) == 0);
     CHECK(store.prune(1101, 100) == 1);
+}
+
+void basesFreshnessOnSenderCaptureTimeNotReceiptTime() {
+    Telemetry::PeerLocationStore store;
+    Telemetry::CustomLocationMeta no_meta{};
+    const auto id = peer(31);
+    CHECK(store.apply(id, location(1), no_meta, 100000) ==
+          Telemetry::PeerLocationResult::INSERTED);
+
+    Telemetry::PeerLocationRecord snapshot[1]{};
+    CHECK(store.snapshot(100000, 1000, snapshot, 1) == 0);
+    CHECK(store.prune(100000, 1000) == 1);
+    CHECK(!hasPeer(store, id));
+}
+
+void treatsPresentEpochZeroExpiryAsExpired() {
+    Telemetry::PeerLocationStore store;
+    auto meta = metaTimestamp(10000);
+    meta.has_expires = true;
+    meta.expires_millis = 0;
+    CHECK(store.apply(peer(32), location(10), meta, 1000) ==
+          Telemetry::PeerLocationResult::EXPIRED);
+    CHECK(store.size() == 0);
+}
+
+void reusesExpiredSlotsBeforeEvictingLiveRecords() {
+    Telemetry::PeerLocationStore store;
+    Telemetry::CustomLocationMeta no_meta{};
+    for (std::size_t index = 0; index < Telemetry::MAX_PEER_LOCATIONS; ++index) {
+        Telemetry::CustomLocationMeta meta{};
+        if (index + 1 == Telemetry::MAX_PEER_LOCATIONS) {
+            meta.has_expires = true;
+            meta.expires_millis = 1000;
+        }
+        CHECK(store.apply(peer(static_cast<uint8_t>(index)), location(10), meta,
+                          100 + index) ==
+              Telemetry::PeerLocationResult::INSERTED);
+    }
+
+    CHECK(store.apply(peer(200), location(11), no_meta, 2000) ==
+          Telemetry::PeerLocationResult::INSERTED);
+    CHECK(hasPeer(store, peer(0)));
+    CHECK(!hasPeer(store, peer(31)));
+    CHECK(hasPeer(store, peer(200)));
+    CHECK(store.size() == Telemetry::MAX_PEER_LOCATIONS);
+}
+
+void rejectsDirectMetadataOutsideColumbaDomains() {
+    Telemetry::PeerLocationStore store;
+    auto meta = metaTimestamp(1);
+    meta.timestamp_millis = -1;
+    CHECK(store.apply(peer(33), location(1), meta, 1) ==
+          Telemetry::PeerLocationResult::INVALID_ARGUMENT);
+
+    meta = metaTimestamp(1);
+    meta.has_expires = true;
+    meta.expires_millis = -1;
+    CHECK(store.apply(peer(33), location(1), meta, 1) ==
+          Telemetry::PeerLocationResult::INVALID_ARGUMENT);
+
+    meta = metaTimestamp(1);
+    meta.has_approx_radius = true;
+    meta.approx_radius_meters = -1;
+    CHECK(store.apply(peer(33), location(1), meta, 1) ==
+          Telemetry::PeerLocationResult::INVALID_ARGUMENT);
+    CHECK(store.size() == 0);
 }
 
 void expiredNewerUpdateClearsExistingState() {
@@ -244,6 +310,10 @@ int main() {
     appliesOrderedCeaseWithoutTouchingOtherPeers();
     reusesVacanciesBeforeDeterministicEviction();
     enforcesExpiryAndStaleDisplayBoundaries();
+    basesFreshnessOnSenderCaptureTimeNotReceiptTime();
+    treatsPresentEpochZeroExpiryAsExpired();
+    reusesExpiredSlotsBeforeEvictingLiveRecords();
+    rejectsDirectMetadataOutsideColumbaDomains();
     expiredNewerUpdateClearsExistingState();
     snapshotsAreCallerOwnedAndCapacityBounded();
     rejectsTimestampOverflowWithoutMutation();

@@ -28,11 +28,11 @@ struct CustomLocationMeta {
     bool has_cease = false;
     bool cease = false;
     bool has_expires = false;
-    uint64_t expires_millis = 0;
+    int64_t expires_millis = 0;
     bool has_approx_radius = false;
-    uint32_t approx_radius_meters = 0;
+    int32_t approx_radius_meters = 0;
     bool has_timestamp = false;
-    uint64_t timestamp_millis = 0;
+    int64_t timestamp_millis = 0;
 };
 
 enum class DecodeResult : uint8_t {

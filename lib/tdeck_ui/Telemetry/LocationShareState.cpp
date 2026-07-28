@@ -15,7 +15,8 @@ bool effectiveTimestampMillis(
     const CustomLocationMeta& meta,
     uint64_t& timestamp_millis) {
     if (meta.has_timestamp) {
-        timestamp_millis = meta.timestamp_millis;
+        if (meta.timestamp_millis < 0) return false;
+        timestamp_millis = static_cast<uint64_t>(meta.timestamp_millis);
         return true;
     }
     if (location.timestamp_seconds >
@@ -55,7 +56,15 @@ std::size_t PeerLocationStore::firstVacant() const {
     return NO_SLOT;
 }
 
-std::size_t PeerLocationStore::evictionCandidate() const {
+std::size_t PeerLocationStore::evictionCandidate(uint64_t now_millis) const {
+    for (std::size_t index = 0; index < MAX_PEER_LOCATIONS; ++index) {
+        if (slots_[index].occupied &&
+            slots_[index].record.has_expiry &&
+            now_millis >= slots_[index].record.expires_at_millis) {
+            return index;
+        }
+    }
+
     std::size_t candidate = NO_SLOT;
     for (std::size_t index = 0; index < MAX_PEER_LOCATIONS; ++index) {
         if (!slots_[index].occupied) continue;
@@ -72,12 +81,12 @@ bool PeerLocationStore::visible(
     const PeerLocationRecord& record,
     uint64_t now_millis,
     uint64_t maximum_age_millis) {
-    if (record.expires_at_millis != 0 &&
+    if (record.has_expiry &&
         now_millis >= record.expires_at_millis) {
         return false;
     }
-    if (now_millis >= record.received_at_millis &&
-        now_millis - record.received_at_millis > maximum_age_millis) {
+    if (now_millis >= record.source_timestamp_millis &&
+        now_millis - record.source_timestamp_millis > maximum_age_millis) {
         return false;
     }
     return true;
@@ -94,6 +103,11 @@ PeerLocationResult PeerLocationStore::apply(
     const LocationTelemetry& location,
     const CustomLocationMeta& meta,
     uint64_t received_at_millis) {
+    if ((meta.has_expires && meta.expires_millis < 0) ||
+        (meta.has_approx_radius && meta.approx_radius_meters < 0)) {
+        return PeerLocationResult::INVALID_ARGUMENT;
+    }
+
     uint64_t source_timestamp_millis = 0;
     if (!effectiveTimestampMillis(location, meta, source_timestamp_millis)) {
         return PeerLocationResult::INVALID_ARGUMENT;
@@ -112,9 +126,10 @@ PeerLocationResult PeerLocationStore::apply(
         return PeerLocationResult::CEASED;
     }
 
-    const uint64_t expires_at_millis =
-        meta.has_expires ? meta.expires_millis : 0;
-    if (expires_at_millis != 0 &&
+    const uint64_t expires_at_millis = meta.has_expires
+                                           ? static_cast<uint64_t>(meta.expires_millis)
+                                           : 0;
+    if (meta.has_expires &&
         received_at_millis >= expires_at_millis) {
         if (existing != NO_SLOT) clear(existing);
         return PeerLocationResult::EXPIRED;
@@ -128,9 +143,12 @@ PeerLocationResult PeerLocationStore::apply(
     record.location = location;
     record.source_timestamp_millis = source_timestamp_millis;
     record.received_at_millis = received_at_millis;
+    record.has_expiry = meta.has_expires;
     record.expires_at_millis = expires_at_millis;
     record.approx_radius_meters =
-        meta.has_approx_radius ? meta.approx_radius_meters : 0;
+        meta.has_approx_radius
+            ? static_cast<uint32_t>(meta.approx_radius_meters)
+            : 0;
 
     if (existing != NO_SLOT) {
         slots_[existing].record = record;
@@ -138,7 +156,7 @@ PeerLocationResult PeerLocationStore::apply(
     }
 
     std::size_t target = firstVacant();
-    if (target == NO_SLOT) target = evictionCandidate();
+    if (target == NO_SLOT) target = evictionCandidate(received_at_millis);
     if (target == NO_SLOT) return PeerLocationResult::INVALID_ARGUMENT;
     if (!slots_[target].occupied) ++size_;
     slots_[target].record = record;
