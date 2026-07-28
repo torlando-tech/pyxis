@@ -52,6 +52,10 @@ LocationStateRecordResult decodeLocationStateRecord(
     std::size_t size,
     LocationStateSnapshot& output);
 
+LocationStateRecordResult validateLocationStateRecord(
+    const uint8_t* data,
+    std::size_t size);
+
 }  // namespace Telemetry
 
 #endif  // PYXIS_TELEMETRY_LOCATION_STATE_RECORD_H

@@ -224,8 +224,12 @@ void rejectsCountOverflowDuplicatesAndInvalidCoordinates() {
           Telemetry::LocationStateRecordResult::OK);
     encoded[Telemetry::LOCATION_STATE_HEADER_BYTES + 16] |= 0x80U;
     repairCrc(encoded, written);
+    output = sample();
+    output.sessions[0].record.cadence_millis = 12345;
+    const auto malformed_before = output;
     CHECK(Telemetry::decodeLocationStateRecord(encoded, written, output) ==
           Telemetry::LocationStateRecordResult::MALFORMED);
+    CHECK(sameState(output, malformed_before));
 
     auto duplicate = sample();
     duplicate.session_count = 2;

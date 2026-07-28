@@ -283,10 +283,9 @@ LocationStateRecordResult encodeLocationStateRecord(
     return LocationStateRecordResult::OK;
 }
 
-LocationStateRecordResult decodeLocationStateRecord(
+LocationStateRecordResult validateLocationStateRecord(
     const uint8_t* data,
-    std::size_t size,
-    LocationStateSnapshot& output) {
+    std::size_t size) {
     if (data == nullptr) return LocationStateRecordResult::INVALID_ARGUMENT;
     if (size < LOCATION_STATE_HEADER_BYTES + LOCATION_STATE_CRC_BYTES) {
         return LocationStateRecordResult::MALFORMED;
@@ -321,9 +320,20 @@ LocationStateRecordResult decodeLocationStateRecord(
     }
 
     const uint8_t* payload = data + LOCATION_STATE_HEADER_BYTES;
+    return validateEncodedRecords(payload, session_count, location_count);
+}
+
+LocationStateRecordResult decodeLocationStateRecord(
+    const uint8_t* data,
+    std::size_t size,
+    LocationStateSnapshot& output) {
     const LocationStateRecordResult validation =
-        validateEncodedRecords(payload, session_count, location_count);
+        validateLocationStateRecord(data, size);
     if (validation != LocationStateRecordResult::OK) return validation;
+
+    const std::size_t session_count = readU16(data + 12);
+    const std::size_t location_count = readU16(data + 14);
+    const uint8_t* payload = data + LOCATION_STATE_HEADER_BYTES;
 
     output.session_count = 0;
     output.location_count = 0;
