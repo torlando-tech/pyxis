@@ -76,7 +76,13 @@ double normalizeLongitude(double longitude) {
     if (!finite(longitude)) {
         return longitude;
     }
-    return wrap(longitude + 180.0, 360.0) - 180.0;
+    double result = std::fmod(longitude, 360.0);
+    if (result >= 180.0) {
+        result -= 360.0;
+    } else if (result < -180.0) {
+        result += 360.0;
+    }
+    return result;
 }
 
 bool isValidZoom(std::uint32_t zoom) {
@@ -195,10 +201,17 @@ Status viewportTiles(const Viewport& viewport,
         return Status::INVALID_ARGUMENT;
     }
 
+    const double world = worldPixels(zoom);
+    const double clipped_top = viewport.top < 0.0 ? 0.0 : viewport.top;
+    const double clipped_bottom = bottom > world ? world : bottom;
+    if (clipped_top >= clipped_bottom) {
+        return Status::OK;
+    }
+
     double first_x_value = std::floor(viewport.left / tile_size);
     double last_x_value = std::ceil(right / tile_size) - 1.0;
-    double first_y_value = std::floor(viewport.top / tile_size);
-    double last_y_value = std::ceil(bottom / tile_size) - 1.0;
+    double first_y_value = std::floor(clipped_top / tile_size);
+    double last_y_value = std::ceil(clipped_bottom / tile_size) - 1.0;
     if (include_border) {
         first_x_value -= 1.0;
         last_x_value += 1.0;

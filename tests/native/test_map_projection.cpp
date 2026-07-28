@@ -60,6 +60,10 @@ void testLongitudeNormalization() {
     CHECK(near(Pyxis::MapProjection::normalizeLongitude(-540.0), -180.0));
     CHECK(near(Pyxis::MapProjection::normalizeLongitude(181.0), -179.0));
     CHECK(near(Pyxis::MapProjection::normalizeLongitude(-181.0), 179.0));
+    const double east_inside = std::nextafter(180.0, -std::numeric_limits<double>::infinity());
+    const double west_outside = std::nextafter(-180.0, -std::numeric_limits<double>::infinity());
+    CHECK(Pyxis::MapProjection::normalizeLongitude(east_inside) == east_inside);
+    CHECK(Pyxis::MapProjection::normalizeLongitude(west_outside) == east_inside);
 }
 
 void testEquatorPrimeMeridian() {
@@ -134,6 +138,19 @@ void testExactViewportEdgesAreExclusive() {
     CHECK(tiles[0].tile.y == 1U);
     CHECK(near(tiles[0].screen_x, 0.0));
     CHECK(near(tiles[0].screen_y, 0.0));
+
+    tiles[0].tile.x = 77U;
+    CHECK(Pyxis::MapProjection::viewportTiles(Viewport{0.0, -256.0, 256U, 256U}, 2U, false, tiles,
+                                               Pyxis::MapProjection::MAX_VIEWPORT_TILES, count) == Status::OK);
+    CHECK(count == 0U);
+    CHECK(tiles[0].tile.x == 77U);
+    CHECK(Pyxis::MapProjection::viewportTiles(Viewport{0.0, 1024.0, 256U, 256U}, 2U, false, tiles,
+                                               Pyxis::MapProjection::MAX_VIEWPORT_TILES, count) == Status::OK);
+    CHECK(count == 0U);
+    CHECK(tiles[0].tile.x == 77U);
+    CHECK(Pyxis::MapProjection::viewportTiles(Viewport{0.0, -1024.0, 256U, 100U}, 2U, true, tiles,
+                                               Pyxis::MapProjection::MAX_VIEWPORT_TILES, count) == Status::OK);
+    CHECK(count == 0U);
 }
 
 void testViewportTwoToThreeTileTransition() {
