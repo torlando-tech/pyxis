@@ -286,6 +286,23 @@ void encodingIsAtomicAndBounded() {
     CHECK(sameState(decoded, maximum));
 }
 
+void preservesPresentZeroApproximateRadius() {
+    auto state = sample();
+    state.sessions[0].record.has_approx_radius = true;
+    state.sessions[0].record.approx_radius_meters = 0;
+    uint8_t encoded[Telemetry::MAX_LOCATION_STATE_RECORD_BYTES]{};
+    std::size_t written = 0;
+    CHECK(Telemetry::encodeLocationStateRecord(
+              state, encoded, sizeof(encoded), written) ==
+          Telemetry::LocationStateRecordResult::OK);
+    Telemetry::LocationStateSnapshot decoded{};
+    CHECK(Telemetry::decodeLocationStateRecord(
+              encoded, written, decoded) ==
+          Telemetry::LocationStateRecordResult::OK);
+    CHECK(decoded.sessions[0].record.has_approx_radius);
+    CHECK(decoded.sessions[0].record.approx_radius_meters == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -294,6 +311,7 @@ int main() {
     rejectsCorruptionAndUnsupportedHeadersTransactionally();
     rejectsCountOverflowDuplicatesAndInvalidCoordinates();
     encodingIsAtomicAndBounded();
+    preservesPresentZeroApproximateRadius();
     std::cout << "location state record: " << passed << " passed, "
               << failures << " failed\n";
     return failures == 0 ? 0 : 1;

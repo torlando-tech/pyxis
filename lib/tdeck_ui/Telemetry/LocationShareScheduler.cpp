@@ -225,6 +225,8 @@ ShareSessionResult LocationShareScheduler::start(
     ShareSession session{};
     session.peer = peer;
     session.cadence_millis = options.cadence_millis;
+    session.has_approx_radius =
+        options.has_approx_radius || options.approx_radius_meters != 0;
     session.approx_radius_meters = options.approx_radius_meters;
     session.has_expiry = has_expiry;
     session.expires_at_millis = expires_at_millis;
@@ -268,6 +270,8 @@ ShareSessionResult LocationShareScheduler::restore(
     ShareSession session{};
     session.peer = peer;
     session.cadence_millis = record.cadence_millis;
+    session.has_approx_radius =
+        record.has_approx_radius || record.approx_radius_meters != 0;
     session.approx_radius_meters = record.approx_radius_meters;
     session.has_expiry = record.has_expiry;
     session.expires_at_millis = record.has_expiry ? record.expires_at_millis : 0;
@@ -364,6 +368,7 @@ SharePollResult LocationShareScheduler::poll(
             monotonic_now_millis + ACKNOWLEDGEMENT_LEASE_MILLIS;
         candidate.has_expiry = session.has_expiry;
         candidate.expires_at_millis = session.expires_at_millis;
+        candidate.has_approx_radius = session.has_approx_radius;
         candidate.approx_radius_meters = session.approx_radius_meters;
 
         session.awaiting_ack = true;
@@ -461,6 +466,7 @@ ShareSnapshotResult LocationShareScheduler::snapshot(
         ShareRestoreEntry entry{};
         entry.peer = session.peer;
         entry.record.cadence_millis = session.cadence_millis;
+        entry.record.has_approx_radius = session.has_approx_radius;
         entry.record.approx_radius_meters = session.approx_radius_meters;
         entry.record.has_expiry = session.has_expiry;
         entry.record.expires_at_millis = session.has_expiry

@@ -43,10 +43,14 @@ LocationMessageDecision classifyInboundLocationMessage(
         return decision;
     }
 
+    BinaryView custom_meta_payload;
     if (message.custom_meta.present &&
-        decodeCustomLocationMeta(message.custom_meta.raw_value.data,
-                                 message.custom_meta.raw_value.size,
-                                 decision.meta) != CustomMetaResult::OK) {
+        (unwrapLxmfBinaryFieldValue(message.custom_meta.raw_value.data,
+                                    message.custom_meta.raw_value.size,
+                                    custom_meta_payload) != FieldValueResult::OK ||
+         decodeCustomLocationMeta(custom_meta_payload.data,
+                                  custom_meta_payload.size,
+                                  decision.meta) != CustomMetaResult::OK)) {
         // Metadata controls cease, expiry, and source ordering. Applying the
         // telemetry while ignoring malformed metadata would violate all three.
         decision.kind = LocationMessageKind::MALFORMED_LOCATION;

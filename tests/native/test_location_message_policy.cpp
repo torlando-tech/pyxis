@@ -50,7 +50,15 @@ Fields validFields(uint64_t timestamp, bool with_meta = false, bool cease = fals
         meta.cease = cease;
         meta.has_timestamp = true;
         meta.timestamp_millis = static_cast<int64_t>(timestamp * 1000U);
-        CHECK(Telemetry::encodeCustomLocationMeta(meta, fields.meta, sizeof(fields.meta), fields.meta_size) == Telemetry::CustomMetaResult::OK);
+        uint8_t encoded_meta[96]{};
+        std::size_t encoded_meta_size = 0;
+        CHECK(Telemetry::encodeCustomLocationMeta(
+                  meta, encoded_meta, sizeof(encoded_meta), encoded_meta_size) ==
+              Telemetry::CustomMetaResult::OK);
+        CHECK(Telemetry::wrapLxmfBinaryFieldValue(
+                  encoded_meta, encoded_meta_size,
+                  fields.meta, sizeof(fields.meta), fields.meta_size) ==
+              Telemetry::FieldValueResult::OK);
     }
     return fields;
 }

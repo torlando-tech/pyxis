@@ -11,6 +11,7 @@ namespace {
 constexpr uint8_t MAGIC[4] = {'P', 'Y', 'L', 'S'};
 constexpr uint8_t SESSION_HAS_EXPIRY = 0x01;
 constexpr uint8_t SESSION_CEASE_PENDING = 0x02;
+constexpr uint8_t SESSION_HAS_APPROX_RADIUS = 0x04;
 constexpr uint8_t LOCATION_HAS_EXPIRY = 0x01;
 
 uint16_t readU16(const uint8_t* data) {
@@ -131,7 +132,8 @@ void encodeSession(const ShareRestoreEntry& entry, uint8_t* output) {
     std::memcpy(output, entry.peer.bytes, PEER_ID_SIZE);
     output[16] = static_cast<uint8_t>(
         (entry.record.has_expiry ? SESSION_HAS_EXPIRY : 0U) |
-        (entry.record.cease_pending ? SESSION_CEASE_PENDING : 0U));
+        (entry.record.cease_pending ? SESSION_CEASE_PENDING : 0U) |
+        (entry.record.has_approx_radius ? SESSION_HAS_APPROX_RADIUS : 0U));
     output[17] = 0;
     writeU32(output + 18, entry.record.cadence_millis);
     writeI32(output + 22, entry.record.approx_radius_meters);
@@ -145,6 +147,8 @@ ShareRestoreEntry decodeSession(const uint8_t* data) {
     entry.record.cease_pending = (data[16] & SESSION_CEASE_PENDING) != 0;
     entry.record.cadence_millis = readU32(data + 18);
     entry.record.approx_radius_meters = readI32(data + 22);
+    entry.record.has_approx_radius =
+        (data[16] & SESSION_HAS_APPROX_RADIUS) != 0;
     entry.record.expires_at_millis = readU64(data + 26);
     return entry;
 }
@@ -193,7 +197,7 @@ LocationStateRecordResult validateEncodedRecords(
     std::size_t location_count) {
     for (std::size_t index = 0; index < session_count; ++index) {
         const uint8_t* current = payload + index * LOCATION_STATE_SESSION_BYTES;
-        if ((current[16] & ~0x03U) != 0 || current[17] != 0) {
+        if ((current[16] & ~0x07U) != 0 || current[17] != 0) {
             return LocationStateRecordResult::MALFORMED;
         }
         const ShareRestoreEntry entry = decodeSession(current);

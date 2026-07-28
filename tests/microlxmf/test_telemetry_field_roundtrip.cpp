@@ -12,6 +12,8 @@
 
 int main() {
     constexpr uint8_t key_bytes[] = {Telemetry::FIELD_TELEMETRY};
+    constexpr uint8_t meta_key_bytes[] = {
+        0xccU, Telemetry::FIELD_CUSTOM_META};
     constexpr std::size_t TELEMETRY_CAPACITY = 128;
 
     Telemetry::LocationTelemetry outbound{};
@@ -42,6 +44,28 @@ int main() {
         return EXIT_FAILURE;
     }
 
+    Telemetry::CustomLocationMeta outbound_meta{};
+    outbound_meta.has_expires = true;
+    outbound_meta.expires_millis = 1700000900000LL;
+    outbound_meta.has_approx_radius = true;
+    outbound_meta.approx_radius_meters = 0;
+    uint8_t inner_meta[96]{};
+    std::size_t inner_meta_size = 0;
+    if (Telemetry::encodeCustomLocationMeta(
+            outbound_meta, inner_meta, sizeof(inner_meta), inner_meta_size) !=
+        Telemetry::CustomMetaResult::OK) {
+        std::cerr << "codec failed to encode custom metadata\n";
+        return EXIT_FAILURE;
+    }
+    uint8_t raw_meta[101]{};
+    std::size_t raw_meta_size = 0;
+    if (Telemetry::wrapLxmfBinaryFieldValue(
+            inner_meta, inner_meta_size, raw_meta, sizeof(raw_meta),
+            raw_meta_size) != Telemetry::FieldValueResult::OK) {
+        std::cerr << "codec failed to wrap custom metadata\n";
+        return EXIT_FAILURE;
+    }
+
     RNS::Identity source_identity;
     RNS::Identity destination_identity;
     RNS::Destination source(
@@ -56,8 +80,11 @@ int main() {
         LXMF::Type::Message::OPPORTUNISTIC);
     const RNS::Bytes key(key_bytes, sizeof(key_bytes));
     const RNS::Bytes value(raw_value, raw_size);
-    if (!message.fields_set(key, value)) {
-        std::cerr << "fields_set rejected telemetry\n";
+    const RNS::Bytes meta_key(meta_key_bytes, sizeof(meta_key_bytes));
+    const RNS::Bytes meta_value(raw_meta, raw_meta_size);
+    if (!message.fields_set(key, value) ||
+        !message.fields_set(meta_key, meta_value)) {
+        std::cerr << "fields_set rejected location fields\n";
         return EXIT_FAILURE;
     }
 
@@ -67,6 +94,11 @@ int main() {
     const RNS::Bytes* decoded_value = decoded_message.fields_get(key);
     if (decoded_value == nullptr || *decoded_value != value) {
         std::cerr << "raw telemetry BIN span changed across microLXMF pack/unpack\n";
+        return EXIT_FAILURE;
+    }
+    const RNS::Bytes* decoded_meta_value = decoded_message.fields_get(meta_key);
+    if (decoded_meta_value == nullptr || *decoded_meta_value != meta_value) {
+        std::cerr << "raw metadata BIN span changed across microLXMF pack/unpack\n";
         return EXIT_FAILURE;
     }
 
@@ -90,6 +122,25 @@ int main() {
         return EXIT_FAILURE;
     }
 
-    std::cout << "microLXMF telemetry field roundtrip: passed\n";
+    Telemetry::BinaryView unwrapped_meta{};
+    if (Telemetry::unwrapLxmfBinaryFieldValue(
+            decoded_meta_value->data(), decoded_meta_value->size(),
+            unwrapped_meta) != Telemetry::FieldValueResult::OK) {
+        std::cerr << "codec failed to unwrap microLXMF metadata field\n";
+        return EXIT_FAILURE;
+    }
+    Telemetry::CustomLocationMeta inbound_meta{};
+    if (Telemetry::decodeCustomLocationMeta(
+            unwrapped_meta.data, unwrapped_meta.size, inbound_meta) !=
+            Telemetry::CustomMetaResult::OK ||
+        !inbound_meta.has_expires ||
+        inbound_meta.expires_millis != outbound_meta.expires_millis ||
+        !inbound_meta.has_approx_radius ||
+        inbound_meta.approx_radius_meters != 0) {
+        std::cerr << "custom metadata changed across codec/microLXMF roundtrip\n";
+        return EXIT_FAILURE;
+    }
+
+    std::cout << "microLXMF location fields roundtrip: passed\n";
     return EXIT_SUCCESS;
 }

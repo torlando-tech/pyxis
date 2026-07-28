@@ -72,6 +72,7 @@ enum class MidnightResult : uint8_t {
 struct ShareStartOptions {
     ShareDuration duration = ShareDuration::MINUTES_15;
     uint32_t cadence_millis = 60000;
+    bool has_approx_radius = false;
     int32_t approx_radius_meters = 0;
     // Required only for LOCAL_MIDNIGHT. The platform resolves the exact
     // DST-aware local boundary before calling the scheduler.
@@ -80,6 +81,7 @@ struct ShareStartOptions {
 
 struct ShareRestoreRecord {
     uint32_t cadence_millis = 60000;
+    bool has_approx_radius = false;
     int32_t approx_radius_meters = 0;
     bool has_expiry = false;
     uint64_t expires_at_millis = 0;
@@ -94,6 +96,7 @@ struct ShareRestoreEntry {
 struct ShareSession {
     PeerId peer{};
     uint32_t cadence_millis = 60000;
+    bool has_approx_radius = false;
     int32_t approx_radius_meters = 0;
     bool has_expiry = false;
     uint64_t expires_at_millis = 0;
@@ -115,6 +118,7 @@ struct ShareWork {
     uint64_t ack_deadline_monotonic_millis = 0;
     bool has_expiry = false;
     uint64_t expires_at_millis = 0;
+    bool has_approx_radius = false;
     int32_t approx_radius_meters = 0;
 };
 
