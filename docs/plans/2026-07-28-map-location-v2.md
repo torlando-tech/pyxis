@@ -58,7 +58,9 @@ Portable code must avoid `Arduino.h`, `String`, LVGL, FreeRTOS, and filesystem h
   - Plain value types, field IDs, validity/error enums, explicit units.
 - `lib/tdeck_ui/Telemetry/LocationTelemetryCodec.h`
 - `lib/tdeck_ui/Telemetry/LocationTelemetryCodec.cpp`
-  - Bounded MessagePack encoder/decoder over caller-owned buffers.
+  - Bounded MessagePack encoder/decoder over caller-owned buffers. Handles both
+    the inner Sideband Telemeter map and the outer raw MessagePack BIN span that
+    current pinned microLXMF stores in `LXMessage::FieldEntry`.
 - `lib/tdeck_ui/Telemetry/LocationShareState.h`
 - `lib/tdeck_ui/Telemetry/LocationShareState.cpp`
   - Fixed-capacity peer locations and outbound sessions; deterministic eviction.
@@ -152,6 +154,8 @@ Telemetry::DecodeResult decodeLocationTelemetry(
 - Skip unknown values with bounded depth and bounded aggregate item count.
 - Reject overflow, truncation, invalid MessagePack types, duplicate location ambiguity, non-finite/out-of-range coordinates, impossible negative unsigned values, excessive nesting, and oversized payloads.
 - Treat `last_update` as authoritative location timestamp; preserve outer sensor timestamp separately if useful.
+- Name and store the speed fixed-point value as centi-km/h. Sideband's location
+  sensor uses km/h; TinyGPS `speed.kmph()` must feed the encoder, not `mps()`.
 
 **TDD cycle per behavior:**
 1. Add one failing vector assertion.
@@ -181,7 +185,7 @@ Telemetry::EncodeResult encodeLocationTelemetry(
 **Behavior:**
 - Caller-owned fixed buffer; explicit `BUFFER_TOO_SMALL` result.
 - Big-endian fixed-point fields with documented rounding/truncation selected from the pinned Sideband reference.
-- Clamp speed to non-negative and accuracy to unsigned 16-bit range.
+- Clamp speed (km/h) to non-negative and accuracy to unsigned 16-bit range.
 - Reject invalid latitude, longitude, bearing policy violations, non-finite values, and timestamps that cannot be represented by the selected wire contract.
 - Compare exact bytes for canonical fixture inputs.
 
@@ -189,9 +193,31 @@ Telemetry::EncodeResult encodeLocationTelemetry(
 
 **Commit:** `feat: encode canonical location telemetry`.
 
-### Task 4: Implement `FIELD_CUSTOM_META` codec
+### Task 4: Implement the pinned microLXMF raw-field envelope
 
-**Objective:** Correctly encode/decode current Columba metadata at LXMF field `0xFD`.
+**Objective:** Prove that the inner Telemeter map crosses current microLXMF as
+the MessagePack BIN value Python LXMF/Sideband expects.
+
+**Critical pinned-API contract:** microLXMF `d9bbc04` stores field keys and
+values as raw MessagePack spans and emits both with `packRawBytes()`. Therefore
+the raw key span for telemetry is positive-fixint `0x02`, while the raw value
+span is `bin8`/`bin16`/`bin32` containing the packed Telemeter map. Passing the
+inner map directly to `fields_set()` would emit a map value rather than bytes
+and Sideband's `Telemeter.from_packed()` would reject it.
+
+**Tests:**
+- Wrap inner payload as bin8/bin16/bin32 at exact boundaries.
+- Unwrap each valid BIN width without copying.
+- Reject non-BIN, truncation, declared-length mismatch, and trailing bytes.
+- Full pinned microLXMF pack → unpack → `fields_get(0x02)` → unwrap → Telemeter
+  decode, plus the reverse direction.
+
+**Commit:** `feat: wrap telemetry for current microLXMF fields`.
+
+### Task 4b: Implement optional Columba `FIELD_CUSTOM_META` codec
+
+**Objective:** Correctly encode/decode the optional current Columba extension at
+LXMF field `0xFD` without treating it as core Sideband telemetry.
 
 **Files:** codec production and native test files.
 
@@ -202,7 +228,10 @@ Telemetry::EncodeResult encodeLocationTelemetry(
 - Unknown keys skipped safely.
 - Absent, malformed, false, and true cease values remain distinct.
 - Empty metadata is omitted outbound.
-- Cease frame requires both a valid zeroed Telemeter body and `{ "cease": true }` metadata for current Columba interoperability.
+- Core stop-sharing semantics stop future sends locally. Sideband has no remote
+  history-deletion/cease contract. When Columba compatibility is enabled, its
+  cease frame requires both a valid zeroed Telemeter body and
+  `{ "cease": true }` metadata.
 
 **Tests:** canonical byte vectors, key reordering, integer widths, malformed values, JSON legacy input explicitly rejected or separately compatibility-gated by a documented test.
 
@@ -324,6 +353,9 @@ Telemetry::EncodeResult encodeLocationTelemetry(
 
 **Behavior:**
 - Construct empty-content LXMF messages carrying field `0x02` and optional `0xFD`.
+- Supply `fields_set()` with raw MessagePack spans: key `02` and a BIN-wrapped
+  Telemeter value. On receive, unwrap the raw BIN returned by `fields_get(02)`
+  before decoding the inner map.
 - Prefer opportunistic delivery; allow router promotion when required, matching short UI messages.
 - Do not fake a known destination identity.
 - Advance scheduler only after `handle_outbound` accepts ownership/queueing under the available API.

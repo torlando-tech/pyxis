@@ -16,7 +16,7 @@ struct LocationTelemetry {
     int32_t latitude_e6 = 0;
     int32_t longitude_e6 = 0;
     int32_t altitude_cm = 0;
-    uint32_t speed_cms = 0;
+    uint32_t speed_centi_kmh = 0;
     int32_t bearing_cdeg = 0;
     uint16_t accuracy_cm = 0;
     uint64_t timestamp_seconds = 0;
@@ -29,6 +29,23 @@ enum class DecodeResult : uint8_t {
     MALFORMED,
     MISSING_LOCATION,
 };
+
+enum class FieldValueResult : uint8_t {
+    OK,
+    INVALID_ARGUMENT,
+    NOT_BINARY,
+    MALFORMED,
+};
+
+struct BinaryView {
+    const uint8_t* data = nullptr;
+    std::size_t size = 0;
+};
+
+FieldValueResult unwrapLxmfBinaryFieldValue(
+    const uint8_t* raw_value,
+    std::size_t raw_size,
+    BinaryView& output);
 
 DecodeResult decodeLocationTelemetry(
     const uint8_t* data,

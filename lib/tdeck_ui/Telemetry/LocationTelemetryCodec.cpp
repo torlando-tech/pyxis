@@ -100,7 +100,7 @@ bool readLocation(Cursor& cursor, LocationTelemetry& location) {
     if (!cursor.readBinary(word, sizeof(word))) return false;
     location.altitude_cm = decodeI32(word);
     if (!cursor.readBinary(word, sizeof(word))) return false;
-    location.speed_cms = decodeU32(word);
+    location.speed_centi_kmh = decodeU32(word);
     if (!cursor.readBinary(word, sizeof(word))) return false;
     location.bearing_cdeg = decodeI32(word);
     if (!cursor.readBinary(half, sizeof(half))) return false;
@@ -112,6 +112,46 @@ bool readLocation(Cursor& cursor, LocationTelemetry& location) {
 }
 
 }  // namespace
+
+FieldValueResult unwrapLxmfBinaryFieldValue(
+    const uint8_t* raw_value,
+    std::size_t raw_size,
+    BinaryView& output) {
+    if (raw_value == nullptr || raw_size == 0) {
+        return FieldValueResult::INVALID_ARGUMENT;
+    }
+
+    const uint8_t marker = raw_value[0];
+    std::size_t header_size = 0;
+    std::size_t payload_size = 0;
+    if (marker == 0xc4U) {
+        if (raw_size < 2) return FieldValueResult::MALFORMED;
+        header_size = 2;
+        payload_size = raw_value[1];
+    } else if (marker == 0xc5U) {
+        if (raw_size < 3) return FieldValueResult::MALFORMED;
+        header_size = 3;
+        payload_size = (static_cast<std::size_t>(raw_value[1]) << 8U) |
+                       raw_value[2];
+    } else if (marker == 0xc6U) {
+        if (raw_size < 5) return FieldValueResult::MALFORMED;
+        header_size = 5;
+        payload_size = (static_cast<std::size_t>(raw_value[1]) << 24U) |
+                       (static_cast<std::size_t>(raw_value[2]) << 16U) |
+                       (static_cast<std::size_t>(raw_value[3]) << 8U) |
+                       raw_value[4];
+    } else {
+        return FieldValueResult::NOT_BINARY;
+    }
+
+    if (payload_size != raw_size - header_size) {
+        return FieldValueResult::MALFORMED;
+    }
+
+    BinaryView candidate{raw_value + header_size, payload_size};
+    output = candidate;
+    return FieldValueResult::OK;
+}
 
 DecodeResult decodeLocationTelemetry(
     const uint8_t* data,
