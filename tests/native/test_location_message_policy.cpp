@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 
 #include "Telemetry/LocationMessagePolicy.h"
 
@@ -184,6 +185,13 @@ void malformedLocationFailsClosedButTextSurvives() {
     decision = Telemetry::classifyInboundLocationMessage(message);
     CHECK(decision.kind == Telemetry::LocationMessageKind::MALFORMED_LOCATION);
     CHECK(!decision.apply_location);
+
+    Fields unusable_timestamp =
+        validFields(std::numeric_limits<uint64_t>::max());
+    message = input(peer(3), unusable_timestamp);
+    decision = Telemetry::classifyInboundLocationMessage(message);
+    CHECK(decision.kind == Telemetry::LocationMessageKind::MALFORMED_LOCATION);
+    CHECK(!decision.apply_location && decision.drop && decision.log_malformed);
 }
 
 void ceaseAndAuthenticatedSenderIsolation() {

@@ -36,6 +36,26 @@ bool locationInRange(const LocationTelemetry& location) {
 
 }  // namespace
 
+bool isValidPeerLocationInput(
+    const LocationTelemetry& location,
+    const CustomLocationMeta& meta,
+    uint64_t received_at_millis) {
+    if ((meta.has_expires && meta.expires_millis < 0) ||
+        (meta.has_approx_radius && meta.approx_radius_meters < 0)) {
+        return false;
+    }
+    uint64_t source_timestamp_millis = 0;
+    if (!effectiveTimestampMillis(location, meta, source_timestamp_millis)) {
+        return false;
+    }
+    if (meta.has_cease && meta.cease) return true;
+    if (meta.has_expires &&
+        received_at_millis >= static_cast<uint64_t>(meta.expires_millis)) {
+        return true;
+    }
+    return locationInRange(location);
+}
+
 bool PeerLocationStore::peerEquals(const PeerId& left, const PeerId& right) {
     return std::memcmp(left.bytes, right.bytes, PEER_ID_SIZE) == 0;
 }
@@ -103,8 +123,7 @@ PeerLocationResult PeerLocationStore::apply(
     const LocationTelemetry& location,
     const CustomLocationMeta& meta,
     uint64_t received_at_millis) {
-    if ((meta.has_expires && meta.expires_millis < 0) ||
-        (meta.has_approx_radius && meta.approx_radius_meters < 0)) {
+    if (!isValidPeerLocationInput(location, meta, received_at_millis)) {
         return PeerLocationResult::INVALID_ARGUMENT;
     }
 

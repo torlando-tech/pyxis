@@ -56,6 +56,16 @@ LocationMessageDecision classifyInboundLocationMessage(
         return decision;
     }
 
+    if (!isValidPeerLocationInput(decision.location,
+                                  decision.meta,
+                                  message.received_at_millis)) {
+        decision.kind = LocationMessageKind::MALFORMED_LOCATION;
+        decision.log_malformed = true;
+        setChatActions(decision, human_text);
+        decision.drop = !human_text;
+        return decision;
+    }
+
     decision.kind = decision.meta.has_cease && decision.meta.cease
                         ? LocationMessageKind::VALID_CEASE
                         : LocationMessageKind::VALID_LOCATION;

@@ -36,6 +36,13 @@ enum class PeerLocationResult : uint8_t {
     INVALID_ARGUMENT,
 };
 
+// Mirrors the argument-domain checks performed by PeerLocationStore::apply().
+// Staleness and capacity remain store-state decisions, not wire validity.
+bool isValidPeerLocationInput(
+    const LocationTelemetry& location,
+    const CustomLocationMeta& meta,
+    uint64_t received_at_millis);
+
 class PeerLocationStore {
 public:
     PeerLocationStore() = default;
