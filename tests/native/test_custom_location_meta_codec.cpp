@@ -134,6 +134,10 @@ void rejectsMalformedAndPreservesOutput() {
         0x81, 0xa2, 't', 's',
         0xcf, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     };
+    constexpr uint8_t expiry_above_columba_long[] = {
+        0x81, 0xa7, 'e', 'x', 'p', 'i', 'r', 'e', 's',
+        0xcf, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
     constexpr uint8_t radius_above_columba_int[] = {
         0x81,
         0xac, 'a', 'p', 'p', 'r', 'o', 'x', 'R', 'a', 'd', 'i', 'u', 's',
@@ -149,6 +153,7 @@ void rejectsMalformedAndPreservesOutput() {
         {too_many_entries, sizeof(too_many_entries)},
         {huge_string, sizeof(huge_string)},
         {timestamp_above_columba_long, sizeof(timestamp_above_columba_long)},
+        {expiry_above_columba_long, sizeof(expiry_above_columba_long)},
         {radius_above_columba_int, sizeof(radius_above_columba_int)},
     };
     const auto sentinel = expectedMeta();
@@ -183,6 +188,13 @@ void rejectsOutboundValuesOutsideColumbaSignedDomains() {
     Telemetry::CustomLocationMeta meta{};
     meta.has_timestamp = true;
     meta.timestamp_millis = -1;
+    CHECK(Telemetry::encodeCustomLocationMeta(
+              meta, encoded, sizeof(encoded), written) ==
+          Telemetry::CustomMetaResult::INVALID_ARGUMENT);
+
+    meta = Telemetry::CustomLocationMeta{};
+    meta.has_expires = true;
+    meta.expires_millis = -1;
     CHECK(Telemetry::encodeCustomLocationMeta(
               meta, encoded, sizeof(encoded), written) ==
           Telemetry::CustomMetaResult::INVALID_ARGUMENT);

@@ -160,6 +160,12 @@ void enforcesExpiryAndStaleDisplayBoundaries() {
     CHECK(store.prune(5000, 10000) == 1);
     CHECK(store.size() == 0);
 
+    CHECK(store.apply(id, location(10), meta, 1000) ==
+          Telemetry::PeerLocationResult::INSERTED);
+    CHECK(store.snapshot(5001, 10000, snapshot, 2) == 0);
+    CHECK(store.prune(5001, 10000) == 1);
+    CHECK(store.size() == 0);
+
     Telemetry::CustomLocationMeta no_meta{};
     CHECK(store.apply(id, location(1), no_meta, 1000) ==
           Telemetry::PeerLocationResult::INSERTED);
@@ -234,6 +240,22 @@ void rejectsDirectMetadataOutsideColumbaDomains() {
     CHECK(store.apply(peer(33), location(1), meta, 1) ==
           Telemetry::PeerLocationResult::INVALID_ARGUMENT);
     CHECK(store.size() == 0);
+
+    Telemetry::CustomLocationMeta valid{};
+    const auto id = peer(34);
+    CHECK(store.apply(id, location(2, 123), valid, 2000) ==
+          Telemetry::PeerLocationResult::INSERTED);
+    Telemetry::PeerLocationRecord before{};
+    CHECK(hasPeer(store, id, &before));
+    meta = metaTimestamp(1);
+    meta.timestamp_millis = -1;
+    CHECK(store.apply(id, location(3, 999), meta, 3000) ==
+          Telemetry::PeerLocationResult::INVALID_ARGUMENT);
+    Telemetry::PeerLocationRecord after{};
+    CHECK(hasPeer(store, id, &after));
+    CHECK(after.location.latitude_e6 == before.location.latitude_e6);
+    CHECK(after.source_timestamp_millis == before.source_timestamp_millis);
+    CHECK(after.received_at_millis == before.received_at_millis);
 }
 
 void expiredNewerUpdateClearsExistingState() {
