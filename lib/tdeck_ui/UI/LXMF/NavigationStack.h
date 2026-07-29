@@ -8,6 +8,7 @@ namespace UI::LXMF {
 enum class Route {
     HOME,
     MESSAGES,
+    MAP,
     CHAT,
     COMPOSE,
     NETWORK,

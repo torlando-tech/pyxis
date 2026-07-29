@@ -6,6 +6,9 @@ namespace Pyxis {
 namespace MapView {
 namespace {
 
+const double EARTH_CIRCUMFERENCE_METERS = 40075016.68557849;
+const double DEGREES_TO_RADIANS = 0.017453292519943295;
+
 bool validLocation(const Telemetry::LocationTelemetry& location) {
     return location.latitude_e6 >= -90000000 &&
            location.latitude_e6 <= 90000000 &&
@@ -49,8 +52,9 @@ void appendMarker(const Telemetry::LocationTelemetry& location,
                   std::uint32_t zoom,
                   Frame& output) {
     MapProjection::MarkerProjection projected{};
+    const MapProjection::GeoPoint point = pointFromLocation(location);
     if (MapProjection::projectMarker(
-            pointFromLocation(location), viewport, zoom, projected) !=
+            point, viewport, zoom, projected) !=
             MapProjection::Status::OK ||
         !projected.visible) {
         return;
@@ -62,6 +66,19 @@ void appendMarker(const Telemetry::LocationTelemetry& location,
     marker.screen_y = projected.screen_y;
     marker.has_approx_radius = has_approx_radius;
     marker.approx_radius_meters = approx_radius_meters;
+    marker.approx_radius_pixels = 0.0;
+    if (has_approx_radius && approx_radius_meters != 0U) {
+        const double world_pixels = static_cast<double>(MapProjection::TILE_SIZE) *
+            static_cast<double>(MapProjection::tileCount(zoom));
+        const double meters_per_pixel =
+            std::cos(MapProjection::clampLatitude(point.latitude) *
+                     DEGREES_TO_RADIANS) *
+            EARTH_CIRCUMFERENCE_METERS / world_pixels;
+        if (meters_per_pixel > 0.0 && std::isfinite(meters_per_pixel)) {
+            marker.approx_radius_pixels =
+                static_cast<double>(approx_radius_meters) / meters_per_pixel;
+        }
+    }
 }
 
 }  // namespace

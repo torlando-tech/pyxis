@@ -37,6 +37,7 @@
 #include "CallLinkOwnership.h"
 #include "CallLivenessWatchdog.h"
 #include "LXSTSignalParser.h"
+#include "MapScreen.h"
 #include "LXMF/LXMRouter.h"
 #include "LXMF/PropagationNodeManager.h"
 #include "LXMF/MessageStore.h"
@@ -137,6 +138,7 @@ public:
      * Show compose new message screen
      */
     void show_compose();
+    void show_map();
 
     /**
      * Show announce list screen
@@ -370,6 +372,7 @@ private:
     CallScreen* _call_screen;
     std::function<RadioActivity::Snapshot()> _radio_activity_snapshot_provider;
     RadioActivityScreen::RadioConfig _radio_activity_config;
+    MapScreen* _map_screen;
 
     ::LXMF::PropagationNodeManager* _propagation_manager;
     RNS::Interface* _ble_interface;
@@ -427,6 +430,7 @@ private:
     void on_call_from_chat();
     bool on_send_message_from_compose(const RNS::Bytes& dest_hash, const String& message);
     void on_cancel_compose();
+    void on_back_from_map();
     void on_announce_selected(const RNS::Bytes& dest_hash);
     void on_back_from_announces();
     void on_back_from_status();

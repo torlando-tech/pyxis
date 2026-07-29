@@ -238,6 +238,7 @@ UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router,
       _settings_screen(nullptr),
       _propagation_nodes_screen(nullptr),
       _call_screen(nullptr),
+      _map_screen(nullptr),
       _propagation_manager(nullptr),
       _ble_interface(nullptr),
       _initialized(false),
@@ -272,6 +273,9 @@ UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router,
 }
 
 UIManager::~UIManager() {
+    // Joins the sole SD/decoder worker before any map buffers are released.
+    if (_map_screen) delete _map_screen;
+    _map_screen = nullptr;
     releaseLocationObject(_location_persistence_controller);
     releaseLocationObject(_location_transaction);
     releaseLocationObject(_location_storage);
@@ -330,6 +334,7 @@ bool UIManager::init() {
     _settings_screen = new SettingsScreen();
     _propagation_nodes_screen = new PropagationNodesScreen();
     _call_screen = new CallScreen();
+    _map_screen = new MapScreen();
 
     _home_screen->set_messages_callback([this]() { show_conversation_list(); });
     _home_screen->set_nomadnet_callback([this]() { show_nomadnet(); });
@@ -363,6 +368,14 @@ bool UIManager::init() {
 
     _conversation_list_screen->set_compose_callback(
         [this]() { on_new_message(); }
+    );
+
+    _conversation_list_screen->set_map_callback(
+        [this]() { show_map(); }
+    );
+
+    _map_screen->set_back_callback(
+        [this]() { on_back_from_map(); }
     );
 
     _conversation_list_screen->set_sync_callback(
@@ -632,6 +645,31 @@ void UIManager::update() {
     } else if (location_result == Telemetry::DispatchResult::CEASE_QUEUED) {
         INFO("Location cease queued");
     }
+
+    // Build the fixed map model and service its worker before LVGL_LOCK. All
+    // authenticated ingress drains on this router-owner loop, so this fixed
+    // peer snapshot cannot race PeerLocationStore::apply().
+    if (_navigation.current() == Route::MAP && _map_screen) {
+        Telemetry::PeerLocationRecord peers[Telemetry::MAX_PEER_LOCATIONS]{};
+        static constexpr uint64_t MAP_PEER_MAX_AGE_MS =
+            24ULL * 60ULL * 60ULL * 1000ULL;
+        const std::size_t peer_count = _peer_locations.snapshot(
+            wall_now_millis, MAP_PEER_MAX_AGE_MS, peers,
+            Telemetry::MAX_PEER_LOCATIONS);
+        Pyxis::MapView::Request map_request{};
+        map_request.center = {0.0, 0.0};
+        map_request.zoom = 2U;
+        map_request.width = Pyxis::MapScreenPresenter::VIEWPORT_WIDTH;
+        map_request.height = Pyxis::MapScreenPresenter::VIEWPORT_HEIGHT;
+        map_request.include_tile_border = false;
+        map_request.has_local_location = current_location_valid;
+        map_request.local_location = current_location;
+        map_request.peers = peers;
+        map_request.peer_count = peer_count;
+        map_request.wall_now_millis = wall_now_millis;
+        _map_screen->updateModel(map_request);
+        _map_screen->serviceIo();
+    }
     LVGL_LOCK();
 
     // Outgoing starts are initiated here while the recursive LVGL mutex is
@@ -649,7 +687,11 @@ void UIManager::update() {
         }
     }
 
-
+    if (_navigation.current() == Route::MAP && _map_screen) {
+        // One predecoded completion at most per tick, then fixed-pool positions.
+        (void)_map_screen->applyOneCompletion();
+        _map_screen->applyFrame();
+    }
     // Consume UI commands unconditionally. LVGL callbacks only publish into
     // the mailbox; loopTask remains the sole owner of the audio pipeline.
     const uint32_t generation = call_current_generation();
@@ -713,6 +755,7 @@ void UIManager::hide_all_screens() {
     if (_settings_screen) _settings_screen->hide();
     if (_propagation_nodes_screen) _propagation_nodes_screen->hide();
     if (_call_screen) _call_screen->hide();
+    if (_map_screen) _map_screen->hide();
 }
 
 void UIManager::show_home() {
@@ -809,6 +852,9 @@ void UIManager::render_route(Route route) {
             _pending_conversation_refresh = false;
             _last_conversation_refresh_ms = millis();
             _conversation_list_screen->show();
+            break;
+        case Route::MAP:
+            _map_screen->show();
             break;
         case Route::CHAT:
             _chat_screen->load_conversation(_current_peer_hash, _store);
@@ -942,6 +988,15 @@ void UIManager::on_conversation_selected(const Bytes& peer_hash) {
 
 void UIManager::on_new_message() {
     show_compose();
+}
+
+void UIManager::show_map() {
+    INFO("Showing offline map");
+    navigate(Route::MAP);
+}
+
+void UIManager::on_back_from_map() {
+    back();
 }
 
 void UIManager::show_settings() {
@@ -2053,7 +2108,14 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
     _call_screen->set_peer(peer_dest.hash());
     _call_screen->set_state(CallScreen::CallState::CONNECTING);
     _call_screen->set_muted(false);
+<<<<<<< HEAD
     navigate(Route::CALL);
+=======
+    _call_screen->show();
+    _chat_screen->hide();
+    if (_map_screen) _map_screen->hide();
+    _current_screen = SCREEN_CALL;
+>>>>>>> 7dae8e7 (feat: add bounded offline map screen)
 
     lxst_breadcrumb(5, ESP.getFreeHeap());
 
@@ -2908,7 +2970,13 @@ void UIManager::call_update() {
         _call_screen->set_peer(_call_peer_hash);
         _call_screen->set_state(CallScreen::CallState::INCOMING_RINGING);
         _call_screen->set_muted(false);
+<<<<<<< HEAD
         navigate(Route::CALL);
+=======
+        _call_screen->show();
+        if (_map_screen) _map_screen->hide();
+        _current_screen = SCREEN_CALL;
+>>>>>>> 7dae8e7 (feat: add bounded offline map screen)
 
         // Play notification tone
         if (_settings_screen) {

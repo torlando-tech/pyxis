@@ -69,6 +69,28 @@ void buildsBoundedTilesAndVisibleMarkers() {
     CHECK(samePeer(frame.markers[1].peer, peer(1)));
     CHECK(frame.markers[1].has_approx_radius);
     CHECK(frame.markers[1].approx_radius_meters == 0);
+    CHECK(frame.markers[1].approx_radius_pixels == 0.0);
+}
+
+void projectsApproximateRadiusToPixels() {
+    Pyxis::MapView::Request request{};
+    request.center = {0.0, 0.0};
+    request.zoom = 10;
+    request.width = 320;
+    request.height = 200;
+    request.wall_now_millis = 1700000000000ULL;
+    Telemetry::PeerLocationRecord peer_record{};
+    peer_record.peer = peer(9);
+    peer_record.location = fix(0.0, 0.0);
+    peer_record.has_approx_radius = true;
+    peer_record.approx_radius_meters = 100000;
+    request.peers = &peer_record;
+    request.peer_count = 1;
+    Pyxis::MapView::Frame frame{};
+    CHECK(Pyxis::MapView::buildFrame(request, frame) == Pyxis::MapView::Result::OK);
+    CHECK(frame.marker_count == 1);
+    CHECK(frame.markers[0].approx_radius_pixels > 600.0);
+    CHECK(frame.markers[0].approx_radius_pixels < 700.0);
 }
 
 void rejectsInvalidAndLeavesOutputUnchanged() {
@@ -103,6 +125,7 @@ void rejectsInvalidAndLeavesOutputUnchanged() {
 
 int main() {
     buildsBoundedTilesAndVisibleMarkers();
+    projectsApproximateRadiusToPixels();
     rejectsInvalidAndLeavesOutputUnchanged();
     std::cout << "map view model: " << passed << " passed, " << failures
               << " failed\n";

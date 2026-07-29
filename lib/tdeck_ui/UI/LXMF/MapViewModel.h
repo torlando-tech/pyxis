@@ -34,6 +34,7 @@ struct Marker {
     double screen_y = 0.0;
     bool has_approx_radius = false;
     std::uint32_t approx_radius_meters = 0;
+    double approx_radius_pixels = 0.0;
 };
 
 struct Request {
