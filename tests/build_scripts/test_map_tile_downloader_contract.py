@@ -39,14 +39,16 @@ def test_https_adapter_verifies_peer_with_explicit_ca_and_has_no_credentials():
         assert forbidden not in source
 
 
-def test_default_endpoint_trust_bundle_covers_current_and_fallback_chains():
+def test_default_endpoint_uses_current_chain_with_known_fallback_available():
     ca = MAP_CA.read_text()
     screen = MAP_SCREEN.read_text()
-    assert "MAP_TILE_CA_BUNDLE" in ca
+    assert "MAP_TILE_GLOBALSIGN_ROOT_R3" in ca
+    assert "MAP_TILE_ISRG_ROOT_X1" in ca
     assert "GlobalSign Root CA - R3" in ca
     assert "ISRG Root X1" in ca
     assert ca.count("-----BEGIN CERTIFICATE-----") == 2
-    assert "MAP_TILE_CA_BUNDLE" in screen
+    assert "MAP_TILE_GLOBALSIGN_ROOT_R3" in screen
+    assert "MAP_TILE_CA_BUNDLE" not in screen
     certificates = re.findall(
         r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", ca, re.S)
     fingerprints = []

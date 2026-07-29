@@ -34,7 +34,7 @@ constexpr std::uint16_t STORE_ENTRY_CAPACITY = 128U;
 
 Hardware::TDeck::MapTileDownloadConfig makeDownloadConfig() {
     Hardware::TDeck::MapTileDownloadConfig config;
-    config.ca_certificate = Hardware::TDeck::MAP_TILE_CA_BUNDLE;
+    config.ca_certificate = Hardware::TDeck::MAP_TILE_GLOBALSIGN_ROOT_R3;
     config.firmware_version = FIRMWARE_VERSION;
     return config;
 }

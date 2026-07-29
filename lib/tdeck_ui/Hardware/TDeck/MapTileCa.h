@@ -7,10 +7,11 @@
 namespace Hardware {
 namespace TDeck {
 
-// Public trust anchors for the default OpenStreetMap endpoint; these are not
-// credentials. GlobalSign Root CA - R3 covers the endpoint's current chain,
-// while ISRG Root X1 preserves compatibility with its previous CDN chain.
-static const char MAP_TILE_CA_BUNDLE[] = R"CERT(-----BEGIN CERTIFICATE-----
+// Public trust anchors observed for the default OpenStreetMap endpoint; these
+// are not credentials. Only the current GlobalSign Root CA - R3 chain is
+// loaded at runtime so mbedTLS retains enough constrained internal RAM for the
+// handshake. ISRG Root X1 is retained as a known previous-chain reference.
+static const char MAP_TILE_ISRG_ROOT_X1[] = R"CERT(-----BEGIN CERTIFICATE-----
 MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
 TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh
 cmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMTUwNjA0MTEwNDM4
@@ -41,7 +42,9 @@ oyi3B43njTOQ5yOf+1CceWxG1bQVs5ZufpsMljq4Ui0/1lvh+wjChP4kqKOJ2qxq
 mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d
 emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 -----END CERTIFICATE-----
------BEGIN CERTIFICATE-----
+)CERT";
+
+static const char MAP_TILE_GLOBALSIGN_ROOT_R3[] = R"CERT(-----BEGIN CERTIFICATE-----
 MIIDXzCCAkegAwIBAgILBAAAAAABIVhTCKIwDQYJKoZIhvcNAQELBQAwTDEgMB4G
 A1UECxMXR2xvYmFsU2lnbiBSb290IENBIC0gUjMxEzARBgNVBAoTCkdsb2JhbFNp
 Z24xEzARBgNVBAMTCkdsb2JhbFNpZ24wHhcNMDkwMzE4MTAwMDAwWhcNMjkwMzE4
