@@ -41,3 +41,11 @@ def test_global_sd_mount_never_formats_unrecognized_media():
     source = SD_ACCESS_CPP.read_text()
     assert "format_if_empty=true" not in source
     assert 'SD.begin(SDCard::CS, SPI, SD_SPI_FREQ, "/sd", 5, false)' in source
+
+
+def test_sd_adapter_latches_unhealthy_when_open_handles_cannot_close():
+    header = SD_H.read_text()
+    source = SD_CPP.read_text()
+    assert "bool healthy_;" in header
+    assert source.count("healthy_ = false") >= 3
+    assert "if (!healthy_) return false" in source

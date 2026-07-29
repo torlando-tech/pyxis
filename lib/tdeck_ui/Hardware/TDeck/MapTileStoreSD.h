@@ -47,6 +47,7 @@ private:
     fs::File list_zoom_;
     fs::File list_x_;
     bool writing_;
+    bool healthy_;
 
     static bool cardPresentLocked();
     static TileStoreResult copyName(const char* source, char* output, std::size_t capacity);
