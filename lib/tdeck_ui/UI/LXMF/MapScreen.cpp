@@ -63,7 +63,7 @@ MapScreen::MapScreen(lv_obj_t* parent)
       state_mutex_(nullptr), worker_task_(nullptr), stop_requested_(false),
       worker_exited_(true), worker_started_(false), store_initialized_(false),
       requests_released_(false),
-      has_location_fix_(false), current_location_{}, dragging_(false),
+      has_location_fix_(false), center_initialized_(false), current_location_{}, dragging_(false),
       last_drag_point_{0, 0}, back_callback_() {
     LVGL_LOCK();
     state_mutex_ = xSemaphoreCreateMutex();
@@ -369,6 +369,10 @@ void MapScreen::updateModel(const Pyxis::MapView::Request& request) {
     if (!lockState(pdMS_TO_TICKS(100))) return;
     has_location_fix_ = request.has_local_location;
     current_location_ = request.local_location;
+    if (!center_initialized_ && request.has_local_location &&
+        presenter_.recenter(true, request.local_location)) {
+        center_initialized_ = true;
+    }
     requests_released_ = false;
     (void)presenter_.buildFrame(request);
     unlockState();
@@ -527,6 +531,7 @@ MapScreen* MapScreen::fromEvent(lv_event_t* event) {
 
 void MapScreen::pan(double dx, double dy) {
     if (!lockState(pdMS_TO_TICKS(100))) return;
+    center_initialized_ = true;
     (void)presenter_.panPixels(dx, dy);
     unlockState();
 }
@@ -539,6 +544,7 @@ void MapScreen::onBack(lv_event_t* event) {
 void MapScreen::onZoomIn(lv_event_t* event) {
     MapScreen* screen = fromEvent(event);
     if (screen && screen->lockState(pdMS_TO_TICKS(100))) {
+        screen->center_initialized_ = true;
         (void)screen->presenter_.zoomBy(1);
         screen->unlockState();
     }
@@ -547,6 +553,7 @@ void MapScreen::onZoomIn(lv_event_t* event) {
 void MapScreen::onZoomOut(lv_event_t* event) {
     MapScreen* screen = fromEvent(event);
     if (screen && screen->lockState(pdMS_TO_TICKS(100))) {
+        screen->center_initialized_ = true;
         (void)screen->presenter_.zoomBy(-1);
         screen->unlockState();
     }
@@ -557,6 +564,7 @@ void MapScreen::onRecenter(lv_event_t* event) {
     if (!screen || !screen->lockState(pdMS_TO_TICKS(100))) return;
     const bool centered = screen->presenter_.recenter(
         screen->has_location_fix_, screen->current_location_);
+    if (centered) screen->center_initialized_ = true;
     screen->unlockState();
     if (!centered) lv_label_set_text(screen->status_label_, "No GPS fix");
 }

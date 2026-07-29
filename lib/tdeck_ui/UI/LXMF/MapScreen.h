@@ -84,6 +84,7 @@ private:
     bool store_initialized_;
     bool requests_released_;
     bool has_location_fix_;
+    bool center_initialized_;
     Telemetry::LocationTelemetry current_location_;
     bool dragging_;
     lv_point_t last_drag_point_;

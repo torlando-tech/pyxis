@@ -44,6 +44,7 @@ def test_fixed_pool_and_cache_contracts():
     assert "static_assert(MapTileStore::HARD_MAX_ENTRIES == 128" in screen_cpp
     assert "© OpenStreetMap contributors" in screen_cpp
     assert "worker_exited_" in screen_h
+    assert "if (!center_initialized_ && request.has_local_location" in screen_cpp
 
 
 def test_worker_predecodes_and_render_path_has_no_io():
