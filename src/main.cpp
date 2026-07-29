@@ -700,6 +700,7 @@ void load_app_settings() {
     app_settings.sync_interval = prefs.getULong("sync_int", 14400);  // Default 14400s = 4 hours
     app_settings.gps_time_sync = prefs.getBool("gps_sync", true);
     app_settings.transport_enabled = prefs.getBool("transport", false);
+    app_settings.map_download_enabled = prefs.getBool("map_dl", false);
 
     // Propagation
     app_settings.prop_auto_select = prefs.getBool("prop_auto", true);
@@ -1343,6 +1344,7 @@ void setup_ui_manager() {
         while (1) delay(1000);
     }
     update_radio_activity_source();
+    ui_manager->set_map_download_enabled(app_settings.map_download_enabled);
 
     // Set initial RNS connection status (check all interfaces)
     {
@@ -1415,6 +1417,9 @@ void setup_ui_manager() {
 
         // Set save callback (update app_settings and apply)
         settings->set_save_callback([](const UI::LXMF::AppSettings& new_settings) {
+            if (ui_manager) {
+                ui_manager->set_map_download_enabled(new_settings.map_download_enabled);
+            }
             UI::LXMF::RouterLock router_lock(0);
             if (!router_lock.acquired()) {
                 WARNING("Router busy; settings application deferred by user retry");

@@ -18,6 +18,8 @@
 
 #include "Hardware/TDeck/MapTileStore.h"
 #include "Hardware/TDeck/MapTileStoreSD.h"
+#include "Hardware/TDeck/MapTileDownloader.h"
+#include "Hardware/TDeck/MapTileHttpArduino.h"
 
 namespace UI {
 namespace LXMF {
@@ -46,6 +48,9 @@ public:
     // These methods never call LVGL and are invoked before LVGL_LOCK.
     void serviceIo();
     void updateModel(const Pyxis::MapView::Request& request);
+    void setDownloadEnabled(bool enabled) {
+        downloads_enabled_.store(enabled, std::memory_order_release);
+    }
 
     // These methods only mutate the pre-created object pool and are invoked
     // while UIManager owns LVGL_LOCK.
@@ -75,6 +80,13 @@ private:
     Hardware::TDeck::MapTileStoreSD storage_;
     Hardware::TDeck::TileStoreConfig store_config_;
     Hardware::TDeck::MapTileStore store_;
+    Hardware::TDeck::MapTileStoreDownloadAdapter download_store_;
+    Hardware::TDeck::MapTileHttpArduino download_transport_;
+    Hardware::TDeck::MapTileMillisClock download_clock_;
+    Hardware::TDeck::MapTileDownloadPolicy download_policy_;
+    Hardware::TDeck::MapTileDownloadConfig download_config_;
+    Hardware::TDeck::MapTileDownloader downloader_;
+    std::atomic<bool> downloads_enabled_;
     std::uint8_t* compressed_staging_;
     SemaphoreHandle_t state_mutex_;
     TaskHandle_t worker_task_;
@@ -93,6 +105,8 @@ private:
     static void workerEntry(void* context);
     void workerLoop();
     Pyxis::MapTileLoadResult loadTile(const Pyxis::MapTileRequest& request);
+    Pyxis::MapTileLoadResult readTile(const Pyxis::MapTileRequest& request);
+    Pyxis::MapTileLoadResult downloadTile(const Pyxis::MapTileRequest& request);
     bool startWorker();
     void stopWorker();
     bool lockState(TickType_t ticks = portMAX_DELAY);

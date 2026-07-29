@@ -81,7 +81,7 @@ MapTileUrlResult MapTileDownloader::canonicalUrl(const char* endpoint, const Til
 }
 
 MapTileEnqueueResult MapTileDownloader::enqueue(const TileKey& key, std::uint32_t generation) {
-    if (!policy_.enabled) return MapTileEnqueueResult::DISABLED;
+    if (!policy_.enabled) return MapTileEnqueueResult::POLICY_DISABLED;
     if (!validKey(key)) return MapTileEnqueueResult::INVALID_KEY;
     if (active_ && sameKey(current_.key, key)) return MapTileEnqueueResult::DUPLICATE;
     for (std::size_t i = 0U; i < queue_count_; ++i) {
@@ -92,6 +92,22 @@ MapTileEnqueueResult MapTileDownloader::enqueue(const TileKey& key, std::uint32_
     queue_[queue_count_].generation = generation;
     ++queue_count_;
     return MapTileEnqueueResult::ACCEPTED;
+}
+
+void MapTileDownloader::setEnabled(bool enabled) {
+    if (policy_.enabled == enabled) return;
+    policy_.enabled = enabled;
+    if (enabled) return;
+    if (active_) finish(MapTileResultCode::CANCELED, store_open_);
+    while (queue_count_ != 0U) {
+        current_ = queue_[0];
+        for (std::size_t index = 1U; index < queue_count_; ++index) {
+            queue_[index - 1U] = queue_[index];
+        }
+        --queue_count_;
+        received_ = 0U;
+        publish(MapTileResultCode::CANCELED);
+    }
 }
 
 void MapTileDownloader::publish(MapTileResultCode code) {

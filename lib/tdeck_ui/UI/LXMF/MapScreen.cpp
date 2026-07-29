@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "MapScreen.h"
+#include "Hardware/TDeck/MapTileCa.h"
 
 #ifdef ARDUINO
 
@@ -25,6 +26,17 @@ namespace {
 constexpr std::size_t TILE_PIXEL_COUNT = 256U * 256U;
 constexpr std::uint32_t STORE_BYTE_QUOTA = 64U * 1024U * 1024U;
 constexpr std::uint16_t STORE_ENTRY_CAPACITY = 128U;
+
+#ifndef FIRMWARE_VERSION
+#define FIRMWARE_VERSION "dev"
+#endif
+
+Hardware::TDeck::MapTileDownloadConfig makeDownloadConfig() {
+    Hardware::TDeck::MapTileDownloadConfig config;
+    config.ca_certificate = Hardware::TDeck::MAP_TILE_ISRG_ROOT_X1;
+    config.firmware_version = FIRMWARE_VERSION;
+    return config;
+}
 
 lv_obj_t* createToolbarButton(lv_obj_t* parent, const char* text,
                               lv_event_cb_t callback, void* context,
@@ -59,7 +71,12 @@ MapScreen::MapScreen(lv_obj_t* parent)
       presenter_(), storage_(),
       store_config_{STORE_ENTRY_CAPACITY, STORE_BYTE_QUOTA,
                     MAX_COMPRESSED_TILE_BYTES},
-      store_(storage_, store_config_), compressed_staging_(nullptr),
+      store_(storage_, store_config_), download_store_(store_),
+      download_transport_(), download_clock_(), download_policy_(),
+      download_config_(makeDownloadConfig()),
+      downloader_(download_store_, download_transport_, download_clock_,
+                  download_policy_, download_config_),
+      downloads_enabled_(false), compressed_staging_(nullptr),
       state_mutex_(nullptr), worker_task_(nullptr), stop_requested_(false),
       worker_exited_(true), worker_started_(false), store_initialized_(false),
       requests_released_(false),
@@ -296,6 +313,61 @@ void MapScreen::workerLoop() {
 
 Pyxis::MapTileLoadResult MapScreen::loadTile(
     const Pyxis::MapTileRequest& request) {
+    const Pyxis::MapTileLoadResult cached = readTile(request);
+    if (cached != Pyxis::MapTileLoadResult::MISS) return cached;
+    const Pyxis::MapTileLoadResult downloaded = downloadTile(request);
+    return downloaded == Pyxis::MapTileLoadResult::READY
+        ? readTile(request) : downloaded;
+}
+
+Pyxis::MapTileLoadResult MapScreen::downloadTile(
+    const Pyxis::MapTileRequest& request) {
+    const bool enabled = downloads_enabled_.load(std::memory_order_acquire);
+    downloader_.setEnabled(enabled);
+    if (!enabled) return Pyxis::MapTileLoadResult::MISS;
+
+    Hardware::TDeck::MapTileDownloadResult ignored{};
+    while (downloader_.takeResult(ignored)) {}
+    const Hardware::TDeck::MapTileEnqueueResult queued =
+        downloader_.enqueue(request.key, request.frame_epoch);
+    if (queued != Hardware::TDeck::MapTileEnqueueResult::ACCEPTED) {
+        return Pyxis::MapTileLoadResult::DOWNLOAD_FAILED;
+    }
+
+    while (downloader_.isBusy()) {
+        if (stop_requested_.load(std::memory_order_acquire) ||
+            !downloads_enabled_.load(std::memory_order_acquire)) {
+            downloader_.setEnabled(false);
+            return Pyxis::MapTileLoadResult::DOWNLOAD_FAILED;
+        }
+        bool stale = false;
+        if (lockState(pdMS_TO_TICKS(20))) {
+            stale = presenter_.generation() != request.generation ||
+                presenter_.frameEpoch() != request.frame_epoch;
+            unlockState();
+        }
+        if (stale) {
+            (void)downloader_.cancelGeneration(request.frame_epoch);
+        }
+        (void)downloader_.pump();
+        if (downloader_.isBusy()) vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    Hardware::TDeck::MapTileDownloadResult result{};
+    while (downloader_.takeResult(result)) {
+        if (result.generation == request.frame_epoch &&
+            result.key.zoom == request.key.zoom && result.key.x == request.key.x &&
+            result.key.y == request.key.y) {
+            return result.code == Hardware::TDeck::MapTileResultCode::SUCCESS
+                ? Pyxis::MapTileLoadResult::READY
+                : Pyxis::MapTileLoadResult::DOWNLOAD_FAILED;
+        }
+    }
+    return Pyxis::MapTileLoadResult::DOWNLOAD_FAILED;
+}
+
+Pyxis::MapTileLoadResult MapScreen::readTile(
+    const Pyxis::MapTileRequest& request) {
     if (!store_initialized_) {
         return Pyxis::MapTileLoadResult::STORAGE_UNAVAILABLE;
     }
@@ -340,8 +412,22 @@ Pyxis::MapTileLoadResult MapScreen::loadTile(
     unsigned char* rgb = nullptr;
     unsigned width = 0U;
     unsigned height = 0U;
-    const unsigned decode_error = lodepng_decode24(
-        &rgb, &width, &height, compressed_staging_, total);
+    LodePNGState decode_state;
+    lodepng_state_init(&decode_state);
+    // Bound the largest legal 256x256 source scanline stream (RGBA16 plus
+    // filter bytes/interlace overhead) independently of compressed size.
+    decode_state.decoder.zlibsettings.max_output_size = 528U * 1024U;
+    unsigned decode_error = lodepng_inspect(
+        &width, &height, &decode_state, compressed_staging_, total);
+    if (decode_error != 0U || width != 256U || height != 256U) {
+        lodepng_state_cleanup(&decode_state);
+        return Pyxis::MapTileLoadResult::INVALID_PNG;
+    }
+    decode_state.info_raw.colortype = LCT_RGB;
+    decode_state.info_raw.bitdepth = 8U;
+    decode_error = lodepng_decode(
+        &rgb, &width, &height, &decode_state, compressed_staging_, total);
+    lodepng_state_cleanup(&decode_state);
     if (decode_error != 0U || rgb == nullptr || width != 256U || height != 256U) {
         if (rgb) lv_mem_free(rgb);
         return Pyxis::MapTileLoadResult::INVALID_PNG;
@@ -463,6 +549,9 @@ void MapScreen::setStatusFor(Pyxis::MapTileLoadResult result) {
             break;
         case Pyxis::MapTileLoadResult::TOO_LARGE:
             lv_label_set_text(status_label_, "Tile too large");
+            break;
+        case Pyxis::MapTileLoadResult::DOWNLOAD_FAILED:
+            lv_label_set_text(status_label_, "Download failed");
             break;
         case Pyxis::MapTileLoadResult::IO_ERROR:
             lv_label_set_text(status_label_, "Tile I/O error");

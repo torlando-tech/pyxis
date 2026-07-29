@@ -34,6 +34,7 @@ static const char* KEY_ANNOUNCE_INT = "announce";
 static const char* KEY_SYNC_INT = "sync_int";
 static const char* KEY_GPS_SYNC = "gps_sync";
 static const char* KEY_TRANSPORT_ENABLED = "transport";
+static const char* KEY_MAP_DOWNLOAD = "map_dl";
 // Notification settings
 static const char* KEY_NOTIF_SND = "notif_snd";
 static const char* KEY_NOTIF_VOL = "notif_vol";
@@ -71,6 +72,7 @@ SettingsScreen::SettingsScreen(lv_obj_t* parent)
       _ta_announce_interval(nullptr), _ta_sync_interval(nullptr), _switch_gps_sync(nullptr),
       _switch_transport_enabled(nullptr), _transport_warning_modal(nullptr),
       _transport_modal_group(nullptr), _transport_enable_confirmed(false),
+      _switch_map_download(nullptr),
       _btn_propagation_nodes(nullptr), _switch_prop_fallback(nullptr), _switch_prop_only(nullptr),
       _gps(nullptr) {
     LVGL_LOCK();
@@ -867,6 +869,27 @@ void SettingsScreen::create_advanced_section(lv_obj_t* parent) {
     lv_obj_align(_switch_gps_sync, LV_ALIGN_RIGHT_MID, 0, 0);
     lv_obj_set_style_bg_color(_switch_gps_sync, Theme::border(), LV_PART_MAIN);
     lv_obj_set_style_bg_color(_switch_gps_sync, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+
+    // Optional network tile downloads are explicit opt-in and visible-tile only.
+    lv_obj_t* map_download_row = lv_obj_create(parent);
+    lv_obj_set_width(map_download_row, LV_PCT(100));
+    lv_obj_set_height(map_download_row, 28);
+    lv_obj_set_style_bg_opa(map_download_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(map_download_row, 0, 0);
+    lv_obj_set_style_pad_all(map_download_row, 0, 0);
+    lv_obj_clear_flag(map_download_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_t* map_download_label = lv_label_create(map_download_row);
+    lv_label_set_text(map_download_label, "Download map tiles:");
+    lv_obj_align(map_download_label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_text_color(map_download_label, Theme::textTertiary(), 0);
+    lv_obj_set_style_text_font(map_download_label, &lv_font_montserrat_14, 0);
+    _switch_map_download = lv_switch_create(map_download_row);
+    lv_obj_set_size(_switch_map_download, 40, 20);
+    lv_obj_align(_switch_map_download, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_set_style_bg_color(_switch_map_download, Theme::border(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(_switch_map_download, Theme::primary(),
+                              LV_PART_INDICATOR | LV_STATE_CHECKED);
+    if (grp) lv_group_add_obj(grp, _switch_map_download);
 }
 
 void SettingsScreen::create_transport_mode_section(lv_obj_t* parent) {
@@ -1030,6 +1053,7 @@ void SettingsScreen::load_settings() {
     _settings.sync_interval = prefs.getUInt(KEY_SYNC_INT, 14400);  // Default 14400s = 4 hours
     _settings.gps_time_sync = prefs.getBool(KEY_GPS_SYNC, true);
     _settings.transport_enabled = prefs.getBool(KEY_TRANSPORT_ENABLED, false);
+    _settings.map_download_enabled = prefs.getBool(KEY_MAP_DOWNLOAD, false);
 
     // Notification settings
     _settings.notification_sound = prefs.getBool(KEY_NOTIF_SND, true);
@@ -1080,6 +1104,7 @@ void SettingsScreen::save_settings() {
     prefs.putUInt(KEY_SYNC_INT, _settings.sync_interval);
     prefs.putBool(KEY_GPS_SYNC, _settings.gps_time_sync);
     prefs.putBool(KEY_TRANSPORT_ENABLED, _settings.transport_enabled);
+    prefs.putBool(KEY_MAP_DOWNLOAD, _settings.map_download_enabled);
 
     // Notification settings
     prefs.putBool(KEY_NOTIF_SND, _settings.notification_sound);
@@ -1189,6 +1214,13 @@ void SettingsScreen::update_ui_from_settings() {
             lv_obj_clear_state(_switch_transport_enabled, LV_STATE_CHECKED);
         }
         _transport_enable_confirmed = false;
+    }
+    if (_switch_map_download) {
+        if (_settings.map_download_enabled) {
+            lv_obj_add_state(_switch_map_download, LV_STATE_CHECKED);
+        } else {
+            lv_obj_clear_state(_switch_map_download, LV_STATE_CHECKED);
+        }
     }
 
     // Interface settings
@@ -1327,6 +1359,10 @@ void SettingsScreen::update_settings_from_ui() {
     }
     if (_switch_transport_enabled) {
         _settings.transport_enabled = lv_obj_has_state(_switch_transport_enabled, LV_STATE_CHECKED);
+    }
+    if (_switch_map_download) {
+        _settings.map_download_enabled =
+            lv_obj_has_state(_switch_map_download, LV_STATE_CHECKED);
     }
 
     // Interface settings

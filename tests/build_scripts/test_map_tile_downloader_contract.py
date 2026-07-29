@@ -5,6 +5,8 @@ CORE_H = ROOT / "lib/tdeck_ui/Hardware/TDeck/MapTileDownloader.h"
 CORE_CPP = ROOT / "lib/tdeck_ui/Hardware/TDeck/MapTileDownloader.cpp"
 ADAPTER_H = ROOT / "lib/tdeck_ui/Hardware/TDeck/MapTileHttpArduino.h"
 ADAPTER_CPP = ROOT / "lib/tdeck_ui/Hardware/TDeck/MapTileHttpArduino.cpp"
+MAP_SCREEN = ROOT / "lib/tdeck_ui/UI/LXMF/MapScreen.cpp"
+SETTINGS = ROOT / "lib/tdeck_ui/UI/LXMF/SettingsScreen.cpp"
 
 
 def test_portable_core_is_bounded_and_allocation_free():
@@ -29,3 +31,14 @@ def test_https_adapter_verifies_peer_with_explicit_ca_and_has_no_credentials():
     assert "setTimeout" in source
     for forbidden in ("Authorization", "Cookie", "username", "password", "SD.begin", "format(", "LittleFS"):
         assert forbidden not in source
+
+
+def test_downloader_is_explicitly_opt_in_and_wired_only_for_visible_misses():
+    screen = MAP_SCREEN.read_text()
+    settings = SETTINGS.read_text()
+    assert "downloadTile(request)" in screen
+    assert "downloader_.enqueue(request.key, request.frame_epoch)" in screen
+    assert "presenter_.frameEpoch() != request.frame_epoch" in screen
+    assert 'KEY_MAP_DOWNLOAD = "map_dl"' in settings
+    assert "prefs.getBool(KEY_MAP_DOWNLOAD, false)" in settings
+    assert "Download map tiles:" in settings

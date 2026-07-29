@@ -314,6 +314,7 @@ MapTileSlot::State MapScreenPresenter::stateFor(MapTileLoadResult result) {
             return MapTileSlot::STORAGE_UNAVAILABLE;
         case MapTileLoadResult::INVALID_PNG: return MapTileSlot::INVALID_PNG;
         case MapTileLoadResult::TOO_LARGE: return MapTileSlot::TOO_LARGE;
+        case MapTileLoadResult::DOWNLOAD_FAILED: return MapTileSlot::IO_ERROR;
         case MapTileLoadResult::IO_ERROR: return MapTileSlot::IO_ERROR;
     }
     return MapTileSlot::IO_ERROR;

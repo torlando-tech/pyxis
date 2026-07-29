@@ -114,7 +114,7 @@ void runUntilIdle(MapTileDownloader& d, FakeClock& clock, int limit = 40) {
 MapTileDownloadResult take(MapTileDownloader& d) { MapTileDownloadResult r; CHECK(d.takeResult(r)); return r; }
 
 void testDisabledByDefault() { beginTest(); FakeStore s; FakeTransport t; FakeClock c; MapTileDownloadPolicy p; MapTileDownloader d(s,t,c,p,config());
-    CHECK(!p.enabled); CHECK(d.enqueue(key(),7U)==MapTileEnqueueResult::DISABLED); CHECK(d.queuedCount()==0U); CHECK(t.starts==0); }
+    CHECK(!p.enabled); CHECK(d.enqueue(key(),7U)==MapTileEnqueueResult::POLICY_DISABLED); CHECK(d.queuedCount()==0U); CHECK(t.starts==0); }
 void testCanonicalUrlAndBounds() { beginTest(); char out[MapTileDownloader::URL_CAPACITY];
     CHECK(MapTileDownloader::canonicalUrl("https://tile.openstreetmap.org/",TileKey{22U,4194303U,4194303U},out,sizeof(out))==MapTileUrlResult::OK);
     CHECK(std::string(out)=="https://tile.openstreetmap.org/22/4194303/4194303.png");
@@ -160,9 +160,16 @@ void testDestructorAbortsOwnedResources() { beginTest(); FakeStore s; FakeTransp
     { MapTileDownloader d(s,t,c,enabled(),config()); CHECK(d.enqueue(key(),1U)==MapTileEnqueueResult::ACCEPTED); CHECK(d.pump()==MapTilePumpResult::PROGRESSED); CHECK(d.pump()==MapTilePumpResult::PROGRESSED); CHECK(d.pump()==MapTilePumpResult::PROGRESSED); CHECK(s.open); }
     CHECK(s.aborts==1); CHECK(t.closes==1); CHECK(!s.open);
 }
+void testRuntimeDisableCancelsAllWork() { beginTest(); FakeStore s; FakeTransport t; t.body=bytes(5000U); FakeClock c; MapTileDownloader d(s,t,c,enabled(),config());
+    CHECK(d.enqueue(key(1U),7U)==MapTileEnqueueResult::ACCEPTED); CHECK(d.enqueue(key(2U),8U)==MapTileEnqueueResult::ACCEPTED);
+    CHECK(d.pump()==MapTilePumpResult::PROGRESSED); CHECK(d.pump()==MapTilePumpResult::PROGRESSED); CHECK(d.pump()==MapTilePumpResult::PROGRESSED); CHECK(s.open);
+    d.setEnabled(false); runUntilIdle(d,c); CHECK(s.aborts==1); CHECK(t.closes==1); CHECK(d.queuedCount()==0U);
+    CHECK(take(d).code==MapTileResultCode::CANCELED); CHECK(take(d).code==MapTileResultCode::CANCELED);
+    CHECK(d.enqueue(key(),9U)==MapTileEnqueueResult::POLICY_DISABLED);
+}
 void testSdDisappearanceAndMailboxBound() { beginTest(); FakeStore s; FakeTransport t; t.body=bytes(5000U); FakeClock c; MapTileDownloader d(s,t,c,enabled(),config()); CHECK(d.enqueue(key(),1U)==MapTileEnqueueResult::ACCEPTED); CHECK(d.pump()==MapTilePumpResult::PROGRESSED); CHECK(d.pump()==MapTilePumpResult::PROGRESSED); s.available=false; runUntilIdle(d,c); CHECK(take(d).code==MapTileResultCode::STORE_UNAVAILABLE);
     FakeStore s2; FakeTransport t2; FakeClock c2; MapTileDownloader d2(s2,t2,c2,enabled(),config()); for(std::uint32_t i=0;i<6U;++i) CHECK(d2.enqueue(key(i),i)==MapTileEnqueueResult::ACCEPTED); for(std::uint32_t i=0;i<6U;++i) CHECK(d2.cancelGeneration(i)==1U); CHECK(d2.resultCount()==MapTileDownloader::RESULT_CAPACITY); CHECK(d2.droppedResultCount()==0U); }
 void testStress() { beginTest(); FakeStore s; FakeTransport t; FakeClock c; MapTileDownloader d(s,t,c,enabled(),config());
     for(std::uint32_t i=0;i<100000U;++i){ TileKey k=key(i&3U); const std::uint32_t g=i&7U; MapTileEnqueueResult r=d.enqueue(k,g); CHECK(r==MapTileEnqueueResult::ACCEPTED||r==MapTileEnqueueResult::DUPLICATE||r==MapTileEnqueueResult::QUEUE_FULL); if((i&3U)==0U)d.cancelGeneration(g); MapTileDownloadResult ignored; while(d.takeResult(ignored)){} } CHECK(d.queuedCount()<=MapTileDownloader::QUEUE_CAPACITY); }
 }
-int main(){ testDisabledByDefault(); testCanonicalUrlAndBounds(); testDedupeAndQueueFullNoEviction(); testSuccessExactChunksAndPublicContract(); testStatusAndContentTypeFailures(); testLengthOverUnderAndChunkOverCap(); testTransportAndStoreFailuresAbort(); testCancellationAtStagesAndGenerationIsolation(); testTimeoutRollbackAndSaturation(); testDestructorAbortsOwnedResources(); testSdDisappearanceAndMailboxBound(); testStress(); std::cout<<"map tile downloader: "<<tests_run<<" tests passed\n"; }
+int main(){ testDisabledByDefault(); testCanonicalUrlAndBounds(); testDedupeAndQueueFullNoEviction(); testSuccessExactChunksAndPublicContract(); testStatusAndContentTypeFailures(); testLengthOverUnderAndChunkOverCap(); testTransportAndStoreFailuresAbort(); testCancellationAtStagesAndGenerationIsolation(); testTimeoutRollbackAndSaturation(); testDestructorAbortsOwnedResources(); testRuntimeDisableCancelsAllWork(); testSdDisappearanceAndMailboxBound(); testStress(); std::cout<<"map tile downloader: "<<tests_run<<" tests passed\n"; }

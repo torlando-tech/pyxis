@@ -49,7 +49,9 @@ def test_fixed_pool_and_cache_contracts():
 
 def test_worker_predecodes_and_render_path_has_no_io():
     source = text(UI / "MapScreen.cpp")
-    assert "lodepng_decode24" in source
+    assert "lodepng_decode(" in source
+    assert "lodepng_inspect" in source
+    assert "max_output_size" in source
     assert "beginGet" in source and "readGetChunk" in source
     assert 'lv_img_set_src(tile_images_[index], &tile_descriptors_[index])' in source
     assert 'lv_img_set_src(tile_images_[index], "' not in source

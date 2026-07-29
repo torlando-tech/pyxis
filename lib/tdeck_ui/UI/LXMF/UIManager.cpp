@@ -1178,6 +1178,10 @@ void UIManager::set_gps(TinyGPSPlus* gps) {
     }
 }
 
+void UIManager::set_map_download_enabled(bool enabled) {
+    if (_map_screen) _map_screen->setDownloadEnabled(enabled);
+}
+
 Telemetry::LocationConsentResult UIManager::start_location_sharing(
     const Bytes& peer_hash,
     const Telemetry::ShareStartOptions& options) {

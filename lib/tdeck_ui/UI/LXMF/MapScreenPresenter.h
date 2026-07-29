@@ -18,6 +18,7 @@ enum class MapTileLoadResult : std::uint8_t {
     STORAGE_UNAVAILABLE,
     INVALID_PNG,
     TOO_LARGE,
+    DOWNLOAD_FAILED,
     IO_ERROR
 };
 

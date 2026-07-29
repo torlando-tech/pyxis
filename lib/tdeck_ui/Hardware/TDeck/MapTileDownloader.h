@@ -78,7 +78,7 @@ private:
     MapTileStore& store_;
 };
 
-enum class MapTileEnqueueResult : std::uint8_t { ACCEPTED, DISABLED, INVALID_KEY, DUPLICATE, QUEUE_FULL };
+enum class MapTileEnqueueResult : std::uint8_t { ACCEPTED, POLICY_DISABLED, INVALID_KEY, DUPLICATE, QUEUE_FULL };
 enum class MapTileUrlResult : std::uint8_t { OK, INVALID_ARGUMENT, INVALID_KEY, TOO_LONG };
 enum class MapTilePumpResult : std::uint8_t { IDLE, PROGRESSED };
 enum class MapTileResultCode : std::uint8_t {
@@ -119,6 +119,8 @@ public:
     static MapTileUrlResult canonicalUrl(const char* endpoint, const TileKey& key,
         char* output, std::size_t capacity);
     MapTileEnqueueResult enqueue(const TileKey& key, std::uint32_t generation);
+    /** Worker-owner only: disabling aborts active and queued work immediately. */
+    void setEnabled(bool enabled);
     std::size_t cancelGeneration(std::uint32_t generation);
     MapTilePumpResult pump();
     bool takeResult(MapTileDownloadResult& result);
