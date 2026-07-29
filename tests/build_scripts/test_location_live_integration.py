@@ -107,7 +107,7 @@ def test_ble_ingress_and_ui_router_mutators_follow_nonblocking_lock_order():
     ]
     assert "RouterLock router_lock(0)" in announce
     assert propagation.count("RouterLock router_lock(0)") >= 3
-    assert main.count("RouterLock router_lock(0)") >= 2
+    assert main.count("RouterLock router_lock(0)") >= 1
     reassembled = ble[
         ble.index("void BLEInterface::onPacketReassembled") :
         ble.index("size_t BLEInterface::drain_inbound")

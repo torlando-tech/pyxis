@@ -338,28 +338,113 @@ bool MapTileStore::validPngHeader() const {
 }
 
 TileStoreResult MapTileStore::evictFor(const TileKey& key, std::uint32_t new_size) {
-    int existing = findEntry(key);
+    const int existing = findEntry(key);
     std::uint32_t prospective = total_bytes_;
     std::uint16_t count = entry_count_;
-    if (existing >= 0) { prospective -= entries_[static_cast<std::size_t>(existing)].size; }
-    else { ++count; }
+    if (existing >= 0) prospective -= entries_[static_cast<std::size_t>(existing)].size;
+    else ++count;
     if (UINT32_MAX - prospective < new_size) return TileStoreResult::QUOTA_EXCEEDED;
     prospective += new_size;
+
+    // Select every victim before touching storage or the index. This keeps a
+    // preflight/remove error from partially evicting unrelated cache entries.
+    TileKey victims[HARD_MAX_ENTRIES] = {};
+    std::uint16_t victim_count = 0U;
     while ((prospective > config_.byte_quota) || (count > config_.max_entries)) {
         int victim = -1;
         for (std::uint16_t i = 0U; i < entry_count_; ++i) {
             if (sameKey(entries_[i].key, key)) continue;
-            if ((victim < 0) || (entries_[i].sequence < entries_[static_cast<std::size_t>(victim)].sequence)) victim = static_cast<int>(i);
+            bool selected = false;
+            for (std::uint16_t j = 0U; j < victim_count; ++j) {
+                if (sameKey(victims[j], entries_[i].key)) { selected = true; break; }
+            }
+            if (selected) continue;
+            if ((victim < 0) ||
+                (entries_[i].sequence <
+                 entries_[static_cast<std::size_t>(victim)].sequence)) {
+                victim = static_cast<int>(i);
+            }
         }
-        if (victim < 0) return (prospective > config_.byte_quota) ? TileStoreResult::QUOTA_EXCEEDED : TileStoreResult::INDEX_FULL;
-        char name[PATH_CAPACITY] = {};
-        canonicalPath(entries_[static_cast<std::size_t>(victim)].key, name, sizeof(name));
-        TileStoreResult result = storage_.remove(name);
-        if ((result != TileStoreResult::OK) && (result != TileStoreResult::MISS)) return result;
+        if (victim < 0) {
+            return (prospective > config_.byte_quota)
+                ? TileStoreResult::QUOTA_EXCEEDED : TileStoreResult::INDEX_FULL;
+        }
+        victims[victim_count++] = entries_[static_cast<std::size_t>(victim)].key;
         prospective -= entries_[static_cast<std::size_t>(victim)].size;
-        removeEntry(static_cast<std::uint16_t>(victim));
         --count;
-        existing = findEntry(key);
+    }
+    if (victim_count == 0U) return TileStoreResult::OK;
+
+    // Clear stale transaction names before moving any live tile. All failures
+    // in this phase leave every indexed live file untouched.
+    for (std::uint16_t i = 0U; i < victim_count; ++i) {
+        char live[PATH_CAPACITY] = {}, temp[PATH_CAPACITY] = {}, backup[PATH_CAPACITY] = {};
+        canonicalPath(victims[i], live, sizeof(live));
+        appendSuffix(live, ".tmp", temp, sizeof(temp));
+        appendSuffix(live, ".bak", backup, sizeof(backup));
+        TileStoreResult result = storage_.remove(temp);
+        if ((result != TileStoreResult::OK) && (result != TileStoreResult::MISS)) return result;
+        result = storage_.remove(backup);
+        if ((result != TileStoreResult::OK) && (result != TileStoreResult::MISS)) return result;
+    }
+
+    // Stage lives as recoverable backups. A rename failure rolls every earlier
+    // victim back before finishPut() reports failure.
+    std::uint16_t staged = 0U;
+    for (; staged < victim_count; ++staged) {
+        char live[PATH_CAPACITY] = {}, backup[PATH_CAPACITY] = {};
+        canonicalPath(victims[staged], live, sizeof(live));
+        appendSuffix(live, ".bak", backup, sizeof(backup));
+        TileStoreResult result = storage_.rename(live, backup);
+        if (result == TileStoreResult::OK) continue;
+        bool restored = true;
+        while (staged > 0U) {
+            --staged;
+            canonicalPath(victims[staged], live, sizeof(live));
+            appendSuffix(live, ".bak", backup, sizeof(backup));
+            if (storage_.rename(backup, live) != TileStoreResult::OK) restored = false;
+        }
+        if (!restored) initialized_ = false;
+        return result;
+    }
+
+    // Rename backups to disposable temps. Recovery restores .bak but discards
+    // .tmp, so this is the eviction commit boundary without deleting data mid-
+    // transaction. Any runtime failure still rolls all victims back.
+    std::uint16_t committed = 0U;
+    for (; committed < victim_count; ++committed) {
+        char live[PATH_CAPACITY] = {}, temp[PATH_CAPACITY] = {}, backup[PATH_CAPACITY] = {};
+        canonicalPath(victims[committed], live, sizeof(live));
+        appendSuffix(live, ".tmp", temp, sizeof(temp));
+        appendSuffix(live, ".bak", backup, sizeof(backup));
+        TileStoreResult result = storage_.rename(backup, temp);
+        if (result == TileStoreResult::OK) continue;
+        bool restored = true;
+        for (std::uint16_t i = 0U; i < victim_count; ++i) {
+            canonicalPath(victims[i], live, sizeof(live));
+            appendSuffix(live, (i < committed) ? ".tmp" : ".bak",
+                         (i < committed) ? temp : backup, PATH_CAPACITY);
+            const char* source = (i < committed) ? temp : backup;
+            if (storage_.rename(source, live) != TileStoreResult::OK) restored = false;
+        }
+        if (!restored) initialized_ = false;
+        return result;
+    }
+
+    // The files are now committed as disposable temps. Remove index entries by
+    // key because compaction changes subsequent numeric indices.
+    for (std::uint16_t i = 0U; i < victim_count; ++i) {
+        const int index = findEntry(victims[i]);
+        if (index >= 0) removeEntry(static_cast<std::uint16_t>(index));
+    }
+    for (std::uint16_t i = 0U; i < victim_count; ++i) {
+        char live[PATH_CAPACITY] = {}, temp[PATH_CAPACITY] = {};
+        canonicalPath(victims[i], live, sizeof(live));
+        appendSuffix(live, ".tmp", temp, sizeof(temp));
+        // Temp-only files are already committed as evicted. Cleanup is best
+        // effort; initialize() deterministically discards any one left by an
+        // unavailable SD card or power loss.
+        storage_.remove(temp);
     }
     return TileStoreResult::OK;
 }

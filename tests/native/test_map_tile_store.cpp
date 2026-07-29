@@ -28,15 +28,18 @@ public:
     bool available;
     bool short_write;
     bool fail_remove;
+    int fail_remove_call;
     int fail_rename_call;
     std::vector<File> files;
     std::string open_path;
     std::size_t position;
     std::size_t list_position;
     int rename_calls;
+    int remove_calls;
 
-    FakeStorage() : available(true), short_write(false), fail_remove(false), fail_rename_call(0), position(0U),
-                    list_position(0U), rename_calls(0) {}
+    FakeStorage() : available(true), short_write(false), fail_remove(false), fail_remove_call(0),
+                    fail_rename_call(0), position(0U), list_position(0U), rename_calls(0),
+                    remove_calls(0) {}
 
     int find(const char* path) const {
         for (std::size_t i = 0U; i < files.size(); ++i) if (files[i].path == path) return static_cast<int>(i);
@@ -76,7 +79,8 @@ public:
     virtual TileStoreResult commitWrite() { open_path.clear(); return available ? TileStoreResult::OK : TileStoreResult::STORAGE_UNAVAILABLE; }
     virtual void abortWrite() { if (!open_path.empty()) remove(open_path.c_str()); open_path.clear(); }
     virtual TileStoreResult remove(const char* path) {
-        if (fail_remove) return TileStoreResult::IO_ERROR;
+        ++remove_calls;
+        if (fail_remove || (fail_remove_call == remove_calls)) return TileStoreResult::IO_ERROR;
         const int i = find(path); if (i < 0) return TileStoreResult::MISS;
         files.erase(files.begin() + i); return TileStoreResult::OK;
     }
@@ -186,8 +190,26 @@ void testPromotionFailureDoesNotEvictVictims() { beginTest(); FakeStorage fs; Ma
     fs.fail_rename_call=fs.rename_calls+1; CHECK(put(s,c,png())==TileStoreResult::IO_ERROR);
     CHECK(s.entryCount()==2U); CHECK(s.totalBytes()==80U); drain(s,a,40U); drain(s,b,40U);
 }
+void testEvictionPreflightFailurePreservesAllVictims() { beginTest(); FakeStorage fs; MapTileStore s(fs,config(3U,80U,80U)); CHECK(s.initialize()==TileStoreResult::OK);
+    const TileKey a={1U,0U,0U}, b={1U,1U,0U}, c={1U,0U,1U};
+    CHECK(put(s,a,png())==TileStoreResult::OK); CHECK(put(s,b,png())==TileStoreResult::OK);
+    fs.fail_remove_call=fs.remove_calls+5; CHECK(put(s,c,png(80U))==TileStoreResult::IO_ERROR);
+    CHECK(s.entryCount()==2U); CHECK(s.totalBytes()==80U); drain(s,a,40U); drain(s,b,40U);
+}
+void testEvictionStageFailureRollsBackAllVictims() { beginTest(); FakeStorage fs; MapTileStore s(fs,config(3U,80U,80U)); CHECK(s.initialize()==TileStoreResult::OK);
+    const TileKey a={1U,0U,0U}, b={1U,1U,0U}, c={1U,0U,1U};
+    CHECK(put(s,a,png())==TileStoreResult::OK); CHECK(put(s,b,png())==TileStoreResult::OK);
+    fs.fail_rename_call=fs.rename_calls+3; CHECK(put(s,c,png(80U))==TileStoreResult::IO_ERROR);
+    CHECK(s.entryCount()==2U); CHECK(s.totalBytes()==80U); drain(s,a,40U); drain(s,b,40U);
+}
+void testEvictionCommitFailureRollsBackAllVictims() { beginTest(); FakeStorage fs; MapTileStore s(fs,config(3U,80U,80U)); CHECK(s.initialize()==TileStoreResult::OK);
+    const TileKey a={1U,0U,0U}, b={1U,1U,0U}, c={1U,0U,1U};
+    CHECK(put(s,a,png())==TileStoreResult::OK); CHECK(put(s,b,png())==TileStoreResult::OK);
+    fs.fail_rename_call=fs.rename_calls+5; CHECK(put(s,c,png(80U))==TileStoreResult::IO_ERROR);
+    CHECK(s.entryCount()==2U); CHECK(s.totalBytes()==80U); drain(s,a,40U); drain(s,b,40U);
+}
 void testDeterministicStress() { beginTest(); FakeStorage fs; MapTileStore s(fs,config(3U,120U,80U)); CHECK(s.initialize()==TileStoreResult::OK); CHECK(put(s,TileKey{2U,0U,0U},png())==TileStoreResult::OK);
     std::uint32_t size=0U; for(std::uint32_t i=0U;i<100000U;++i) { const TileKey k={2U,i&3U,(i>>2)&3U}; TileStoreResult r=s.beginGet(k,size); CHECK(r==TileStoreResult::OK||r==TileStoreResult::MISS); if(r==TileStoreResult::OK)s.endGet(); }
 }
 }
-int main() { testKeyAndCanonicalPath(); testMissHitAndRemoval(); testMalformedPngs(); testShortWriteAbortsTemp(); testExactQuotaAndLruEviction(); testDuplicateAtomicReplacement(); testInterruptedFilesRecover(); testLiveWinsRecovery(); testCorruptLiveRecoversValidBackup(); testCorruptLiveWithoutBackupIsRemoved(); testStaleTempRemovalFailureAbortsPut(); testRecoveryRejectsMalformedAndExhaustion(); testRecoveryQuotaFailsClosed(); testRenameFailureRestoresDuplicate(); testPromotionFailureDoesNotEvictVictims(); testDeterministicStress(); std::cout<<"map tile store: "<<tests_run<<" tests passed\n"; }
+int main() { testKeyAndCanonicalPath(); testMissHitAndRemoval(); testMalformedPngs(); testShortWriteAbortsTemp(); testExactQuotaAndLruEviction(); testDuplicateAtomicReplacement(); testInterruptedFilesRecover(); testLiveWinsRecovery(); testCorruptLiveRecoversValidBackup(); testCorruptLiveWithoutBackupIsRemoved(); testStaleTempRemovalFailureAbortsPut(); testRecoveryRejectsMalformedAndExhaustion(); testRecoveryQuotaFailsClosed(); testRenameFailureRestoresDuplicate(); testPromotionFailureDoesNotEvictVictims(); testEvictionPreflightFailurePreservesAllVictims(); testEvictionStageFailureRollsBackAllVictims(); testEvictionCommitFailureRollsBackAllVictims(); testDeterministicStress(); std::cout<<"map tile store: "<<tests_run<<" tests passed\n"; }

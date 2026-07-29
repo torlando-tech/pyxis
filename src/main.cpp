@@ -171,9 +171,11 @@ String pending_wifi_password;
 // UDP log broadcasting (POSIX socket — no per-packet heap allocation)
 // WiFiUDP::beginPacket() does new char[1460] on every call, causing severe
 // heap fragmentation over time. A raw POSIX socket with sendto() avoids this.
+#ifdef PYXIS_TEST_HOOKS
 static int udp_log_sock = -1;
 static struct sockaddr_in udp_log_dest;
 static bool udp_log_ready = false;
+#endif
 
 // Crash-phase evidence that survives panic/watchdog resets without writing
 // flash from the real-time audio task.
@@ -190,6 +192,7 @@ extern "C" void pyxis_audio_phase(uint32_t phase) {
     g_audio_phase_magic = AUDIO_PHASE_MAGIC;
 }
 
+#ifdef PYXIS_TEST_HOOKS
 static void udp_log_init() {
     if (udp_log_sock >= 0) close(udp_log_sock);  // Re-init safe
     udp_log_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -231,17 +234,24 @@ static void udp_log_init() {
 // lwIP's internal TCPIP core lock serializes concurrent calls.  Worst case
 // on contention: EAGAIN/ENOMEM and the packet is dropped (acceptable for logs).
 static void udp_send(const char* msg, size_t len) {
-    if (udp_log_sock < 0 || !udp_log_ready || WiFi.status() != WL_CONNECTED) return;
+    // udp_log_ready is cleared before managed disconnects and the socket is
+    // non-blocking. Do not query the WiFi status accessor from the log callback:
+    // the just-connected path can still own the WiFi mutex and deadlock loopTask.
+    if (udp_log_sock < 0 || !udp_log_ready) return;
     sendto(udp_log_sock, msg, len, 0,
            (struct sockaddr*)&udp_log_dest, sizeof(udp_log_dest));
 }
+#endif
 
-// Global log function callable from any module (sends to UDP + Serial)
+// Global log function callable from any module. Production is wired-only;
+// diagnostic firmware may additionally use its UDP harness transport.
 extern "C" void pyxis_log(const char* msg) {
     Serial.println(msg);
+#ifdef PYXIS_TEST_HOOKS
     if (udp_log_ready) {
         udp_send(msg, strlen(msg));
     }
+#endif
 }
 
 #ifdef PYXIS_TEST_HOOKS
@@ -314,7 +324,7 @@ static void udp_audio_dest_init() {
 // Same guards as udp_send(): WiFi connected + socket valid + logging ready
 // (logging-ready implies the socket was bound to a live WiFi iface).
 static void udp_audio_send(const void* data, size_t len) {
-    if (udp_log_sock < 0 || !udp_log_ready || WiFi.status() != WL_CONNECTED) return;
+    if (udp_log_sock < 0 || !udp_log_ready) return;
     if (!udp_audio_dest_ready) udp_audio_dest_init();
     sendto(udp_log_sock, data, len, 0,
            (struct sockaddr*)&udp_audio_dest, sizeof(udp_audio_dest));
@@ -766,10 +776,10 @@ void setup_wifi() {
     BOOT_PROFILE_WAIT_END("wifi_connect");
 
     if (WiFi.status() == WL_CONNECTED) {
-        on_wifi_connected();
+        INFO("WiFi associated during boot; post-connect services deferred until runtime initialization completes");
     } else {
         INFO("WiFi association deferred — main-loop event handler will "
-             "do NTP/OTA/UDP setup when the connect lands");
+             "do NTP/OTA setup when the connect lands");
     }
 }
 
@@ -859,7 +869,9 @@ void on_wifi_connected() {
         // state -- log the target instead of claiming readiness we can't confirm.
         INFO((String("OTA: wireless flash service started (") + OTA_HOSTNAME + ":3232)").c_str());
 
-        // Initialize UDP log broadcasting (multicast group 239.0.99.99:9999)
+        // UDP log broadcasting is a diagnostic transport. Keeping it out of
+        // production avoids network calls from the synchronous logger path.
+#ifdef PYXIS_TEST_HOOKS
         udp_log_init();
         udp_log_ready = true;
         // Renamed upstream (microReticulum @ 0.3.0): setLogCallback -> set_log_callback.
@@ -901,6 +913,7 @@ void on_wifi_connected() {
             }
         });
         INFO("UDP log broadcasting on port 9999");
+#endif
         if (g_boot_reset_reason != ESP_RST_POWERON || g_boot_lxst_step > 0 ||
                 g_audio_phase_magic == AUDIO_PHASE_MAGIC) {
             WARNINGF("BOOT CRASH EVIDENCE: reset=%d lxst_step=%u heap=%u stack=%u audio_phase=%u",
@@ -1428,14 +1441,14 @@ void setup_ui_manager() {
         });
 
         // Set save callback (update app_settings and apply)
-        settings->set_save_callback([](const UI::LXMF::AppSettings& new_settings) {
-            if (ui_manager) {
-                ui_manager->set_map_download_enabled(new_settings.map_download_enabled);
-            }
+        settings->set_save_callback([](const UI::LXMF::AppSettings& new_settings) -> bool {
             UI::LXMF::RouterLock router_lock(0);
             if (!router_lock.acquired()) {
-                WARNING("Router busy; settings application deferred by user retry");
-                return;
+                WARNING("Router busy; settings application retained for retry");
+                return false;
+            }
+            if (ui_manager) {
+                ui_manager->set_map_download_enabled(new_settings.map_download_enabled);
             }
             // Check what changed
             bool wifi_settings_changed = (new_settings.wifi_ssid != app_settings.wifi_ssid) ||
@@ -1603,13 +1616,8 @@ void setup_ui_manager() {
 
             // Apply propagation settings to router
             if (router) {
-                UI::LXMF::RouterLock router_lock(0);
-                if (router_lock.acquired()) {
-                    router->set_fallback_to_propagation(new_settings.prop_fallback_enabled);
-                    router->set_propagation_only(new_settings.prop_only);
-                } else {
-                    WARNING("Router busy; propagation settings not applied");
-                }
+                router->set_fallback_to_propagation(new_settings.prop_fallback_enabled);
+                router->set_propagation_only(new_settings.prop_only);
 
                 // When auto-select is enabled, save the current effective node for next boot
                 if (new_settings.prop_auto_select && propagation_manager) {
@@ -1627,6 +1635,7 @@ void setup_ui_manager() {
             }
 
             INFO("Settings saved");
+            return true;
         });
     }
 
@@ -2756,7 +2765,9 @@ void loop() {
     if (wifi_reconnect_pending) {
         wifi_reconnect_pending = false;
         INFO(("Reconnecting WiFi to: " + pending_wifi_ssid).c_str());
+#ifdef PYXIS_TEST_HOOKS
         udp_log_ready = false;  // Suspend UDP logging during WiFi transition
+#endif
         WiFi.disconnect();
         delay(100);
         WiFi.begin(pending_wifi_ssid.c_str(), pending_wifi_password.c_str());
@@ -2768,8 +2779,10 @@ void loop() {
         }
 
         if (WiFi.status() == WL_CONNECTED) {
+#ifdef PYXIS_TEST_HOOKS
             udp_log_init();  // Rebind to new WiFi interface IP
             udp_log_ready = true;  // Resume UDP logging
+#endif
             INFO(("WiFi connected! IP: " + WiFi.localIP().toString()).c_str());
         } else {
             WARNING("WiFi reconnection failed");
@@ -3094,7 +3107,8 @@ void loop() {
         }
     }
 
-    // Periodic heap monitoring (every 5 seconds)
+    // Periodic heap/UDP diagnostics are restricted to test firmware.
+#ifdef PYXIS_TEST_HOOKS
     static uint32_t last_heap_check = 0;
     static uint32_t last_free_heap = 0;
     static uint32_t last_table_check = 0;
@@ -3180,6 +3194,7 @@ void loop() {
 
         last_free_heap = free_heap;
     }
+#endif
 
     // Small delay to prevent tight loop
     delay(5);

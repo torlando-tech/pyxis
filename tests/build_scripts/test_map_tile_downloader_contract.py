@@ -7,7 +7,9 @@ ADAPTER_H = ROOT / "lib/tdeck_ui/Hardware/TDeck/MapTileHttpArduino.h"
 ADAPTER_CPP = ROOT / "lib/tdeck_ui/Hardware/TDeck/MapTileHttpArduino.cpp"
 MAP_SCREEN = ROOT / "lib/tdeck_ui/UI/LXMF/MapScreen.cpp"
 SETTINGS = ROOT / "lib/tdeck_ui/UI/LXMF/SettingsScreen.cpp"
+SETTINGS_H = ROOT / "lib/tdeck_ui/UI/LXMF/SettingsScreen.h"
 UI_MANAGER = ROOT / "lib/tdeck_ui/UI/LXMF/UIManager.cpp"
+MAIN = ROOT / "src/main.cpp"
 
 
 def test_portable_core_is_bounded_and_allocation_free():
@@ -55,6 +57,16 @@ def test_settings_save_defers_persistence_and_application_outside_lvgl():
     assert "_save_callback" not in capture
     assert "Preferences prefs" in service
     assert "_save_callback(settings)" in service
+    assert "SAVE_APPLY_RETRY" in SETTINGS_H.read_text()
+    assert "applied ? SAVE_IDLE : SAVE_APPLY_RETRY" in service
+
+    main = MAIN.read_text()
+    callback = main[main.index("settings->set_save_callback"):
+                    main.index("// Apply initial brightness", main.index("settings->set_save_callback"))]
+    assert "-> bool" in callback
+    assert "return false" in callback
+    assert "return true" in callback
+    assert callback.count("RouterLock router_lock") == 1
 
     update = UI_MANAGER.read_text()
     body = update[update.index("void UIManager::update()"):

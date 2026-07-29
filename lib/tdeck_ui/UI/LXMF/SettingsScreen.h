@@ -140,7 +140,8 @@ class SettingsScreen {
 public:
     // Callback types
     using BackCallback = std::function<void()>;
-    using SaveCallback = std::function<void(const AppSettings&)>;
+    /** Return true only after the runtime snapshot was fully applied. */
+    using SaveCallback = std::function<bool(const AppSettings&)>;
     using WifiReconnectCallback = std::function<void(const String&, const String&)>;
     using BrightnessChangeCallback = std::function<void(uint8_t)>;
     using PropagationNodesCallback = std::function<void()>;
@@ -237,6 +238,12 @@ public:
     lv_obj_t* get_object();
 
 private:
+    enum SaveState : std::uint8_t {
+        SAVE_IDLE = 0U,
+        SAVE_PENDING = 1U,
+        SAVE_PROCESSING = 2U,
+        SAVE_APPLY_RETRY = 3U
+    };
     // Main UI components
     lv_obj_t* _screen;
     lv_obj_t* _header;
