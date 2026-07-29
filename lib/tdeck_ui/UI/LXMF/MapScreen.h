@@ -87,6 +87,8 @@ private:
     Hardware::TDeck::MapTileDownloadConfig download_config_;
     Hardware::TDeck::MapTileDownloader downloader_;
     std::atomic<bool> downloads_enabled_;
+    Hardware::TDeck::TileKey decode_failed_keys_[TILE_COUNT];
+    std::uint32_t decode_failed_generations_[TILE_COUNT];
     std::uint8_t* compressed_staging_;
     SemaphoreHandle_t state_mutex_;
     TaskHandle_t worker_task_;
@@ -107,6 +109,8 @@ private:
     Pyxis::MapTileLoadResult loadTile(const Pyxis::MapTileRequest& request);
     Pyxis::MapTileLoadResult readTile(const Pyxis::MapTileRequest& request);
     Pyxis::MapTileLoadResult downloadTile(const Pyxis::MapTileRequest& request);
+    bool decodeFailedFor(const Pyxis::MapTileRequest& request) const;
+    void markDecodeFailed(const Pyxis::MapTileRequest& request);
     bool startWorker();
     void stopWorker();
     bool lockState(TickType_t ticks = portMAX_DELAY);

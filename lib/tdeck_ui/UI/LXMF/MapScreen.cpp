@@ -77,7 +77,8 @@ MapScreen::MapScreen(lv_obj_t* parent)
       download_config_(makeDownloadConfig()),
       downloader_(download_store_, download_transport_, download_clock_,
                   download_policy_, download_config_),
-      downloads_enabled_(false), compressed_staging_(nullptr),
+      downloads_enabled_(false), decode_failed_keys_{}, decode_failed_generations_{},
+      compressed_staging_(nullptr),
       state_mutex_(nullptr), worker_task_(nullptr), stop_requested_(false),
       worker_exited_(true), worker_started_(false), store_initialized_(false),
       requests_released_(false),
@@ -324,10 +325,34 @@ void MapScreen::workerLoop() {
 Pyxis::MapTileLoadResult MapScreen::loadTile(
     const Pyxis::MapTileRequest& request) {
     const Pyxis::MapTileLoadResult cached = readTile(request);
-    if (cached != Pyxis::MapTileLoadResult::MISS) return cached;
+    if (cached != Pyxis::MapTileLoadResult::MISS &&
+        cached != Pyxis::MapTileLoadResult::INVALID_PNG) return cached;
+    if (decodeFailedFor(request)) return Pyxis::MapTileLoadResult::DOWNLOAD_FAILED;
     const Pyxis::MapTileLoadResult downloaded = downloadTile(request);
-    return downloaded == Pyxis::MapTileLoadResult::READY
-        ? readTile(request) : downloaded;
+    if (downloaded != Pyxis::MapTileLoadResult::READY) return downloaded;
+    const Pyxis::MapTileLoadResult decoded = readTile(request);
+    if (decoded == Pyxis::MapTileLoadResult::INVALID_PNG) {
+        markDecodeFailed(request);
+        return Pyxis::MapTileLoadResult::DOWNLOAD_FAILED;
+    }
+    return decoded;
+}
+
+bool MapScreen::decodeFailedFor(const Pyxis::MapTileRequest& request) const {
+    for (std::size_t index = 0U; index < TILE_COUNT; ++index) {
+        const Hardware::TDeck::TileKey& key = decode_failed_keys_[index];
+        if (decode_failed_generations_[index] == request.generation &&
+            key.zoom == request.key.zoom && key.x == request.key.x &&
+            key.y == request.key.y) return true;
+    }
+    return false;
+}
+
+void MapScreen::markDecodeFailed(const Pyxis::MapTileRequest& request) {
+    const std::size_t index =
+        static_cast<std::size_t>(request.slot_index) % TILE_COUNT;
+    decode_failed_keys_[index] = request.key;
+    decode_failed_generations_[index] = request.generation;
 }
 
 Pyxis::MapTileLoadResult MapScreen::downloadTile(
@@ -434,8 +459,8 @@ Pyxis::MapTileLoadResult MapScreen::readTile(
         const Hardware::TDeck::TileStoreResult removed = store_.removeTile(request.key);
         return (removed == Hardware::TDeck::TileStoreResult::OK ||
                 removed == Hardware::TDeck::TileStoreResult::MISS)
-            ? Pyxis::MapTileLoadResult::MISS
-            : Pyxis::MapTileLoadResult::INVALID_PNG;
+            ? Pyxis::MapTileLoadResult::INVALID_PNG
+            : Pyxis::MapTileLoadResult::IO_ERROR;
     }
     decode_state.info_raw.colortype = LCT_RGB;
     decode_state.info_raw.bitdepth = 8U;
@@ -447,8 +472,8 @@ Pyxis::MapTileLoadResult MapScreen::readTile(
         const Hardware::TDeck::TileStoreResult removed = store_.removeTile(request.key);
         return (removed == Hardware::TDeck::TileStoreResult::OK ||
                 removed == Hardware::TDeck::TileStoreResult::MISS)
-            ? Pyxis::MapTileLoadResult::MISS
-            : Pyxis::MapTileLoadResult::INVALID_PNG;
+            ? Pyxis::MapTileLoadResult::INVALID_PNG
+            : Pyxis::MapTileLoadResult::IO_ERROR;
     }
     if (request.slot_index >= TILE_COUNT || !tile_pixels_[request.slot_index]) {
         lv_mem_free(rgb);
