@@ -235,8 +235,18 @@ void testMalformedEvictionManifestFailsClosed() { beginTest(); FakeStorage fs;
     fs.add("/pyxis-map/tiles/.evict.txn",std::vector<std::uint8_t>(21U,0U));
     MapTileStore s(fs,config()); CHECK(s.initialize()==TileStoreResult::INDEX_MISMATCH);
 }
+void testPostCommitCleanupResidueKeepsWholeNewGeneration() { beginTest(); FakeStorage fs;
+    const TileKey a={1U,0U,0U}, b={1U,1U,0U}, c={1U,0U,1U};
+    fs.add("/pyxis-map/tiles/1/0/0.png.evict",png());
+    fs.add("/pyxis-map/tiles/1/1/0.png.evict",png());
+    fs.add("/pyxis-map/tiles/1/0/1.png",png(80U));
+    MapTileStore s(fs,config(3U,80U,80U)); CHECK(s.initialize()==TileStoreResult::OK);
+    CHECK(s.entryCount()==1U); CHECK(s.totalBytes()==80U); drain(s,c,80U);
+    std::uint32_t size=0U; CHECK(s.beginGet(a,size)==TileStoreResult::MISS); CHECK(s.beginGet(b,size)==TileStoreResult::MISS);
+    CHECK(fs.find("/pyxis-map/tiles/1/0/0.png.evict")<0); CHECK(fs.find("/pyxis-map/tiles/1/1/0.png.evict")<0);
+}
 void testDeterministicStress() { beginTest(); FakeStorage fs; MapTileStore s(fs,config(3U,120U,80U)); CHECK(s.initialize()==TileStoreResult::OK); CHECK(put(s,TileKey{2U,0U,0U},png())==TileStoreResult::OK);
     std::uint32_t size=0U; for(std::uint32_t i=0U;i<100000U;++i) { const TileKey k={2U,i&3U,(i>>2)&3U}; TileStoreResult r=s.beginGet(k,size); CHECK(r==TileStoreResult::OK||r==TileStoreResult::MISS); if(r==TileStoreResult::OK)s.endGet(); }
 }
 }
-int main() { testKeyAndCanonicalPath(); testMissHitAndRemoval(); testMalformedPngs(); testShortWriteAbortsTemp(); testExactQuotaAndLruEviction(); testDuplicateAtomicReplacement(); testInterruptedFilesRecover(); testLiveWinsRecovery(); testCorruptLiveRecoversValidBackup(); testCorruptLiveWithoutBackupIsRemoved(); testStaleTempRemovalFailureAbortsPut(); testRecoveryRejectsMalformedAndExhaustion(); testRecoveryQuotaFailsClosed(); testRenameFailureRestoresDuplicate(); testPromotionFailureDoesNotEvictVictims(); testEvictionPreflightFailurePreservesAllVictims(); testEvictionStageFailureRollsBackAllVictims(); testEvictionPowerCutsRestoreWholeOldGeneration(); testDuplicateEvictionPowerCutsRestoreOldCandidateAndVictim(); testMalformedEvictionManifestFailsClosed(); testDeterministicStress(); std::cout<<"map tile store: "<<tests_run<<" tests passed\n"; }
+int main() { testKeyAndCanonicalPath(); testMissHitAndRemoval(); testMalformedPngs(); testShortWriteAbortsTemp(); testExactQuotaAndLruEviction(); testDuplicateAtomicReplacement(); testInterruptedFilesRecover(); testLiveWinsRecovery(); testCorruptLiveRecoversValidBackup(); testCorruptLiveWithoutBackupIsRemoved(); testStaleTempRemovalFailureAbortsPut(); testRecoveryRejectsMalformedAndExhaustion(); testRecoveryQuotaFailsClosed(); testRenameFailureRestoresDuplicate(); testPromotionFailureDoesNotEvictVictims(); testEvictionPreflightFailurePreservesAllVictims(); testEvictionStageFailureRollsBackAllVictims(); testEvictionPowerCutsRestoreWholeOldGeneration(); testDuplicateEvictionPowerCutsRestoreOldCandidateAndVictim(); testMalformedEvictionManifestFailsClosed(); testPostCommitCleanupResidueKeepsWholeNewGeneration(); testDeterministicStress(); std::cout<<"map tile store: "<<tests_run<<" tests passed\n"; }
