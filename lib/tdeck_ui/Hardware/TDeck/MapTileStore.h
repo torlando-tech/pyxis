@@ -90,6 +90,8 @@ public:
 
     std::uint16_t entryCount() const { return entry_count_; }
     std::uint32_t totalBytes() const { return total_bytes_; }
+    std::uint32_t maxTileBytes() const { return config_.max_tile_bytes; }
+    bool isAvailable() const { return storage_.isAvailable(); }
     static std::size_t ramBytes() { return sizeof(MapTileStore); }
 
 private:
