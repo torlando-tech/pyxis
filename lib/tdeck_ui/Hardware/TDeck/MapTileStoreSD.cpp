@@ -7,18 +7,22 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 namespace Hardware {
 namespace TDeck {
 
 namespace {
+bool makeMountedPath(const char* name, char* mounted, std::size_t capacity) {
+    if ((name == NULL) || (mounted == NULL)) return false;
+    const int written = std::snprintf(mounted, capacity, "/sd%s", name);
+    return (written >= 0) && (static_cast<std::size_t>(written) < capacity);
+}
 TileStoreResult statMountedPathLocked(const char* name, struct stat& info) {
     char mounted[MapTileStore::PATH_CAPACITY + 4U] = {};
-    const int written = std::snprintf(mounted, sizeof(mounted), "/sd%s", name);
-    if ((written < 0) || (static_cast<std::size_t>(written) >= sizeof(mounted))) {
-        return TileStoreResult::INVALID_ARGUMENT;
-    }
+    if (!makeMountedPath(name, mounted, sizeof(mounted))) return TileStoreResult::INVALID_ARGUMENT;
     errno = 0;
     if (::stat(mounted, &info) == 0) return TileStoreResult::OK;
     return (errno == ENOENT) ? TileStoreResult::MISS : TileStoreResult::IO_ERROR;
@@ -26,7 +30,7 @@ TileStoreResult statMountedPathLocked(const char* name, struct stat& info) {
 }
 
 MapTileStoreSD::MapTileStoreSD()
-    : stream_(), list_root_(), list_zoom_(), list_x_(), writing_(false), healthy_(true) {}
+    : stream_(), list_root_(), list_zoom_(), list_x_(), write_fd_(-1), writing_(false), healthy_(true) {}
 MapTileStoreSD::~MapTileStoreSD() { abortWrite(); endRead(); endList(); }
 
 bool MapTileStoreSD::cardPresentLocked() { return SD.cardType() != CARD_NONE; }
@@ -102,36 +106,41 @@ TileStoreResult MapTileStoreSD::beginWrite(const char* name) {
     if (!healthy_ || !SDAccess::is_ready() || !SDAccess::acquire_bus(500U)) return TileStoreResult::STORAGE_UNAVAILABLE;
     if (!cardPresentLocked()) { SDAccess::release_bus(); return TileStoreResult::STORAGE_UNAVAILABLE; }
     if (!makeParentDirectoriesLocked(name)) { SDAccess::release_bus(); return TileStoreResult::IO_ERROR; }
-    stream_ = SD.open(name, FILE_WRITE);
-    writing_ = static_cast<bool>(stream_);
+    char mounted[MapTileStore::PATH_CAPACITY + 4U] = {};
+    if (!makeMountedPath(name, mounted, sizeof(mounted))) { SDAccess::release_bus(); return TileStoreResult::INVALID_ARGUMENT; }
+    write_fd_ = ::open(mounted, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    writing_ = (write_fd_ >= 0);
     SDAccess::release_bus();
     return writing_ ? TileStoreResult::OK : TileStoreResult::IO_ERROR;
 }
 
 TileStoreResult MapTileStoreSD::writeChunk(const std::uint8_t* data, std::size_t size, std::size_t& written) {
-    if (!healthy_ || !stream_ || !writing_) return TileStoreResult::IO_ERROR;
+    if (!healthy_ || (write_fd_ < 0) || !writing_) return TileStoreResult::IO_ERROR;
     if (!SDAccess::acquire_bus(500U)) return TileStoreResult::STORAGE_UNAVAILABLE;
     if (!cardPresentLocked()) { SDAccess::release_bus(); return TileStoreResult::STORAGE_UNAVAILABLE; }
-    written = stream_.write(data, size);
+    const ssize_t result = ::write(write_fd_, data, size);
+    written = (result < 0) ? 0U : static_cast<std::size_t>(result);
     SDAccess::release_bus();
     return (written == size) ? TileStoreResult::OK : TileStoreResult::IO_ERROR;
 }
 
 TileStoreResult MapTileStoreSD::commitWrite() {
-    if (!healthy_ || !stream_ || !writing_) return TileStoreResult::IO_ERROR;
+    if (!healthy_ || (write_fd_ < 0) || !writing_) return TileStoreResult::IO_ERROR;
     if (!SDAccess::acquire_bus(500U)) return TileStoreResult::STORAGE_UNAVAILABLE;
     if (!cardPresentLocked()) { SDAccess::release_bus(); return TileStoreResult::STORAGE_UNAVAILABLE; }
-    stream_.flush();
-    stream_.close();
+    const bool synced = (::fsync(write_fd_) == 0);
+    const bool closed = (::close(write_fd_) == 0);
+    write_fd_ = -1;
     writing_ = false;
     SDAccess::release_bus();
-    return TileStoreResult::OK;
+    return (synced && closed) ? TileStoreResult::OK : TileStoreResult::IO_ERROR;
 }
 
 void MapTileStoreSD::abortWrite() {
-    if (!stream_ || !writing_) return;
+    if ((write_fd_ < 0) || !writing_) return;
     if (SDAccess::acquire_bus(500U)) {
-        stream_.close();
+        if (::close(write_fd_) != 0) healthy_ = false;
+        write_fd_ = -1;
         writing_ = false;
         SDAccess::release_bus();
     } else {

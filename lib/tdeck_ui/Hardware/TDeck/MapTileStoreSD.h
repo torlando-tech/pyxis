@@ -46,6 +46,7 @@ private:
     fs::File list_root_;
     fs::File list_zoom_;
     fs::File list_x_;
+    int write_fd_;
     bool writing_;
     bool healthy_;
 

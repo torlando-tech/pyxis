@@ -66,3 +66,13 @@ def test_sd_adapter_distinguishes_missing_files_from_open_failures():
                        source.index("TileStoreResult MapTileStoreSD::nextList")]
     assert "present == TileStoreResult::MISS" in list_body
     assert "if (!list_root_)" in list_body and "TileStoreResult::IO_ERROR" in list_body
+
+
+def test_sd_adapter_checks_sync_and_close_before_acknowledging_write():
+    source = SD_CPP.read_text()
+    body = source[source.index("TileStoreResult MapTileStoreSD::commitWrite"):
+                  source.index("void MapTileStoreSD::abortWrite")]
+    assert "::fsync(write_fd_) == 0" in body
+    assert "::close(write_fd_) == 0" in body
+    assert "synced && closed" in body
+    assert "stream_.flush()" not in body
