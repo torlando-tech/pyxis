@@ -31,7 +31,7 @@ TileStoreResult statMountedPathLocked(const char* name, struct stat& info) {
 
 MapTileStoreSD::MapTileStoreSD()
     : stream_(), list_root_(), list_zoom_(), list_x_(), write_fd_(-1), writing_(false), abort_pending_(false), healthy_(true) {}
-MapTileStoreSD::~MapTileStoreSD() { abortWrite(); endRead(); endList(); }
+MapTileStoreSD::~MapTileStoreSD() { abortWrite(); endRead(); endList(); abortWrite(); }
 
 bool MapTileStoreSD::cardPresentLocked() { return SD.cardType() != CARD_NONE; }
 
@@ -48,7 +48,9 @@ TileStoreResult MapTileStoreSD::servicePendingAbortLocked() {
 bool MapTileStoreSD::isAvailable() const {
     if (!healthy_) return false;
     if (!SDAccess::is_ready() || !SDAccess::acquire_bus(100U)) return false;
-    const bool present = cardPresentLocked();
+    MapTileStoreSD* self = const_cast<MapTileStoreSD*>(this);
+    const bool cleaned = self->servicePendingAbortLocked() == TileStoreResult::OK;
+    const bool present = cleaned && cardPresentLocked();
     SDAccess::release_bus();
     return present;
 }
@@ -95,8 +97,11 @@ TileStoreResult MapTileStoreSD::beginRead(const char* name, std::uint32_t& size)
 }
 
 TileStoreResult MapTileStoreSD::readChunk(std::uint8_t* output, std::size_t capacity, std::size_t& count) {
-    if (!healthy_ || !stream_) return TileStoreResult::IO_ERROR;
+    if (!healthy_) return TileStoreResult::IO_ERROR;
     if (!SDAccess::acquire_bus(500U)) return TileStoreResult::STORAGE_UNAVAILABLE;
+    const TileStoreResult cleanup = servicePendingAbortLocked();
+    if (cleanup != TileStoreResult::OK) { SDAccess::release_bus(); return cleanup; }
+    if (!stream_) { SDAccess::release_bus(); return TileStoreResult::IO_ERROR; }
     if (!cardPresentLocked()) { SDAccess::release_bus(); return TileStoreResult::STORAGE_UNAVAILABLE; }
     count = stream_.read(output, capacity);
     const bool failed = (count == 0U) && stream_.available();
@@ -105,8 +110,9 @@ TileStoreResult MapTileStoreSD::readChunk(std::uint8_t* output, std::size_t capa
 }
 
 void MapTileStoreSD::endRead() {
-    if (!stream_ || writing_) return;
+    if ((!stream_ || writing_) && !abort_pending_) return;
     if (SDAccess::acquire_bus(500U)) {
+        servicePendingAbortLocked();
         stream_.close();
         SDAccess::release_bus();
     } else {
@@ -129,8 +135,11 @@ TileStoreResult MapTileStoreSD::beginWrite(const char* name) {
 }
 
 TileStoreResult MapTileStoreSD::writeChunk(const std::uint8_t* data, std::size_t size, std::size_t& written) {
-    if (!healthy_ || (write_fd_ < 0) || !writing_) return TileStoreResult::IO_ERROR;
+    if (!healthy_) return TileStoreResult::IO_ERROR;
     if (!SDAccess::acquire_bus(500U)) return TileStoreResult::STORAGE_UNAVAILABLE;
+    const TileStoreResult cleanup = servicePendingAbortLocked();
+    if (cleanup != TileStoreResult::OK) { SDAccess::release_bus(); return cleanup; }
+    if ((write_fd_ < 0) || !writing_) { SDAccess::release_bus(); return TileStoreResult::IO_ERROR; }
     if (!cardPresentLocked()) { SDAccess::release_bus(); return TileStoreResult::STORAGE_UNAVAILABLE; }
     const ssize_t result = ::write(write_fd_, data, size);
     written = (result < 0) ? 0U : static_cast<std::size_t>(result);
@@ -139,8 +148,11 @@ TileStoreResult MapTileStoreSD::writeChunk(const std::uint8_t* data, std::size_t
 }
 
 TileStoreResult MapTileStoreSD::commitWrite() {
-    if (!healthy_ || (write_fd_ < 0) || !writing_) return TileStoreResult::IO_ERROR;
+    if (!healthy_) return TileStoreResult::IO_ERROR;
     if (!SDAccess::acquire_bus(500U)) return TileStoreResult::STORAGE_UNAVAILABLE;
+    const TileStoreResult cleanup = servicePendingAbortLocked();
+    if (cleanup != TileStoreResult::OK) { SDAccess::release_bus(); return cleanup; }
+    if ((write_fd_ < 0) || !writing_) { SDAccess::release_bus(); return TileStoreResult::IO_ERROR; }
     if (!cardPresentLocked()) { SDAccess::release_bus(); return TileStoreResult::STORAGE_UNAVAILABLE; }
     const bool synced = (::fsync(write_fd_) == 0);
     const bool closed = (::close(write_fd_) == 0);
@@ -228,8 +240,10 @@ TileStoreResult MapTileStoreSD::beginList() {
 TileStoreResult MapTileStoreSD::nextList(char* name, std::size_t capacity, bool& done) {
     done = false;
     if (!healthy_) return TileStoreResult::STORAGE_UNAVAILABLE;
-    if (!list_root_) { done = true; return TileStoreResult::OK; }
     if (!SDAccess::acquire_bus(500U)) return TileStoreResult::STORAGE_UNAVAILABLE;
+    const TileStoreResult cleanup = servicePendingAbortLocked();
+    if (cleanup != TileStoreResult::OK) { SDAccess::release_bus(); return cleanup; }
+    if (!list_root_) { done = true; SDAccess::release_bus(); return TileStoreResult::OK; }
     if (!cardPresentLocked()) { SDAccess::release_bus(); return TileStoreResult::STORAGE_UNAVAILABLE; }
     while (true) {
         if (list_x_) {
@@ -268,8 +282,9 @@ TileStoreResult MapTileStoreSD::nextList(char* name, std::size_t capacity, bool&
 }
 
 void MapTileStoreSD::endList() {
-    if (!list_root_ && !list_zoom_ && !list_x_) return;
+    if (!list_root_ && !list_zoom_ && !list_x_ && !abort_pending_) return;
     if (SDAccess::acquire_bus(500U)) {
+        servicePendingAbortLocked();
         if (list_x_) list_x_.close();
         if (list_zoom_) list_zoom_.close();
         if (list_root_) list_root_.close();

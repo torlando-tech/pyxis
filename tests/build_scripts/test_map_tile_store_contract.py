@@ -89,3 +89,10 @@ def test_sd_abort_lock_timeout_defers_descriptor_close_without_leaking_it():
     assert "else {\n        abort_pending_ = true;\n    }" in abort
     assert "::close(write_fd_)" in service
     assert "servicePendingAbortLocked()" in begin_write
+    for method in ("isAvailable", "beginRead", "readChunk", "endRead", "beginWrite",
+                   "writeChunk", "commitWrite", "remove", "rename", "stat",
+                   "beginList", "nextList", "endList"):
+        start = source.index(f"MapTileStoreSD::{method}")
+        next_method = source.find("MapTileStoreSD::", start + len(f"MapTileStoreSD::{method}"))
+        body = source[start:] if next_method < 0 else source[start:next_method]
+        assert "servicePendingAbortLocked()" in body, method
