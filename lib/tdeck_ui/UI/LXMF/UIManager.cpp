@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "UIManager.h"
+#include "RouterLock.h"
 
 #ifdef ARDUINO
 
@@ -127,43 +128,45 @@ public:
         const Telemetry::OutboundLocationEnvelope& envelope,
         uint64_t exclusive_deadline_monotonic_millis,
         uint64_t& ownership_monotonic_millis) override {
-        Bytes destination_hash(envelope.destination.bytes, Telemetry::PEER_ID_SIZE);
-        Identity destination_identity = Identity::recall(destination_hash);
-        Destination destination(Type::NONE);
-        if (destination_identity) {
-            destination = Destination(
-                destination_identity, Type::Destination::OUT,
-                Type::Destination::SINGLE, "lxmf", "delivery");
-        }
-
-        ::LXMF::LXMessage message(
-            destination,
-            router_.delivery_destination(),
-            Bytes(),
-            Bytes(),
-            ::LXMF::Type::Message::OPPORTUNISTIC);
-        if (!destination_identity) {
-            message.destination_hash(destination_hash);
-        }
-        for (std::size_t index = 0; index < envelope.field_count; ++index) {
-            const auto& field = envelope.fields[index];
-            if (!message.fields_set(
-                    Bytes(field.key, field.key_size),
-                    Bytes(field.value, field.value_size))) {
-                return false;
-            }
-        }
-
-        GuardContext guard_context{
-            exclusive_deadline_monotonic_millis,
-            &ownership_monotonic_millis};
+        RouterLock router_lock;
+        if (!router_lock.acquired()) return false;
         try {
+            Bytes destination_hash(
+                envelope.destination.bytes, Telemetry::PEER_ID_SIZE);
+            Identity destination_identity = Identity::recall(destination_hash);
+            Destination destination(Type::NONE);
+            if (destination_identity) {
+                destination = Destination(
+                    destination_identity, Type::Destination::OUT,
+                    Type::Destination::SINGLE, "lxmf", "delivery");
+            }
+
+            ::LXMF::LXMessage message(
+                destination,
+                router_.delivery_destination(),
+                Bytes(),
+                Bytes(),
+                ::LXMF::Type::Message::OPPORTUNISTIC);
+            if (!destination_identity) {
+                message.destination_hash(destination_hash);
+            }
+            for (std::size_t index = 0; index < envelope.field_count; ++index) {
+                const auto& field = envelope.fields[index];
+                if (!message.fields_set(
+                        Bytes(field.key, field.key_size),
+                        Bytes(field.value, field.value_size))) {
+                    return false;
+                }
+            }
+
+            GuardContext guard_context{
+                exclusive_deadline_monotonic_millis,
+                &ownership_monotonic_millis};
             return router_.try_handle_outbound(
                        message, claimOwnership, &guard_context) ==
                    ::LXMF::OutboundAdmissionResult::ACCEPTED;
         } catch (const std::exception& error) {
-            WARNING((std::string("Location outbound preparation failed: ") +
-                     error.what()).c_str());
+            WARNINGF("Location outbound preparation failed: %s", error.what());
             return false;
         }
     }
@@ -1188,8 +1191,16 @@ bool UIManager::send_message(const Bytes& dest_hash, const String& content) {
         _chat_screen->add_message(message, true);
     }
 
-    // Queue for sending (pack already called, will use cached packed data)
-    _router.handle_outbound(message);
+    // Queue for sending (pack already called, will use cached packed data).
+    // Router queues are shared with loopTask; serialize the ownership copy.
+    {
+        RouterLock router_lock;
+        if (!router_lock.acquired()) {
+            ERROR("Router lock unavailable; message not queued");
+            return false;
+        }
+        _router.handle_outbound(message);
+    }
 
     INFO("  Message queued for delivery");
     return true;

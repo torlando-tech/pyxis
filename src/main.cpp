@@ -80,6 +80,7 @@
 #include <UI/LVGL/LVGLInit.h>
 #include <UI/LVGL/LVGLLock.h>
 #include <UI/LXMF/UIManager.h>
+#include <UI/LXMF/RouterLock.h>
 #include <UI/LXMF/SettingsScreen.h>
 
 // Audio notifications
@@ -1683,6 +1684,10 @@ void setup() {
     // Initialize serial
     Serial.begin(115200);
     delay(100);
+    if (!UI::LXMF::RouterLock::initialize()) {
+        ERROR("Failed to initialize router mutex");
+        while (true) delay(1000);
+    }
 
     // Apply the production TWDT policy before any application worker task is
     // created. Arduino-ESP32 starts with a baked 5s policy; BLE/LVGL workers
@@ -2757,7 +2762,10 @@ void loop() {
 
     // Process Reticulum
     LOOP_STEP(4);  // reticulum->loop()
-    reticulum->loop();
+    {
+        UI::LXMF::RouterLock router_lock;
+        if (router_lock.acquired()) reticulum->loop();
+    }
 
     // Best-effort instantaneous RSSI sampling is main-loop owned and enabled
     // only for the dedicated view. The interface skips TX and SPI contention.
@@ -2808,12 +2816,16 @@ void loop() {
     // Do not poll TCP/LoRa/BLE again here; BLE additionally enforces dedicated
     // task ownership when its worker is running.
 
-    // Process LXMF router queues
+    // Process LXMF router queues under the same serialization domain used by
+    // Reticulum and location-message admission.
     LOOP_STEP(7);  // Router processing
-    if (router) {
-        router->process_outbound();
-        router->process_inbound();
-        router->process_sync();
+    {
+        UI::LXMF::RouterLock router_lock;
+        if (router_lock.acquired() && router) {
+            router->process_outbound();
+            router->process_inbound();
+            router->process_sync();
+        }
     }
 
     LOOP_STEP(8);  // Memory monitor

@@ -47,3 +47,20 @@ def test_router_pump_is_not_run_under_lvgl_and_transient_delivery_skips_store_up
     ]
     assert callback.index("load_message(msg_hash)") < callback.index("update_message_state(")
     assert "if (!full_msg.hash())" in callback
+
+
+def test_live_and_chat_outbound_share_a_router_mutex():
+    cpp = CPP.read_text()
+    main = (ROOT / "src/main.cpp").read_text()
+    router_block = cpp[
+        cpp.index("class LiveLocationEnvelopeRouter") :
+        cpp.index("UIManager::UIManager")
+    ]
+    send = cpp[cpp.index("bool UIManager::send_message") : cpp.index("void UIManager::on_message_received")]
+    assert "RouterLock" in router_block
+    assert "RouterLock" in send
+    network_pump = main[
+        main.index("// Process Reticulum") :
+        main.index("// Update UI manager")
+    ]
+    assert "RouterLock" in network_pump
