@@ -34,7 +34,10 @@ TileTransportResult MapTileHttpArduino::start(const char* url, const char* user_
     client_.setTimeout(read_timeout_ms);
     http_.setConnectTimeout(boundedConnectTimeout(connect_timeout_ms));
     http_.setTimeout(boundedReadTimeout(read_timeout_ms));
-    http_.useHTTP10(true); // deterministic EOF for responses without Content-Length
+    // Keep the single visible-tile TLS session alive across sequential requests.
+    // Repeated handshakes fragment the ESP32-S3 internal heap and can exhaust the
+    // hardware SHA/AES allocation budget before the six-tile viewport completes.
+    http_.setReuse(true);
     http_.setUserAgent(user_agent);
     const char* response_headers[] = {"Content-Type"};
     http_.collectHeaders(response_headers, 1U);
