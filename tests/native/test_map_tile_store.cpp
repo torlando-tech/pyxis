@@ -30,6 +30,8 @@ public:
     bool fail_remove;
     int fail_remove_call;
     int fail_rename_call;
+    int power_cut_after_rename_call;
+    std::string fail_remove_path;
     std::vector<File> files;
     std::string open_path;
     std::size_t position;
@@ -38,7 +40,7 @@ public:
     int remove_calls;
 
     FakeStorage() : available(true), short_write(false), fail_remove(false), fail_remove_call(0),
-                    fail_rename_call(0), position(0U), list_position(0U), rename_calls(0),
+                    fail_rename_call(0), power_cut_after_rename_call(0), position(0U), list_position(0U), rename_calls(0),
                     remove_calls(0) {}
 
     int find(const char* path) const {
@@ -79,15 +81,18 @@ public:
     virtual TileStoreResult commitWrite() { open_path.clear(); return available ? TileStoreResult::OK : TileStoreResult::STORAGE_UNAVAILABLE; }
     virtual void abortWrite() { if (!open_path.empty()) remove(open_path.c_str()); open_path.clear(); }
     virtual TileStoreResult remove(const char* path) {
+        if (!available) return TileStoreResult::STORAGE_UNAVAILABLE;
         ++remove_calls;
-        if (fail_remove || (fail_remove_call == remove_calls)) return TileStoreResult::IO_ERROR;
+        if (fail_remove || (fail_remove_call == remove_calls) || fail_remove_path == path) return TileStoreResult::IO_ERROR;
         const int i = find(path); if (i < 0) return TileStoreResult::MISS;
         files.erase(files.begin() + i); return TileStoreResult::OK;
     }
     virtual TileStoreResult rename(const char* from, const char* to) {
+        if (!available) return TileStoreResult::STORAGE_UNAVAILABLE;
         ++rename_calls; if (fail_rename_call == rename_calls) return TileStoreResult::IO_ERROR;
         const int i = find(from); if (i < 0) return TileStoreResult::MISS;
         remove(to); files[static_cast<std::size_t>(i >= find(from) ? find(from) : 0)].path = to;
+        if (power_cut_after_rename_call == rename_calls) available = false;
         return TileStoreResult::OK;
     }
     virtual TileStoreResult stat(const char* path, std::uint32_t& size) {
@@ -193,23 +198,45 @@ void testPromotionFailureDoesNotEvictVictims() { beginTest(); FakeStorage fs; Ma
 void testEvictionPreflightFailurePreservesAllVictims() { beginTest(); FakeStorage fs; MapTileStore s(fs,config(3U,80U,80U)); CHECK(s.initialize()==TileStoreResult::OK);
     const TileKey a={1U,0U,0U}, b={1U,1U,0U}, c={1U,0U,1U};
     CHECK(put(s,a,png())==TileStoreResult::OK); CHECK(put(s,b,png())==TileStoreResult::OK);
-    fs.fail_remove_call=fs.remove_calls+5; CHECK(put(s,c,png(80U))==TileStoreResult::IO_ERROR);
+    fs.fail_remove_path="/pyxis-map/tiles/.evict.txn.tmp"; CHECK(put(s,c,png(80U))==TileStoreResult::IO_ERROR); fs.fail_remove_path.clear();
     CHECK(s.entryCount()==2U); CHECK(s.totalBytes()==80U); drain(s,a,40U); drain(s,b,40U);
 }
 void testEvictionStageFailureRollsBackAllVictims() { beginTest(); FakeStorage fs; MapTileStore s(fs,config(3U,80U,80U)); CHECK(s.initialize()==TileStoreResult::OK);
     const TileKey a={1U,0U,0U}, b={1U,1U,0U}, c={1U,0U,1U};
     CHECK(put(s,a,png())==TileStoreResult::OK); CHECK(put(s,b,png())==TileStoreResult::OK);
-    fs.fail_rename_call=fs.rename_calls+3; CHECK(put(s,c,png(80U))==TileStoreResult::IO_ERROR);
+    fs.fail_rename_call=fs.rename_calls+4; CHECK(put(s,c,png(80U))==TileStoreResult::IO_ERROR);
     CHECK(s.entryCount()==2U); CHECK(s.totalBytes()==80U); drain(s,a,40U); drain(s,b,40U);
 }
-void testEvictionCommitFailureRollsBackAllVictims() { beginTest(); FakeStorage fs; MapTileStore s(fs,config(3U,80U,80U)); CHECK(s.initialize()==TileStoreResult::OK);
-    const TileKey a={1U,0U,0U}, b={1U,1U,0U}, c={1U,0U,1U};
-    CHECK(put(s,a,png())==TileStoreResult::OK); CHECK(put(s,b,png())==TileStoreResult::OK);
-    fs.fail_rename_call=fs.rename_calls+5; CHECK(put(s,c,png(80U))==TileStoreResult::IO_ERROR);
-    CHECK(s.entryCount()==2U); CHECK(s.totalBytes()==80U); drain(s,a,40U); drain(s,b,40U);
+void testEvictionPowerCutsRestoreWholeOldGeneration() { beginTest();
+    for (int cut=2;cut<=4;++cut) { FakeStorage fs; MapTileStore s(fs,config(3U,80U,80U)); CHECK(s.initialize()==TileStoreResult::OK);
+        const TileKey a={1U,0U,0U}, b={1U,1U,0U}, c={1U,0U,1U};
+        CHECK(put(s,a,png())==TileStoreResult::OK); CHECK(put(s,b,png())==TileStoreResult::OK);
+        fs.power_cut_after_rename_call=fs.rename_calls+cut;
+        CHECK(put(s,c,png(80U))!=TileStoreResult::OK);
+        fs.available=true; fs.power_cut_after_rename_call=0;
+        MapTileStore recovered(fs,config(3U,80U,80U)); CHECK(recovered.initialize()==TileStoreResult::OK);
+        CHECK(recovered.entryCount()==2U); CHECK(recovered.totalBytes()==80U);
+        drain(recovered,a,40U); drain(recovered,b,40U);
+    }
+}
+void testDuplicateEvictionPowerCutsRestoreOldCandidateAndVictim() { beginTest();
+    for (int cut=1;cut<=4;++cut) { FakeStorage fs; MapTileStore s(fs,config(2U,80U,80U)); CHECK(s.initialize()==TileStoreResult::OK);
+        const TileKey a={1U,0U,0U}, b={1U,1U,0U};
+        CHECK(put(s,a,png())==TileStoreResult::OK); CHECK(put(s,b,png())==TileStoreResult::OK);
+        fs.power_cut_after_rename_call=fs.rename_calls+cut;
+        CHECK(put(s,a,png(80U))!=TileStoreResult::OK);
+        fs.available=true; fs.power_cut_after_rename_call=0;
+        MapTileStore recovered(fs,config(2U,80U,80U)); CHECK(recovered.initialize()==TileStoreResult::OK);
+        CHECK(recovered.entryCount()==2U); CHECK(recovered.totalBytes()==80U);
+        drain(recovered,a,40U); drain(recovered,b,40U);
+    }
+}
+void testMalformedEvictionManifestFailsClosed() { beginTest(); FakeStorage fs;
+    fs.add("/pyxis-map/tiles/.evict.txn",std::vector<std::uint8_t>(21U,0U));
+    MapTileStore s(fs,config()); CHECK(s.initialize()==TileStoreResult::INDEX_MISMATCH);
 }
 void testDeterministicStress() { beginTest(); FakeStorage fs; MapTileStore s(fs,config(3U,120U,80U)); CHECK(s.initialize()==TileStoreResult::OK); CHECK(put(s,TileKey{2U,0U,0U},png())==TileStoreResult::OK);
     std::uint32_t size=0U; for(std::uint32_t i=0U;i<100000U;++i) { const TileKey k={2U,i&3U,(i>>2)&3U}; TileStoreResult r=s.beginGet(k,size); CHECK(r==TileStoreResult::OK||r==TileStoreResult::MISS); if(r==TileStoreResult::OK)s.endGet(); }
 }
 }
-int main() { testKeyAndCanonicalPath(); testMissHitAndRemoval(); testMalformedPngs(); testShortWriteAbortsTemp(); testExactQuotaAndLruEviction(); testDuplicateAtomicReplacement(); testInterruptedFilesRecover(); testLiveWinsRecovery(); testCorruptLiveRecoversValidBackup(); testCorruptLiveWithoutBackupIsRemoved(); testStaleTempRemovalFailureAbortsPut(); testRecoveryRejectsMalformedAndExhaustion(); testRecoveryQuotaFailsClosed(); testRenameFailureRestoresDuplicate(); testPromotionFailureDoesNotEvictVictims(); testEvictionPreflightFailurePreservesAllVictims(); testEvictionStageFailureRollsBackAllVictims(); testEvictionCommitFailureRollsBackAllVictims(); testDeterministicStress(); std::cout<<"map tile store: "<<tests_run<<" tests passed\n"; }
+int main() { testKeyAndCanonicalPath(); testMissHitAndRemoval(); testMalformedPngs(); testShortWriteAbortsTemp(); testExactQuotaAndLruEviction(); testDuplicateAtomicReplacement(); testInterruptedFilesRecover(); testLiveWinsRecovery(); testCorruptLiveRecoversValidBackup(); testCorruptLiveWithoutBackupIsRemoved(); testStaleTempRemovalFailureAbortsPut(); testRecoveryRejectsMalformedAndExhaustion(); testRecoveryQuotaFailsClosed(); testRenameFailureRestoresDuplicate(); testPromotionFailureDoesNotEvictVictims(); testEvictionPreflightFailurePreservesAllVictims(); testEvictionStageFailureRollsBackAllVictims(); testEvictionPowerCutsRestoreWholeOldGeneration(); testDuplicateEvictionPowerCutsRestoreOldCandidateAndVictim(); testMalformedEvictionManifestFailsClosed(); testDeterministicStress(); std::cout<<"map tile store: "<<tests_run<<" tests passed\n"; }

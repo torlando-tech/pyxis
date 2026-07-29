@@ -67,6 +67,9 @@ def test_settings_save_defers_persistence_and_application_outside_lvgl():
     assert "return false" in callback
     assert "return true" in callback
     assert callback.count("RouterLock router_lock") == 1
+    assert "if (!ble_mem)" in callback
+    assert callback.index("app_settings = new_settings") > callback.index("Failed to start BLE interface")
+    assert callback.count("return false") >= 5
 
     update = UI_MANAGER.read_text()
     body = update[update.index("void UIManager::update()"):

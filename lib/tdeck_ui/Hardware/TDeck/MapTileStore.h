@@ -106,7 +106,8 @@ private:
     enum RecoveryFlag {
         HAS_LIVE = 1,
         HAS_TEMP = 2,
-        HAS_BACKUP = 4
+        HAS_BACKUP = 4,
+        HAS_EVICT = 8
     };
 
     MapTileStorage& storage_;
@@ -134,7 +135,13 @@ private:
     TileStoreResult validatePathHeader(const char* path, std::uint32_t& size);
     TileStoreResult validateLiveHeader(const Entry& entry);
     TileStoreResult recoverIndex();
-    TileStoreResult evictFor(const TileKey& key, std::uint32_t new_size);
+    TileStoreResult recoverEvictionTransaction();
+    TileStoreResult planEviction(const TileKey& key, std::uint32_t new_size,
+                                 TileKey* victims, std::uint16_t& victim_count) const;
+    TileStoreResult writeEvictionTransaction(const TileKey& key, bool duplicate,
+                                             const TileKey* victims, std::uint16_t victim_count);
+    TileStoreResult evictFor(const TileKey* victims, std::uint16_t victim_count);
+    void cleanupEvicted(const TileKey* victims, std::uint16_t victim_count);
     bool validPngHeader() const;
     void failPut();
 };

@@ -1466,12 +1466,6 @@ void setup_ui_manager() {
             bool ble_settings_changed = (new_settings.ble_enabled != app_settings.ble_enabled);
             bool transport_settings_changed = (new_settings.transport_enabled != app_settings.transport_enabled);
 
-            app_settings = new_settings;
-
-            if (transport_settings_changed) {
-                WARNING("Transport mode setting changed; reboot required before it takes effect");
-            }
-
             // Reconnect is serviced by the main loop's existing bounded,
             // watchdog-fed reconnect path after this settings application
             // releases the router lock.
@@ -1495,7 +1489,18 @@ void setup_ui_manager() {
                 }
 
                 if (new_settings.tcp_enabled) {
-                    start_tcp_interface();
+                    bool created = false;
+                    if (!tcp_interface_impl) {
+                        tcp_interface_impl = new TCPClientInterface("tcp0");
+                        tcp_interface = new Interface(tcp_interface_impl);
+                        created = true;
+                    }
+                    tcp_interface_impl->set_target_host(new_settings.tcp_host.c_str());
+                    tcp_interface_impl->set_target_port(new_settings.tcp_port);
+                    // A failed initial connection is transient; TCPClientInterface
+                    // owns its background retry state once configured.
+                    tcp_interface_impl->start();
+                    if (created) Transport::register_interface(*tcp_interface);
                 } else {
                     INFO("TCP interface disabled");
                 }
@@ -1532,6 +1537,7 @@ void setup_ui_manager() {
                         Transport::register_interface(*lora_interface);
                     } else {
                         ERROR("Failed to start LoRa interface!");
+                        return false;
                     }
                 } else {
                     INFO("LoRa interface disabled");
@@ -1562,6 +1568,7 @@ void setup_ui_manager() {
                         Transport::register_interface(*auto_interface);
                     } else {
                         ERROR("Failed to start AutoInterface!");
+                        return false;
                     }
                 } else if (new_settings.auto_enabled) {
                     WARNING("AutoInterface enabled but WiFi not connected");
@@ -1584,6 +1591,10 @@ void setup_ui_manager() {
                     if (!ble_interface_impl) {
                         INFO("Creating new BLE interface...");
                         void* ble_mem = heap_caps_calloc(1, sizeof(BLEInterface), MALLOC_CAP_SPIRAM);
+                        if (!ble_mem) {
+                            ERROR("Failed to allocate BLE interface in PSRAM");
+                            return false;
+                        }
                         ble_interface_impl = new (ble_mem) BLEInterface("BLE");
                         // Testing: DUAL mode with WiFi radio completely disabled
                         ble_interface_impl->setRole(RNS::BLE::Role::DUAL);
@@ -1608,11 +1619,20 @@ void setup_ui_manager() {
                         }
                     } else {
                         ERROR("Failed to start BLE interface!");
+                        return false;
                     }
                 } else {
                     INFO("BLE interface disabled");
                 }
             }
+
+            // Commit the runtime snapshot only after every fallible transition
+            // above has succeeded. A false return leaves comparisons intact so
+            // SettingsScreen can retry the persisted desired snapshot.
+            if (transport_settings_changed) {
+                WARNING("Transport mode setting changed; reboot required before it takes effect");
+            }
+            app_settings = new_settings;
 
             // Apply propagation settings to router
             if (router) {
