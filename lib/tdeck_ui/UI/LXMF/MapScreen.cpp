@@ -77,7 +77,8 @@ MapScreen::MapScreen(lv_obj_t* parent)
       download_config_(makeDownloadConfig()),
       downloader_(download_store_, download_transport_, download_clock_,
                   download_policy_, download_config_),
-      downloads_enabled_(false), decode_failed_keys_{}, decode_failed_generations_{},
+      downloads_enabled_(false), download_failed_frame_epoch_(0U),
+      decode_failed_keys_{}, decode_failed_generations_{},
       compressed_staging_(nullptr),
       state_mutex_(nullptr), worker_task_(nullptr), stop_requested_(false),
       worker_exited_(true), worker_started_(false), store_initialized_(false),
@@ -313,10 +314,13 @@ void MapScreen::workerLoop() {
         completion.slot_index = request.slot_index;
         completion.key = request.key;
         completion.result = loadTile(request);
+        bool frame_drained = false;
         if (lockState(portMAX_DELAY)) {
             (void)presenter_.publishCompletion(completion);
+            frame_drained = presenter_.requestCount() == 0U;
             unlockState();
         }
+        if (frame_drained) download_transport_.disconnectIdle();
     }
     worker_exited_.store(true, std::memory_order_release);
     vTaskDelete(nullptr);
@@ -360,6 +364,9 @@ Pyxis::MapTileLoadResult MapScreen::downloadTile(
     const bool enabled = downloads_enabled_.load(std::memory_order_acquire);
     downloader_.setEnabled(enabled);
     if (!enabled) return Pyxis::MapTileLoadResult::MISS;
+    if (download_failed_frame_epoch_ == request.frame_epoch) {
+        return Pyxis::MapTileLoadResult::DOWNLOAD_FAILED;
+    }
 
     Hardware::TDeck::MapTileDownloadResult ignored{};
     while (downloader_.takeResult(ignored)) {}
@@ -383,6 +390,7 @@ Pyxis::MapTileLoadResult MapScreen::downloadTile(
         }
         if (stale) {
             (void)downloader_.cancelGeneration(request.frame_epoch);
+            download_transport_.disconnectIdle();
         }
         (void)downloader_.pump();
         if (downloader_.isBusy()) vTaskDelay(pdMS_TO_TICKS(1));
@@ -393,11 +401,16 @@ Pyxis::MapTileLoadResult MapScreen::downloadTile(
         if (result.generation == request.frame_epoch &&
             result.key.zoom == request.key.zoom && result.key.x == request.key.x &&
             result.key.y == request.key.y) {
-            return result.code == Hardware::TDeck::MapTileResultCode::SUCCESS
-                ? Pyxis::MapTileLoadResult::READY
-                : Pyxis::MapTileLoadResult::DOWNLOAD_FAILED;
+            if (result.code == Hardware::TDeck::MapTileResultCode::SUCCESS) {
+                return Pyxis::MapTileLoadResult::READY;
+            }
+            download_failed_frame_epoch_ = request.frame_epoch;
+            download_transport_.disconnectIdle();
+            return Pyxis::MapTileLoadResult::DOWNLOAD_FAILED;
         }
     }
+    download_failed_frame_epoch_ = request.frame_epoch;
+    download_transport_.disconnectIdle();
     return Pyxis::MapTileLoadResult::DOWNLOAD_FAILED;
 }
 

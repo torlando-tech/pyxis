@@ -87,6 +87,7 @@ private:
     Hardware::TDeck::MapTileDownloadConfig download_config_;
     Hardware::TDeck::MapTileDownloader downloader_;
     std::atomic<bool> downloads_enabled_;
+    std::uint32_t download_failed_frame_epoch_;
     Hardware::TDeck::TileKey decode_failed_keys_[TILE_COUNT];
     std::uint32_t decode_failed_generations_[TILE_COUNT];
     std::uint8_t* compressed_staging_;

@@ -25,6 +25,7 @@ public:
     virtual TileTransportResult read(std::uint8_t* output, std::size_t capacity,
         std::size_t& count, bool& eof);
     virtual void close();
+    void disconnectIdle();
 private:
     WiFiClientSecure client_;
     HTTPClient http_;

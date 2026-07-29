@@ -99,6 +99,15 @@ void MapTileHttpArduino::close() {
     content_type_[0] = '\0';
 }
 
+void MapTileHttpArduino::disconnectIdle() {
+    client_.stop();
+    http_.end();
+    stream_ = NULL;
+    remaining_ = -1;
+    open_ = false;
+    content_type_[0] = '\0';
+}
+
 MapTileMillisClock::MapTileMillisClock() : previous_(millis()), high_(0U) {}
 std::uint64_t MapTileMillisClock::nowMs() const {
     const std::uint32_t current = millis();

@@ -37,6 +37,8 @@ def test_https_adapter_verifies_peer_with_explicit_ca_and_has_no_credentials():
     assert "setTimeout" in source
     assert "setReuse(true)" in source
     assert "useHTTP10(true)" not in source
+    assert "disconnectIdle" in source
+    assert "client_.stop()" in source
     for forbidden in ("Authorization", "Cookie", "username", "password", "SD.begin", "format(", "LittleFS"):
         assert forbidden not in source
 
@@ -71,6 +73,9 @@ def test_downloader_is_explicitly_opt_in_and_wired_only_for_visible_misses():
     assert "downloadTile(request)" in screen
     assert "downloader_.enqueue(request.key, request.frame_epoch)" in screen
     assert "presenter_.frameEpoch() != request.frame_epoch" in screen
+    assert "download_failed_frame_epoch_ == request.frame_epoch" in screen
+    assert "presenter_.requestCount() == 0U" in screen
+    assert "download_transport_.disconnectIdle()" in screen
     assert 'KEY_MAP_DOWNLOAD = "map_dl"' in settings
     assert "prefs.getBool(KEY_MAP_DOWNLOAD, false)" in settings
     assert "Download map tiles:" in settings
