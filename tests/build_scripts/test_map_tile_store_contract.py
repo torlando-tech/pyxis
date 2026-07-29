@@ -5,6 +5,7 @@ CORE_H = ROOT / "lib/tdeck_ui/Hardware/TDeck/MapTileStore.h"
 CORE_CPP = ROOT / "lib/tdeck_ui/Hardware/TDeck/MapTileStore.cpp"
 SD_H = ROOT / "lib/tdeck_ui/Hardware/TDeck/MapTileStoreSD.h"
 SD_CPP = ROOT / "lib/tdeck_ui/Hardware/TDeck/MapTileStoreSD.cpp"
+SD_ACCESS_CPP = ROOT / "lib/tdeck_ui/Hardware/TDeck/SDAccess.cpp"
 
 
 def test_sd_adapter_uses_existing_mount_without_begin_or_format():
@@ -34,3 +35,9 @@ def test_adapter_releases_shared_bus_for_each_chunk():
     source = SD_CPP.read_text()
     assert "readChunk" in source and "writeChunk" in source
     assert source.count("SDAccess::release_bus()") >= 8
+
+
+def test_global_sd_mount_never_formats_unrecognized_media():
+    source = SD_ACCESS_CPP.read_text()
+    assert "format_if_empty=true" not in source
+    assert 'SD.begin(SDCard::CS, SPI, SD_SPI_FREQ, "/sd", 5, false)' in source
