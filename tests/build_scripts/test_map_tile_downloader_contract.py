@@ -1,10 +1,13 @@
 from pathlib import Path
+import re
+import subprocess
 
 ROOT = Path(__file__).resolve().parents[2]
 CORE_H = ROOT / "lib/tdeck_ui/Hardware/TDeck/MapTileDownloader.h"
 CORE_CPP = ROOT / "lib/tdeck_ui/Hardware/TDeck/MapTileDownloader.cpp"
 ADAPTER_H = ROOT / "lib/tdeck_ui/Hardware/TDeck/MapTileHttpArduino.h"
 ADAPTER_CPP = ROOT / "lib/tdeck_ui/Hardware/TDeck/MapTileHttpArduino.cpp"
+MAP_CA = ROOT / "lib/tdeck_ui/Hardware/TDeck/MapTileCa.h"
 MAP_SCREEN = ROOT / "lib/tdeck_ui/UI/LXMF/MapScreen.cpp"
 SETTINGS = ROOT / "lib/tdeck_ui/UI/LXMF/SettingsScreen.cpp"
 SETTINGS_H = ROOT / "lib/tdeck_ui/UI/LXMF/SettingsScreen.h"
@@ -34,6 +37,28 @@ def test_https_adapter_verifies_peer_with_explicit_ca_and_has_no_credentials():
     assert "setTimeout" in source
     for forbidden in ("Authorization", "Cookie", "username", "password", "SD.begin", "format(", "LittleFS"):
         assert forbidden not in source
+
+
+def test_default_endpoint_trust_bundle_covers_current_and_fallback_chains():
+    ca = MAP_CA.read_text()
+    screen = MAP_SCREEN.read_text()
+    assert "MAP_TILE_CA_BUNDLE" in ca
+    assert "GlobalSign Root CA - R3" in ca
+    assert "ISRG Root X1" in ca
+    assert ca.count("-----BEGIN CERTIFICATE-----") == 2
+    assert "MAP_TILE_CA_BUNDLE" in screen
+    certificates = re.findall(
+        r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", ca, re.S)
+    fingerprints = []
+    for certificate in certificates:
+        parsed = subprocess.run(
+            ["openssl", "x509", "-noout", "-fingerprint", "-sha256"],
+            input=certificate, text=True, capture_output=True, check=True)
+        fingerprints.append(parsed.stdout.strip())
+    assert any("96:BC:EC:06:26:49:76:F3:74:60:77:9A:CF:28:C5:A7:" in value
+               for value in fingerprints)
+    assert any("CB:B5:22:D7:B7:F1:27:AD:6A:01:13:86:5B:DF:1C:D4:" in value
+               for value in fingerprints)
 
 
 def test_downloader_is_explicitly_opt_in_and_wired_only_for_visible_misses():
