@@ -330,38 +330,41 @@ TileStoreResult MapTileStore::recoverEvictionTransaction() {
 TileStoreResult MapTileStore::recoverIndex() {
     TileStoreResult result = recoverEvictionTransaction();
     if (result != TileStoreResult::OK) return result;
-    // With no manifest, every .evict file belongs to a committed transaction.
-    // Remove these in a separate list pass so they cannot consume recovery
-    // index slots, including when max_entries == HARD_MAX_ENTRIES.
-    TileKey committed_evictions[HARD_MAX_ENTRIES] = {};
-    std::uint16_t committed_count = 0U;
-    result = storage_.beginList();
-    if (result != TileStoreResult::OK) return result;
+    // With no manifest, every .evict file belongs to a committed transaction
+    // and every .tmp tile belongs to an uncommitted put. Remove cleanup artifacts
+    // in bounded batches before collecting live generations, so any number of
+    // stale tombstones and HARD_MAX live keys plus one crash temp remain recoverable.
     while (true) {
-        char name[PATH_CAPACITY] = {};
-        bool done = false;
-        result = storage_.nextList(name, sizeof(name), done);
-        if (result != TileStoreResult::OK) { storage_.endList(); return result; }
-        if (done) break;
-        TileKey key = {0U, 0U, 0U};
-        std::uint8_t flag = 0U;
-        result = parseOwnedPath(name, key, flag);
-        if (result != TileStoreResult::OK) { storage_.endList(); return result; }
-        if (flag == HAS_EVICT) {
-            if (committed_count >= HARD_MAX_ENTRIES) {
-                storage_.endList();
-                return TileStoreResult::INDEX_FULL;
+        TileKey cleanup_keys[HARD_MAX_ENTRIES] = {};
+        std::uint8_t cleanup_flags[HARD_MAX_ENTRIES] = {};
+        std::uint16_t cleanup_count = 0U;
+        result = storage_.beginList();
+        if (result != TileStoreResult::OK) return result;
+        while (cleanup_count < HARD_MAX_ENTRIES) {
+            char name[PATH_CAPACITY] = {};
+            bool done = false;
+            result = storage_.nextList(name, sizeof(name), done);
+            if (result != TileStoreResult::OK) { storage_.endList(); return result; }
+            if (done) break;
+            TileKey key = {0U, 0U, 0U};
+            std::uint8_t flag = 0U;
+            result = parseOwnedPath(name, key, flag);
+            if (result != TileStoreResult::OK) { storage_.endList(); return result; }
+            if ((flag == HAS_EVICT) || (flag == HAS_TEMP)) {
+                cleanup_keys[cleanup_count] = key;
+                cleanup_flags[cleanup_count++] = flag;
             }
-            committed_evictions[committed_count++] = key;
         }
-    }
-    storage_.endList();
-    for (std::uint16_t i = 0U; i < committed_count; ++i) {
-        char live[PATH_CAPACITY] = {}, evicted[PATH_CAPACITY] = {};
-        canonicalPath(committed_evictions[i], live, sizeof(live));
-        appendSuffix(live, ".evict", evicted, sizeof(evicted));
-        result = storage_.remove(evicted);
-        if ((result != TileStoreResult::OK) && (result != TileStoreResult::MISS)) return result;
+        storage_.endList();
+        if (cleanup_count == 0U) break;
+        for (std::uint16_t i = 0U; i < cleanup_count; ++i) {
+            char live[PATH_CAPACITY] = {}, artifact[PATH_CAPACITY] = {};
+            canonicalPath(cleanup_keys[i], live, sizeof(live));
+            appendSuffix(live, (cleanup_flags[i] == HAS_EVICT) ? ".evict" : ".tmp",
+                         artifact, sizeof(artifact));
+            result = storage_.remove(artifact);
+            if ((result != TileStoreResult::OK) && (result != TileStoreResult::MISS)) return result;
+        }
     }
 
     result = storage_.beginList();

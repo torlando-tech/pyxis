@@ -55,5 +55,14 @@ def test_sd_adapter_distinguishes_missing_files_from_open_failures():
     source = SD_CPP.read_text()
     body = source[source.index("TileStoreResult MapTileStoreSD::beginRead"):
                   source.index("TileStoreResult MapTileStoreSD::readChunk")]
-    assert body.index("SD.exists(name)") < body.index("SD.open(name, FILE_READ)")
+    assert "statMountedPathLocked(name, info)" in body
+    assert body.index("statMountedPathLocked(name, info)") < body.index("SD.open(name, FILE_READ)")
     assert "if (!stream_) { SDAccess::release_bus(); return TileStoreResult::IO_ERROR; }" in body
+    stat_body = source[source.index("TileStoreResult MapTileStoreSD::stat"):
+                       source.index("TileStoreResult MapTileStoreSD::beginList")]
+    assert "SD.open" not in stat_body
+    assert "statMountedPathLocked(name, info)" in stat_body
+    list_body = source[source.index("TileStoreResult MapTileStoreSD::beginList"):
+                       source.index("TileStoreResult MapTileStoreSD::nextList")]
+    assert "present == TileStoreResult::MISS" in list_body
+    assert "if (!list_root_)" in list_body and "TileStoreResult::IO_ERROR" in list_body

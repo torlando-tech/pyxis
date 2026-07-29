@@ -4,10 +4,26 @@
 #include "MapTileStoreSD.h"
 
 #ifdef ARDUINO
+#include <cerrno>
+#include <cstdio>
 #include <cstring>
+#include <sys/stat.h>
 
 namespace Hardware {
 namespace TDeck {
+
+namespace {
+TileStoreResult statMountedPathLocked(const char* name, struct stat& info) {
+    char mounted[MapTileStore::PATH_CAPACITY + 4U] = {};
+    const int written = std::snprintf(mounted, sizeof(mounted), "/sd%s", name);
+    if ((written < 0) || (static_cast<std::size_t>(written) >= sizeof(mounted))) {
+        return TileStoreResult::INVALID_ARGUMENT;
+    }
+    errno = 0;
+    if (::stat(mounted, &info) == 0) return TileStoreResult::OK;
+    return (errno == ENOENT) ? TileStoreResult::MISS : TileStoreResult::IO_ERROR;
+}
+}
 
 MapTileStoreSD::MapTileStoreSD()
     : stream_(), list_root_(), list_zoom_(), list_x_(), writing_(false), healthy_(true) {}
@@ -49,7 +65,9 @@ bool MapTileStoreSD::makeParentDirectoriesLocked(const char* name) {
 TileStoreResult MapTileStoreSD::beginRead(const char* name, std::uint32_t& size) {
     if (!healthy_ || !SDAccess::is_ready() || !SDAccess::acquire_bus(500U)) return TileStoreResult::STORAGE_UNAVAILABLE;
     if (!cardPresentLocked()) { SDAccess::release_bus(); return TileStoreResult::STORAGE_UNAVAILABLE; }
-    if (!SD.exists(name)) { SDAccess::release_bus(); return TileStoreResult::MISS; }
+    struct stat info = {};
+    const TileStoreResult present = statMountedPathLocked(name, info);
+    if (present != TileStoreResult::OK) { SDAccess::release_bus(); return present; }
     stream_ = SD.open(name, FILE_READ);
     if (!stream_) { SDAccess::release_bus(); return TileStoreResult::IO_ERROR; }
     const std::size_t file_size = stream_.size();
@@ -124,17 +142,25 @@ void MapTileStoreSD::abortWrite() {
 TileStoreResult MapTileStoreSD::remove(const char* name) {
     if (!healthy_ || !SDAccess::is_ready() || !SDAccess::acquire_bus(500U)) return TileStoreResult::STORAGE_UNAVAILABLE;
     if (!cardPresentLocked()) { SDAccess::release_bus(); return TileStoreResult::STORAGE_UNAVAILABLE; }
-    const bool existed = SD.exists(name);
-    const bool removed = !existed || SD.remove(name);
+    struct stat info = {};
+    const TileStoreResult present = statMountedPathLocked(name, info);
+    if (present != TileStoreResult::OK) { SDAccess::release_bus(); return present; }
+    const bool removed = SD.remove(name);
     SDAccess::release_bus();
-    return !existed ? TileStoreResult::MISS : (removed ? TileStoreResult::OK : TileStoreResult::IO_ERROR);
+    return removed ? TileStoreResult::OK : TileStoreResult::IO_ERROR;
 }
 
 TileStoreResult MapTileStoreSD::rename(const char* from, const char* to) {
     if (!healthy_ || !SDAccess::is_ready() || !SDAccess::acquire_bus(500U)) return TileStoreResult::STORAGE_UNAVAILABLE;
     if (!cardPresentLocked()) { SDAccess::release_bus(); return TileStoreResult::STORAGE_UNAVAILABLE; }
-    if (!SD.exists(from)) { SDAccess::release_bus(); return TileStoreResult::MISS; }
-    if (SD.exists(to) && !SD.remove(to)) { SDAccess::release_bus(); return TileStoreResult::IO_ERROR; }
+    struct stat source_info = {}, destination_info = {};
+    const TileStoreResult source = statMountedPathLocked(from, source_info);
+    if (source != TileStoreResult::OK) { SDAccess::release_bus(); return source; }
+    const TileStoreResult destination = statMountedPathLocked(to, destination_info);
+    if ((destination != TileStoreResult::MISS) && (destination != TileStoreResult::OK)) {
+        SDAccess::release_bus(); return destination;
+    }
+    if ((destination == TileStoreResult::OK) && !SD.remove(to)) { SDAccess::release_bus(); return TileStoreResult::IO_ERROR; }
     const bool renamed = SD.rename(from, to);
     SDAccess::release_bus();
     return renamed ? TileStoreResult::OK : TileStoreResult::IO_ERROR;
@@ -143,13 +169,12 @@ TileStoreResult MapTileStoreSD::rename(const char* from, const char* to) {
 TileStoreResult MapTileStoreSD::stat(const char* name, std::uint32_t& size) {
     if (!healthy_ || !SDAccess::is_ready() || !SDAccess::acquire_bus(500U)) return TileStoreResult::STORAGE_UNAVAILABLE;
     if (!cardPresentLocked()) { SDAccess::release_bus(); return TileStoreResult::STORAGE_UNAVAILABLE; }
-    fs::File file = SD.open(name, FILE_READ);
-    if (!file) { SDAccess::release_bus(); return TileStoreResult::MISS; }
-    const std::size_t file_size = file.size();
-    file.close();
+    struct stat info = {};
+    const TileStoreResult present = statMountedPathLocked(name, info);
     SDAccess::release_bus();
-    if (file_size > UINT32_MAX) return TileStoreResult::TOO_LARGE;
-    size = static_cast<std::uint32_t>(file_size);
+    if (present != TileStoreResult::OK) return present;
+    if ((info.st_size < 0) || (static_cast<std::uint64_t>(info.st_size) > UINT32_MAX)) return TileStoreResult::TOO_LARGE;
+    size = static_cast<std::uint32_t>(info.st_size);
     return TileStoreResult::OK;
 }
 
@@ -157,7 +182,14 @@ TileStoreResult MapTileStoreSD::beginList() {
     endList();
     if (!healthy_ || !SDAccess::is_ready() || !SDAccess::acquire_bus(500U)) return TileStoreResult::STORAGE_UNAVAILABLE;
     if (!cardPresentLocked()) { SDAccess::release_bus(); return TileStoreResult::STORAGE_UNAVAILABLE; }
+    struct stat info = {};
+    const TileStoreResult present = statMountedPathLocked("/pyxis-map/tiles", info);
+    if (present == TileStoreResult::MISS) { SDAccess::release_bus(); return TileStoreResult::OK; }
+    if ((present != TileStoreResult::OK) || !S_ISDIR(info.st_mode)) {
+        SDAccess::release_bus(); return TileStoreResult::IO_ERROR;
+    }
     list_root_ = SD.open("/pyxis-map/tiles", FILE_READ);
+    if (!list_root_) { SDAccess::release_bus(); return TileStoreResult::IO_ERROR; }
     SDAccess::release_bus();
     return TileStoreResult::OK; // An absent cache directory is an empty cache.
 }
@@ -170,28 +202,34 @@ TileStoreResult MapTileStoreSD::nextList(char* name, std::size_t capacity, bool&
     if (!cardPresentLocked()) { SDAccess::release_bus(); return TileStoreResult::STORAGE_UNAVAILABLE; }
     while (true) {
         if (list_x_) {
+            errno = 0;
             fs::File item = list_x_.openNextFile();
             if (item) {
                 const TileStoreResult copied = copyName(item.path(), name, capacity);
                 item.close(); SDAccess::release_bus(); return copied;
             }
+            if (errno != 0) { SDAccess::release_bus(); return TileStoreResult::IO_ERROR; }
             list_x_.close();
         }
         if (list_zoom_) {
+            errno = 0;
             fs::File item = list_zoom_.openNextFile();
             if (item) {
                 if (item.isDirectory()) { list_x_ = item; continue; }
                 const TileStoreResult copied = copyName(item.path(), name, capacity);
                 item.close(); SDAccess::release_bus(); return copied;
             }
+            if (errno != 0) { SDAccess::release_bus(); return TileStoreResult::IO_ERROR; }
             list_zoom_.close();
         }
+        errno = 0;
         fs::File item = list_root_.openNextFile();
         if (item) {
             if (item.isDirectory()) { list_zoom_ = item; continue; }
             const TileStoreResult copied = copyName(item.path(), name, capacity);
             item.close(); SDAccess::release_bus(); return copied;
         }
+        if (errno != 0) { SDAccess::release_bus(); return TileStoreResult::IO_ERROR; }
         done = true;
         SDAccess::release_bus();
         return TileStoreResult::OK;
