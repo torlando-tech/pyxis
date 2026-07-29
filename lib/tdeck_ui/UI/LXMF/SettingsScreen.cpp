@@ -74,7 +74,7 @@ SettingsScreen::SettingsScreen(lv_obj_t* parent)
       _transport_modal_group(nullptr), _transport_enable_confirmed(false),
       _switch_map_download(nullptr),
       _btn_propagation_nodes(nullptr), _switch_prop_fallback(nullptr), _switch_prop_only(nullptr),
-      _save_state(0U), _gps(nullptr) {
+      _save_state(0U), _apply_retry_at_ms(0U), _gps(nullptr) {
     LVGL_LOCK();
 
     // Create screen object
@@ -1101,6 +1101,8 @@ void SettingsScreen::save_settings() {
 void SettingsScreen::service_pending_save() {
     std::uint8_t expected = _save_state.load(std::memory_order_acquire);
     if (expected != SAVE_PENDING && expected != SAVE_APPLY_RETRY) return;
+    if (expected == SAVE_APPLY_RETRY &&
+        static_cast<std::int32_t>(millis() - _apply_retry_at_ms) < 0) return;
     const bool needs_persistence = expected == SAVE_PENDING;
     if (!_save_state.compare_exchange_strong(
             expected, SAVE_PROCESSING, std::memory_order_acq_rel)) return;
@@ -1142,6 +1144,7 @@ void SettingsScreen::service_pending_save() {
     }
 
     const bool applied = !_save_callback || _save_callback(settings);
+    if (!applied) _apply_retry_at_ms = millis() + 1000U;
     _save_state.store(applied ? SAVE_IDLE : SAVE_APPLY_RETRY,
                       std::memory_order_release);
 }

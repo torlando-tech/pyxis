@@ -130,6 +130,7 @@ UI::LXMF::UIManager* ui_manager = nullptr;
 bool location_filesystem_available = false;
 TCPClientInterface* tcp_interface_impl = nullptr;
 Interface* tcp_interface = nullptr;
+bool tcp_interface_registered = false;
 SX1262Interface* lora_interface_impl = nullptr;
 Interface* lora_interface = nullptr;
 AutoInterface* auto_interface_impl = nullptr;
@@ -1450,6 +1451,7 @@ void setup_ui_manager() {
             if (ui_manager) {
                 ui_manager->set_map_download_enabled(new_settings.map_download_enabled);
             }
+            app_settings.map_download_enabled = new_settings.map_download_enabled;
             // Check what changed
             bool wifi_settings_changed = (new_settings.wifi_ssid != app_settings.wifi_ssid) ||
                                         (new_settings.wifi_password != app_settings.wifi_password);
@@ -1465,6 +1467,7 @@ void setup_ui_manager() {
             bool auto_settings_changed = (new_settings.auto_enabled != app_settings.auto_enabled);
             bool ble_settings_changed = (new_settings.ble_enabled != app_settings.ble_enabled);
             bool transport_settings_changed = (new_settings.transport_enabled != app_settings.transport_enabled);
+            bool display_name_changed = (new_settings.display_name != app_settings.display_name);
 
             // Reconnect is serviced by the main loop's existing bounded,
             // watchdog-fed reconnect path after this settings application
@@ -1475,11 +1478,14 @@ void setup_ui_manager() {
                 wifi_reconnect_pending = true;
                 INFO(("WiFi reconnect queued for: " + new_settings.wifi_ssid).c_str());
             }
+            app_settings.wifi_ssid = new_settings.wifi_ssid;
+            app_settings.wifi_password = new_settings.wifi_password;
 
             // Update router display name while the callback's outer RouterLock is held.
-            if (router && !new_settings.display_name.isEmpty()) {
+            if (display_name_changed && router && !new_settings.display_name.isEmpty()) {
                 router->set_display_name(new_settings.display_name.c_str());
             }
+            app_settings.display_name = new_settings.display_name;
 
             // Handle TCP interface changes at runtime
             if (tcp_settings_changed) {
@@ -1489,21 +1495,28 @@ void setup_ui_manager() {
                 }
 
                 if (new_settings.tcp_enabled) {
-                    bool created = false;
                     if (!tcp_interface_impl) {
                         tcp_interface_impl = new TCPClientInterface("tcp0");
                         tcp_interface = new Interface(tcp_interface_impl);
-                        created = true;
                     }
                     tcp_interface_impl->set_target_host(new_settings.tcp_host.c_str());
                     tcp_interface_impl->set_target_port(new_settings.tcp_port);
                     // A failed initial connection is transient; TCPClientInterface
                     // owns its background retry state once configured.
-                    tcp_interface_impl->start();
-                    if (created) Transport::register_interface(*tcp_interface);
+                    if (!tcp_interface_impl->start()) {
+                        ERROR("Failed to start TCP connect worker");
+                        return false;
+                    }
+                    if (!tcp_interface_registered) {
+                        Transport::register_interface(*tcp_interface);
+                        tcp_interface_registered = true;
+                    }
                 } else {
                     INFO("TCP interface disabled");
                 }
+                app_settings.tcp_enabled = new_settings.tcp_enabled;
+                app_settings.tcp_host = new_settings.tcp_host;
+                app_settings.tcp_port = new_settings.tcp_port;
             }
 
             // Handle LoRa interface changes at runtime
@@ -1543,6 +1556,12 @@ void setup_ui_manager() {
                     INFO("LoRa interface disabled");
                 }
                 update_radio_activity_source();
+                app_settings.lora_enabled = new_settings.lora_enabled;
+                app_settings.lora_frequency = new_settings.lora_frequency;
+                app_settings.lora_bandwidth = new_settings.lora_bandwidth;
+                app_settings.lora_sf = new_settings.lora_sf;
+                app_settings.lora_cr = new_settings.lora_cr;
+                app_settings.lora_power = new_settings.lora_power;
             }
 
             // Handle Auto interface changes at runtime
@@ -1575,6 +1594,7 @@ void setup_ui_manager() {
                 } else {
                     INFO("AutoInterface disabled");
                 }
+                app_settings.auto_enabled = new_settings.auto_enabled;
             }
 
             // Handle BLE interface changes at runtime
@@ -1624,6 +1644,7 @@ void setup_ui_manager() {
                 } else {
                     INFO("BLE interface disabled");
                 }
+                app_settings.ble_enabled = new_settings.ble_enabled;
             }
 
             // Commit the runtime snapshot only after every fallible transition
@@ -1706,23 +1727,19 @@ void start_tcp_interface() {
     if (!tcp_interface_impl) {
         String server_addr = app_settings.tcp_host + ":" + String(app_settings.tcp_port);
         INFO(("Creating TCP interface to " + std::string(server_addr.c_str())).c_str());
-
         tcp_interface_impl = new TCPClientInterface("tcp0");
-        tcp_interface_impl->set_target_host(app_settings.tcp_host.c_str());
-        tcp_interface_impl->set_target_port(app_settings.tcp_port);
         tcp_interface = new Interface(tcp_interface_impl);
-
-        if (!tcp_interface->start()) {
-            INFO("TCP initial connection failed, will retry in background");
-        }
-        Transport::register_interface(*tcp_interface);
-    } else {
-        // Interface exists, just update settings and restart
-        INFO("Starting TCP interface...");
-        tcp_interface_impl->set_target_host(app_settings.tcp_host.c_str());
-        tcp_interface_impl->set_target_port(app_settings.tcp_port);
-        tcp_interface_impl->start();
     }
+    if (tcp_interface_registered) return;
+    INFO("Starting TCP interface...");
+    tcp_interface_impl->set_target_host(app_settings.tcp_host.c_str());
+    tcp_interface_impl->set_target_port(app_settings.tcp_port);
+    if (!tcp_interface_impl->start()) {
+        ERROR("TCP connect worker start failed; retry remains armed");
+        return;
+    }
+    Transport::register_interface(*tcp_interface);
+    tcp_interface_registered = true;
 }
 
 void setup() {
@@ -2966,9 +2983,6 @@ void loop() {
         if (wifi_connected && !last_wifi_connected) {
             INFO("WiFi connected (post-boot) — running on_wifi_connected");
             on_wifi_connected();
-            if (!tcp_interface_impl && app_settings.tcp_enabled) {
-                start_tcp_interface();
-            }
             // AutoInterface init at boot fails its WiFi-connected gate
             // because WiFi typically associates 2-5s after the boot
             // block runs. Retry here once WiFi actually lands. Also handles
@@ -2980,6 +2994,11 @@ void loop() {
             if (app_settings.auto_enabled) {
                 start_auto_interface();
             }
+        }
+        // A failed worker allocation leaves the interface unregistered. Retry
+        // at the bounded status cadence instead of accepting a dead setting.
+        if (wifi_connected && app_settings.tcp_enabled && !tcp_interface_registered) {
+            start_tcp_interface();
         }
         // Backstop auto-reconnect: WiFi.setAutoReconnect() handles most drops in
         // the background, but not every disconnect reason — without an explicit

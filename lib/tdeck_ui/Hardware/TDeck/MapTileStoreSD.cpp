@@ -49,8 +49,9 @@ bool MapTileStoreSD::makeParentDirectoriesLocked(const char* name) {
 TileStoreResult MapTileStoreSD::beginRead(const char* name, std::uint32_t& size) {
     if (!healthy_ || !SDAccess::is_ready() || !SDAccess::acquire_bus(500U)) return TileStoreResult::STORAGE_UNAVAILABLE;
     if (!cardPresentLocked()) { SDAccess::release_bus(); return TileStoreResult::STORAGE_UNAVAILABLE; }
+    if (!SD.exists(name)) { SDAccess::release_bus(); return TileStoreResult::MISS; }
     stream_ = SD.open(name, FILE_READ);
-    if (!stream_) { SDAccess::release_bus(); return TileStoreResult::MISS; }
+    if (!stream_) { SDAccess::release_bus(); return TileStoreResult::IO_ERROR; }
     const std::size_t file_size = stream_.size();
     if (file_size > UINT32_MAX) { stream_.close(); SDAccess::release_bus(); return TileStoreResult::TOO_LARGE; }
     size = static_cast<std::uint32_t>(file_size);

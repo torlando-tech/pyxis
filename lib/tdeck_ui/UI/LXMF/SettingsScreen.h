@@ -321,6 +321,7 @@ private:
     AppSettings _settings;
     AppSettings _pending_save_settings;
     std::atomic<std::uint8_t> _save_state; // 0 idle, 1 pending, 2 processing
+    std::uint32_t _apply_retry_at_ms;
     RNS::Bytes _identity_hash;
     RNS::Bytes _lxmf_address;
     TinyGPSPlus* _gps;

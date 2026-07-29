@@ -269,6 +269,17 @@ TileStoreResult MapTileStore::recoverEvictionTransaction() {
     }
     const TileKey candidate = decodeKey(record + 8U);
     if (!isValidKey(candidate)) return TileStoreResult::INDEX_MISMATCH;
+    TileKey victims[HARD_MAX_ENTRIES] = {};
+    for (std::uint16_t i = 0U; i < victim_count; ++i) {
+        victims[i] = decodeKey(
+            record + 17U + (static_cast<std::size_t>(i) * TRANSACTION_KEY_BYTES));
+        if (!isValidKey(victims[i]) || sameKey(victims[i], candidate)) {
+            return TileStoreResult::INDEX_MISMATCH;
+        }
+        for (std::uint16_t prior = 0U; prior < i; ++prior) {
+            if (sameKey(victims[i], victims[prior])) return TileStoreResult::INDEX_MISMATCH;
+        }
+    }
     char live[PATH_CAPACITY] = {}, temp[PATH_CAPACITY] = {}, backup[PATH_CAPACITY] = {};
     canonicalPath(candidate, live, sizeof(live));
     appendSuffix(live, ".tmp", temp, sizeof(temp));
@@ -294,9 +305,7 @@ TileStoreResult MapTileStore::recoverEvictionTransaction() {
     }
 
     for (std::uint16_t i = 0U; i < victim_count; ++i) {
-        const TileKey victim = decodeKey(
-            record + 17U + (static_cast<std::size_t>(i) * TRANSACTION_KEY_BYTES));
-        if (!isValidKey(victim) || sameKey(victim, candidate)) return TileStoreResult::INDEX_MISMATCH;
+        const TileKey& victim = victims[i];
         char victim_live[PATH_CAPACITY] = {}, evicted[PATH_CAPACITY] = {};
         canonicalPath(victim, victim_live, sizeof(victim_live));
         appendSuffix(victim_live, ".evict", evicted, sizeof(evicted));
@@ -321,6 +330,40 @@ TileStoreResult MapTileStore::recoverEvictionTransaction() {
 TileStoreResult MapTileStore::recoverIndex() {
     TileStoreResult result = recoverEvictionTransaction();
     if (result != TileStoreResult::OK) return result;
+    // With no manifest, every .evict file belongs to a committed transaction.
+    // Remove these in a separate list pass so they cannot consume recovery
+    // index slots, including when max_entries == HARD_MAX_ENTRIES.
+    TileKey committed_evictions[HARD_MAX_ENTRIES] = {};
+    std::uint16_t committed_count = 0U;
+    result = storage_.beginList();
+    if (result != TileStoreResult::OK) return result;
+    while (true) {
+        char name[PATH_CAPACITY] = {};
+        bool done = false;
+        result = storage_.nextList(name, sizeof(name), done);
+        if (result != TileStoreResult::OK) { storage_.endList(); return result; }
+        if (done) break;
+        TileKey key = {0U, 0U, 0U};
+        std::uint8_t flag = 0U;
+        result = parseOwnedPath(name, key, flag);
+        if (result != TileStoreResult::OK) { storage_.endList(); return result; }
+        if (flag == HAS_EVICT) {
+            if (committed_count >= HARD_MAX_ENTRIES) {
+                storage_.endList();
+                return TileStoreResult::INDEX_FULL;
+            }
+            committed_evictions[committed_count++] = key;
+        }
+    }
+    storage_.endList();
+    for (std::uint16_t i = 0U; i < committed_count; ++i) {
+        char live[PATH_CAPACITY] = {}, evicted[PATH_CAPACITY] = {};
+        canonicalPath(committed_evictions[i], live, sizeof(live));
+        appendSuffix(live, ".evict", evicted, sizeof(evicted));
+        result = storage_.remove(evicted);
+        if ((result != TileStoreResult::OK) && (result != TileStoreResult::MISS)) return result;
+    }
+
     result = storage_.beginList();
     if (result != TileStoreResult::OK) return result;
     while (true) {
@@ -335,7 +378,10 @@ TileStoreResult MapTileStore::recoverIndex() {
         if (result != TileStoreResult::OK) { storage_.endList(); return result; }
         int index = findEntry(key);
         if (index < 0) {
-            if (entry_count_ >= config_.max_entries) { storage_.endList(); return TileStoreResult::INDEX_FULL; }
+            // Recovery artifacts can temporarily exceed the configured live
+            // entry count. Collect up to the hard bound, clean them, then
+            // enforce max_entries on the surviving live generation.
+            if (entry_count_ >= HARD_MAX_ENTRIES) { storage_.endList(); return TileStoreResult::INDEX_FULL; }
             index = static_cast<int>(entry_count_++);
             entries_[static_cast<std::size_t>(index)] = Entry{key, 0U, 0U, 0U};
         }
@@ -407,6 +453,7 @@ TileStoreResult MapTileStore::recoverIndex() {
         for (std::uint16_t j = i; (j + 1U) < entry_count_; ++j) entries_[j] = entries_[j + 1U];
         --entry_count_;
     }
+    if (entry_count_ > config_.max_entries) return TileStoreResult::INDEX_FULL;
     if (total_bytes_ > config_.byte_quota) return TileStoreResult::QUOTA_EXCEEDED;
     for (std::uint16_t a = 1U; a < entry_count_; ++a) {
         Entry value = entries_[a]; std::uint16_t b = a;
@@ -627,7 +674,9 @@ TileStoreResult MapTileStore::finishPut() {
             const TileStoreResult recovered = recoverEvictionTransaction();
             if (recovered != TileStoreResult::OK) initialized_ = false;
         } else {
-            if (duplicate) storage_.rename(put_backup_, put_live_);
+            if (duplicate && storage_.rename(put_backup_, put_live_) != TileStoreResult::OK) {
+                initialized_ = false;
+            }
             storage_.remove(put_temp_);
         }
         return result;

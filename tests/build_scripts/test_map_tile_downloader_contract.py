@@ -59,6 +59,8 @@ def test_settings_save_defers_persistence_and_application_outside_lvgl():
     assert "_save_callback(settings)" in service
     assert "SAVE_APPLY_RETRY" in SETTINGS_H.read_text()
     assert "applied ? SAVE_IDLE : SAVE_APPLY_RETRY" in service
+    assert "millis() - _apply_retry_at_ms" in service
+    assert "_apply_retry_at_ms = millis() + 1000U" in service
 
     main = MAIN.read_text()
     callback = main[main.index("settings->set_save_callback"):
@@ -70,6 +72,10 @@ def test_settings_save_defers_persistence_and_application_outside_lvgl():
     assert "if (!ble_mem)" in callback
     assert callback.index("app_settings = new_settings") > callback.index("Failed to start BLE interface")
     assert callback.count("return false") >= 5
+    assert "if (!tcp_interface_impl->start())" in callback
+    assert callback.index("app_settings.tcp_enabled = new_settings.tcp_enabled") < callback.index("Failed to start LoRa interface")
+    assert callback.index("app_settings.lora_enabled = new_settings.lora_enabled") < callback.index("Failed to start AutoInterface")
+    assert callback.index("app_settings.auto_enabled = new_settings.auto_enabled") < callback.index("Failed to start BLE interface")
 
     update = UI_MANAGER.read_text()
     body = update[update.index("void UIManager::update()"):

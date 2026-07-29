@@ -49,3 +49,11 @@ def test_sd_adapter_latches_unhealthy_when_open_handles_cannot_close():
     assert "bool healthy_;" in header
     assert source.count("healthy_ = false") >= 3
     assert "if (!healthy_) return false" in source
+
+
+def test_sd_adapter_distinguishes_missing_files_from_open_failures():
+    source = SD_CPP.read_text()
+    body = source[source.index("TileStoreResult MapTileStoreSD::beginRead"):
+                  source.index("TileStoreResult MapTileStoreSD::readChunk")]
+    assert body.index("SD.exists(name)") < body.index("SD.open(name, FILE_READ)")
+    assert "if (!stream_) { SDAccess::release_bus(); return TileStoreResult::IO_ERROR; }" in body
