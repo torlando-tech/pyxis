@@ -32,3 +32,18 @@ def test_live_location_control_surface_is_explicit_opt_in():
     assert "start_location_sharing(" in header
     assert "stop_location_sharing(" in header
     assert "get_location_share_session(" in header
+
+
+def test_router_pump_is_not_run_under_lvgl_and_transient_delivery_skips_store_update():
+    cpp = CPP.read_text()
+    main = (ROOT / "src/main.cpp").read_text()
+    update = cpp[cpp.index("void UIManager::update()") : cpp.index("void UIManager::show_conversation_list")]
+    assert "_router.process_outbound()" not in update
+    assert "_router.process_inbound()" not in update
+
+    callback = main[
+        main.index("router->register_delivered_callback") :
+        main.index("// Boot profiling complete")
+    ]
+    assert callback.index("load_message(msg_hash)") < callback.index("update_message_state(")
+    assert "if (!full_msg.hash())" in callback

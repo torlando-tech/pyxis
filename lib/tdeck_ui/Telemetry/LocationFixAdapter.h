@@ -8,6 +8,7 @@
 namespace Telemetry {
 
 constexpr uint32_t MAX_GPS_FIX_AGE_MILLIS = 10000U;
+constexpr uint64_t MIN_VALID_LOCATION_WALL_MILLIS = 1577836800000ULL;
 
 struct GpsFixSample {
     bool location_valid = false;
@@ -21,8 +22,6 @@ struct GpsFixSample {
     double speed_kilometers_per_hour = 0.0;
     bool bearing_valid = false;
     double bearing_degrees = 0.0;
-    bool hdop_valid = false;
-    double hdop = 0.0;
 };
 
 // Converts a fresh GPS sample into the fixed-unit telemetry contract. Output is

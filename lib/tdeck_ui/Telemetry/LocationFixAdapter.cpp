@@ -35,7 +35,7 @@ bool locationTelemetryFromGpsFix(
     LocationTelemetry& output) {
     if (!sample.location_valid ||
         sample.location_age_millis > MAX_GPS_FIX_AGE_MILLIS ||
-        wall_now_millis == 0 ||
+        wall_now_millis < MIN_VALID_LOCATION_WALL_MILLIS ||
         !finiteInRange(sample.latitude_degrees, -90.0, 90.0) ||
         !finiteInRange(sample.longitude_degrees, -180.0, 180.0)) {
         return false;
@@ -46,8 +46,7 @@ bool locationTelemetryFromGpsFix(
           sample.speed_kilometers_per_hour < 0.0)) ||
         (sample.bearing_valid &&
          (!std::isfinite(sample.bearing_degrees) ||
-          sample.bearing_degrees < 0.0 || sample.bearing_degrees >= 360.0)) ||
-        (sample.hdop_valid && (!std::isfinite(sample.hdop) || sample.hdop < 0.0))) {
+          sample.bearing_degrees < 0.0 || sample.bearing_degrees >= 360.0))) {
         return false;
     }
 
@@ -65,12 +64,11 @@ bool locationTelemetryFromGpsFix(
         candidate.bearing_cdeg = roundedUnsignedClamped<uint32_t>(
             sample.bearing_degrees * 100.0);
     }
-    if (sample.hdop_valid) {
-        // TinyGPS++ exposes dimensionless HDOP. Preserve the existing Pyxis
-        // approximation of horizontal accuracy as HDOP * 5 metres.
-        candidate.accuracy_cm = roundedUnsignedClamped<uint16_t>(sample.hdop * 500.0);
-    }
-    candidate.timestamp_seconds = wall_now_millis / 1000ULL;
+    // TinyGPS++ HDOP is dimensionless and must not be presented as a measured
+    // horizontal accuracy. Leave accuracy at its explicit unknown value zero.
+    const uint64_t fix_wall_millis =
+        wall_now_millis - sample.location_age_millis;
+    candidate.timestamp_seconds = fix_wall_millis / 1000ULL;
     candidate.sensor_timestamp_seconds = candidate.timestamp_seconds;
     if (candidate.timestamp_seconds == 0) return false;
 

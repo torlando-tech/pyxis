@@ -558,8 +558,7 @@ void UIManager::update() {
         gps_sample.speed_kilometers_per_hour = _gps->speed.kmph();
         gps_sample.bearing_valid = _gps->course.isValid();
         gps_sample.bearing_degrees = _gps->course.deg();
-        gps_sample.hdop_valid = _gps->hdop.isValid();
-        gps_sample.hdop = _gps->hdop.hdop();
+
     }
     Telemetry::LocationTelemetry current_location{};
     const bool current_location_valid = Telemetry::locationTelemetryFromGpsFix(
@@ -594,6 +593,7 @@ void UIManager::update() {
             WARNING("LXST: Discarding stale/busy call start request");
         }
     }
+
 
     // Consume UI commands unconditionally. LVGL callbacks only publish into
     // the mailbox; loopTask remains the sole owner of the audio pipeline.

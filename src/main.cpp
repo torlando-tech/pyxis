@@ -1898,45 +1898,24 @@ void setup() {
 
     // Register delivered callback to update message status in storage and UI
     router->register_delivered_callback([](LXMF::LXMessage& msg) {
-        INFO(">>> APP DELIVERED CALLBACK ENTRY");
-        Serial.flush();
-
-        INFO(">>> Getting message hash");
-        Serial.flush();
         RNS::Bytes msg_hash = msg.hash();
         INFO("Delivery confirmed for message: " + msg_hash.toHex().substr(0, 16) + "...");
-        Serial.flush();
+        if (!message_store) return;
 
-        // Update message state in storage
-        if (message_store) {
-            INFO(">>> Updating message state in store");
-            Serial.flush();
-            if (!message_store->update_message_state(msg_hash, LXMF::Type::Message::DELIVERED)) {
-				ERROR("Delivered message state persistence failed; UI status not advanced");
-				return;
-            }
-            INFO(">>> State updated, loading full message");
-            Serial.flush();
-
-            // Load full message for UI update (need destination_hash)
-            LXMF::LXMessage full_msg = message_store->load_message(msg_hash);
-            INFO(">>> Message loaded, checking hash");
-            Serial.flush();
-            if (full_msg.hash()) {
-                INFO(">>> Setting state on full message");
-                Serial.flush();
-                full_msg.state(LXMF::Type::Message::DELIVERED);
-                if (ui_manager) {
-                    INFO(">>> Calling UI manager on_message_delivered");
-                    Serial.flush();
-                    ui_manager->on_message_delivered(full_msg);
-                    INFO(">>> UI manager returned");
-                    Serial.flush();
-                }
-            }
+        // Transient telemetry is deliberately not stored as chat. Check for a
+        // durable message before attempting a state write so its delivery
+        // callback remains silent and does not report a false storage error.
+        LXMF::LXMessage full_msg = message_store->load_message(msg_hash);
+        if (!full_msg.hash()) return;
+        if (!message_store->update_message_state(
+                msg_hash, LXMF::Type::Message::DELIVERED)) {
+            ERROR("Delivered message state persistence failed; UI status not advanced");
+            return;
         }
-        INFO(">>> APP DELIVERED CALLBACK EXIT");
-        Serial.flush();
+        full_msg.state(LXMF::Type::Message::DELIVERED);
+        if (ui_manager) {
+            ui_manager->on_message_delivered(full_msg);
+        }
     });
 
     // Boot profiling complete

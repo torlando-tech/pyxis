@@ -21,8 +21,7 @@ Telemetry::GpsFixSample validSample() {
     sample.speed_kilometers_per_hour = 12.34;
     sample.bearing_valid = true;
     sample.bearing_degrees = 42.0;
-    sample.hdop_valid = true;
-    sample.hdop = 0.7;
+
     return sample;
 }
 
@@ -35,9 +34,9 @@ void convertsFreshFixWithExplicitUnits() {
     CHECK(output.altitude_cm == 1625);
     CHECK(output.speed_centi_kmh == 1234U);
     CHECK(output.bearing_cdeg == 4200U);
-    CHECK(output.accuracy_cm == 350U);
-    CHECK(output.timestamp_seconds == 1700000000ULL);
-    CHECK(output.sensor_timestamp_seconds == 1700000000ULL);
+    CHECK(output.accuracy_cm == 0U);
+    CHECK(output.timestamp_seconds == 1699999999ULL);
+    CHECK(output.sensor_timestamp_seconds == 1699999999ULL);
 }
 
 void rejectsUnavailableStaleAndInvalidFixesTransactionally() {
@@ -58,6 +57,8 @@ void rejectsUnavailableStaleAndInvalidFixesTransactionally() {
     CHECK(!Telemetry::locationTelemetryFromGpsFix(sample, 1700000000123ULL, sentinel));
     sample = validSample();
     CHECK(!Telemetry::locationTelemetryFromGpsFix(sample, 0, sentinel));
+    CHECK(!Telemetry::locationTelemetryFromGpsFix(
+        sample, Telemetry::MIN_VALID_LOCATION_WALL_MILLIS - 1U, sentinel));
 }
 
 void defaultsMissingOptionalSensorsAndClampsRepresentableValues() {
@@ -65,7 +66,7 @@ void defaultsMissingOptionalSensorsAndClampsRepresentableValues() {
     sample.altitude_valid = false;
     sample.speed_valid = false;
     sample.bearing_valid = false;
-    sample.hdop_valid = false;
+
     Telemetry::LocationTelemetry output{};
     CHECK(Telemetry::locationTelemetryFromGpsFix(sample, 1700000000123ULL, output));
     CHECK(output.altitude_cm == 0);
@@ -76,11 +77,11 @@ void defaultsMissingOptionalSensorsAndClampsRepresentableValues() {
     sample = validSample();
     sample.altitude_meters = 1.0e20;
     sample.speed_kilometers_per_hour = 1.0e20;
-    sample.hdop = 1.0e20;
+
     CHECK(Telemetry::locationTelemetryFromGpsFix(sample, 1700000000123ULL, output));
     CHECK(output.altitude_cm == std::numeric_limits<int32_t>::max());
     CHECK(output.speed_centi_kmh == std::numeric_limits<uint32_t>::max());
-    CHECK(output.accuracy_cm == std::numeric_limits<uint16_t>::max());
+    CHECK(output.accuracy_cm == 0U);
 }
 
 void rejectsNonFiniteAndInvalidOptionalDomains() {
@@ -94,9 +95,7 @@ void rejectsNonFiniteAndInvalidOptionalDomains() {
     sample = validSample();
     sample.bearing_degrees = 360.0;
     CHECK(!Telemetry::locationTelemetryFromGpsFix(sample, 1700000000123ULL, output));
-    sample = validSample();
-    sample.hdop = -0.1;
-    CHECK(!Telemetry::locationTelemetryFromGpsFix(sample, 1700000000123ULL, output));
+
 }
 }
 
