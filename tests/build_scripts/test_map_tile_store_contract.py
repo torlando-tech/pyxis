@@ -76,3 +76,16 @@ def test_sd_adapter_checks_sync_and_close_before_acknowledging_write():
     assert "::close(write_fd_) == 0" in body
     assert "synced && closed" in body
     assert "stream_.flush()" not in body
+
+
+def test_sd_abort_lock_timeout_defers_descriptor_close_without_leaking_it():
+    source = SD_CPP.read_text()
+    abort = source[source.index("void MapTileStoreSD::abortWrite"):
+                   source.index("TileStoreResult MapTileStoreSD::remove")]
+    service = source[source.index("TileStoreResult MapTileStoreSD::servicePendingAbortLocked"):
+                     source.index("bool MapTileStoreSD::isAvailable")]
+    begin_write = source[source.index("TileStoreResult MapTileStoreSD::beginWrite"):
+                         source.index("TileStoreResult MapTileStoreSD::writeChunk")]
+    assert "else {\n        abort_pending_ = true;\n    }" in abort
+    assert "::close(write_fd_)" in service
+    assert "servicePendingAbortLocked()" in begin_write

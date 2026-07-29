@@ -48,11 +48,13 @@ private:
     fs::File list_x_;
     int write_fd_;
     bool writing_;
+    bool abort_pending_;
     bool healthy_;
 
     static bool cardPresentLocked();
     static TileStoreResult copyName(const char* source, char* output, std::size_t capacity);
     static bool makeParentDirectoriesLocked(const char* name);
+    TileStoreResult servicePendingAbortLocked();
 };
 
 } // namespace TDeck
