@@ -10,7 +10,7 @@
 #   PYXIS_TEST_TCP_HOST   Mac IP the T-Deck dials for rnsd (default: en0 IPv4)
 #   PYXIS_TEST_TCP_PORT   rnsd TCPServerInterface port      (default: 4242)
 #   PYXIS_SERIAL_PORT     T-Deck USB serial                 (default: first /dev/cu.usbmodem*)
-#   PYXIS_ENV             platformio env                    (default: tdeck)
+#   PYXIS_ENV             platformio env                    (default: tdeck-test)
 #   PYXIS_PROPAGATION_NODE_HEX  lxmd PN hash (optional; enables PROPAGATED rounds)
 #
 # Usage:
@@ -26,7 +26,7 @@ REPO="$(cd "$HERE/../.." && pwd)"
 SOAK_HOURS="0"
 [ "${1:-}" = "--soak-hours" ] && SOAK_HOURS="${2:-0}"
 
-PYXIS_ENV="${PYXIS_ENV:-tdeck}"
+PYXIS_ENV="${PYXIS_ENV:-tdeck-test}"
 PYXIS_TEST_TCP_PORT="${PYXIS_TEST_TCP_PORT:-4242}"
 PYXIS_TEST_TCP_HOST="${PYXIS_TEST_TCP_HOST:-$(ipconfig getifaddr en0 2>/dev/null || true)}"
 PYXIS_SERIAL_PORT="${PYXIS_SERIAL_PORT:-$(ls /dev/cu.usbmodem* 2>/dev/null | head -1 || true)}"

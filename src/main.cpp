@@ -2,6 +2,15 @@
 // Complete LXMF messaging application with LVGL UI
 
 #include <Arduino.h>
+
+#ifdef PYXIS_TEST_HOOKS
+#ifndef PYXIS_TEST_TCP_HOST
+#define PYXIS_TEST_TCP_HOST ""
+#endif
+#ifndef PYXIS_TEST_TCP_PORT
+#define PYXIS_TEST_TCP_PORT ""
+#endif
+#endif
 #include <Wire.h>
 #include <SD.h>
 #include <FS.h>
