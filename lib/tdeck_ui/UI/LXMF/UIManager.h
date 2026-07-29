@@ -40,6 +40,7 @@
 #include "LXMF/LXMRouter.h"
 #include "LXMF/PropagationNodeManager.h"
 #include "LXMF/MessageStore.h"
+#include "Telemetry/LocationMessagePolicy.h"
 #include <microReticulum/Reticulum.h>
 #include <microReticulum/Link.h>
 
@@ -316,6 +317,7 @@ private:
     RNS::Reticulum& _reticulum;
     ::LXMF::LXMRouter& _router;
     ::LXMF::MessageStore& _store;
+    Telemetry::PeerLocationStore _peer_locations;
     RNS::Destination _lxst_destination;
 
     NavigationStack _navigation;

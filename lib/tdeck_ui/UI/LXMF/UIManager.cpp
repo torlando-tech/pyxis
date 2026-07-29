@@ -21,6 +21,7 @@
 #include <microReticulum/Packet.h>
 #include <microReticulum/Transport.h>
 #include <microReticulum/Destination.h>
+#include <microReticulum/Utilities/OS.h>
 #include <esp_heap_caps.h>
 
 using namespace RNS;
@@ -1060,6 +1061,61 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
 #ifdef PYXIS_TEST_HOOKS
     pyxis_test_hook_record_rx(message);
 #endif
+
+    // Classify authenticated location fields before any conversation write.
+    // Raw field keys and values are MessagePack spans retained by LXMessage.
+    Telemetry::InboundLocationMessage inbound{};
+    const RNS::Bytes& source_hash = message.source_hash();
+    if (message.signature_validated() &&
+        source_hash.size() == Telemetry::PEER_ID_SIZE) {
+        std::memcpy(inbound.authenticated_sender.bytes,
+                    source_hash.data(), Telemetry::PEER_ID_SIZE);
+
+        static const uint8_t telemetry_key_bytes[] = {
+            Telemetry::FIELD_TELEMETRY};
+        static const uint8_t custom_meta_key_bytes[] = {
+            0xccU, Telemetry::FIELD_CUSTOM_META};
+        const RNS::Bytes telemetry_key(
+            telemetry_key_bytes, sizeof(telemetry_key_bytes));
+        const RNS::Bytes custom_meta_key(
+            custom_meta_key_bytes, sizeof(custom_meta_key_bytes));
+        const RNS::Bytes* telemetry_value = message.fields_get(telemetry_key);
+        const RNS::Bytes* custom_meta_value = message.fields_get(custom_meta_key);
+        if (telemetry_value != nullptr) {
+            inbound.telemetry.present = true;
+            inbound.telemetry.raw_value = Telemetry::BinaryView{
+                telemetry_value->data(), telemetry_value->size()};
+        }
+        if (custom_meta_value != nullptr) {
+            inbound.custom_meta.present = true;
+            inbound.custom_meta.raw_value = Telemetry::BinaryView{
+                custom_meta_value->data(), custom_meta_value->size()};
+        }
+        const RNS::Bytes& title = message.title();
+        const RNS::Bytes& content = message.content();
+        inbound.title = Telemetry::TextField(
+            true, title.data(), title.size());
+        inbound.content = Telemetry::TextField(
+            true, content.data(), content.size());
+        inbound.received_at_millis = RNS::Utilities::OS::ltime();
+
+        const Telemetry::LocationMessageDecision location_decision =
+            Telemetry::classifyInboundLocationMessage(inbound);
+        if (location_decision.log_malformed) {
+            WARNING("Malformed inbound location field ignored");
+        }
+        if (location_decision.apply_location) {
+            (void)_peer_locations.apply(
+                location_decision.authenticated_sender,
+                location_decision.location,
+                location_decision.meta,
+                location_decision.received_at_millis);
+        }
+        if (!location_decision.persist) {
+            INFO("  Location telemetry processed without chat persistence");
+            return;
+        }
+    }
 
     // Pre-graft: RNS::Identity::mark_persistent — fork-only. See note above.
     // (void)RNS::Identity::mark_persistent(message.source_hash());
