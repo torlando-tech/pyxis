@@ -23,6 +23,7 @@ struct PeerLocationRecord {
     uint64_t received_at_millis = 0;
     bool has_expiry = false;
     uint64_t expires_at_millis = 0;
+    bool has_approx_radius = false;
     uint32_t approx_radius_meters = 0;
 };
 
@@ -63,6 +64,10 @@ public:
 
     std::size_t prune(uint64_t now_millis, uint64_t maximum_age_millis);
     std::size_t size() const { return size_; }
+    uint64_t revision() const { return revision_; }
+    PeerLocationResult restore(const PeerLocationRecord& record);
+    std::size_t durableSnapshot(PeerLocationRecord* output,
+                                std::size_t capacity) const;
 
 private:
     struct Slot {
@@ -81,6 +86,7 @@ private:
 
     Slot slots_[MAX_PEER_LOCATIONS]{};
     std::size_t size_ = 0;
+    uint64_t revision_ = 0;
 };
 
 }  // namespace Telemetry

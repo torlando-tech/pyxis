@@ -26,6 +26,8 @@
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <cstring>
+#include <new>
+#include <utility>
 
 using namespace RNS;
 
@@ -119,6 +121,21 @@ bool peerIdFromHash(const Bytes& hash, Telemetry::PeerId& output) {
     return true;
 }
 
+template <typename T, typename... Args>
+T* allocateLocationObject(Args&&... args) {
+    void* memory = heap_caps_calloc(
+        1, sizeof(T), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return memory ? new (memory) T(std::forward<Args>(args)...) : nullptr;
+}
+
+template <typename T>
+void releaseLocationObject(T*& object) {
+    if (!object) return;
+    object->~T();
+    heap_caps_free(object);
+    object = nullptr;
+}
+
 class LiveLocationEnvelopeRouter : public Telemetry::LocationEnvelopeRouter {
 public:
     explicit LiveLocationEnvelopeRouter(::LXMF::LXMRouter& router)
@@ -196,8 +213,13 @@ int UIManager::profile_to_codec2_mode(int profile) {
     return ULBWVoiceProfilePolicy::codecModeForProfile(profile);
 }
 
-UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::MessageStore& store)
+UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router,
+                     ::LXMF::MessageStore& store,
+                     bool location_filesystem_available)
     : _reticulum(reticulum), _router(router), _store(store),
+      _location_storage(nullptr),
+      _location_transaction(nullptr),
+      _location_persistence_controller(nullptr),
       _gps(nullptr),
       // Vanilla upstream RNS::Destination has no default ctor; construct in
       // a Type::NONE state, then assign a real Destination later. (The fork
@@ -233,9 +255,26 @@ UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::Me
       _pending_conversation_refresh(false),
       _last_conversation_refresh_ms(0) {
     memset((void*)_call_signal_queue, 0, sizeof(_call_signal_queue));
+    _location_storage = allocateLocationObject<
+        Telemetry::LocationPersistenceLittleFS>(location_filesystem_available);
+    if (_location_storage) {
+        _location_transaction = allocateLocationObject<
+            Telemetry::TransactionalLocationPersistence>(*_location_storage);
+    }
+    if (_location_transaction) {
+        _location_persistence_controller = allocateLocationObject<
+            Telemetry::LocationPersistenceController>(
+                _location_shares, _peer_locations, *_location_transaction);
+    }
+    if (!_location_persistence_controller) {
+        ERROR("Location persistence allocation failed; sharing remains disabled");
+    }
 }
 
 UIManager::~UIManager() {
+    releaseLocationObject(_location_persistence_controller);
+    releaseLocationObject(_location_transaction);
+    releaseLocationObject(_location_storage);
     // Clean up call state
     if (_call_state != CallState::IDLE ||
         call_current_generation() != 0) {
@@ -549,6 +588,12 @@ void UIManager::update() {
     // a rendering operation. With no explicit sessions this remains a no-op.
     const uint64_t wall_now_millis =
         static_cast<uint64_t>(RNS::Utilities::OS::ltime());
+    const uint64_t monotonic_now_millis = monotonicMillis();
+    const Telemetry::LocationControllerState location_state =
+        _location_persistence_controller
+            ? _location_persistence_controller->service(
+                  wall_now_millis, monotonic_now_millis)
+            : Telemetry::LocationControllerState::BLOCKED;
     Telemetry::GpsFixSample gps_sample{};
     if (_gps) {
         gps_sample.location_valid = _gps->location.isValid();
@@ -566,15 +611,17 @@ void UIManager::update() {
     Telemetry::LocationTelemetry current_location{};
     const bool current_location_valid = Telemetry::locationTelemetryFromGpsFix(
         gps_sample, wall_now_millis, current_location);
-    LiveLocationEnvelopeRouter location_router(_router);
-    const Telemetry::DispatchResult location_result =
-        Telemetry::dispatchLocationShare(
+    Telemetry::DispatchResult location_result = Telemetry::DispatchResult::NO_WORK;
+    if (location_state == Telemetry::LocationControllerState::READY) {
+        LiveLocationEnvelopeRouter location_router(_router);
+        location_result = Telemetry::dispatchLocationShare(
             _location_shares,
             wall_now_millis,
-            monotonicMillis(),
+            monotonic_now_millis,
             current_location_valid,
             current_location,
             location_router);
+    }
     if (location_result == Telemetry::DispatchResult::QUEUED) {
         INFO("Location telemetry queued");
     } else if (location_result == Telemetry::DispatchResult::CEASE_QUEUED) {
@@ -951,26 +998,39 @@ void UIManager::set_gps(TinyGPSPlus* gps) {
     }
 }
 
-Telemetry::ShareSessionResult UIManager::start_location_sharing(
+Telemetry::LocationConsentResult UIManager::start_location_sharing(
     const Bytes& peer_hash,
     const Telemetry::ShareStartOptions& options) {
     Telemetry::PeerId peer{};
     if (!peerIdFromHash(peer_hash, peer)) {
-        return Telemetry::ShareSessionResult::INVALID_ARGUMENT;
+        return Telemetry::LocationConsentResult::INVALID_ARGUMENT;
     }
-    return _location_shares.start(
-        peer, options,
-        static_cast<uint64_t>(RNS::Utilities::OS::ltime()));
+    if (!_location_persistence_controller) {
+        return Telemetry::LocationConsentResult::NOT_READY;
+    }
+    const uint64_t wall_now =
+        static_cast<uint64_t>(RNS::Utilities::OS::ltime());
+    const uint64_t monotonic_now = monotonicMillis();
+    _location_persistence_controller->service(wall_now, monotonic_now);
+    return _location_persistence_controller->startSharing(
+        peer, options, wall_now, monotonic_now);
 }
 
-Telemetry::ShareSessionResult UIManager::stop_location_sharing(
+Telemetry::LocationConsentResult UIManager::stop_location_sharing(
     const Bytes& peer_hash) {
     Telemetry::PeerId peer{};
     if (!peerIdFromHash(peer_hash, peer)) {
-        return Telemetry::ShareSessionResult::INVALID_ARGUMENT;
+        return Telemetry::LocationConsentResult::INVALID_ARGUMENT;
     }
-    return _location_shares.stop(
-        peer, static_cast<uint64_t>(RNS::Utilities::OS::ltime()));
+    if (!_location_persistence_controller) {
+        return Telemetry::LocationConsentResult::NOT_READY;
+    }
+    const uint64_t wall_now =
+        static_cast<uint64_t>(RNS::Utilities::OS::ltime());
+    const uint64_t monotonic_now = monotonicMillis();
+    _location_persistence_controller->service(wall_now, monotonic_now);
+    return _location_persistence_controller->stopSharing(
+        peer, wall_now, monotonic_now);
 }
 
 bool UIManager::get_location_share_session(
@@ -1264,11 +1324,20 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
             WARNING("Malformed inbound location field ignored");
         }
         if (location_decision.apply_location) {
-            (void)_peer_locations.apply(
-                location_decision.authenticated_sender,
-                location_decision.location,
-                location_decision.meta,
-                location_decision.received_at_millis);
+            const Telemetry::PeerLocationResult location_result =
+                _peer_locations.apply(
+                    location_decision.authenticated_sender,
+                    location_decision.location,
+                    location_decision.meta,
+                    location_decision.received_at_millis);
+            if (_location_persistence_controller &&
+                location_result != Telemetry::PeerLocationResult::STALE &&
+                location_result != Telemetry::PeerLocationResult::NOT_FOUND &&
+                location_result != Telemetry::PeerLocationResult::INVALID_ARGUMENT) {
+                _location_persistence_controller->service(
+                    static_cast<uint64_t>(RNS::Utilities::OS::ltime()),
+                    monotonicMillis());
+            }
         }
         if (!location_decision.persist) {
             INFO("  Location telemetry processed without chat persistence");

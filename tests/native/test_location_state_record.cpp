@@ -301,6 +301,25 @@ void preservesPresentZeroApproximateRadius() {
           Telemetry::LocationStateRecordResult::OK);
     CHECK(decoded.sessions[0].record.has_approx_radius);
     CHECK(decoded.sessions[0].record.approx_radius_meters == 0);
+
+    state.locations[0].has_approx_radius = false;
+    state.locations[0].approx_radius_meters = 0;
+    CHECK(Telemetry::encodeLocationStateRecord(
+              state, encoded, sizeof(encoded), written) ==
+          Telemetry::LocationStateRecordResult::OK);
+    CHECK(Telemetry::decodeLocationStateRecord(encoded, written, decoded) ==
+          Telemetry::LocationStateRecordResult::OK);
+    CHECK(!decoded.locations[0].has_approx_radius);
+
+    state.locations[0].has_approx_radius = true;
+    CHECK(Telemetry::encodeLocationStateRecord(
+              state, encoded, sizeof(encoded), written) ==
+          Telemetry::LocationStateRecordResult::OK);
+    CHECK(Telemetry::decodeLocationStateRecord(encoded, written, decoded) ==
+          Telemetry::LocationStateRecordResult::OK);
+    CHECK(decoded.locations[0].has_approx_radius);
+    CHECK(decoded.locations[0].approx_radius_meters == 0);
+    CHECK(written == 140);
 }
 
 }  // namespace

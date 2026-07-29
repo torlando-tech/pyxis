@@ -127,6 +127,7 @@ LXMRouter* router = nullptr;
 MessageStore* message_store = nullptr;
 PropagationNodeManager* propagation_manager = nullptr;
 UI::LXMF::UIManager* ui_manager = nullptr;
+bool location_filesystem_available = false;
 TCPClientInterface* tcp_interface_impl = nullptr;
 Interface* tcp_interface = nullptr;
 SX1262Interface* lora_interface_impl = nullptr;
@@ -955,6 +956,7 @@ void setup_hardware() {
     // can be deleted once the graft lands.
     static microStore::Adapters::LittleFSFileSystem fs("/littlefs");
     persistent_storage_ready = fs.init(false);
+    location_filesystem_available = persistent_storage_ready;
     if (!persistent_storage_ready) {
         ERROR("FileSystem mount failed; preserving persistent data");
     } else {
@@ -1334,7 +1336,7 @@ void setup_ui_manager() {
     INFO("\n=== UI Manager Initialization ===");
 
     // Create UI manager
-    ui_manager = new UI::LXMF::UIManager(*reticulum, *router, *message_store);
+    ui_manager = new UI::LXMF::UIManager(*reticulum, *router, *message_store, location_filesystem_available);
 
     if (!ui_manager->init()) {
         ERROR("UI manager initialization failed!");

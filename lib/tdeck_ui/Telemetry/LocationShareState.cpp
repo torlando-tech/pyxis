@@ -116,6 +116,7 @@ void PeerLocationStore::clear(std::size_t index) {
     if (index >= MAX_PEER_LOCATIONS || !slots_[index].occupied) return;
     slots_[index] = Slot{};
     --size_;
+    ++revision_;
 }
 
 PeerLocationResult PeerLocationStore::apply(
@@ -164,6 +165,7 @@ PeerLocationResult PeerLocationStore::apply(
     record.received_at_millis = received_at_millis;
     record.has_expiry = meta.has_expires;
     record.expires_at_millis = expires_at_millis;
+    record.has_approx_radius = meta.has_approx_radius;
     record.approx_radius_meters =
         meta.has_approx_radius
             ? static_cast<uint32_t>(meta.approx_radius_meters)
@@ -171,6 +173,7 @@ PeerLocationResult PeerLocationStore::apply(
 
     if (existing != NO_SLOT) {
         slots_[existing].record = record;
+        ++revision_;
         return PeerLocationResult::UPDATED;
     }
 
@@ -180,7 +183,41 @@ PeerLocationResult PeerLocationStore::apply(
     if (!slots_[target].occupied) ++size_;
     slots_[target].record = record;
     slots_[target].occupied = true;
+    ++revision_;
     return PeerLocationResult::INSERTED;
+}
+
+PeerLocationResult PeerLocationStore::restore(
+    const PeerLocationRecord& record) {
+    if (record.source_timestamp_millis >
+            static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
+        record.expires_at_millis >
+            static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
+        record.approx_radius_meters >
+            static_cast<uint32_t>(std::numeric_limits<int32_t>::max())) {
+        return PeerLocationResult::INVALID_ARGUMENT;
+    }
+    CustomLocationMeta meta{};
+    meta.has_timestamp = true;
+    meta.timestamp_millis = static_cast<int64_t>(record.source_timestamp_millis);
+    meta.has_expires = record.has_expiry;
+    meta.expires_millis = static_cast<int64_t>(record.expires_at_millis);
+    meta.has_approx_radius = record.has_approx_radius;
+    meta.approx_radius_meters = static_cast<int32_t>(record.approx_radius_meters);
+    return apply(record.peer, record.location, meta, record.received_at_millis);
+}
+
+std::size_t PeerLocationStore::durableSnapshot(
+    PeerLocationRecord* output,
+    std::size_t capacity) const {
+    if (output == nullptr || capacity == 0) return 0;
+    std::size_t copied = 0;
+    for (std::size_t index = 0;
+         index < MAX_PEER_LOCATIONS && copied < capacity;
+         ++index) {
+        if (slots_[index].occupied) output[copied++] = slots_[index].record;
+    }
+    return copied;
 }
 
 bool PeerLocationStore::get(

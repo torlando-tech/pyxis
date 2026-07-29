@@ -13,6 +13,7 @@ constexpr uint8_t SESSION_HAS_EXPIRY = 0x01;
 constexpr uint8_t SESSION_CEASE_PENDING = 0x02;
 constexpr uint8_t SESSION_HAS_APPROX_RADIUS = 0x04;
 constexpr uint8_t LOCATION_HAS_EXPIRY = 0x01;
+constexpr uint8_t LOCATION_HAS_APPROX_RADIUS = 0x02;
 
 uint16_t readU16(const uint8_t* data) {
     return static_cast<uint16_t>(
@@ -155,7 +156,9 @@ ShareRestoreEntry decodeSession(const uint8_t* data) {
 
 void encodeLocation(const PeerLocationRecord& record, uint8_t* output) {
     std::memcpy(output, record.peer.bytes, PEER_ID_SIZE);
-    output[16] = record.has_expiry ? LOCATION_HAS_EXPIRY : 0;
+    output[16] = static_cast<uint8_t>(
+        (record.has_expiry ? LOCATION_HAS_EXPIRY : 0U) |
+        (record.has_approx_radius ? LOCATION_HAS_APPROX_RADIUS : 0U));
     output[17] = 0;
     writeI32(output + 18, record.location.latitude_e6);
     writeI32(output + 22, record.location.longitude_e6);
@@ -176,6 +179,8 @@ PeerLocationRecord decodeLocation(const uint8_t* data) {
     PeerLocationRecord record{};
     std::memcpy(record.peer.bytes, data, PEER_ID_SIZE);
     record.has_expiry = (data[16] & LOCATION_HAS_EXPIRY) != 0;
+    record.has_approx_radius =
+        (data[16] & LOCATION_HAS_APPROX_RADIUS) != 0;
     record.location.latitude_e6 = readI32(data + 18);
     record.location.longitude_e6 = readI32(data + 22);
     record.location.altitude_cm = readI32(data + 26);
@@ -214,7 +219,7 @@ LocationStateRecordResult validateEncodedRecords(
         payload + session_count * LOCATION_STATE_SESSION_BYTES;
     for (std::size_t index = 0; index < location_count; ++index) {
         const uint8_t* current = locations + index * LOCATION_STATE_LOCATION_BYTES;
-        if ((current[16] & ~0x01U) != 0 || current[17] != 0 ||
+        if ((current[16] & ~0x03U) != 0 || current[17] != 0 ||
             readU16(current + 40) != 0) {
             return LocationStateRecordResult::MALFORMED;
         }

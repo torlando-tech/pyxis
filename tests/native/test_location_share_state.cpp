@@ -87,6 +87,45 @@ void insertsUpdatesAndRejectsStaleData() {
     CHECK(record.location.latitude_e6 == 400);
 }
 
+void revisionsTrackOnlyDurableMutationsAndRadiusPresence() {
+    Telemetry::PeerLocationStore store;
+    const auto id = peer(70);
+    Telemetry::CustomLocationMeta meta{};
+    CHECK(store.revision() == 0);
+    CHECK(store.apply(id, location(10), meta, 1000) ==
+          Telemetry::PeerLocationResult::INSERTED);
+    CHECK(store.revision() == 1);
+
+    Telemetry::PeerLocationRecord record{};
+    CHECK(store.get(id, record));
+    CHECK(!record.has_approx_radius);
+    CHECK(record.approx_radius_meters == 0);
+
+    auto stale = metaTimestamp(9999);
+    CHECK(store.apply(id, location(9), stale, 1001) ==
+          Telemetry::PeerLocationResult::STALE);
+    CHECK(store.revision() == 1);
+
+    meta.has_approx_radius = true;
+    meta.approx_radius_meters = 0;
+    CHECK(store.apply(id, location(11), meta, 1002) ==
+          Telemetry::PeerLocationResult::UPDATED);
+    CHECK(store.revision() == 2);
+    CHECK(store.get(id, record));
+    CHECK(record.has_approx_radius);
+    CHECK(record.approx_radius_meters == 0);
+
+    auto missing_cease = metaTimestamp(12000);
+    missing_cease.has_cease = true;
+    missing_cease.cease = true;
+    CHECK(store.apply(peer(71), location(12), missing_cease, 1003) ==
+          Telemetry::PeerLocationResult::NOT_FOUND);
+    CHECK(store.revision() == 2);
+    CHECK(store.apply(id, location(12), missing_cease, 1003) ==
+          Telemetry::PeerLocationResult::CEASED);
+    CHECK(store.revision() == 3);
+}
+
 void appliesOrderedCeaseWithoutTouchingOtherPeers() {
     Telemetry::PeerLocationStore store;
     Telemetry::CustomLocationMeta no_meta{};
@@ -329,6 +368,7 @@ void survivesDeterministicHundredThousandOperationStress() {
 
 int main() {
     insertsUpdatesAndRejectsStaleData();
+    revisionsTrackOnlyDurableMutationsAndRadiusPresence();
     appliesOrderedCeaseWithoutTouchingOtherPeers();
     reusesVacanciesBeforeDeterministicEviction();
     enforcesExpiryAndStaleDisplayBoundaries();

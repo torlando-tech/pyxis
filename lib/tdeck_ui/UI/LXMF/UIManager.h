@@ -43,6 +43,8 @@
 #include "Telemetry/LocationMessagePolicy.h"
 #include "Telemetry/LocationFixAdapter.h"
 #include "Telemetry/LocationLxmfAdapter.h"
+#include "Telemetry/LocationPersistenceController.h"
+#include "Telemetry/LocationPersistenceLittleFS.h"
 #include <microReticulum/Reticulum.h>
 #include <microReticulum/Link.h>
 
@@ -76,7 +78,9 @@ public:
      * @param router LXMF router instance
      * @param store Message store instance
      */
-    UIManager(RNS::Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::MessageStore& store);
+    UIManager(RNS::Reticulum& reticulum, ::LXMF::LXMRouter& router,
+              ::LXMF::MessageStore& store,
+              bool location_filesystem_available);
 
     /**
      * Destructor
@@ -191,10 +195,10 @@ public:
 
     // Location sharing is always explicit and peer-scoped. No session exists
     // until the UI calls start_location_sharing().
-    Telemetry::ShareSessionResult start_location_sharing(
+    Telemetry::LocationConsentResult start_location_sharing(
         const RNS::Bytes& peer_hash,
         const Telemetry::ShareStartOptions& options);
-    Telemetry::ShareSessionResult stop_location_sharing(
+    Telemetry::LocationConsentResult stop_location_sharing(
         const RNS::Bytes& peer_hash);
     bool get_location_share_session(
         const RNS::Bytes& peer_hash,
@@ -332,6 +336,9 @@ private:
     ::LXMF::MessageStore& _store;
     Telemetry::PeerLocationStore _peer_locations;
     Telemetry::LocationShareScheduler _location_shares;
+    Telemetry::LocationPersistenceLittleFS* _location_storage;
+    Telemetry::TransactionalLocationPersistence* _location_transaction;
+    Telemetry::LocationPersistenceController* _location_persistence_controller;
     TinyGPSPlus* _gps;
     RNS::Destination _lxst_destination;
 

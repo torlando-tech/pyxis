@@ -32,6 +32,33 @@ def test_live_location_control_surface_is_explicit_opt_in():
     assert "start_location_sharing(" in header
     assert "stop_location_sharing(" in header
     assert "get_location_share_session(" in header
+    assert "LocationConsentResult start_location_sharing(" in header
+
+
+def test_live_persistence_is_owned_and_serviced_before_dispatch_and_lvgl():
+    cpp = CPP.read_text()
+    header = HEADER.read_text()
+    main = (ROOT / "src/main.cpp").read_text()
+    update = cpp[cpp.index("void UIManager::update()") : cpp.index("void UIManager::show_conversation_list")]
+    assert "LocationPersistenceController* _location_persistence_controller;" in header
+    assert "LocationStateSnapshot" not in update
+    assert "TransactionalLocationPersistence persistence" not in update
+    assert update.index("_location_persistence_controller->service") < update.index("dispatchLocationShare")
+    assert update.index("_location_persistence_controller->service") < update.index("LVGL_LOCK();")
+    assert "location_filesystem_available" in main
+    assert "fs.init(false)" in main
+    assert "UIManager(*reticulum, *router, *message_store, location_filesystem_available)" in main
+    assert "heap_caps_calloc" in cpp
+
+
+def test_inbound_location_and_consent_controls_use_controller_durability():
+    cpp = CPP.read_text()
+    inbound = cpp[cpp.index("void UIManager::on_message_received") : cpp.index("void UIManager::on_message_delivered")]
+    start = cpp[cpp.index("UIManager::start_location_sharing") : cpp.index("UIManager::get_location_share_session")]
+    assert "_location_persistence_controller->service" in inbound
+    assert "_peer_locations.apply" in inbound
+    assert "_location_persistence_controller->startSharing" in start
+    assert "_location_persistence_controller->stopSharing" in start
 
 
 def test_router_pump_is_not_run_under_lvgl_and_transient_delivery_skips_store_update():

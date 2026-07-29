@@ -66,6 +66,49 @@ void defaultsToNoSharing() {
     CHECK(!scheduler.get(peer(1), session));
 }
 
+void revisionsTrackOnlySerializedSessionMutations() {
+    Telemetry::LocationShareScheduler scheduler;
+    const auto id = peer(21);
+    CHECK(scheduler.revision() == 0);
+    CHECK(scheduler.start(id, options(Telemetry::ShareDuration::INDEFINITE), 1000) ==
+          Telemetry::ShareSessionResult::STARTED);
+    CHECK(scheduler.revision() == 1);
+
+    Telemetry::ShareWork work{};
+    CHECK(scheduler.poll(1000, 5000, true, work) ==
+          Telemetry::SharePollResult::WORK);
+    CHECK(scheduler.revision() == 1);
+    CHECK(scheduler.acknowledge(id, work.token, false, 1000, 5001) ==
+          Telemetry::ShareAckResult::RETRY_SCHEDULED);
+    CHECK(scheduler.revision() == 1);
+    CHECK(scheduler.stop(id, 1001) == Telemetry::ShareSessionResult::STOPPING);
+    CHECK(scheduler.revision() == 2);
+    CHECK(scheduler.stop(id, 1002) == Telemetry::ShareSessionResult::STOPPING);
+    CHECK(scheduler.revision() == 2);
+
+    CHECK(scheduler.poll(1002, 5002, false, work) ==
+          Telemetry::SharePollResult::WORK);
+    CHECK(scheduler.revision() == 2);
+    CHECK(scheduler.acknowledge(id, work.token, true, 1002, 5003) ==
+          Telemetry::ShareAckResult::CEASED);
+    CHECK(scheduler.revision() == 3);
+    CHECK(scheduler.stop(id, 1003) == Telemetry::ShareSessionResult::NOT_FOUND);
+    CHECK(scheduler.revision() == 3);
+
+    Telemetry::LocationShareScheduler expiry;
+    CHECK(expiry.start(peer(22), options(), 1000) ==
+          Telemetry::ShareSessionResult::STARTED);
+    const uint64_t before_expiry = expiry.revision();
+    Telemetry::ShareSession session{};
+    CHECK(expiry.get(peer(22), session));
+    CHECK(expiry.poll(session.expires_at_millis, 1, false, work) ==
+          Telemetry::SharePollResult::WORK);
+    CHECK(expiry.revision() == before_expiry + 1);
+    CHECK(expiry.poll(session.expires_at_millis, 2, false, work) ==
+          Telemetry::SharePollResult::NO_WORK);
+    CHECK(expiry.revision() == before_expiry + 1);
+}
+
 void computesDurationAndMidnightBoundaries() {
     constexpr uint64_t now = 1700000000000ULL;
     struct Case {
@@ -591,6 +634,7 @@ void expirationPreemptsAQueuedRetry() {
 
 int main() {
     defaultsToNoSharing();
+    revisionsTrackOnlySerializedSessionMutations();
     computesDurationAndMidnightBoundaries();
     requestsImmediateWorkAndAdvancesOnlyAfterAcceptance();
     retriesFailuresWithBoundedBackoffWithoutExtendingExpiry();
