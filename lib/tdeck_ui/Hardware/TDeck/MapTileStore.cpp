@@ -597,6 +597,15 @@ TileStoreResult MapTileStore::finishPut() {
         return result;
     }
     const bool transactional_eviction = victim_count != 0U;
+    if (duplicate) {
+        // A stale backup must not become the rollback generation recorded by a
+        // new transaction. Verify its removal before publishing the manifest.
+        result = storage_.remove(put_backup_);
+        if ((result != TileStoreResult::OK) && (result != TileStoreResult::MISS)) {
+            storage_.remove(put_temp_);
+            return result;
+        }
+    }
     if (transactional_eviction) {
         result = writeEvictionTransaction(put_key_, duplicate, victims, victim_count);
         if (result != TileStoreResult::OK) {
@@ -605,7 +614,6 @@ TileStoreResult MapTileStore::finishPut() {
         }
     }
     if (duplicate) {
-        storage_.remove(put_backup_);
         result = storage_.rename(put_live_, put_backup_);
         if (result != TileStoreResult::OK) {
             if (transactional_eviction) recoverEvictionTransaction();
