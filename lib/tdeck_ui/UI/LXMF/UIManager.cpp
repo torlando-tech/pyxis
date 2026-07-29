@@ -237,6 +237,7 @@ UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router,
       _qr_screen(nullptr),
       _settings_screen(nullptr),
       _propagation_nodes_screen(nullptr),
+      _location_share_screen(nullptr),
       _call_screen(nullptr),
       _map_screen(nullptr),
       _propagation_manager(nullptr),
@@ -306,6 +307,7 @@ UIManager::~UIManager() {
     if (_qr_screen) delete _qr_screen;
     if (_settings_screen) delete _settings_screen;
     if (_propagation_nodes_screen) delete _propagation_nodes_screen;
+    if (_location_share_screen) delete _location_share_screen;
     if (_call_screen) delete _call_screen;
 }
 
@@ -333,6 +335,7 @@ bool UIManager::init() {
     _qr_screen = new QRScreen();
     _settings_screen = new SettingsScreen();
     _propagation_nodes_screen = new PropagationNodesScreen();
+    _location_share_screen = new LocationShareScreen();
     _call_screen = new CallScreen();
     _map_screen = new MapScreen();
 
@@ -395,6 +398,25 @@ bool UIManager::init() {
 
     _chat_screen->set_call_callback(
         [this]() { on_call_from_chat(); }
+    );
+    _chat_screen->set_location_callback(
+        [this]() { on_location_from_chat(); }
+    );
+
+    _location_share_screen->set_back_callback(
+        [this]() { on_back_from_location_sharing(); }
+    );
+    _location_share_screen->set_start_callback(
+        [this](const uint8_t* peer, std::size_t peer_size, uint8_t duration,
+               uint32_t cadence, bool approximate, int32_t radius) {
+            return _location_share_commands.requestStart(
+                peer, peer_size, duration, cadence, approximate, radius);
+        }
+    );
+    _location_share_screen->set_stop_callback(
+        [this](const uint8_t* peer, std::size_t peer_size) {
+            return _location_share_commands.requestStop(peer, peer_size);
+        }
     );
 
     // Set up callbacks for compose screen
@@ -571,6 +593,70 @@ void UIManager::update() {
     if (_conversation_list_screen) {
         _conversation_list_screen->flush_pending_name_writes();
     }
+
+    // SERVICE ORDER CONTRACT: consume peer consent commands and complete the
+    // existing controller-owned durable start/stop transaction before location
+    // service/dispatch and before LVGL_LOCK. LVGL callbacks perform no I/O.
+    const LocationShareCommandMailbox::Command location_command =
+        _location_share_commands.take();
+    bool has_location_ui_result = false;
+    Telemetry::LocationConsentResult location_ui_result =
+        Telemetry::LocationConsentResult::INVALID_ARGUMENT;
+    Telemetry::ShareSession location_ui_session{};
+    bool has_location_ui_session = false;
+    if (location_command.action != LocationShareCommandMailbox::Action::NONE) {
+        Bytes command_peer(location_command.peer, Telemetry::PEER_ID_SIZE);
+        if (location_command.action == LocationShareCommandMailbox::Action::QUERY) {
+            const Telemetry::LocationControllerState query_state =
+                _location_persistence_controller
+                    ? _location_persistence_controller->service(
+                          static_cast<uint64_t>(RNS::Utilities::OS::ltime()),
+                          monotonicMillis())
+                    : Telemetry::LocationControllerState::BLOCKED;
+            if (query_state == Telemetry::LocationControllerState::READY) {
+                has_location_ui_session = get_location_share_session(
+                    command_peer, location_ui_session);
+                location_ui_result = has_location_ui_session
+                    ? Telemetry::LocationConsentResult::UPDATED
+                    : Telemetry::LocationConsentResult::NOT_FOUND;
+            } else {
+                location_ui_result =
+                    query_state == Telemetry::LocationControllerState::WAITING_FOR_CLOCK
+                        ? Telemetry::LocationConsentResult::CLOCK_UNAVAILABLE
+                        : Telemetry::LocationConsentResult::STORAGE_FAILURE;
+            }
+        } else if (location_command.action == LocationShareCommandMailbox::Action::STOP) {
+            location_ui_result = stop_location_sharing(command_peer);
+        } else {
+            Telemetry::ShareStartOptions options{};
+            bool valid = true;
+            switch (location_command.duration) {
+                case 0: options.duration = Telemetry::ShareDuration::MINUTES_15; break;
+                case 1: options.duration = Telemetry::ShareDuration::HOUR_1; break;
+                case 2: options.duration = Telemetry::ShareDuration::HOURS_4; break;
+                default: valid = false; break;
+            }
+            if (location_command.cadenceMillis != 60000U &&
+                location_command.cadenceMillis != 300000U &&
+                location_command.cadenceMillis != 900000U) valid = false;
+            if ((!location_command.hasApproximation && location_command.approximationMeters != 0) ||
+                (location_command.hasApproximation &&
+                 location_command.approximationMeters != 100 &&
+                 location_command.approximationMeters != 1000 &&
+                 location_command.approximationMeters != 10000)) valid = false;
+            options.cadence_millis = location_command.cadenceMillis;
+            options.has_approx_radius = location_command.hasApproximation;
+            options.approx_radius_meters = location_command.approximationMeters;
+            location_ui_result = valid
+                ? start_location_sharing(command_peer, options)
+                : Telemetry::LocationConsentResult::INVALID_ARGUMENT;
+        }
+        has_location_ui_result = true;
+        if (location_command.action != LocationShareCommandMailbox::Action::QUERY) {
+            has_location_ui_session = get_location_share_session(
+                command_peer, location_ui_session);
+        }
+    }
     // Stream the rest of the open conversation's first page in a few at a time
     // (the newest were rendered synchronously on open). Done here, on the main
     // loop, so each small batch only briefly holds the LVGL lock instead of the
@@ -692,6 +778,13 @@ void UIManager::update() {
         (void)_map_screen->applyOneCompletion();
         _map_screen->applyFrame();
     }
+    if (has_location_ui_result && _location_share_screen &&
+        _location_share_screen->matches_peer(
+            location_command.peer, Telemetry::PEER_ID_SIZE)) {
+        _location_share_screen->apply_result(
+            location_ui_result,
+            has_location_ui_session ? &location_ui_session : nullptr);
+    }
     // Consume UI commands unconditionally. LVGL callbacks only publish into
     // the mailbox; loopTask remains the sole owner of the audio pipeline.
     const uint32_t generation = call_current_generation();
@@ -754,6 +847,7 @@ void UIManager::hide_all_screens() {
     if (_qr_screen) _qr_screen->hide();
     if (_settings_screen) _settings_screen->hide();
     if (_propagation_nodes_screen) _propagation_nodes_screen->hide();
+    _location_share_screen->hide();
     if (_call_screen) _call_screen->hide();
     if (_map_screen) _map_screen->hide();
 }
@@ -856,6 +950,9 @@ void UIManager::render_route(Route route) {
         case Route::MAP:
             _map_screen->show();
             break;
+        case Route::LOCATION_SHARING:
+            _location_share_screen->show();
+            break;
         case Route::CHAT:
             _chat_screen->load_conversation(_current_peer_hash, _store);
             _chat_screen->show();
@@ -907,6 +1004,29 @@ void UIManager::show_chat(const Bytes& peer_hash) {
 
     _current_peer_hash = peer_hash;
     navigate(Route::CHAT);
+}
+
+void UIManager::show_location_sharing(const Bytes& peer_hash) {
+    if (peer_hash.size() != Telemetry::PEER_ID_SIZE ||
+        !_current_peer_hash || peer_hash != _current_peer_hash) {
+        WARNING("Refusing location controls for invalid or non-current peer");
+        return;
+    }
+    if (!_location_share_screen->open_for_peer(
+            peer_hash.data(), peer_hash.size(), nullptr)) {
+        WARNING("Refusing location controls: peer must be exactly 16 bytes");
+        return;
+    }
+    if (!_location_share_commands.requestQuery(peer_hash.data(), peer_hash.size())) {
+        WARNING("Location controls busy; current status will refresh on retry");
+    }
+    navigate(Route::LOCATION_SHARING);
+}
+
+void UIManager::on_back_from_location_sharing() {
+    // _current_peer_hash is retained while controls are open, so Back always
+    // returns to the exact chat that opened this peer-scoped screen.
+    back();
 }
 
 void UIManager::show_compose() {
@@ -1122,6 +1242,14 @@ void UIManager::on_call_from_chat() {
     if (!_call_starts.request(peerHash)) {
         WARNING("LXST: Call start already pending");
     }
+}
+
+void UIManager::on_location_from_chat() {
+    if (_current_peer_hash.size() != Telemetry::PEER_ID_SIZE) {
+        WARNING("Location controls require an exact 16-byte current peer");
+        return;
+    }
+    show_location_sharing(_current_peer_hash);
 }
 
 bool UIManager::on_send_message_from_compose(const Bytes& dest_hash, const String& message) {

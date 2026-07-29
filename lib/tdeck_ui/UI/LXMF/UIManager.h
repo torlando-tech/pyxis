@@ -38,6 +38,8 @@
 #include "CallLivenessWatchdog.h"
 #include "LXSTSignalParser.h"
 #include "MapScreen.h"
+#include "LocationShareScreen.h"
+#include "LocationShareCommandMailbox.h"
 #include "LXMF/LXMRouter.h"
 #include "LXMF/PropagationNodeManager.h"
 #include "LXMF/MessageStore.h"
@@ -133,6 +135,7 @@ public:
      * @param peer_hash Peer destination hash
      */
     void show_chat(const RNS::Bytes& peer_hash);
+    void show_location_sharing(const RNS::Bytes& peer_hash);
 
     /**
      * Show compose new message screen
@@ -369,10 +372,12 @@ private:
     QRScreen* _qr_screen;
     SettingsScreen* _settings_screen;
     PropagationNodesScreen* _propagation_nodes_screen;
+    LocationShareScreen* _location_share_screen;
     CallScreen* _call_screen;
     std::function<RadioActivity::Snapshot()> _radio_activity_snapshot_provider;
     RadioActivityScreen::RadioConfig _radio_activity_config;
     MapScreen* _map_screen;
+    LocationShareCommandMailbox _location_share_commands;
 
     ::LXMF::PropagationNodeManager* _propagation_manager;
     RNS::Interface* _ble_interface;
@@ -428,6 +433,8 @@ private:
     void on_back_to_conversation_list();
     bool on_send_message_from_chat(const String& content);
     void on_call_from_chat();
+    void on_location_from_chat();
+    void on_back_from_location_sharing();
     bool on_send_message_from_compose(const RNS::Bytes& dest_hash, const String& message);
     void on_cancel_compose();
     void on_back_from_map();

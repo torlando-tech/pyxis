@@ -21,7 +21,7 @@ namespace LXMF {
 ChatScreen::ChatScreen(lv_obj_t* parent)
     : _screen(nullptr), _header(nullptr), _message_list(nullptr), _input_area(nullptr),
       _text_area(nullptr), _btn_send(nullptr), _btn_back(nullptr), _btn_call(nullptr),
-      _message_store(nullptr), _display_start_idx(0), _loading_more(false) {
+      _btn_location(nullptr), _message_store(nullptr), _display_start_idx(0), _loading_more(false) {
     LVGL_LOCK();
 
     // Create screen object
@@ -85,7 +85,7 @@ void ChatScreen::create_header() {
     lv_obj_align(label_peer, LV_ALIGN_LEFT_MID, 60, 0);
     lv_obj_set_style_text_color(label_peer, Theme::textPrimary(), 0);
     lv_obj_set_style_text_font(label_peer, &lv_font_montserrat_16, 0);
-    lv_obj_set_width(label_peer, 195);
+    lv_obj_set_width(label_peer, 145);
     lv_label_set_long_mode(label_peer, LV_LABEL_LONG_DOT);
 
     // Voice call button (right side of header)
@@ -100,6 +100,16 @@ void ChatScreen::create_header() {
     lv_label_set_text(label_call, LV_SYMBOL_CALL);
     lv_obj_center(label_call);
     lv_obj_set_style_text_color(label_call, Theme::textPrimary(), 0);
+
+    // Peer-scoped location sharing is reachable only from an active chat.
+    _btn_location = lv_btn_create(_header);
+    lv_obj_set_size(_btn_location, 44, 28);
+    lv_obj_align(_btn_location, LV_ALIGN_RIGHT_MID, -56, 0);
+    lv_obj_set_style_bg_color(_btn_location, Theme::btnSecondary(), 0);
+    lv_obj_add_event_cb(_btn_location, on_location_clicked, LV_EVENT_CLICKED, this);
+    lv_obj_t* label_location = lv_label_create(_btn_location);
+    lv_label_set_text(label_location, LV_SYMBOL_GPS);
+    lv_obj_center(label_location);
 }
 
 void ChatScreen::create_message_list() {
@@ -544,6 +554,10 @@ void ChatScreen::set_call_callback(CallCallback callback) {
     _call_callback = callback;
 }
 
+void ChatScreen::set_location_callback(LocationCallback callback) {
+    _location_callback = callback;
+}
+
 void ChatScreen::show() {
     LVGL_LOCK();
     lv_obj_clear_flag(_screen, LV_OBJ_FLAG_HIDDEN);
@@ -554,6 +568,7 @@ void ChatScreen::show() {
     lv_group_t* group = LVGL::LVGLInit::get_default_group();
     if (group) {
         if (_btn_back) lv_group_add_obj(group, _btn_back);
+        if (_btn_location) lv_group_add_obj(group, _btn_location);
         if (_btn_call) lv_group_add_obj(group, _btn_call);
         if (_btn_send) lv_group_add_obj(group, _btn_send);
 
@@ -570,6 +585,7 @@ void ChatScreen::hide() {
     lv_group_t* group = LVGL::LVGLInit::get_default_group();
     if (group) {
         if (_btn_back) lv_group_remove_obj(_btn_back);
+        if (_btn_location) lv_group_remove_obj(_btn_location);
         if (_btn_call) lv_group_remove_obj(_btn_call);
         if (_btn_send) lv_group_remove_obj(_btn_send);
     }
@@ -594,6 +610,13 @@ void ChatScreen::on_call_clicked(lv_event_t* event) {
 
     if (screen->_call_callback) {
         screen->_call_callback();
+    }
+}
+
+void ChatScreen::on_location_clicked(lv_event_t* event) {
+    ChatScreen* screen = (ChatScreen*)lv_event_get_user_data(event);
+    if (screen->_location_callback) {
+        screen->_location_callback();
     }
 }
 
