@@ -579,7 +579,7 @@ void MapScreen::applyFrame() {
 void MapScreen::setStatusFor(Pyxis::MapTileLoadResult result) {
     switch (result) {
         case Pyxis::MapTileLoadResult::READY:
-            lv_label_set_text(status_label_, "Offline");
+            lv_label_set_text(status_label_, "Tile ready");
             break;
         case Pyxis::MapTileLoadResult::MISS:
             lv_label_set_text(status_label_, "Tile unavailable");

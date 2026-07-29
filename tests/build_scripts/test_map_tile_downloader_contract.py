@@ -74,6 +74,10 @@ def test_downloader_is_explicitly_opt_in_and_wired_only_for_visible_misses():
     assert 'KEY_MAP_DOWNLOAD = "map_dl"' in settings
     assert "prefs.getBool(KEY_MAP_DOWNLOAD, false)" in settings
     assert "Download map tiles:" in settings
+    status = screen[screen.index("void MapScreen::setStatusFor"):
+                    screen.index("bool MapScreen::applyOneCompletion")]
+    assert '"Tile ready"' in status
+    assert '"Offline"' not in status
 
 
 def test_settings_save_defers_persistence_and_application_outside_lvgl():
