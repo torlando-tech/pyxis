@@ -35,6 +35,7 @@ def test_https_adapter_verifies_peer_with_explicit_ca_and_has_no_credentials():
     assert "setInsecure" not in source
     assert "setConnectTimeout" in source
     assert "setTimeout" in source
+    assert "setHandshakeTimeout" in source
     assert "setReuse(true)" in source
     assert "useHTTP10(true)" not in source
     assert "disconnectIdle" in source

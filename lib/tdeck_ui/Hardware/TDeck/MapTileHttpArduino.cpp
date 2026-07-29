@@ -32,6 +32,10 @@ TileTransportResult MapTileHttpArduino::start(const char* url, const char* user_
 
     client_.setCACert(ca_certificate);
     client_.setTimeout(read_timeout_ms);
+    unsigned long handshake_seconds = static_cast<unsigned long>(connect_timeout_ms / 1000U);
+    if ((connect_timeout_ms % 1000U) != 0U) ++handshake_seconds;
+    if (handshake_seconds == 0UL) handshake_seconds = 1UL;
+    client_.setHandshakeTimeout(handshake_seconds);
     http_.setConnectTimeout(boundedConnectTimeout(connect_timeout_ms));
     http_.setTimeout(boundedReadTimeout(read_timeout_ms));
     // Keep the single visible-tile TLS session alive across sequential requests.
