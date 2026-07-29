@@ -587,6 +587,9 @@ bool UIManager::init() {
 }
 
 void UIManager::update() {
+    // Settings Save only publishes a snapshot from the LVGL event. Persistence
+    // and interface changes execute here on the main owner loop, before LVGL.
+    if (_settings_screen) _settings_screen->service_pending_save();
     // Flush display-name write-throughs the last conversation-list refresh
     // deferred. Done here, BEFORE LVGL_LOCK, so the microStore/LittleFS I/O
     // never runs under the render lock (same reason as on_message_received).

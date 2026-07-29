@@ -258,8 +258,10 @@ esp_err_t es7210_adc_init(TwoWire *tw, audio_hal_codec_config_t *codec_cfg)
 // Runtime register poke for the T:REG diagnostic harness — write/read any ES7210 register
 // over I2C while capturing, to probe the mic analog config (MICBIAS REG41/42, VMID REG40,
 // ADC DC-block HPF REG22/23, etc.) without reflashing for every guess.
+#ifdef PYXIS_TEST_HOOKS
 extern "C" void pyxis_es7210_write_reg(int addr, int val) { es7210_write_reg((uint8_t)addr, (uint8_t)val); }
 extern "C" int  pyxis_es7210_read_reg(int addr) { return es7210_read_reg((uint8_t)addr); }
+#endif
 
 esp_err_t es7210_adc_deinit()
 {

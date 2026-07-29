@@ -82,6 +82,7 @@ public:
     TileStoreResult beginGet(const TileKey& key, std::uint32_t& size);
     TileStoreResult readGetChunk(std::uint8_t* output, std::size_t capacity, std::size_t& count);
     void endGet();
+    TileStoreResult removeTile(const TileKey& key);
 
     TileStoreResult beginPut(const TileKey& key);
     TileStoreResult writePutChunk(const std::uint8_t* data, std::size_t size);

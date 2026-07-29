@@ -26,6 +26,13 @@ def test_test_hooks_are_isolated_from_production_tdeck():
     assert '\'-DPYXIS_TEST_TCP_PORT="${sysenv.PYXIS_TEST_TCP_PORT}"\'' in instrumented
 
 
+def test_audio_diagnostic_state_and_recorder_initialization_are_test_only():
+    main = MAIN.read_text()
+    assert "#ifdef PYXIS_TEST_HOOKS\n// --- Audio loopback PCM dump" in main
+    mutex = main.index("g_rec_mutex = xSemaphoreCreateMutex()")
+    assert main.rfind("#ifdef PYXIS_TEST_HOOKS", 0, mutex) > main.rfind("#endif", 0, mutex)
+
+
 def test_test_hook_defaults_and_harness_target_are_safe():
     main = MAIN.read_text()
     hook_defaults = main[main.index("#ifdef PYXIS_TEST_HOOKS") : main.index("#include <Wire.h>")]

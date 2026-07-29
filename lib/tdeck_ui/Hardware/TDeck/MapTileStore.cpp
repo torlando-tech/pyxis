@@ -273,6 +273,21 @@ TileStoreResult MapTileStore::readGetChunk(std::uint8_t* output, std::size_t cap
 
 void MapTileStore::endGet() { if (read_open_) storage_.endRead(); read_open_ = false; }
 
+TileStoreResult MapTileStore::removeTile(const TileKey& key) {
+    if (!initialized_) return TileStoreResult::NOT_INITIALIZED;
+    if (read_open_ || write_open_) return TileStoreResult::BUSY;
+    if (!storage_.isAvailable()) return TileStoreResult::STORAGE_UNAVAILABLE;
+    const int index = findEntry(key);
+    if (index < 0) return TileStoreResult::MISS;
+    char path[PATH_CAPACITY] = {};
+    TileStoreResult result = canonicalPath(key, path, sizeof(path));
+    if (result != TileStoreResult::OK) return result;
+    result = storage_.remove(path);
+    if (result != TileStoreResult::OK && result != TileStoreResult::MISS) return result;
+    removeEntry(static_cast<std::uint16_t>(index));
+    return TileStoreResult::OK;
+}
+
 TileStoreResult MapTileStore::beginPut(const TileKey& key) {
     if (!initialized_) return TileStoreResult::NOT_INITIALIZED;
     if (read_open_ || write_open_) return TileStoreResult::BUSY;
@@ -355,8 +370,6 @@ TileStoreResult MapTileStore::finishPut() {
     TileStoreResult result = storage_.commitWrite();
     if (result != TileStoreResult::OK) { failPut(); return result; }
     write_open_ = false;
-    result = evictFor(put_key_, put_size_);
-    if (result != TileStoreResult::OK) { storage_.remove(put_temp_); return result; }
     int index = findEntry(put_key_);
     const bool duplicate = index >= 0;
     if (duplicate) {
@@ -370,6 +383,16 @@ TileStoreResult MapTileStore::finishPut() {
         storage_.remove(put_temp_);
         return result;
     }
+    // Only commit quota eviction after the candidate is safely promoted. If
+    // eviction cannot complete, remove the candidate and restore a replaced
+    // live generation rather than losing the new tile and victims up front.
+    result = evictFor(put_key_, put_size_);
+    if (result != TileStoreResult::OK) {
+        storage_.remove(put_live_);
+        if (duplicate) storage_.rename(put_backup_, put_live_);
+        return result;
+    }
+    index = findEntry(put_key_);
     if (duplicate) {
         storage_.remove(put_backup_);
         Entry& entry = entries_[static_cast<std::size_t>(index)];

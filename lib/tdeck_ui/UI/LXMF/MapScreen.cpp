@@ -11,6 +11,7 @@
 #include "../LVGL/LVGLLock.h"
 
 #include <esp_heap_caps.h>
+#include <esp_system.h>
 #define LODEPNG_NO_COMPILE_CPP
 extern "C" {
 #include <src/extra/libs/png/lodepng.h>
@@ -268,7 +269,16 @@ void MapScreen::stopWorker() {
     if (!worker_started_) return;
     stop_requested_.store(true, std::memory_order_release);
     if (worker_task_) xTaskNotifyGive(worker_task_);
+    const TickType_t started = xTaskGetTickCount();
+    const TickType_t shutdown_limit = pdMS_TO_TICKS(20000);
     while (!worker_exited_.load(std::memory_order_acquire)) {
+        if ((xTaskGetTickCount() - started) >= shutdown_limit) {
+            // Do not destroy storage/decoder/transport state while the worker
+            // may still own it. A controlled restart is safer than UAF or an
+            // unbounded UI teardown after a wedged hardware operation.
+            esp_restart();
+            for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
+        }
         vTaskDelay(pdMS_TO_TICKS(1));
     }
     worker_task_ = nullptr;
@@ -421,7 +431,11 @@ Pyxis::MapTileLoadResult MapScreen::readTile(
         &width, &height, &decode_state, compressed_staging_, total);
     if (decode_error != 0U || width != 256U || height != 256U) {
         lodepng_state_cleanup(&decode_state);
-        return Pyxis::MapTileLoadResult::INVALID_PNG;
+        const Hardware::TDeck::TileStoreResult removed = store_.removeTile(request.key);
+        return (removed == Hardware::TDeck::TileStoreResult::OK ||
+                removed == Hardware::TDeck::TileStoreResult::MISS)
+            ? Pyxis::MapTileLoadResult::MISS
+            : Pyxis::MapTileLoadResult::INVALID_PNG;
     }
     decode_state.info_raw.colortype = LCT_RGB;
     decode_state.info_raw.bitdepth = 8U;
@@ -430,7 +444,11 @@ Pyxis::MapTileLoadResult MapScreen::readTile(
     lodepng_state_cleanup(&decode_state);
     if (decode_error != 0U || rgb == nullptr || width != 256U || height != 256U) {
         if (rgb) lv_mem_free(rgb);
-        return Pyxis::MapTileLoadResult::INVALID_PNG;
+        const Hardware::TDeck::TileStoreResult removed = store_.removeTile(request.key);
+        return (removed == Hardware::TDeck::TileStoreResult::OK ||
+                removed == Hardware::TDeck::TileStoreResult::MISS)
+            ? Pyxis::MapTileLoadResult::MISS
+            : Pyxis::MapTileLoadResult::INVALID_PNG;
     }
     if (request.slot_index >= TILE_COUNT || !tile_pixels_[request.slot_index]) {
         lv_mem_free(rgb);

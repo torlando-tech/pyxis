@@ -9,6 +9,7 @@
 #include <lvgl.h>
 #include <Preferences.h>
 #include <functional>
+#include <atomic>
 #include <microReticulum/Bytes.h>
 #include <microReticulum/Identity.h>
 
@@ -160,10 +161,11 @@ public:
      */
     void load_settings();
 
-    /**
-     * Save settings to NVS
-     */
+    /** Capture a save request from LVGL without persistence or network I/O. */
     void save_settings();
+
+    /** Persist and apply one pending snapshot from the main owner loop. */
+    void service_pending_save();
 
     /**
      * Get current settings
@@ -310,6 +312,8 @@ private:
 
     // Data
     AppSettings _settings;
+    AppSettings _pending_save_settings;
+    std::atomic<std::uint8_t> _save_state; // 0 idle, 1 pending, 2 processing
     RNS::Bytes _identity_hash;
     RNS::Bytes _lxmf_address;
     TinyGPSPlus* _gps;

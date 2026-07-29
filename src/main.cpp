@@ -244,6 +244,7 @@ extern "C" void pyxis_log(const char* msg) {
     }
 }
 
+#ifdef PYXIS_TEST_HOOKS
 // --- Audio loopback PCM dump (test harness) ---------------------------------
 // In LOOPBACK test mode the decoded PCM is streamed over a SECOND multicast
 // destination (239.0.99.99:9998) so the Mac harness can score voice quality.
@@ -351,6 +352,17 @@ extern "C" void pyxis_audio_dump(const void* pcm, size_t bytes) {
         g_audio_dump_offset += (uint32_t)chunk;
     }
 }
+#else
+// Production keeps only ABI-compatible constant-time stubs used by the audio
+// pipeline. Diagnostic state, buffers, multicast output, register access and
+// recorder synchronization are absent from the image.
+extern "C" bool pyxis_rawmic_mode() { return false; }
+extern "C" int pyxis_rawmic_stage() { return 0; }
+extern "C" bool pyxis_record_active() { return false; }
+extern "C" void pyxis_record_write_ch0(const int16_t*, int) {}
+extern "C" void pyxis_audio_dump_arm(bool) {}
+extern "C" void pyxis_audio_dump(const void*, size_t) {}
+#endif
 
 // Forward declarations
 void start_tcp_interface();
@@ -1447,37 +1459,19 @@ void setup_ui_manager() {
                 WARNING("Transport mode setting changed; reboot required before it takes effect");
             }
 
-            // Handle WiFi credential changes - auto reconnect
+            // Reconnect is serviced by the main loop's existing bounded,
+            // watchdog-fed reconnect path after this settings application
+            // releases the router lock.
             if (wifi_settings_changed && new_settings.wifi_ssid.length() > 0) {
-                INFO(("WiFi credentials changed, reconnecting to: " + new_settings.wifi_ssid).c_str());
-                udp_log_ready = false;  // Suspend UDP logging during WiFi transition
-                WiFi.disconnect();
-                delay(100);
-                WiFi.begin(new_settings.wifi_ssid.c_str(), new_settings.wifi_password.c_str());
-
-                // Wait for connection (with timeout)
-                uint32_t start = millis();
-                while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
-                    delay(100);
-                }
-
-                if (WiFi.status() == WL_CONNECTED) {
-                    udp_log_init();  // Rebind to new WiFi interface IP
-                    udp_log_ready = true;  // Resume UDP logging
-                    INFO(("WiFi connected! IP: " + WiFi.localIP().toString()).c_str());
-                } else {
-                    WARNING("WiFi connection failed");
-                }
+                pending_wifi_ssid = new_settings.wifi_ssid;
+                pending_wifi_password = new_settings.wifi_password;
+                wifi_reconnect_pending = true;
+                INFO(("WiFi reconnect queued for: " + new_settings.wifi_ssid).c_str());
             }
 
-            // Update router display name
+            // Update router display name while the callback's outer RouterLock is held.
             if (router && !new_settings.display_name.isEmpty()) {
-                UI::LXMF::RouterLock router_lock(0);
-                if (router_lock.acquired()) {
-                    router->set_display_name(new_settings.display_name.c_str());
-                } else {
-                    WARNING("Router busy; display-name update not applied");
-                }
+                router->set_display_name(new_settings.display_name.c_str());
             }
 
             // Handle TCP interface changes at runtime
@@ -1717,11 +1711,13 @@ void setup() {
     // GATT operations. Task subscriptions are added at their creation sites.
     ESP_ERROR_CHECK(esp_task_wdt_init(60, true));
 
+#ifdef PYXIS_TEST_HOOKS
     // Create diagnostic recorder synchronization before any audio task starts.
     g_rec_mutex = xSemaphoreCreateMutex();
     if (!g_rec_mutex) {
         ERROR("Failed to create recorder mutex; T:RECORD will be unavailable");
     }
+#endif
 
     INFO("\n");
     INFO("╔══════════════════════════════════════╗");

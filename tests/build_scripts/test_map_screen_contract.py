@@ -52,6 +52,7 @@ def test_worker_predecodes_and_render_path_has_no_io():
     assert "lodepng_decode(" in source
     assert "lodepng_inspect" in source
     assert "max_output_size" in source
+    assert "store_.removeTile(request.key)" in source
     assert "beginGet" in source and "readGetChunk" in source
     assert 'lv_img_set_src(tile_images_[index], &tile_descriptors_[index])' in source
     assert 'lv_img_set_src(tile_images_[index], "' not in source

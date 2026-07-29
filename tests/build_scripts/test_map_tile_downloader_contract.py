@@ -7,6 +7,7 @@ ADAPTER_H = ROOT / "lib/tdeck_ui/Hardware/TDeck/MapTileHttpArduino.h"
 ADAPTER_CPP = ROOT / "lib/tdeck_ui/Hardware/TDeck/MapTileHttpArduino.cpp"
 MAP_SCREEN = ROOT / "lib/tdeck_ui/UI/LXMF/MapScreen.cpp"
 SETTINGS = ROOT / "lib/tdeck_ui/UI/LXMF/SettingsScreen.cpp"
+UI_MANAGER = ROOT / "lib/tdeck_ui/UI/LXMF/UIManager.cpp"
 
 
 def test_portable_core_is_bounded_and_allocation_free():
@@ -42,3 +43,20 @@ def test_downloader_is_explicitly_opt_in_and_wired_only_for_visible_misses():
     assert 'KEY_MAP_DOWNLOAD = "map_dl"' in settings
     assert "prefs.getBool(KEY_MAP_DOWNLOAD, false)" in settings
     assert "Download map tiles:" in settings
+
+
+def test_settings_save_defers_persistence_and_application_outside_lvgl():
+    settings = SETTINGS.read_text()
+    capture = settings[settings.index("void SettingsScreen::save_settings()"):
+                       settings.index("void SettingsScreen::service_pending_save()")]
+    service = settings[settings.index("void SettingsScreen::service_pending_save()"):
+                       settings.index("void SettingsScreen::update_ui_from_settings()")]
+    assert "Preferences" not in capture
+    assert "_save_callback" not in capture
+    assert "Preferences prefs" in service
+    assert "_save_callback(settings)" in service
+
+    update = UI_MANAGER.read_text()
+    body = update[update.index("void UIManager::update()"):
+                  update.index("void UIManager::refresh_current_screen()")]
+    assert body.index("service_pending_save()") < body.index("LVGL_LOCK")
