@@ -23,6 +23,8 @@
 #include <microReticulum/Destination.h>
 #include <microReticulum/Utilities/OS.h>
 #include <esp_heap_caps.h>
+#include <esp_timer.h>
+#include <cstring>
 
 using namespace RNS;
 
@@ -106,6 +108,83 @@ public:
 };
 static std::shared_ptr<LXSTAnnounceHandler> s_lxst_announce_handler;
 
+uint64_t monotonicMillis() {
+    return static_cast<uint64_t>(esp_timer_get_time() / 1000LL);
+}
+
+bool peerIdFromHash(const Bytes& hash, Telemetry::PeerId& output) {
+    if (hash.size() != Telemetry::PEER_ID_SIZE) return false;
+    std::memcpy(output.bytes, hash.data(), Telemetry::PEER_ID_SIZE);
+    return true;
+}
+
+class LiveLocationEnvelopeRouter : public Telemetry::LocationEnvelopeRouter {
+public:
+    explicit LiveLocationEnvelopeRouter(::LXMF::LXMRouter& router)
+        : router_(router) {}
+
+    bool queue(
+        const Telemetry::OutboundLocationEnvelope& envelope,
+        uint64_t exclusive_deadline_monotonic_millis,
+        uint64_t& ownership_monotonic_millis) override {
+        Bytes destination_hash(envelope.destination.bytes, Telemetry::PEER_ID_SIZE);
+        Identity destination_identity = Identity::recall(destination_hash);
+        Destination destination(Type::NONE);
+        if (destination_identity) {
+            destination = Destination(
+                destination_identity, Type::Destination::OUT,
+                Type::Destination::SINGLE, "lxmf", "delivery");
+        }
+
+        ::LXMF::LXMessage message(
+            destination,
+            router_.delivery_destination(),
+            Bytes(),
+            Bytes(),
+            ::LXMF::Type::Message::OPPORTUNISTIC);
+        if (!destination_identity) {
+            message.destination_hash(destination_hash);
+        }
+        for (std::size_t index = 0; index < envelope.field_count; ++index) {
+            const auto& field = envelope.fields[index];
+            if (!message.fields_set(
+                    Bytes(field.key, field.key_size),
+                    Bytes(field.value, field.value_size))) {
+                return false;
+            }
+        }
+
+        GuardContext guard_context{
+            exclusive_deadline_monotonic_millis,
+            &ownership_monotonic_millis};
+        try {
+            return router_.try_handle_outbound(
+                       message, claimOwnership, &guard_context) ==
+                   ::LXMF::OutboundAdmissionResult::ACCEPTED;
+        } catch (const std::exception& error) {
+            WARNING((std::string("Location outbound preparation failed: ") +
+                     error.what()).c_str());
+            return false;
+        }
+    }
+
+private:
+    struct GuardContext {
+        uint64_t deadline;
+        uint64_t* ownership_time;
+    };
+
+    static bool claimOwnership(void* raw_context) {
+        auto& context = *static_cast<GuardContext*>(raw_context);
+        const uint64_t now = monotonicMillis();
+        if (now >= context.deadline) return false;
+        *context.ownership_time = now;
+        return true;
+    }
+
+    ::LXMF::LXMRouter& router_;
+};
+
 // LoRa bandwidth is a production constraint: Pyxis advertises and accepts only
 // LXST ULBW/Codec2-700C.
 int UIManager::_preferred_profile = UIManager::LXST_PROFILE_ULBW;
@@ -116,6 +195,7 @@ int UIManager::profile_to_codec2_mode(int profile) {
 
 UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::MessageStore& store)
     : _reticulum(reticulum), _router(router), _store(store),
+      _gps(nullptr),
       // Vanilla upstream RNS::Destination has no default ctor; construct in
       // a Type::NONE state, then assign a real Destination later. (The fork
       // had a default ctor that pyxis was implicitly relying on.)
@@ -459,6 +539,44 @@ void UIManager::update() {
         _radio_activity_screen->render_due(now)) {
         const RadioActivity::Snapshot snapshot = _radio_activity_snapshot_provider();
         _radio_activity_screen->render(snapshot, _radio_activity_config, now);
+    }
+
+    // Poll one consent-gated location item outside LVGL_LOCK. Packing and the
+    // router's synchronous ownership copy may perform crypto work; neither is
+    // a rendering operation. With no explicit sessions this remains a no-op.
+    const uint64_t wall_now_millis =
+        static_cast<uint64_t>(RNS::Utilities::OS::ltime());
+    Telemetry::GpsFixSample gps_sample{};
+    if (_gps) {
+        gps_sample.location_valid = _gps->location.isValid();
+        gps_sample.location_age_millis = _gps->location.age();
+        gps_sample.latitude_degrees = _gps->location.lat();
+        gps_sample.longitude_degrees = _gps->location.lng();
+        gps_sample.altitude_valid = _gps->altitude.isValid();
+        gps_sample.altitude_meters = _gps->altitude.meters();
+        gps_sample.speed_valid = _gps->speed.isValid();
+        gps_sample.speed_kilometers_per_hour = _gps->speed.kmph();
+        gps_sample.bearing_valid = _gps->course.isValid();
+        gps_sample.bearing_degrees = _gps->course.deg();
+        gps_sample.hdop_valid = _gps->hdop.isValid();
+        gps_sample.hdop = _gps->hdop.hdop();
+    }
+    Telemetry::LocationTelemetry current_location{};
+    const bool current_location_valid = Telemetry::locationTelemetryFromGpsFix(
+        gps_sample, wall_now_millis, current_location);
+    LiveLocationEnvelopeRouter location_router(_router);
+    const Telemetry::DispatchResult location_result =
+        Telemetry::dispatchLocationShare(
+            _location_shares,
+            wall_now_millis,
+            monotonicMillis(),
+            current_location_valid,
+            current_location,
+            location_router);
+    if (location_result == Telemetry::DispatchResult::QUEUED) {
+        INFO("Location telemetry queued");
+    } else if (location_result == Telemetry::DispatchResult::CEASE_QUEUED) {
+        INFO("Location cease queued");
     }
     LVGL_LOCK();
 
@@ -824,9 +942,39 @@ void UIManager::set_ble_interface(Interface* iface) {
 }
 
 void UIManager::set_gps(TinyGPSPlus* gps) {
+    _gps = gps;
     if (_conversation_list_screen) {
         _conversation_list_screen->set_gps(gps);
     }
+}
+
+Telemetry::ShareSessionResult UIManager::start_location_sharing(
+    const Bytes& peer_hash,
+    const Telemetry::ShareStartOptions& options) {
+    Telemetry::PeerId peer{};
+    if (!peerIdFromHash(peer_hash, peer)) {
+        return Telemetry::ShareSessionResult::INVALID_ARGUMENT;
+    }
+    return _location_shares.start(
+        peer, options,
+        static_cast<uint64_t>(RNS::Utilities::OS::ltime()));
+}
+
+Telemetry::ShareSessionResult UIManager::stop_location_sharing(
+    const Bytes& peer_hash) {
+    Telemetry::PeerId peer{};
+    if (!peerIdFromHash(peer_hash, peer)) {
+        return Telemetry::ShareSessionResult::INVALID_ARGUMENT;
+    }
+    return _location_shares.stop(
+        peer, static_cast<uint64_t>(RNS::Utilities::OS::ltime()));
+}
+
+bool UIManager::get_location_share_session(
+    const Bytes& peer_hash,
+    Telemetry::ShareSession& output) const {
+    Telemetry::PeerId peer{};
+    return peerIdFromHash(peer_hash, peer) && _location_shares.get(peer, output);
 }
 
 void UIManager::on_back_to_conversation_list() {
