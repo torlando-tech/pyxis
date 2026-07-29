@@ -55,8 +55,7 @@ def test_inbound_location_and_consent_controls_use_controller_durability():
     cpp = CPP.read_text()
     inbound = cpp[cpp.index("void UIManager::on_message_received") : cpp.index("void UIManager::on_message_delivered")]
     start = cpp[cpp.index("UIManager::start_location_sharing") : cpp.index("UIManager::get_location_share_session")]
-    assert "_location_persistence_controller->service" in inbound
-    assert "_peer_locations.apply" in inbound
+    assert inbound.index("_location_persistence_controller->service") < inbound.index("_peer_locations.apply")
     assert "_location_persistence_controller->startSharing" in start
     assert "_location_persistence_controller->stopSharing" in start
 
@@ -91,3 +90,30 @@ def test_live_and_chat_outbound_share_a_router_mutex():
         main.index("// Update UI manager")
     ]
     assert "RouterLock" in network_pump
+    assert "RouterLock router_lock(0)" in send
+
+
+def test_ble_ingress_and_ui_router_mutators_follow_nonblocking_lock_order():
+    cpp = CPP.read_text()
+    main = (ROOT / "src/main.cpp").read_text()
+    ble = (ROOT / "lib/ble_interface/BLEInterface.cpp").read_text()
+    announce = cpp[
+        cpp.index("set_send_announce_callback") :
+        cpp.index("// Set up callbacks for status screen")
+    ]
+    propagation = cpp[
+        cpp.index("void UIManager::on_propagation_node_selected") :
+        cpp.index("void UIManager::set_rns_status")
+    ]
+    assert "RouterLock router_lock(0)" in announce
+    assert propagation.count("RouterLock router_lock(0)") >= 3
+    assert main.count("RouterLock router_lock(0)") >= 2
+    reassembled = ble[
+        ble.index("void BLEInterface::onPacketReassembled") :
+        ble.index("size_t BLEInterface::drain_inbound")
+    ]
+    assert "handle_incoming" not in reassembled
+    assert "drain_inbound" in ble
+    assert "ble_interface_impl->drain_inbound" in main
+    stop = ble[ble.index("void BLEInterface::stop()") : ble.index("void BLEInterface::loop()")]
+    assert "_pending_packet_count = 0" in stop

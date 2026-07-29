@@ -96,9 +96,14 @@ LocationControllerState LocationPersistenceController::service(
         !observeMonotonic(monotonic_now_millis)) {
         return LocationControllerState::BLOCKED;
     }
+    if (wall_now_millis < TRUSTED_WALL_CLOCK_MIN_MILLIS) {
+        if (state_ == LocationControllerState::READY) {
+            state_ = LocationControllerState::BLOCKED;
+        }
+        return state_;
+    }
 
     if (state_ == LocationControllerState::WAITING_FOR_CLOCK) {
-        if (wall_now_millis < TRUSTED_WALL_CLOCK_MIN_MILLIS) return state_;
         if (monotonic_now_millis < next_restore_attempt_monotonic_millis_) {
             return state_;
         }
@@ -192,25 +197,12 @@ LocationConsentResult LocationPersistenceController::mapSessionResult(
     return LocationConsentResult::INVALID_ARGUMENT;
 }
 
-void LocationPersistenceController::captureRollback(const PeerId& peer) {
-    const std::size_t index = scheduler_.find(peer);
-    rollback_existed_ = index != MAX_SHARE_SESSIONS;
-    rollback_session_ = rollback_existed_
-                            ? scheduler_.slots_[index].session
-                            : ShareSession{};
-    rollback_revision_ = scheduler_.revision_;
+void LocationPersistenceController::captureRollback() {
+    rollback_scheduler_ = scheduler_;
 }
 
-void LocationPersistenceController::restoreRollback(const PeerId& peer) {
-    const std::size_t index = scheduler_.find(peer);
-    if (rollback_existed_) {
-        if (index != MAX_SHARE_SESSIONS) {
-            scheduler_.slots_[index].session = rollback_session_;
-        }
-    } else if (index != MAX_SHARE_SESSIONS) {
-        scheduler_.clear(index);
-    }
-    scheduler_.revision_ = rollback_revision_;
+void LocationPersistenceController::restoreRollback() {
+    scheduler_ = rollback_scheduler_;
 }
 
 LocationConsentResult LocationPersistenceController::startSharing(
@@ -222,14 +214,14 @@ LocationConsentResult LocationPersistenceController::startSharing(
         !observeMonotonic(monotonic_now_millis)) {
         return LocationConsentResult::NOT_READY;
     }
-    captureRollback(peer);
+    captureRollback();
     const ShareSessionResult result = scheduler_.start(peer, options, wall_now_millis);
     if (result != ShareSessionResult::STARTED &&
         result != ShareSessionResult::UPDATED) {
         return mapSessionResult(result);
     }
     if (urgentSave(monotonic_now_millis) != LocationControllerSaveResult::SAVED) {
-        restoreRollback(peer);
+        restoreRollback();
         return LocationConsentResult::STORAGE_FAILURE;
     }
     return mapSessionResult(result);
@@ -243,11 +235,11 @@ LocationConsentResult LocationPersistenceController::stopSharing(
         !observeMonotonic(monotonic_now_millis)) {
         return LocationConsentResult::NOT_READY;
     }
-    captureRollback(peer);
+    captureRollback();
     const ShareSessionResult result = scheduler_.stop(peer, wall_now_millis);
     if (result != ShareSessionResult::STOPPING) return mapSessionResult(result);
     if (urgentSave(monotonic_now_millis) != LocationControllerSaveResult::SAVED) {
-        restoreRollback(peer);
+        restoreRollback();
         return LocationConsentResult::STORAGE_FAILURE;
     }
     return LocationConsentResult::STOPPING;

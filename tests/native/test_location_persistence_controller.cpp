@@ -120,6 +120,8 @@ void clockGateRestoreAndPrune() {
     Telemetry::PeerLocationRecord record{};
     CHECK(peers.get(peer(3), record));
     CHECK(record.has_approx_radius && record.approx_radius_meters == 0);
+    CHECK(controller.service(1000, 30) ==
+          Telemetry::LocationControllerState::BLOCKED);
 }
 
 void unavailableCorruptAndIoRetryFailClosed() {
@@ -207,6 +209,28 @@ void urgentConsentSaveRollsBackAndRollbackClockBlocks() {
     CHECK(shares.get(peer(5), session) && !session.cease_pending);
     CHECK(controller.service(WALL + 2, 102) == Telemetry::LocationControllerState::BLOCKED);
 }
+
+void failedConsentRestoresWholeScheduler() {
+    MemoryStorage storage;
+    Telemetry::PeerLocationStore peers;
+    Telemetry::LocationShareScheduler shares;
+    Telemetry::TransactionalLocationPersistence persistence(storage);
+    Telemetry::LocationPersistenceController controller(shares, peers, persistence);
+    CHECK(controller.service(WALL, 100) == Telemetry::LocationControllerState::READY);
+    Telemetry::ShareStartOptions options{};
+    options.duration = Telemetry::ShareDuration::INDEFINITE;
+    CHECK(controller.startSharing(peer(6), options, WALL + 1000, 101) ==
+          Telemetry::LocationConsentResult::STARTED);
+    Telemetry::ShareSession before{};
+    CHECK(shares.get(peer(6), before));
+    storage.fail_io = true;
+    CHECK(controller.startSharing(peer(5), options, WALL, 102) ==
+          Telemetry::LocationConsentResult::STORAGE_FAILURE);
+    Telemetry::ShareSession after{};
+    CHECK(shares.get(peer(6), after));
+    CHECK(after.next_attempt_millis == before.next_attempt_millis);
+    CHECK(after.last_sent_millis == before.last_sent_millis);
+}
 }  // namespace
 
 int main() {
@@ -214,6 +238,7 @@ int main() {
     unavailableCorruptAndIoRetryFailClosed();
     dirtyCadenceIsNonSlidingAndRetries();
     urgentConsentSaveRollsBackAndRollbackClockBlocks();
+    failedConsentRestoresWholeScheduler();
     std::cout << "location persistence controller: " << passed << " passed, "
               << failures << " failed\n";
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

@@ -1415,6 +1415,11 @@ void setup_ui_manager() {
 
         // Set save callback (update app_settings and apply)
         settings->set_save_callback([](const UI::LXMF::AppSettings& new_settings) {
+            UI::LXMF::RouterLock router_lock(0);
+            if (!router_lock.acquired()) {
+                WARNING("Router busy; settings application deferred by user retry");
+                return;
+            }
             // Check what changed
             bool wifi_settings_changed = (new_settings.wifi_ssid != app_settings.wifi_ssid) ||
                                         (new_settings.wifi_password != app_settings.wifi_password);
@@ -1462,7 +1467,12 @@ void setup_ui_manager() {
 
             // Update router display name
             if (router && !new_settings.display_name.isEmpty()) {
-                router->set_display_name(new_settings.display_name.c_str());
+                UI::LXMF::RouterLock router_lock(0);
+                if (router_lock.acquired()) {
+                    router->set_display_name(new_settings.display_name.c_str());
+                } else {
+                    WARNING("Router busy; display-name update not applied");
+                }
             }
 
             // Handle TCP interface changes at runtime
@@ -1594,8 +1604,13 @@ void setup_ui_manager() {
 
             // Apply propagation settings to router
             if (router) {
-                router->set_fallback_to_propagation(new_settings.prop_fallback_enabled);
-                router->set_propagation_only(new_settings.prop_only);
+                UI::LXMF::RouterLock router_lock(0);
+                if (router_lock.acquired()) {
+                    router->set_fallback_to_propagation(new_settings.prop_fallback_enabled);
+                    router->set_propagation_only(new_settings.prop_only);
+                } else {
+                    WARNING("Router busy; propagation settings not applied");
+                }
 
                 // When auto-select is enabled, save the current effective node for next boot
                 if (new_settings.prop_auto_select && propagation_manager) {
@@ -2824,6 +2839,7 @@ void loop() {
     {
         UI::LXMF::RouterLock router_lock;
         if (router_lock.acquired() && router) {
+            if (ble_interface_impl) ble_interface_impl->drain_inbound(4);
             router->process_outbound();
             router->process_inbound();
             router->process_sync();
@@ -2844,8 +2860,11 @@ void loop() {
                                         (lora_interface && lora_interface->online()) ||
                                         (ble_interface && ble_interface->online());
             if (router && has_online_interface) {
-                announce_reachable_destinations();
-                INFO("Periodic announce sent (interval: " + std::to_string(app_settings.announce_interval) + "s)");
+                UI::LXMF::RouterLock router_lock;
+                if (router_lock.acquired()) {
+                    announce_reachable_destinations();
+                    INFO("Periodic announce sent (interval: " + std::to_string(app_settings.announce_interval) + "s)");
+                }
             }
         }
     }
@@ -2873,9 +2892,12 @@ void loop() {
             // Only sync if TCP is online (propagation nodes need network)
             bool tcp_online = tcp_interface && tcp_interface->online();
             if (tcp_online) {
-                router->request_messages_from_propagation_node();
-                last_sync = now;
-                INFO("Periodic propagation sync (interval: " + std::to_string(app_settings.sync_interval / 3600) + " hours)");
+                UI::LXMF::RouterLock router_lock;
+                if (router_lock.acquired()) {
+                    router->request_messages_from_propagation_node();
+                    last_sync = now;
+                    INFO("Periodic propagation sync (interval: " + std::to_string(app_settings.sync_interval / 3600) + " hours)");
+                }
             }
         }
     }
@@ -2885,7 +2907,10 @@ void loop() {
         INFO("TCP interface reconnected - sending announce");
         if (router) {
             delay(500);  // Brief stabilization delay
-            announce_reachable_destinations();
+            UI::LXMF::RouterLock router_lock;
+            if (router_lock.acquired()) {
+                announce_reachable_destinations();
+            }
         }
         last_tcp_online = true;
     }

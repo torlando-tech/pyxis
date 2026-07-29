@@ -66,8 +66,8 @@ private:
     void observeDirty(uint64_t monotonic_now_millis);
     void markSaved();
     static LocationConsentResult mapSessionResult(ShareSessionResult result);
-    void captureRollback(const PeerId& peer);
-    void restoreRollback(const PeerId& peer);
+    void captureRollback();
+    void restoreRollback();
 
     LocationShareScheduler& scheduler_;
     PeerLocationStore& peers_;
@@ -84,9 +84,7 @@ private:
     bool has_monotonic_observation_ = false;
     bool dirty_ = false;
 
-    ShareSession rollback_session_{};
-    uint64_t rollback_revision_ = 0;
-    bool rollback_existed_ = false;
+    LocationShareScheduler rollback_scheduler_{};
 };
 
 }  // namespace Telemetry

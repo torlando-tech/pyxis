@@ -216,6 +216,21 @@ void validatesTempBeforeReplacingLive() {
     CHECK(marker(output) == 30);
 }
 
+void successfulPromotionIsCommittedWhenReadbackIoFails() {
+    FakeStorage storage;
+    put(storage, Telemetry::LocationPersistenceSlot::LIVE, state(10));
+    Telemetry::TransactionalLocationPersistence persistence(storage);
+    storage.fail_at = 11;  // promoted LIVE stat/read-back cannot be observed
+    CHECK(persistence.save(state(20)) ==
+          Telemetry::LocationPersistenceResult::SAVED);
+    storage.fail_at = 0;
+    storage.operations = 0;
+    Telemetry::LocationStateSnapshot output{};
+    CHECK(persistence.load(output) ==
+          Telemetry::LocationPersistenceResult::LOADED_LIVE);
+    CHECK(marker(output) == 20);
+}
+
 void transientHigherPriorityIoNeverFallsBackOrRepairs() {
     FakeStorage storage;
     put(storage, Telemetry::LocationPersistenceSlot::LIVE, state(20));
@@ -256,6 +271,7 @@ int main() {
     failsClosedWhenUnavailableMissingOrCorrupt();
     everyInterruptedSaveRetainsAValidGeneration();
     validatesTempBeforeReplacingLive();
+    successfulPromotionIsCommittedWhenReadbackIoFails();
     transientHigherPriorityIoNeverFallsBackOrRepairs();
     std::cout << "location persistence: " << passed << " passed, "
               << failures << " failed\n";

@@ -407,6 +407,11 @@ bool UIManager::init() {
     _announce_list_screen->set_send_announce_callback(
         [this]() {
             INFO("Sending LXMF announce...");
+            RouterLock router_lock(0);
+            if (!router_lock.acquired()) {
+                WARNING("Router busy; announce deferred by user retry");
+                return;
+            }
             try {
                 _router.announce();
                 announce_lxst();
@@ -1116,6 +1121,11 @@ void UIManager::on_back_from_propagation_nodes() {
 }
 
 void UIManager::on_propagation_node_selected(const Bytes& node_hash) {
+    RouterLock router_lock(0);
+    if (!router_lock.acquired()) {
+        WARNING("Router busy; propagation selection not applied");
+        return;
+    }
     std::string hash_hex = node_hash.toHex().substr(0, 16);
     std::string msg = "Propagation node selected: " + hash_hex + "...";
     INFO(msg.c_str());
@@ -1150,6 +1160,11 @@ void UIManager::on_propagation_node_selected(const Bytes& node_hash) {
 }
 
 void UIManager::on_propagation_auto_select_changed(bool enabled) {
+    RouterLock router_lock(0);
+    if (!router_lock.acquired()) {
+        WARNING("Router busy; propagation mode not applied");
+        return;
+    }
     std::string msg = "Propagation auto-select changed: ";
     msg += enabled ? "enabled" : "disabled";
     INFO(msg.c_str());
@@ -1172,6 +1187,11 @@ void UIManager::on_propagation_auto_select_changed(bool enabled) {
 }
 
 void UIManager::on_propagation_sync() {
+    RouterLock router_lock(0);
+    if (!router_lock.acquired()) {
+        WARNING("Router busy; sync request not queued");
+        return;
+    }
     INFO("Requesting messages from propagation node");
     _router.request_messages_from_propagation_node();
 }
@@ -1254,9 +1274,9 @@ bool UIManager::send_message(const Bytes& dest_hash, const String& content) {
     // Queue for sending (pack already called, will use cached packed data).
     // Router queues are shared with loopTask; serialize the ownership copy.
     {
-        RouterLock router_lock;
+        RouterLock router_lock(0);
         if (!router_lock.acquired()) {
-            ERROR("Router lock unavailable; message not queued");
+            WARNING("Router busy; message saved but user retry is required");
             return false;
         }
         _router.handle_outbound(message);
@@ -1324,19 +1344,29 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
             WARNING("Malformed inbound location field ignored");
         }
         if (location_decision.apply_location) {
-            const Telemetry::PeerLocationResult location_result =
-                _peer_locations.apply(
-                    location_decision.authenticated_sender,
-                    location_decision.location,
-                    location_decision.meta,
-                    location_decision.received_at_millis);
-            if (_location_persistence_controller &&
-                location_result != Telemetry::PeerLocationResult::STALE &&
-                location_result != Telemetry::PeerLocationResult::NOT_FOUND &&
-                location_result != Telemetry::PeerLocationResult::INVALID_ARGUMENT) {
-                _location_persistence_controller->service(
-                    static_cast<uint64_t>(RNS::Utilities::OS::ltime()),
-                    monotonicMillis());
+            const uint64_t location_wall_now =
+                static_cast<uint64_t>(RNS::Utilities::OS::ltime());
+            const uint64_t location_monotonic_now = monotonicMillis();
+            const Telemetry::LocationControllerState location_state =
+                _location_persistence_controller
+                    ? _location_persistence_controller->service(
+                          location_wall_now, location_monotonic_now)
+                    : Telemetry::LocationControllerState::BLOCKED;
+            if (location_state == Telemetry::LocationControllerState::READY) {
+                const Telemetry::PeerLocationResult location_result =
+                    _peer_locations.apply(
+                        location_decision.authenticated_sender,
+                        location_decision.location,
+                        location_decision.meta,
+                        location_decision.received_at_millis);
+                if (location_result != Telemetry::PeerLocationResult::STALE &&
+                    location_result != Telemetry::PeerLocationResult::NOT_FOUND &&
+                    location_result != Telemetry::PeerLocationResult::INVALID_ARGUMENT) {
+                    _location_persistence_controller->service(
+                        location_wall_now, location_monotonic_now);
+                }
+            } else {
+                WARNING("Location state not restored; inbound update ignored");
             }
         }
         if (!location_decision.persist) {
