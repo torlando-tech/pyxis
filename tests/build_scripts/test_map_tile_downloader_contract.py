@@ -97,6 +97,16 @@ def test_recent_decoded_tiles_use_a_fixed_psram_lru_before_sd_decode():
     assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in screen
     assert "decoded_cache_pixels_[Pyxis::DecodedTileCache::CAPACITY]" in header
     assert "heap_caps_free(decoded_cache_pixels_[index])" in screen
+    constructor = screen[screen.index("MapScreen::MapScreen"):
+                         screen.index("MapScreen::~MapScreen")]
+    staging = "compressed_staging_ = static_cast<std::uint8_t*>(heap_caps_malloc("
+    cache_loop = "index < Pyxis::DecodedTileCache::CAPACITY; ++index)"
+    assert constructor.index(staging) < constructor.index(cache_loop)
+    assert "if (compressed_staging_)" in constructor
+    start_worker = screen[screen.index("bool MapScreen::startWorker"):
+                          screen.index("void MapScreen::stopWorker")]
+    assert "heap_caps_malloc" not in start_worker
+    assert "heap_caps_free(compressed_staging_)" not in start_worker
 
 
 def test_settings_save_defers_persistence_and_application_outside_lvgl():

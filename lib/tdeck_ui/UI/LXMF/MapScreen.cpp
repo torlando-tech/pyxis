@@ -88,6 +88,10 @@ MapScreen::MapScreen(lv_obj_t* parent)
       last_drag_point_{0, 0}, back_callback_() {
     LVGL_LOCK();
     state_mutex_ = xSemaphoreCreateMutex();
+    // Reserve the mandatory SD/PNG staging buffer before optional decoded
+    // cache entries. A partial cache must never prevent the worker starting.
+    compressed_staging_ = static_cast<std::uint8_t*>(heap_caps_malloc(
+        MAX_COMPRESSED_TILE_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
 
     screen_ = lv_obj_create(parent ? parent : lv_scr_act());
     lv_obj_set_size(screen_, 320, 240);
@@ -161,12 +165,15 @@ MapScreen::MapScreen(lv_obj_t* parent)
         tile_images_[index] = lv_img_create(viewport_);
         lv_obj_add_flag(tile_images_[index], LV_OBJ_FLAG_HIDDEN);
     }
-    for (std::size_t index = 0U; index < Pyxis::DecodedTileCache::CAPACITY; ++index) {
-        decoded_cache_pixels_[index] = static_cast<std::uint16_t*>(heap_caps_malloc(
-            TILE_PIXEL_COUNT * sizeof(std::uint16_t),
-            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-        if (decoded_cache_pixels_[index]) {
-            (void)decoded_tile_cache_.attach(index, decoded_cache_pixels_[index]);
+    if (compressed_staging_) {
+        for (std::size_t index = 0U;
+             index < Pyxis::DecodedTileCache::CAPACITY; ++index) {
+            decoded_cache_pixels_[index] = static_cast<std::uint16_t*>(heap_caps_malloc(
+                TILE_PIXEL_COUNT * sizeof(std::uint16_t),
+                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            if (decoded_cache_pixels_[index]) {
+                (void)decoded_tile_cache_.attach(index, decoded_cache_pixels_[index]);
+            }
         }
     }
 
@@ -261,10 +268,7 @@ void MapScreen::unlockState() {
 
 bool MapScreen::startWorker() {
     if (worker_started_) return true;
-    if (!state_mutex_) return false;
-    compressed_staging_ = static_cast<std::uint8_t*>(heap_caps_malloc(
-        MAX_COMPRESSED_TILE_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (!compressed_staging_) return false;
+    if (!state_mutex_ || !compressed_staging_) return false;
     stop_requested_.store(false, std::memory_order_release);
     worker_exited_.store(false, std::memory_order_release);
     const BaseType_t created = xTaskCreatePinnedToCore(
@@ -272,8 +276,6 @@ bool MapScreen::startWorker() {
     if (created != pdPASS) {
         worker_exited_.store(true, std::memory_order_release);
         worker_task_ = nullptr;
-        heap_caps_free(compressed_staging_);
-        compressed_staging_ = nullptr;
         return false;
     }
     worker_started_ = true;
