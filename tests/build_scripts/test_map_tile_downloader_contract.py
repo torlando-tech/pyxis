@@ -86,10 +86,13 @@ def test_downloader_is_explicitly_opt_in_and_wired_only_for_visible_misses():
     worker = screen[screen.index("void MapScreen::workerLoop()"):
                     screen.index("Pyxis::MapTileLoadResult MapScreen::loadTile")]
     assert "frame_drained" not in worker
-    assert "retain_download_transport" in worker
     assert "screen_visible_.load(std::memory_order_acquire)" in worker
     assert "transport_close_epoch_.load(std::memory_order_acquire)" in worker
-    assert "requests_released_ && should_retain_download_transport" in worker
+    assert "requests_released_ && screen_visible" in worker
+    take_request = worker[worker.index("presenter_.takeRequest") - 160:
+                          worker.index("presenter_.takeRequest") + 80]
+    assert "downloads_enabled" not in take_request
+    assert "should_retain_download_transport" not in take_request
     assert "download_transport_.disconnectIdle()" in worker
     assert "screen_visible_.store(true, std::memory_order_release)" in screen
     assert "screen_visible_.exchange(false, std::memory_order_acq_rel)" in screen
@@ -113,7 +116,9 @@ def test_recent_decoded_tiles_use_a_fixed_psram_lru_before_sd_decode():
     cache = (ROOT / "lib/tdeck_ui/UI/LXMF/DecodedTileCache.h").read_text()
     assert "CAPACITY = 12U" in cache
     assert "decoded_tile_cache_.get" in screen
-    assert screen.index("decoded_tile_cache_.get") < screen.index("store_.beginGet")
+    read_tile = screen[screen.index("Pyxis::MapTileLoadResult MapScreen::readTile("):
+                       screen.index("Pyxis::MapTileLoadResult MapScreen::readCompressedTile(")]
+    assert read_tile.index("decoded_tile_cache_.get") < read_tile.index("MapTileLookupPolicy::readLocal")
     assert "decoded_tile_cache_.put" in screen
     assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in screen
     assert "decoded_cache_pixels_[Pyxis::DecodedTileCache::CAPACITY]" in header

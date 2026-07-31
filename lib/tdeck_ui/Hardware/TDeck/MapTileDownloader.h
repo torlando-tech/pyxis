@@ -129,6 +129,9 @@ public:
     bool takeResult(MapTileDownloadResult& result);
 
     bool isBusy() const { return active_ || queue_count_ != 0U; }
+    bool willStartTransportOnNextPump() const {
+        return active_ && stage_ == Stage::SELECTED;
+    }
     std::size_t queuedCount() const { return queue_count_; }
     std::size_t resultCount() const { return result_count_; }
     std::uint32_t droppedResultCount() const { return dropped_results_; }

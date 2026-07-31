@@ -9,16 +9,15 @@ import pytest
 from native_test import find_cxx
 
 ROOT = Path(__file__).resolve().parents[2]
-TEST_SOURCE = ROOT / "tests/native/test_map_tile_downloader.cpp"
-PRODUCTION_SOURCE = ROOT / "lib/tdeck_ui/Hardware/TDeck/MapTileDownloader.cpp"
+SOURCE = ROOT / "tests/native/test_map_tile_stream_reader.cpp"
 
 
 @pytest.mark.parametrize("sanitize", [False, True], ids=["strict-cxx11", "asan-ubsan"])
-def test_bounded_map_tile_downloader(tmp_path: Path, sanitize: bool) -> None:
-    binary = tmp_path / "test_map_tile_downloader"
+def test_map_tile_stream_reader(tmp_path: Path, sanitize: bool) -> None:
+    binary = tmp_path / "test_map_tile_stream_reader"
     command = [find_cxx(), "-std=c++11", "-Wall", "-Wextra", "-Werror", "-pedantic",
                "-Wconversion", "-Wsign-conversion", f"-I{ROOT / 'lib/tdeck_ui'}",
-               str(TEST_SOURCE), str(PRODUCTION_SOURCE), "-o", str(binary)]
+               str(SOURCE), "-o", str(binary)]
     if sanitize:
         command[1:1] = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
     compiled = subprocess.run(command, capture_output=True, text=True, timeout=60)
@@ -29,4 +28,4 @@ def test_bounded_map_tile_downloader(tmp_path: Path, sanitize: bool) -> None:
         env["UBSAN_OPTIONS"] = "halt_on_error=1:print_stacktrace=1"
     ran = subprocess.run([str(binary)], capture_output=True, text=True, timeout=60, env=env)
     assert ran.returncode == 0, ran.stdout + ran.stderr
-    assert ran.stdout == "map tile downloader: 21 tests passed\n"
+    assert ran.stdout == "map tile stream reader: 3 tests passed\n"

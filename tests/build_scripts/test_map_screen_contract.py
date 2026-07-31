@@ -69,6 +69,94 @@ def test_worker_predecodes_and_render_path_has_no_io():
     assert "MAX_COMPLETIONS_PER_TICK = 1" in text(UI / "MapScreen.h")
 
 
+def test_selected_pack_is_worker_owned_read_only_and_precedes_live_cache():
+    source = text(UI / "MapScreen.cpp")
+    header = text(UI / "MapScreen.h")
+    assert '#include "Hardware/TDeck/MapTilePack.h"' in header
+    assert "Hardware::TDeck::MapTilePack pack_;" in header
+    constructor = source[source.index("MapScreen::MapScreen"):
+                         source.index("MapScreen::~MapScreen")]
+    assert "pack_(storage_)" in constructor
+
+    worker = function_body(source, "void MapScreen::workerLoop()")
+    assert worker.index("store_.initialize()") < worker.index("pack_.initialize()")
+
+    read_tile = function_body(source, "Pyxis::MapTileLoadResult MapScreen::readTile(")
+    assert read_tile.index("decoded_tile_cache_.get") < read_tile.index("PACK")
+    assert read_tile.index("PACK") < read_tile.index("LIVE_STORE")
+
+    pack_read = function_body(
+        source, "Pyxis::MapTileLoadResult MapScreen::readCompressedTile(")
+    assert ("source == CompressedTileSource::LIVE_STORE && !store_initialized_"
+            in pack_read)
+    assert "MapTileStreamReader::readExact" in pack_read
+    assert "PackReadStream pack_stream(pack_)" in pack_read
+    assert "LiveReadStream live_stream(store_)" in pack_read
+    pack_adapter = source[source.index("class PackReadStream"):
+                          source.index("class LiveReadStream")]
+    live_adapter = source[source.index("class LiveReadStream"):
+                          source.index("class AtomicStopSource")]
+    assert "pack_.beginGet" in pack_adapter
+    assert "pack_.readGetChunk" in pack_adapter
+    assert "pack_.endGet" in pack_adapter
+    assert "remove" not in pack_adapter
+    assert "store_.beginGet" in live_adapter
+    assert "store_.readGetChunk" in live_adapter
+    assert "store_.endGet" in live_adapter
+    remove_token = "store_.removeTile(request.key)"
+    remove_offsets = []
+    cursor = 0
+    while True:
+        offset = pack_read.find(remove_token, cursor)
+        if offset < 0:
+            break
+        remove_offsets.append(offset)
+        cursor = offset + len(remove_token)
+    assert len(remove_offsets) == 2
+    for offset in remove_offsets:
+        remove_block = pack_read[max(0, offset - 220):offset + 80]
+        assert "source == CompressedTileSource::LIVE_STORE" in remove_block
+
+    # Covered-missing, uncovered, and corrupt immutable-pack tiles all continue
+    # to the mutable live cache before optional online acquisition.
+    assert "MapTilePackResult::UNCOVERED" in pack_adapter
+    assert "MapTilePackResult::TILE_MISSING" in pack_adapter
+    assert "MapTileLookupPolicy::readLocal" in read_tile
+    assert "static MapTileLoadResult resolveLocal" in text(UI / "MapTileLookupPolicy.h")
+    assert "MapTileLookupPolicy::shouldStartOnline" in source
+
+    # Every activation publishes a durable pack refresh edge. The worker owns
+    # reinitialization and clears decoded tiles only when selection identity
+    # actually changes; failed replacement remains transactional in MapTilePack.
+    show = function_body(source, "void MapScreen::show()")
+    assert "pack_refresh_epoch_.fetch_add" in show
+    assert "std::atomic<std::uint32_t> pack_refresh_epoch_;" in header
+    assert "pack_refresh_epoch != handled_pack_refresh_epoch" in worker
+    initial_epoch = worker.index("handled_pack_refresh_epoch")
+    initial_pack_init = worker.index("pack_.initialize()")
+    assert initial_epoch < initial_pack_init
+    assert worker.index("pack_.initialize()", worker.index("pack_refresh_epoch !=")) < worker.index("presenter_.takeRequest")
+    assert "decoded_tile_cache_.clear()" in worker
+    assert "std::strcmp(previous_pack_id, pack_.metadata().pack_id)" in worker
+
+    download = function_body(source, "Pyxis::MapTileLoadResult MapScreen::downloadTile(")
+    assert "willStartTransportOnNextPump()" in download
+    assert "xSemaphoreTake(transport_start_mutex_, portMAX_DELAY)" in download
+    guarded_start = download[download.index("willStartTransportOnNextPump()"):
+                             download.index("xSemaphoreGive(transport_start_mutex_)")]
+    assert "downloads_enabled_.load" in guarded_start
+    assert "screen_visible_.load" in guarded_start
+    assert "transport_close_epoch_.load" in guarded_start
+    assert "downloader_.pump()" in guarded_start
+    disable = function_body(source, "void MapScreen::setDownloadEnabled(")
+    hide = function_body(source, "void MapScreen::hide()")
+    assert "synchronizeTransportStart()" in disable
+    assert "synchronizeTransportStart()" in hide
+
+    library = text(ROOT / "lib/tdeck_ui/library.json")
+    assert '"+<Hardware/TDeck/*.cpp>"' in library
+
+
 def test_sd_adapter_never_mounts_or_formats():
     source = text(HW / "MapTileStoreSD.cpp")
     for forbidden in ("SD.begin", "SD.format", "LittleFS"):
