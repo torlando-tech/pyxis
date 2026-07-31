@@ -79,12 +79,25 @@ def test_default_endpoint_uses_current_chain_with_known_fallback_available():
 def test_downloader_is_explicitly_opt_in_and_wired_only_for_visible_misses():
     screen = MAP_SCREEN.read_text()
     settings = SETTINGS.read_text()
-    assert "downloadTile(request)" in screen
+    assert "downloadTile(request, transport_epoch)" in screen
     assert "downloader_.enqueue(request.key, request.frame_epoch)" in screen
     assert "presenter_.frameEpoch() != request.frame_epoch" in screen
     assert "download_failed_frame_epoch_ == request.frame_epoch" in screen
-    assert "presenter_.requestCount() == 0U" in screen
-    assert "download_transport_.disconnectIdle()" in screen
+    worker = screen[screen.index("void MapScreen::workerLoop()"):
+                    screen.index("Pyxis::MapTileLoadResult MapScreen::loadTile")]
+    assert "frame_drained" not in worker
+    assert "retain_download_transport" in worker
+    assert "screen_visible_.load(std::memory_order_acquire)" in worker
+    assert "transport_close_epoch_.load(std::memory_order_acquire)" in worker
+    assert "requests_released_ && should_retain_download_transport" in worker
+    assert "download_transport_.disconnectIdle()" in worker
+    assert "screen_visible_.store(true, std::memory_order_release)" in screen
+    assert "screen_visible_.exchange(false, std::memory_order_acq_rel)" in screen
+    assert "transport_close_epoch_.fetch_add(1U, std::memory_order_acq_rel)" in screen
+    download = screen[screen.index("Pyxis::MapTileLoadResult MapScreen::downloadTile"):
+                      screen.index("Pyxis::MapTileLoadResult MapScreen::readTile")]
+    assert "!screen_visible_.load(std::memory_order_acquire)" in download
+    assert "transport_close_epoch_.load(std::memory_order_acquire) !=" in download
     assert 'KEY_MAP_DOWNLOAD = "map_dl"' in settings
     assert "prefs.getBool(KEY_MAP_DOWNLOAD, false)" in settings
     assert "Download map tiles:" in settings

@@ -50,7 +50,12 @@ public:
     void serviceIo();
     void updateModel(const Pyxis::MapView::Request& request);
     void setDownloadEnabled(bool enabled) {
-        downloads_enabled_.store(enabled, std::memory_order_release);
+        const bool was_enabled =
+            downloads_enabled_.exchange(enabled, std::memory_order_acq_rel);
+        if (was_enabled && !enabled) {
+            transport_close_epoch_.fetch_add(1U, std::memory_order_acq_rel);
+        }
+        if (worker_task_) xTaskNotifyGive(worker_task_);
     }
 
     // These methods only mutate the pre-created object pool and are invoked
@@ -90,6 +95,8 @@ private:
     Hardware::TDeck::MapTileDownloadConfig download_config_;
     Hardware::TDeck::MapTileDownloader downloader_;
     std::atomic<bool> downloads_enabled_;
+    std::atomic<bool> screen_visible_;
+    std::atomic<std::uint32_t> transport_close_epoch_;
     std::uint32_t download_failed_frame_epoch_;
     Hardware::TDeck::TileKey decode_failed_keys_[TILE_COUNT];
     std::uint32_t decode_failed_generations_[TILE_COUNT];
@@ -110,9 +117,11 @@ private:
 
     static void workerEntry(void* context);
     void workerLoop();
-    Pyxis::MapTileLoadResult loadTile(const Pyxis::MapTileRequest& request);
+    Pyxis::MapTileLoadResult loadTile(const Pyxis::MapTileRequest& request,
+                                      std::uint32_t transport_epoch);
     Pyxis::MapTileLoadResult readTile(const Pyxis::MapTileRequest& request);
-    Pyxis::MapTileLoadResult downloadTile(const Pyxis::MapTileRequest& request);
+    Pyxis::MapTileLoadResult downloadTile(const Pyxis::MapTileRequest& request,
+                                          std::uint32_t transport_epoch);
     bool decodeFailedFor(const Pyxis::MapTileRequest& request) const;
     void markDecodeFailed(const Pyxis::MapTileRequest& request);
     bool startWorker();
