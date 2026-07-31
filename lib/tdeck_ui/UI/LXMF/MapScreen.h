@@ -5,6 +5,7 @@
 #define UI_LXMF_MAP_SCREEN_H
 
 #include "MapScreenPresenter.h"
+#include "DecodedTileCache.h"
 
 #ifdef ARDUINO
 
@@ -72,6 +73,8 @@ private:
     lv_obj_t* tile_images_[TILE_COUNT];
     lv_img_dsc_t tile_descriptors_[TILE_COUNT];
     lv_color_t* tile_pixels_[TILE_COUNT];
+    Pyxis::DecodedTileCache decoded_tile_cache_;
+    std::uint16_t* decoded_cache_pixels_[Pyxis::DecodedTileCache::CAPACITY];
     lv_obj_t* approximation_halos_[MARKER_COUNT];
     lv_obj_t* markers_[MARKER_COUNT];
     lv_obj_t* marker_labels_[MARKER_COUNT];

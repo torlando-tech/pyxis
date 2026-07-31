@@ -68,7 +68,8 @@ MapScreen::MapScreen(lv_obj_t* parent)
       status_label_(nullptr), attribution_label_(nullptr), zoom_label_(nullptr),
       zoom_out_button_(nullptr), zoom_in_button_(nullptr),
       recenter_button_(nullptr), pan_buttons_{}, tile_images_{},
-      tile_descriptors_{}, tile_pixels_{}, approximation_halos_{}, markers_{}, marker_labels_{},
+      tile_descriptors_{}, tile_pixels_{}, decoded_tile_cache_(TILE_PIXEL_COUNT),
+      decoded_cache_pixels_{}, approximation_halos_{}, markers_{}, marker_labels_{},
       presenter_(), storage_(),
       store_config_{STORE_ENTRY_CAPACITY, STORE_BYTE_QUOTA,
                     MAX_COMPRESSED_TILE_BYTES},
@@ -160,6 +161,14 @@ MapScreen::MapScreen(lv_obj_t* parent)
         tile_images_[index] = lv_img_create(viewport_);
         lv_obj_add_flag(tile_images_[index], LV_OBJ_FLAG_HIDDEN);
     }
+    for (std::size_t index = 0U; index < Pyxis::DecodedTileCache::CAPACITY; ++index) {
+        decoded_cache_pixels_[index] = static_cast<std::uint16_t*>(heap_caps_malloc(
+            TILE_PIXEL_COUNT * sizeof(std::uint16_t),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (decoded_cache_pixels_[index]) {
+            (void)decoded_tile_cache_.attach(index, decoded_cache_pixels_[index]);
+        }
+    }
 
     for (std::size_t index = 0; index < MARKER_COUNT; ++index) {
         approximation_halos_[index] = lv_obj_create(viewport_);
@@ -231,6 +240,10 @@ MapScreen::~MapScreen() {
     for (std::size_t index = 0; index < TILE_COUNT; ++index) {
         if (tile_pixels_[index]) heap_caps_free(tile_pixels_[index]);
         tile_pixels_[index] = nullptr;
+    }
+    for (std::size_t index = 0U; index < Pyxis::DecodedTileCache::CAPACITY; ++index) {
+        if (decoded_cache_pixels_[index]) heap_caps_free(decoded_cache_pixels_[index]);
+        decoded_cache_pixels_[index] = nullptr;
     }
     if (compressed_staging_) heap_caps_free(compressed_staging_);
     compressed_staging_ = nullptr;
@@ -416,6 +429,13 @@ Pyxis::MapTileLoadResult MapScreen::downloadTile(
 
 Pyxis::MapTileLoadResult MapScreen::readTile(
     const Pyxis::MapTileRequest& request) {
+    if (request.slot_index < TILE_COUNT && tile_pixels_[request.slot_index] &&
+        decoded_tile_cache_.get(
+            request.key,
+            reinterpret_cast<std::uint16_t*>(tile_pixels_[request.slot_index]),
+            TILE_PIXEL_COUNT)) {
+        return Pyxis::MapTileLoadResult::READY;
+    }
     if (!store_initialized_) {
         return Pyxis::MapTileLoadResult::STORAGE_UNAVAILABLE;
     }
@@ -499,6 +519,9 @@ Pyxis::MapTileLoadResult MapScreen::readTile(
                                       rgb[source + 2U]);
     }
     lv_mem_free(rgb);
+    (void)decoded_tile_cache_.put(
+        request.key, reinterpret_cast<const std::uint16_t*>(pixels),
+        TILE_PIXEL_COUNT);
     return Pyxis::MapTileLoadResult::READY;
 }
 

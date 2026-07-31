@@ -86,6 +86,19 @@ def test_downloader_is_explicitly_opt_in_and_wired_only_for_visible_misses():
     assert '"Offline"' not in status
 
 
+def test_recent_decoded_tiles_use_a_fixed_psram_lru_before_sd_decode():
+    screen = MAP_SCREEN.read_text()
+    header = (ROOT / "lib/tdeck_ui/UI/LXMF/MapScreen.h").read_text()
+    cache = (ROOT / "lib/tdeck_ui/UI/LXMF/DecodedTileCache.h").read_text()
+    assert "CAPACITY = 12U" in cache
+    assert "decoded_tile_cache_.get" in screen
+    assert screen.index("decoded_tile_cache_.get") < screen.index("store_.beginGet")
+    assert "decoded_tile_cache_.put" in screen
+    assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in screen
+    assert "decoded_cache_pixels_[Pyxis::DecodedTileCache::CAPACITY]" in header
+    assert "heap_caps_free(decoded_cache_pixels_[index])" in screen
+
+
 def test_settings_save_defers_persistence_and_application_outside_lvgl():
     settings = SETTINGS.read_text()
     capture = settings[settings.index("void SettingsScreen::save_settings()"):
