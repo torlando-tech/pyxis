@@ -45,6 +45,8 @@ public:
     virtual TileTransportResult read(std::uint8_t* output, std::size_t capacity,
         std::size_t& count, bool& eof) = 0;
     virtual void close() = 0;
+    /** Hard-reset transport state before a bounded reconnect attempt. */
+    virtual void reset() { close(); }
 };
 
 class MapTileDownloadClock {
@@ -97,8 +99,9 @@ struct MapTileDownloadResult {
 /**
  * Fixed-capacity, caller-pumped downloader for visible slippy-map tiles.
  *
- * Requests contain only TileKey + generation. There is no retry, prefetch,
- * background bulk mode, credential support, or hidden URL input. Keep one
+ * Requests contain only TileKey + generation. A failed transport start gets one
+ * hard-reset reconnect attempt; there is no content retry, prefetch, background
+ * bulk mode, credential support, or hidden URL input. Keep one
  * visible tile request active at a time. Users of the default public endpoint
  * must preserve visible OpenStreetMap attribution in the eventual map UI and
  * comply with https://operations.osmfoundation.org/policies/tiles/ .
@@ -149,6 +152,7 @@ private:
     Request current_;
     bool active_;
     bool transport_open_;
+    bool transport_retry_used_;
     bool store_open_;
     Stage stage_;
     std::uint64_t last_now_;

@@ -39,7 +39,15 @@ def test_https_adapter_verifies_peer_with_explicit_ca_and_has_no_credentials():
     assert "setReuse(true)" in source
     assert "useHTTP10(true)" not in source
     assert "disconnectIdle" in source
-    assert "client_.stop()" in source
+    reset = ADAPTER_CPP.read_text().split("void MapTileHttpArduino::reset()", 1)[1].split("}\n", 1)[0]
+    assert "http_.setReuse(false)" in reset
+    assert "http_.end()" in reset
+    assert "http_.detachClient()" in reset
+    assert "client_.markStopped()" in reset
+    assert "MapTileHttpArduino::~MapTileHttpArduino() { reset(); }" in source
+    # The pinned WiFiClientSecure zeroes its socket context after an internal
+    # failure stop; an explicit second stop can therefore close descriptor 0.
+    assert "client_.stop()" not in reset
     for forbidden in ("Authorization", "Cookie", "username", "password", "SD.begin", "format(", "LittleFS"):
         assert forbidden not in source
 

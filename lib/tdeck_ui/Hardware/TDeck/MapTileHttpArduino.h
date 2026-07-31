@@ -14,6 +14,18 @@
 namespace Hardware {
 namespace TDeck {
 
+class MapTileSecureClient : public WiFiClientSecure {
+public:
+    /** Restore the framework's stopped-socket sentinel after TLS cleanup. */
+    void markStopped() { if (sslclient != NULL) sslclient->socket = -1; }
+};
+
+class MapTileHttpClient : public HTTPClient {
+public:
+    /** Prevent HTTPClient destruction from stopping an already-stopped client. */
+    void detachClient() { _client = NULL; }
+};
+
 /** HTTPS-only transport. A non-empty explicit CA is mandatory for peer verification. */
 class MapTileHttpArduino : public MapTileTransport {
 public:
@@ -25,10 +37,11 @@ public:
     virtual TileTransportResult read(std::uint8_t* output, std::size_t capacity,
         std::size_t& count, bool& eof);
     virtual void close();
+    virtual void reset();
     void disconnectIdle();
 private:
-    WiFiClientSecure client_;
-    HTTPClient http_;
+    MapTileSecureClient client_;
+    MapTileHttpClient http_;
     WiFiClient* stream_;
     std::int64_t remaining_;
     bool open_;

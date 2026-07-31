@@ -21,7 +21,7 @@ std::int32_t boundedConnectTimeout(std::uint32_t value) {
 
 MapTileHttpArduino::MapTileHttpArduino()
     : stream_(NULL), remaining_(-1), open_(false), content_type_{0} {}
-MapTileHttpArduino::~MapTileHttpArduino() { close(); }
+MapTileHttpArduino::~MapTileHttpArduino() { reset(); }
 
 TileTransportResult MapTileHttpArduino::start(const char* url, const char* user_agent,
     const char* ca_certificate, std::uint32_t connect_timeout_ms,
@@ -103,13 +103,24 @@ void MapTileHttpArduino::close() {
     content_type_[0] = '\0';
 }
 
-void MapTileHttpArduino::disconnectIdle() {
-    client_.stop();
+void MapTileHttpArduino::reset() {
+    // Disable reuse so HTTPClient::end() stops an active secure connection.
+    // Do not stop the secure client directly: it may already have done so after
+    // a connect/write failure, and this framework zeroes the context afterward,
+    // making a second stop interpret socket 0 as live.
+    http_.setReuse(false);
     http_.end();
+    http_.detachClient();
+    client_.markStopped();
     stream_ = NULL;
     remaining_ = -1;
     open_ = false;
     content_type_[0] = '\0';
+    http_.setReuse(true);
+}
+
+void MapTileHttpArduino::disconnectIdle() {
+    reset();
 }
 
 MapTileMillisClock::MapTileMillisClock() : previous_(millis()), high_(0U) {}

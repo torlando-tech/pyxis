@@ -35,7 +35,8 @@ MapTileDownloader::MapTileDownloader(MapTileDownloadStore& store, MapTileTranspo
     : store_(store), transport_(transport), clock_(clock), policy_(policy), config_(config),
       queue_{}, queue_count_(0U), results_{}, result_head_(0U), result_count_(0U),
       dropped_results_(0U), current_{}, active_(false), transport_open_(false),
-      store_open_(false), stage_(Stage::SELECTED), last_now_(0U), deadline_(0U),
+      transport_retry_used_(false), store_open_(false), stage_(Stage::SELECTED),
+      last_now_(0U), deadline_(0U),
       received_(0U), expected_length_(-1), url_{0}, user_agent_{0}, chunk_{0} {}
 
 MapTileDownloader::~MapTileDownloader() {
@@ -189,6 +190,7 @@ MapTilePumpResult MapTileDownloader::pump() {
         received_ = 0U;
         expected_length_ = -1;
         transport_open_ = false;
+        transport_retry_used_ = false;
         store_open_ = false;
         stage_ = Stage::SELECTED;
         last_now_ = clock_.nowMs();
@@ -220,6 +222,17 @@ MapTilePumpResult MapTileDownloader::pump() {
         const TileTransportResult started = transport_.start(url_, user_agent_, config_.ca_certificate,
             config_.connect_timeout_ms, config_.read_timeout_ms, response);
         if (started != TileTransportResult::OK) {
+            // HTTPClient may retain a server-closed keep-alive socket when reuse
+            // is enabled. Force the concrete transport to release its socket and
+            // TLS context before one bounded reconnect attempt.
+            transport_.reset();
+            // A blocking reconnect attempt can consume the remaining overall
+            // budget even when it returns a generic transport error.
+            if (!checkClock()) return MapTilePumpResult::PROGRESSED;
+            if (started == TileTransportResult::ERROR && !transport_retry_used_) {
+                transport_retry_used_ = true;
+                return MapTilePumpResult::PROGRESSED;
+            }
             finish(started == TileTransportResult::TIMEOUT ? MapTileResultCode::TIMEOUT :
                 MapTileResultCode::TRANSPORT_ERROR, false);
             return MapTilePumpResult::PROGRESSED;

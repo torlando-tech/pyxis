@@ -59,6 +59,7 @@ public:
 class FakeTransport : public MapTileTransport {
 public:
     TileTransportResult start_result;
+    std::vector<TileTransportResult> start_results;
     TileTransportResult read_result;
     int status;
     std::int64_t length;
@@ -75,16 +76,19 @@ public:
     std::uint32_t connect_timeout;
     std::uint32_t read_timeout;
     FakeClock* clock;
+    std::uint64_t advance_on_start;
     std::uint64_t advance_on_read;
     FakeTransport() : start_result(TileTransportResult::OK), read_result(TileTransportResult::OK),
         status(200), length(-1), type("image/png"), position(0U), forced_chunk(0U), starts(0), reads(0), closes(0),
-        connect_timeout(0U), read_timeout(0U), clock(NULL), advance_on_read(0U) {}
+        connect_timeout(0U), read_timeout(0U), clock(NULL), advance_on_start(0U), advance_on_read(0U) {}
     virtual TileTransportResult start(const char* u, const char* a, const char* c,
                                       std::uint32_t ct, std::uint32_t rt, TileHttpResponse& response) {
         ++starts; url = u == NULL ? "" : u; agent = a == NULL ? "" : a; ca = c == NULL ? "" : c;
+        if (clock != NULL) clock->value += advance_on_start;
         connect_timeout = ct; read_timeout = rt; position = 0U;
         response.status_code = status; response.content_length = length; response.content_type = type;
-        return start_result;
+        const std::size_t attempt = static_cast<std::size_t>(starts - 1);
+        return attempt < start_results.size() ? start_results[attempt] : start_result;
     }
     virtual TileTransportResult read(std::uint8_t* output, std::size_t capacity, std::size_t& count, bool& eof) {
         ++reads;
@@ -147,6 +151,58 @@ void testTransportAndStoreFailuresAbort() { beginTest();
     { FakeStore s; s.short_write=true; FakeTransport t; t.body=bytes(30U); FakeClock c; MapTileDownloader d(s,t,c,enabled(),config()); CHECK(d.enqueue(key(),1U)==MapTileEnqueueResult::ACCEPTED); runUntilIdle(d,c); CHECK(take(d).code==MapTileResultCode::STORE_ERROR); CHECK(s.aborts==1); }
     { FakeStore s; s.finish_result=TileStoreResult::IO_ERROR; FakeTransport t; t.body=bytes(30U); FakeClock c; MapTileDownloader d(s,t,c,enabled(),config()); CHECK(d.enqueue(key(),1U)==MapTileEnqueueResult::ACCEPTED); runUntilIdle(d,c); CHECK(take(d).code==MapTileResultCode::STORE_ERROR); CHECK(s.aborts==1); }
 }
+void testTransportStartFailureHardClosesAndRetriesOnce() { beginTest();
+    FakeStore s; FakeTransport t; t.start_results.push_back(TileTransportResult::ERROR);
+    t.start_results.push_back(TileTransportResult::OK); t.body=bytes(30U);
+    FakeClock c; MapTileDownloader d(s,t,c,enabled(),config());
+    CHECK(d.enqueue(key(),1U)==MapTileEnqueueResult::ACCEPTED); runUntilIdle(d,c);
+    CHECK(take(d).code==MapTileResultCode::SUCCESS); CHECK(t.starts==2); CHECK(t.closes==2);
+}
+void testTransportStartRetryIsBounded() { beginTest();
+    FakeStore s; FakeTransport t; t.start_result=TileTransportResult::ERROR;
+    FakeClock c; MapTileDownloader d(s,t,c,enabled(),config());
+    CHECK(d.enqueue(key(),1U)==MapTileEnqueueResult::ACCEPTED); runUntilIdle(d,c);
+    CHECK(take(d).code==MapTileResultCode::TRANSPORT_ERROR); CHECK(t.starts==2); CHECK(t.closes==2);
+}
+void testTransportStartTimeoutIsNotRetried() { beginTest();
+    FakeStore s; FakeTransport t; t.start_result=TileTransportResult::TIMEOUT;
+    FakeClock c; MapTileDownloader d(s,t,c,enabled(),config());
+    CHECK(d.enqueue(key(),1U)==MapTileEnqueueResult::ACCEPTED); runUntilIdle(d,c);
+    CHECK(take(d).code==MapTileResultCode::TIMEOUT); CHECK(t.starts==1); CHECK(t.closes==1);
+}
+void testTransportRetryHonorsOverallDeadline() { beginTest();
+    FakeStore s; FakeTransport t; t.start_result=TileTransportResult::ERROR;
+    FakeClock c; t.clock=&c; t.advance_on_start=20U; MapTileDownloadConfig cfg=config();
+    cfg.overall_timeout_ms=10U; MapTileDownloader d(s,t,c,enabled(),cfg);
+    CHECK(d.enqueue(key(),1U)==MapTileEnqueueResult::ACCEPTED); runUntilIdle(d,c);
+    CHECK(take(d).code==MapTileResultCode::TIMEOUT); CHECK(t.starts==1); CHECK(t.closes==1);
+}
+void testSecondTransportFailureHonorsOverallDeadline() { beginTest();
+    FakeStore s; FakeTransport t; t.start_result=TileTransportResult::ERROR;
+    FakeClock c; t.clock=&c; t.advance_on_start=6U; MapTileDownloadConfig cfg=config();
+    cfg.overall_timeout_ms=10U; MapTileDownloader d(s,t,c,enabled(),cfg);
+    CHECK(d.enqueue(key(),1U)==MapTileEnqueueResult::ACCEPTED); runUntilIdle(d,c);
+    CHECK(take(d).code==MapTileResultCode::TIMEOUT); CHECK(t.starts==2); CHECK(t.closes==2);
+}
+void testTransportRetryCanBeCanceledBetweenAttempts() { beginTest();
+    FakeStore s; FakeTransport t; t.start_result=TileTransportResult::ERROR;
+    FakeClock c; MapTileDownloader d(s,t,c,enabled(),config());
+    CHECK(d.enqueue(key(),5U)==MapTileEnqueueResult::ACCEPTED);
+    CHECK(d.pump()==MapTilePumpResult::PROGRESSED);
+    CHECK(d.pump()==MapTilePumpResult::PROGRESSED); CHECK(t.starts==1); CHECK(t.closes==1);
+    CHECK(d.cancelGeneration(5U)==1U); runUntilIdle(d,c);
+    CHECK(take(d).code==MapTileResultCode::CANCELED); CHECK(t.starts==1);
+}
+void testTransportRetryBudgetResetsForNextRequest() { beginTest();
+    FakeStore s; FakeTransport t; t.start_results.push_back(TileTransportResult::ERROR);
+    t.start_results.push_back(TileTransportResult::OK); t.start_results.push_back(TileTransportResult::ERROR);
+    t.start_results.push_back(TileTransportResult::OK); t.body=bytes(30U);
+    FakeClock c; MapTileDownloader d(s,t,c,enabled(),config());
+    CHECK(d.enqueue(key(1U),1U)==MapTileEnqueueResult::ACCEPTED);
+    CHECK(d.enqueue(key(2U),2U)==MapTileEnqueueResult::ACCEPTED); runUntilIdle(d,c);
+    CHECK(take(d).code==MapTileResultCode::SUCCESS); CHECK(take(d).code==MapTileResultCode::SUCCESS);
+    CHECK(t.starts==4); CHECK(t.closes==4);
+}
 void testCancellationAtStagesAndGenerationIsolation() { beginTest();
     for(int stage=0;stage<3;++stage){ FakeStore s; FakeTransport t; t.body=bytes(5000U); FakeClock c; MapTileDownloader d(s,t,c,enabled(),config()); CHECK(d.enqueue(key(),5U)==MapTileEnqueueResult::ACCEPTED); for(int i=0;i<stage;++i) CHECK(d.pump()==MapTilePumpResult::PROGRESSED); CHECK(d.cancelGeneration(5U)==1U); runUntilIdle(d,c); CHECK(take(d).code==MapTileResultCode::CANCELED); if(s.begins!=0) CHECK(s.aborts==1); }
     FakeStore s; FakeTransport t; FakeClock c; MapTileDownloader d(s,t,c,enabled(),config()); CHECK(d.enqueue(key(0U),1U)==MapTileEnqueueResult::ACCEPTED); CHECK(d.enqueue(key(1U),2U)==MapTileEnqueueResult::ACCEPTED); CHECK(d.cancelGeneration(1U)==1U); CHECK(d.queuedCount()==1U); CHECK(take(d).code==MapTileResultCode::CANCELED); }
@@ -172,4 +228,4 @@ void testSdDisappearanceAndMailboxBound() { beginTest(); FakeStore s; FakeTransp
 void testStress() { beginTest(); FakeStore s; FakeTransport t; FakeClock c; MapTileDownloader d(s,t,c,enabled(),config());
     for(std::uint32_t i=0;i<100000U;++i){ TileKey k=key(i&3U); const std::uint32_t g=i&7U; MapTileEnqueueResult r=d.enqueue(k,g); CHECK(r==MapTileEnqueueResult::ACCEPTED||r==MapTileEnqueueResult::DUPLICATE||r==MapTileEnqueueResult::QUEUE_FULL); if((i&3U)==0U)d.cancelGeneration(g); MapTileDownloadResult ignored; while(d.takeResult(ignored)){} } CHECK(d.queuedCount()<=MapTileDownloader::QUEUE_CAPACITY); }
 }
-int main(){ testDisabledByDefault(); testCanonicalUrlAndBounds(); testDedupeAndQueueFullNoEviction(); testSuccessExactChunksAndPublicContract(); testStatusAndContentTypeFailures(); testLengthOverUnderAndChunkOverCap(); testTransportAndStoreFailuresAbort(); testCancellationAtStagesAndGenerationIsolation(); testTimeoutRollbackAndSaturation(); testDestructorAbortsOwnedResources(); testRuntimeDisableCancelsAllWork(); testSdDisappearanceAndMailboxBound(); testStress(); std::cout<<"map tile downloader: "<<tests_run<<" tests passed\n"; }
+int main(){ testDisabledByDefault(); testCanonicalUrlAndBounds(); testDedupeAndQueueFullNoEviction(); testSuccessExactChunksAndPublicContract(); testStatusAndContentTypeFailures(); testLengthOverUnderAndChunkOverCap(); testTransportAndStoreFailuresAbort(); testTransportStartFailureHardClosesAndRetriesOnce(); testTransportStartRetryIsBounded(); testTransportStartTimeoutIsNotRetried(); testTransportRetryHonorsOverallDeadline(); testSecondTransportFailureHonorsOverallDeadline(); testTransportRetryCanBeCanceledBetweenAttempts(); testTransportRetryBudgetResetsForNextRequest(); testCancellationAtStagesAndGenerationIsolation(); testTimeoutRollbackAndSaturation(); testDestructorAbortsOwnedResources(); testRuntimeDisableCancelsAllWork(); testSdDisappearanceAndMailboxBound(); testStress(); std::cout<<"map tile downloader: "<<tests_run<<" tests passed\n"; }
