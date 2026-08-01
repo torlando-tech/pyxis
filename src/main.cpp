@@ -138,6 +138,16 @@ uint32_t last_announce = 0;
 uint32_t last_sync = 0;
 uint32_t last_status_check = 0;
 const uint32_t STATUS_CHECK_INTERVAL = 1000;  // 1 second
+
+void announce_reachable_destinations() {
+    if (!router) return;
+
+    router->announce();
+    if (ui_manager) {
+        ui_manager->announce_lxst();
+    }
+    last_announce = millis();
+}
 const uint32_t INITIAL_SYNC_DELAY = 45000;    // 45 seconds after boot before first sync
 bool initial_sync_done = false;
 
@@ -1231,13 +1241,10 @@ void setup_lxmf() {
         delay(3000);
         BOOT_PROFILE_WAIT_END("tcp_stabilize");
 
-        // Check TCP status before announcing
+        // Record whether TCP stabilized during boot. Destination announces are
+        // deferred until UIManager has constructed lxst.telephony.
         if (tcp_interface->online()) {
             INFO("TCP interface online: YES");
-            // Announce delivery destination
-            INFO("Sending LXMF announce...");
-            router->announce();
-            last_announce = millis();
         } else {
             INFO("TCP interface online: NO");
         }
@@ -1785,10 +1792,9 @@ void setup() {
     // gate because they are recoverable runtime operations.
     confirm_running_firmware();
 
-    // Send initial LXST voice destination announce
-    if (ui_manager) {
-        ui_manager->announce_lxst();
-    }
+    // Publish both reachable destinations together after UIManager has created
+    // the LXST destination. Earlier boot stages deliberately do not announce.
+    announce_reachable_destinations();
 
     // Register delivered callback to update message status in storage and UI
     router->register_delivered_callback([](LXMF::LXMessage& msg) {
@@ -1995,16 +2001,13 @@ static void handle_test_hook_command(const String& line) {
     }
     else if (cmd == "T:ANN") {
         if (!router) { Serial.println("T:ERR no router"); return; }
-        router->announce();
+        announce_reachable_destinations();
         Serial.println("T:OK announced");
     }
     else if (cmd == "T:ANNLXST") {
         // T:ANNLXST — force a fresh announce of the lxst.telephony
-        // destination. Required before pyxis-as-callee tests because
-        // the TCP-reconnect path at main.cpp:963 only announces LXMF;
-        // a brand-new boot ends up with the LXST destination absent
-        // from rnsd's cache, so the bot can resolve a path but the
-        // path doesn't actually route to pyxis.
+        // destination independently for protocol diagnostics. Normal LXMF
+        // announce paths publish both destinations together.
         if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
         ui_manager->announce_lxst();
         Serial.println("T:OK announced");
@@ -2754,11 +2757,7 @@ void loop() {
                                         (lora_interface && lora_interface->online()) ||
                                         (ble_interface && ble_interface->online());
             if (router && has_online_interface) {
-                router->announce();
-                if (ui_manager) {
-                    ui_manager->announce_lxst();
-                }
-                last_announce = millis();
+                announce_reachable_destinations();
                 INFO("Periodic announce sent (interval: " + std::to_string(app_settings.announce_interval) + "s)");
             }
         }
@@ -2799,8 +2798,7 @@ void loop() {
         INFO("TCP interface reconnected - sending announce");
         if (router) {
             delay(500);  // Brief stabilization delay
-            router->announce();
-            last_announce = millis();
+            announce_reachable_destinations();
         }
         last_tcp_online = true;
     }
@@ -2863,6 +2861,15 @@ void loop() {
 
         bool tcp_online = tcp_interface && tcp_interface->online();
         bool lora_online = lora_interface && lora_interface->online();
+
+        // The boot-time LXST announce can run before the asynchronous TCP
+        // client reaches ONLINE. Re-announce both destinations on every TCP
+        // offline->online edge so peers that can exchange LXMF messages also
+        // receive a routable lxst.telephony path without waiting for the
+        // periodic announce interval.
+        if (tcp_online && !last_tcp_online) {
+            announce_reachable_destinations();
+        }
 
         // Check if status changed
         if (tcp_online != last_tcp_online || lora_online != last_lora_online) {

@@ -227,6 +227,7 @@ bool UIManager::init() {
             INFO("Sending LXMF announce...");
             try {
                 _router.announce();
+                announce_lxst();
                 INFO("LXMF announce sent successfully");
             } catch (const std::exception& e) {
                 ERRORF("LXMF announce failed: %s", e.what());
@@ -1193,6 +1194,12 @@ void UIManager::call_hangup() {
     const uint32_t generation =
         call_current_generation();
 
+    // Normal call termination gets an application-level terminal signal before
+    // the one-shot, unacknowledged Reticulum LINKCLOSE. Repetition and the
+    // bounded drain interval reduce packet-loss races without blocking the
+    // owner task indefinitely. Older peers ignore unknown status 0x07.
+    call_send_terminal_burst();
+
     // Detach callback ownership before touching the shared Link. Keep call
     // admission reserved until all owner-side teardown completes.
     _call_link_ownership.clear(generation);
@@ -1220,6 +1227,7 @@ void UIManager::call_hangup() {
     _call_audio_rx_count = 0;
     _call_audio_tx_count = 0;
     _call_commands.take();
+    _call_liveness.disarm();
     _call_state = CallState::IDLE;
     call_clear_generation(generation);
 
@@ -1301,6 +1309,17 @@ void UIManager::call_teardown_audio() {
 
 void UIManager::call_send_signal(int signal) {
     call_send_signal_on_link(_call_link, signal);
+}
+
+void UIManager::call_send_terminal_burst() {
+    if (!_call_link || _call_link.status() != Type::Link::ACTIVE) return;
+
+    for (int attempt = 0; attempt < TERMINAL_SIGNAL_SEND_COUNT; ++attempt) {
+        call_send_signal(LXST_STATUS_TERMINATED);
+        if (attempt + 1 < TERMINAL_SIGNAL_SEND_COUNT) {
+            delay(TERMINAL_SIGNAL_DRAIN_MS);
+        }
+    }
 }
 
 void UIManager::call_send_signal_on_link(const Link& link, int signal) {
@@ -1435,6 +1454,10 @@ void UIManager::call_rx_audio_frame(const uint8_t* frame, size_t frame_len) {
     // Guard: packets can arrive after hangup from the network pipeline.
     // In loopback mode _call_state stays IDLE, so bypass the IDLE guard.
     if (!_lxst_audio || (!_call_loopback && _call_state == CallState::IDLE)) return;
+    if (!frame || frame_len < 2) {
+        WARNING("LXST: RX audio dropped (truncated frame)");
+        return;
+    }
 
     // Wire format: [codec_type_byte] + [mode_header + codec2_subframes...]
     // codec_type: 0x00=Raw, 0x01=Opus, 0x02=Codec2 (matches LXST Codecs/__init__.py)
@@ -1453,14 +1476,20 @@ void UIManager::call_rx_audio_frame(const uint8_t* frame, size_t frame_len) {
         return;  // Can't decode Opus (0x01) or Raw (0x00) — only Codec2
     }
 
-    if (_lxst_audio && _lxst_audio->isPlaying()) {
-        _lxst_audio->writeEncodedPacket(codec_data, codec_data_len);
-        _call_audio_rx_count++;
-        if (_call_audio_rx_count <= 3) {
-            char dbg[80];
-            snprintf(dbg, sizeof(dbg), "LXST: RX audio #%lu mode=0x%02X len=%d",
-                     (unsigned long)_call_audio_rx_count, codec_data[0], (int)codec_data_len);
-            INFO(dbg);
+    if (_lxst_audio->isPlaying()) {
+        if (_lxst_audio->writeEncodedPacket(codec_data, codec_data_len)) {
+            _call_audio_rx_count++;
+            if (!_call_loopback && _call_state == CallState::ACTIVE) {
+                _call_liveness.observe(millis());
+            }
+            if (_call_audio_rx_count <= 3) {
+                char dbg[80];
+                snprintf(dbg, sizeof(dbg), "LXST: RX audio #%lu mode=0x%02X len=%d",
+                         (unsigned long)_call_audio_rx_count, codec_data[0], (int)codec_data_len);
+                INFO(dbg);
+            }
+        } else {
+            WARNING("LXST: RX audio dropped (invalid Codec2 frame)");
         }
     } else if (_call_audio_rx_count == 0) {
         WARNING("LXST: RX audio dropped (playback not active)");
@@ -1616,6 +1645,18 @@ void UIManager::call_process_signal(uint8_t signal) {
         INFO(dbg);
     }
 
+    // Terminal is generation-scoped and valid in every owned non-idle call
+    // state. call_ended() is idempotent with the subsequent Link-close callback
+    // because it clears link ownership before teardown.
+    if (signal == LXST_STATUS_TERMINATED) {
+        if (_call_state != CallState::IDLE ||
+            call_current_generation() != 0) {
+            INFO("LXST: Remote terminated call");
+            call_ended();
+        }
+        return;
+    }
+
     switch (_call_state) {
         case CallState::WAIT_AVAILABLE:
             if (signal == LXST_STATUS_AVAILABLE) {
@@ -1677,6 +1718,7 @@ void UIManager::call_process_signal(uint8_t signal) {
                 INFO("LXST: Call established!");
                 _call_state = CallState::ACTIVE;
                 _call_start_ms = millis();
+                _call_liveness.arm(_call_start_ms);
                 _call_screen->set_state(CallScreen::CallState::ACTIVE);
                 lxst_breadcrumb(24, ESP.getFreeHeap());
 
@@ -1713,6 +1755,7 @@ void UIManager::call_process_signal(uint8_t signal) {
                 INFO("LXST: Call established!");
                 _call_state = CallState::ACTIVE;
                 _call_start_ms = millis();
+                _call_liveness.arm(_call_start_ms);
                 _call_screen->set_state(CallScreen::CallState::ACTIVE);
 
                 // Ensure full-duplex is running
@@ -1762,6 +1805,7 @@ void UIManager::call_ended() {
     _call_audio_rx_count = 0;
     _call_audio_tx_count = 0;
     _call_commands.take();
+    _call_liveness.disarm();
     _call_state = CallState::IDLE;
     call_clear_generation(generation);
 
@@ -1961,6 +2005,13 @@ void UIManager::call_update() {
     if (_call_state == CallState::ACTIVE || _call_state == CallState::CONNECTING) {
         if (!_call_link || _call_link.status() == Type::Link::CLOSED) {
             WARNING("LXST: Link closed during call");
+            call_ended();
+            return;
+        }
+
+        if (_call_state == CallState::ACTIVE &&
+            _call_liveness.expired(now, CALL_MEDIA_LIVENESS_TIMEOUT_MS)) {
+            WARNING("LXST: Call media liveness timed out");
             call_ended();
             return;
         }
@@ -2253,6 +2304,7 @@ void UIManager::call_answer() {
     // Transition to active call
     _call_state = CallState::ACTIVE;
     _call_start_ms = millis();
+    _call_liveness.arm(_call_start_ms);
     INFO("LXST: Call active (answerer, full-duplex)");
 }
 

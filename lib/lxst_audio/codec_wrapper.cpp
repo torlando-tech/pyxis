@@ -106,6 +106,14 @@ int Codec2Wrapper::decode(const uint8_t* encoded, int encodedBytes,
     // Skip header byte, decode remaining sub-frames
     const uint8_t* data = encoded + 1;
     int dataLen = encodedBytes - 1;
+    if (dataLen <= 0 || bytesPerFrame_ <= 0 || dataLen % bytesPerFrame_ != 0) {
+        LOGW("Codec2 decode: invalid sub-frame batch (%d bytes, frame size %d)",
+             dataLen, bytesPerFrame_);
+#ifdef ARDUINO
+        if (mutex_) xSemaphoreGive(mutex_);
+#endif
+        return -1;
+    }
     int numFrames = dataLen / bytesPerFrame_;
     int totalSamples = numFrames * samplesPerFrame_;
 

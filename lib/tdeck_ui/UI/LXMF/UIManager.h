@@ -22,6 +22,7 @@
 #include "CallStartMailbox.h"
 #include "CallGenerationGuard.h"
 #include "CallLinkOwnership.h"
+#include "CallLivenessWatchdog.h"
 #include "LXMF/LXMRouter.h"
 #include "LXMF/PropagationNodeManager.h"
 #include "LXMF/MessageStore.h"
@@ -362,9 +363,17 @@ private:
     static constexpr uint8_t LXST_STATUS_RINGING      = 0x04;
     static constexpr uint8_t LXST_STATUS_CONNECTING   = 0x05;
     static constexpr uint8_t LXST_STATUS_ESTABLISHED  = 0x06;
+    // Backward-compatible extension. Legacy peers ignore this status and still
+    // receive the Reticulum Link-close fallback.
+    static constexpr uint8_t LXST_STATUS_TERMINATED   = 0x07;
+    static constexpr int TERMINAL_SIGNAL_SEND_COUNT = 3;
+    static constexpr uint32_t TERMINAL_SIGNAL_DRAIN_MS = 20;
 
     // An accepted incoming link must identify before it can start ringing.
     static constexpr uint32_t INCOMING_IDENTIFY_TIMEOUT_MS = 15000;
+    // Codec2 media is continuous even during silence. Ninety seconds permits
+    // substantial temporary impairment while bounding orphaned active calls.
+    static constexpr uint32_t CALL_MEDIA_LIVENESS_TIMEOUT_MS = 90000;
 
     // LXST codec type bytes (match LXST Codecs/__init__.py)
     static constexpr uint8_t LXST_CODEC_CODEC2 = 0x02;
@@ -415,6 +424,7 @@ private:
     CallCommandMailbox _call_commands;
     CallGenerationGuard _call_generation_guard;
     CallLinkOwnership _call_link_ownership;
+    CallLivenessWatchdog _call_liveness;
 #ifdef PYXIS_TEST_HOOKS
     TestCallInitiateResult _test_call_initiate_result =
         TestCallInitiateResult::FAILED;
@@ -459,6 +469,7 @@ private:
     // Send a signalling byte over the call link
     void call_send_signal(int signal);
     static void call_send_signal_on_link(const RNS::Link& link, int signal);
+    void call_send_terminal_burst();
 
     // Send batched audio frames over the call link (10 sub-frames per batch)
     void call_send_audio_batch(const uint8_t* batch_data, int batch_len, int batch_count, int total_frames);

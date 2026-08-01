@@ -29,8 +29,8 @@ or `<X>` is misspelled.
 | `T:ID` | — | `T:OK <hex>` | Local Reticulum identity hash (32 hex). |
 | `T:DEST` | — | `T:OK <hex>` | LXMF delivery destination hash (16 hex). |
 | `T:LXSTDEST` | — | `T:OK <hex>` | LXST telephony destination hash. Used to share with the test bot before `T:CALL`. |
-| `T:ANN` | — | `T:OK announced` | Force a fresh LXMF delivery announce. |
-| `T:ANNLXST` | — | `T:OK announced` | Force a fresh LXST telephony announce. Required before pyxis-as-callee tests because the TCP-reconnect path only re-announces LXMF. |
+| `T:ANN` | — | `T:OK announced` | Force paired fresh LXMF delivery and LXST telephony announces. |
+| `T:ANNLXST` | — | `T:OK announced` | Force only a fresh LXST telephony announce for protocol diagnostics. Normal announce paths publish LXMF and LXST together. |
 | `T:PATHS` | — | `T:OK count=N` then `T:PATH <hex>` per row | Dump the in-memory path table. |
 | `T:HASPATH` | `<hex>` | `T:OK 0/1 mem=0/1 mem_count=N` | Has-path check + diagnostic split between disk-backed `Transport::has_path` and the in-memory `_path_table`. |
 | `T:RECALL` | `<hex>` | `T:OK <hex>` or `T:ERR not recallable` | Try to resolve `<hex>` to its identity hash via `Identity::recall`. |
