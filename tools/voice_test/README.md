@@ -61,7 +61,7 @@ T-Deck serial hooks to verify:
 Build the test firmware with the Mac TCP server baked in, then upload it:
 
 ```bash
-export PYXIS_TEST_TCP_HOST=10.0.0.145 PYXIS_TEST_TCP_PORT=4242
+export PYXIS_TEST_TCP_HOST="<RNSD-HOST>" PYXIS_TEST_TCP_PORT=4242
 /opt/homebrew/bin/pio run -e tdeck -t upload --upload-port /dev/cu.usbmodem101
 ```
 
