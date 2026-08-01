@@ -32,7 +32,13 @@ public:
     bool expired(uint32_t now_ms, uint32_t timeout_ms) const {
         if (!_armed.load(std::memory_order_acquire)) return false;
         const uint32_t last = _last_observed_ms.load(std::memory_order_relaxed);
-        return static_cast<uint32_t>(now_ms - last) >= timeout_ms;
+        const uint32_t elapsed = static_cast<uint32_t>(now_ms - last);
+        // The UI loop can sample `now_ms` immediately before a signal callback
+        // arms the watchdog. Treat that small backward sample as stale rather
+        // than as almost UINT32_MAX milliseconds elapsed. Genuine millis wrap
+        // remains a small forward delta and is still handled normally.
+        if (elapsed > 0x7FFFFFFFu) return false;
+        return elapsed >= timeout_ms;
     }
 
 private:

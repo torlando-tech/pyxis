@@ -24,6 +24,7 @@ int main() {
     expect(!watchdog.expired(100000, timeout), "disarmed watchdog does not expire");
 
     watchdog.arm(1000);
+    expect(!watchdog.expired(999, timeout), "stale pre-arm timestamp does not expire");
     expect(!watchdog.expired(90999, timeout), "active just below timeout");
     expect(watchdog.expired(91000, timeout), "active expires at timeout");
 
