@@ -2,6 +2,16 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
+MICROSTORE_PIN = "https://github.com/attermann/microStore.git#c5fb69d68229e684c7fbd17692a67ae8193b84e2"
+MICRORETICULUM_PIN = "https://github.com/torlando-tech/microReticulum.git#6054f6ba82367628a85cd07fcb668b95e947f046"
+
+
+def test_microstore_pin_resolves_before_transitive_registry_requirement():
+    config = (ROOT / "platformio.ini").read_text()
+    dependencies = config.split("lib_deps =", 1)[1].split("; Build configuration", 1)[0]
+
+    assert dependencies.count(MICROSTORE_PIN) == 1
+    assert dependencies.index(MICROSTORE_PIN) < dependencies.index(MICRORETICULUM_PIN)
 
 
 def test_tdeck_release_removes_diagnostic_flags():
@@ -11,8 +21,8 @@ def test_tdeck_release_removes_diagnostic_flags():
     assert "extends = env:tdeck" in release
     for flag in (
         "-DPYXIS_TEST_HOOKS",
-        "-DPYXIS_TEST_TCP_HOST=*",
-        "-DPYXIS_TEST_TCP_PORT=*",
+        "-DPYXIS_TEST_TCP_HOST",
+        "-DPYXIS_TEST_TCP_PORT",
         "-DMEMORY_INSTRUMENTATION_ENABLED",
         "-DBOOT_PROFILING_ENABLED",
     ):
