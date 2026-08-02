@@ -7,6 +7,7 @@
 #ifdef ARDUINO
 #include <Arduino.h>
 #include <lvgl.h>
+#include <atomic>
 #include <functional>
 #include "ConversationListScreen.h"
 #include "ChatScreen.h"
@@ -18,6 +19,10 @@
 #include "PropagationNodesScreen.h"
 #include "CallScreen.h"
 #include "CallCommandMailbox.h"
+#include "CallStartMailbox.h"
+#include "CallGenerationGuard.h"
+#include "CallLinkOwnership.h"
+#include "CallLivenessWatchdog.h"
 #include "LXMF/LXMRouter.h"
 #include "LXMF/PropagationNodeManager.h"
 #include "LXMF/MessageStore.h"
@@ -198,8 +203,17 @@ public:
      * commands defined in main.cpp under PYXIS_TEST_HOOKS.
      */
 
-    /** Initiate an outgoing call to peer (calls private call_initiate). */
-    void test_call_initiate(const RNS::Bytes& peer_hash) { call_initiate(peer_hash); }
+    enum class TestCallInitiateResult {
+        FAILED,
+        BUSY,
+        STARTED,
+    };
+
+    /** Initiate an outgoing call and report its exact admission outcome. */
+    TestCallInitiateResult test_call_initiate(const RNS::Bytes& peer_hash) {
+        call_initiate(peer_hash);
+        return _test_call_initiate_result;
+    }
 
     /** Hang up the active call on loopTask (calls private call_hangup). */
     void test_call_hangup() { call_hangup(); }
@@ -259,10 +273,8 @@ public:
     void test_call_set_inject_sine(bool enabled, int freq = 1000, float amp = 0.5f);
 
     /**
-     * Get/set the preferred Codec2 profile pyxis advertises and uses
-     * for the next call. Valid values: LXST_PROFILE_ULBW (0x10,
-     * Codec2-700C, LoRa-friendly default), LXST_PROFILE_VLBW (0x20,
-     * Codec2-1600), LXST_PROFILE_LBW (0x30, Codec2-3200, used pre-2026).
+     * Get/set the production voice profile. Only ULBW (0x10,
+     * Codec2-700C) is accepted; wider profiles violate the LoRa budget.
      */
     int test_call_get_profile() const { return _preferred_profile; }
     bool test_call_set_profile(int profile);
@@ -349,20 +361,28 @@ private:
     static constexpr uint8_t LXST_STATUS_RINGING      = 0x04;
     static constexpr uint8_t LXST_STATUS_CONNECTING   = 0x05;
     static constexpr uint8_t LXST_STATUS_ESTABLISHED  = 0x06;
+    // Backward-compatible extension. Legacy peers ignore this status and still
+    // receive the Reticulum Link-close fallback.
+    static constexpr uint8_t LXST_STATUS_TERMINATED   = 0x07;
+    static constexpr int TERMINAL_SIGNAL_SEND_COUNT = 3;
+    static constexpr uint32_t TERMINAL_SIGNAL_DRAIN_MS = 20;
+
+    // An accepted incoming link must identify before it can start ringing.
+    static constexpr uint32_t INCOMING_IDENTIFY_TIMEOUT_MS = 15000;
+    // Codec2 media is continuous even during silence. Ninety seconds permits
+    // substantial temporary impairment while bounding orphaned active calls.
+    static constexpr uint32_t CALL_MEDIA_LIVENESS_TIMEOUT_MS = 90000;
 
     // LXST codec type bytes (match LXST Codecs/__init__.py)
     static constexpr uint8_t LXST_CODEC_CODEC2 = 0x02;
 
     // LXST profile negotiation
     static constexpr int LXST_PREFERRED_PROFILE = 0xFF;
-    static constexpr int LXST_PROFILE_ULBW      = 0x10;  // Codec2 700C  (~700 bps)  — heaviest CPU; reserve for marginal LoRa
-    static constexpr int LXST_PROFILE_VLBW      = 0x20;  // Codec2 1600bps — DEFAULT (good quality, low CPU)
-    static constexpr int LXST_PROFILE_LBW       = 0x30;  // Codec2 3200bps — best quality + lowest CPU; fast links
+    static constexpr int LXST_PROFILE_ULBW      = 0x10;  // Codec2 700C; sole production profile
+    static constexpr int LXST_PROFILE_VLBW      = 0x20;  // protocol value; unsupported locally
+    static constexpr int LXST_PROFILE_LBW       = 0x30;  // protocol value; unsupported locally
 
-    // The profile we ASK the remote for and CONFIGURE locally on every new call.
-    // Defaults to VLBW (Codec2-1600): 700C is the heaviest AND lowest-quality mode,
-    // so it is reserved for marginal LoRa links (select ULBW there). Test harness can
-    // override via T:CALL_PROFILE.
+    // The sole profile Pyxis asks the peer for and configures locally.
     static int _preferred_profile;
 
     // Map profile byte to the Codec2 library mode constant
@@ -376,6 +396,7 @@ private:
         WAIT_AVAILABLE,     // Outgoing: link up, waiting for STATUS_AVAILABLE
         WAIT_RINGING,       // Outgoing: sent identify, waiting for STATUS_RINGING
         RINGING,            // Outgoing: remote is ringing
+        INCOMING_IDENTIFYING, // Incoming: link reserved, waiting for caller identity
         INCOMING_RINGING,   // Incoming: waiting for user to answer/reject
         CONNECTING,         // Both: opening audio pipelines
         ACTIVE,             // Both: voice flowing
@@ -394,14 +415,21 @@ private:
     // takes the safe NoneConstructor branch. Same fix as DirectLinkSlot.
     RNS::Link _call_link{RNS::Type::NONE};
     LXSTAudio* _lxst_audio;
+    CallStartMailbox _call_starts;
     CallCommandMailbox _call_commands;
-    std::atomic<uint32_t> _call_generation{0};
-    std::atomic<uint32_t> _call_generation_counter{1};
+    CallGenerationGuard _call_generation_guard;
+    CallLinkOwnership _call_link_ownership;
+    CallLivenessWatchdog _call_liveness;
+#ifdef PYXIS_TEST_HOOKS
+    TestCallInitiateResult _test_call_initiate_result =
+        TestCallInitiateResult::FAILED;
+#endif
     uint32_t _call_start_ms;       // millis() when call became ACTIVE
     uint32_t _call_timeout_ms;     // millis() deadline for current wait state
     bool _call_muted;
-    volatile bool _call_answer_pending;  // Set by LVGL task, consumed by main loop
-    volatile bool _call_link_closed_pending;  // Set by link callback, consumed by call_update
+    // Set by the LVGL task and consumed/reset by loopTask.
+    std::atomic<bool> _call_answer_pending;
+
     // Signal queue: written by Reticulum thread, consumed by call_update under LVGL lock
     static constexpr int SIGNAL_QUEUE_SIZE = 8;
     volatile uint8_t _call_signal_queue[SIGNAL_QUEUE_SIZE];
@@ -419,8 +447,14 @@ private:
     void call_set_mute(bool muted);
     void call_request_hangup();
     void call_request_mute(bool muted);
-    bool call_begin_generation();
+    uint32_t call_begin_generation();
     void call_clear_generation(uint32_t expected_generation);
+    uint32_t call_current_generation() const;
+    static bool call_extract_link_id(
+        const RNS::Link& link, CallLinkOwnership::LinkId& id);
+    bool call_publish_link(const RNS::Link& link, uint32_t generation);
+    bool call_owns_link(
+        const CallLinkOwnership::LinkId& id, uint32_t generation) const;
     void call_teardown_audio();
     void call_update();  // Called from update() — pumps audio packets + state machine
 
@@ -429,6 +463,8 @@ private:
 
     // Send a signalling byte over the call link
     void call_send_signal(int signal);
+    static void call_send_signal_on_link(const RNS::Link& link, int signal);
+    void call_send_terminal_burst();
 
     // Send batched audio frames over the call link (10 sub-frames per batch)
     void call_send_audio_batch(const uint8_t* batch_data, int batch_len, int batch_count, int total_frames);

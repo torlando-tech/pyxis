@@ -14,6 +14,7 @@
 #include "Tone.h"
 #include "../LVGL/LVGLLock.h"
 #include "lxst_audio.h"
+#include "ULBWVoiceProfilePolicy.h"
 #include <microReticulum/Packet.h>
 #include <microReticulum/Transport.h>
 #include <microReticulum/Destination.h>
@@ -74,21 +75,12 @@ public:
 };
 static std::shared_ptr<LXSTAnnounceHandler> s_lxst_announce_handler;
 
-// Default preferred profile: Codec2-1600 (VLBW). Good quality at low CPU and the
-// right default for WiFi/IP calls (where most calls run with the app). 700C (ULBW)
-// is BOTH the lowest quality AND the heaviest Codec2 mode (newamp1) -- reserve it for
-// marginal LoRa links by selecting ULBW (via the call profile setting / T:CALL_PROFILE
-// hook). TODO: auto-select per active interface (WiFi->LBW/3200, LoRa-only->ULBW/700C).
-// See the LXST voice audit (2026-06-23).
-int UIManager::_preferred_profile = UIManager::LXST_PROFILE_VLBW;
+// LoRa bandwidth is a production constraint: Pyxis advertises and accepts only
+// LXST ULBW/Codec2-700C.
+int UIManager::_preferred_profile = UIManager::LXST_PROFILE_ULBW;
 
 int UIManager::profile_to_codec2_mode(int profile) {
-    switch (profile) {
-        case LXST_PROFILE_ULBW: return CODEC2_MODE_700C;
-        case LXST_PROFILE_VLBW: return CODEC2_MODE_1600;
-        case LXST_PROFILE_LBW:  return CODEC2_MODE_3200;
-        default:                return -1;
-    }
+    return ULBWVoiceProfilePolicy::codecModeForProfile(profile);
 }
 
 UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::MessageStore& store)
@@ -117,7 +109,6 @@ UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::Me
       _call_timeout_ms(0),
       _call_muted(false),
       _call_answer_pending(false),
-      _call_link_closed_pending(false),
       _call_signal_write(0),
       _call_signal_read(0),
       _call_audio_rx_count(0),
@@ -130,7 +121,7 @@ UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::Me
 UIManager::~UIManager() {
     // Clean up call state
     if (_call_state != CallState::IDLE ||
-        _call_generation.load(std::memory_order_acquire) != 0) {
+        call_current_generation() != 0) {
         call_hangup();
     }
     call_teardown_audio();
@@ -228,6 +219,7 @@ bool UIManager::init() {
             INFO("Sending LXMF announce...");
             try {
                 _router.announce();
+                announce_lxst();
                 INFO("LXMF announce sent successfully");
             } catch (const std::exception& e) {
                 ERRORF("LXMF announce failed: %s", e.what());
@@ -333,7 +325,9 @@ bool UIManager::init() {
 
     // Set up answer callback for incoming calls (deferred to main loop)
     _call_screen->set_answer_callback(
-        [this]() { _call_answer_pending = true; }
+        [this]() {
+            _call_answer_pending.store(true, std::memory_order_release);
+        }
     );
 
     // Load conversations and show conversation list
@@ -385,6 +379,22 @@ void UIManager::update() {
         _settings_screen->tick();  // keep the live clock / GPS / system readouts ticking
     }
     LVGL_LOCK();
+
+    // Outgoing starts are initiated here while the recursive LVGL mutex is
+    // held. Interface workers (notably BLE) can synchronously dispatch
+    // Reticulum callbacks on their own tasks, so every call-lifecycle callback
+    // takes this same mutex. A response therefore cannot run until Link
+    // construction, exact-ID publication, and state assignment finish.
+    CallStartMailbox::PeerHash startPeerHash{};
+    if (_call_starts.take(startPeerHash)) {
+        if (_call_state == CallState::IDLE &&
+            call_current_generation() == 0) {
+            call_initiate(Bytes(startPeerHash.data(), startPeerHash.size()));
+        } else {
+            WARNING("LXST: Discarding stale/busy call start request");
+        }
+    }
+
     // Process outbound LXMF messages
     _router.process_outbound();
 
@@ -393,7 +403,7 @@ void UIManager::update() {
 
     // Consume UI commands unconditionally. LVGL callbacks only publish into
     // the mailbox; loopTask remains the sole owner of the audio pipeline.
-    const uint32_t generation = _call_generation.load(std::memory_order_acquire);
+    const uint32_t generation = call_current_generation();
     const CallCommandMailbox::Command command =
         _call_commands.takeForGeneration(generation);
     if (command.action == CallCommandMailbox::Action::HANGUP) {
@@ -405,7 +415,7 @@ void UIManager::update() {
     // Pump voice call state while a call is active or its generation remains
     // reserved during owner-side teardown.
     if (_call_state != CallState::IDLE ||
-        _call_generation.load(std::memory_order_acquire) != 0) {
+        call_current_generation() != 0) {
         call_update();
     }
 
@@ -668,12 +678,18 @@ bool UIManager::on_send_message_from_chat(const String& content) {
 
 void UIManager::on_call_from_chat() {
     if (!_current_peer_hash) return;
-    if (_call_state != CallState::IDLE) {
-        WARNING("Already in a call");
+    if (_current_peer_hash.size() != CallStartMailbox::PeerHash{}.size()) {
+        WARNING("LXST: Call peer hash is not exactly 16 bytes");
         return;
     }
 
-    call_initiate(_current_peer_hash);
+    CallStartMailbox::PeerHash peerHash{};
+    for (size_t i = 0; i < peerHash.size(); ++i) {
+        peerHash[i] = _current_peer_hash[i];
+    }
+    if (!_call_starts.request(peerHash)) {
+        WARNING("LXST: Call start already pending");
+    }
 }
 
 bool UIManager::on_send_message_from_compose(const Bytes& dest_hash, const String& message) {
@@ -1001,6 +1017,9 @@ static void lxst_breadcrumb(uint8_t step, uint32_t heap) {
 }
 
 void UIManager::call_initiate(const Bytes& peer_hash) {
+#ifdef PYXIS_TEST_HOOKS
+    _test_call_initiate_result = TestCallInitiateResult::FAILED;
+#endif
     {
         std::string h = peer_hash.toHex().substr(0, 16);
         INFO(("LXST: Initiating call to " + h + "...").c_str());
@@ -1037,9 +1056,15 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
     lxst_breadcrumb(4, ESP.getFreeHeap());
 
     // Reserve a generation only after the outgoing call has passed its
-    // acceptance checks. Incoming-link callbacks can race this LVGL path, so
-    // the atomic reservation is the definitive admission check.
-    if (!call_begin_generation()) {
+    // acceptance checks. update() holds the recursive LVGL mutex across this
+    // entire initiation, and call-lifecycle callbacks take the same mutex even
+    // when an interface task dispatches them. The atomic reservation remains
+    // the definitive ownership check.
+    const uint32_t generation = call_begin_generation();
+    if (generation == 0) {
+#ifdef PYXIS_TEST_HOOKS
+        _test_call_initiate_result = TestCallInitiateResult::BUSY;
+#endif
         WARNING("LXST: Another call was accepted concurrently");
         return;
     }
@@ -1057,11 +1082,12 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
     lxst_breadcrumb(5, ESP.getFreeHeap());
 
     _call_dest_hash = peer_dest.hash();
+    _call_answer_pending.store(false, std::memory_order_release);
     _call_audio_rx_count = 0;
     _call_audio_tx_count = 0;
-    _call_link_closed_pending = false;
     _call_signal_write = 0;
     _call_signal_read = 0;
+    _call_commands.take();
 
     {
         std::string dh = peer_dest.hash().toHex().substr(0, 16);
@@ -1072,9 +1098,15 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
     }
 
     if (Transport::has_path(peer_dest.hash())) {
-        // Path known — create link immediately
+        // Register lifecycle callbacks in the constructor before the link
+        // request is sent. Publish the exact ID as soon as it returns.
         INFO("LXST: Creating link...");
         _call_link = Link(peer_dest, on_call_link_established, on_call_link_closed);
+        if (!call_publish_link(_call_link, generation)) {
+            WARNING("LXST: Link has invalid ID, aborting call");
+            call_ended();
+            return;
+        }
         _call_state = CallState::LINK_ESTABLISHING;
         _call_timeout_ms = millis() + 30000;
         INFO("LXST: Link establishing, 30s timeout");
@@ -1085,6 +1117,10 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
         _call_state = CallState::PATH_REQUESTING;
         _call_timeout_ms = millis() + 10000;
     }
+
+#ifdef PYXIS_TEST_HOOKS
+    _test_call_initiate_result = TestCallInitiateResult::STARTED;
+#endif
 
     lxst_breadcrumb(7, ESP.getFreeHeap());
 }
@@ -1118,7 +1154,7 @@ bool UIManager::test_call_set_profile(int profile) {
 
 bool UIManager::test_call_answer() {
     if (_call_state != CallState::INCOMING_RINGING) return false;
-    _call_answer_pending = true;
+    _call_answer_pending.store(true, std::memory_order_release);
     return true;
 }
 
@@ -1135,6 +1171,7 @@ const char* UIManager::test_call_state_name() const {
         case CallState::WAIT_AVAILABLE:     return "WAIT_AVAILABLE";
         case CallState::WAIT_RINGING:       return "WAIT_RINGING";
         case CallState::RINGING:            return "RINGING";
+        case CallState::INCOMING_IDENTIFYING: return "INCOMING_IDENTIFYING";
         case CallState::INCOMING_RINGING:   return "INCOMING_RINGING";
         case CallState::CONNECTING:         return "CONNECTING";
         case CallState::ACTIVE:             return "ACTIVE";
@@ -1147,7 +1184,17 @@ void UIManager::call_hangup() {
     INFO("LXST: Hanging up");
 
     const uint32_t generation =
-        _call_generation.load(std::memory_order_acquire);
+        call_current_generation();
+
+    // Normal call termination gets an application-level terminal signal before
+    // the one-shot, unacknowledged Reticulum LINKCLOSE. Repetition and the
+    // bounded drain interval reduce packet-loss races without blocking the
+    // owner task indefinitely. Older peers ignore unknown status 0x07.
+    call_send_terminal_burst();
+
+    // Detach callback ownership before touching the shared Link. Keep call
+    // admission reserved until all owner-side teardown completes.
+    _call_link_ownership.clear(generation);
 
     // call_hangup() is an owner operation: production UI paths reach it only
     // through update() on loopTask, which also owns pump_call_tx(). Keep the
@@ -1162,7 +1209,17 @@ void UIManager::call_hangup() {
     }
 
     _call_peer_hash = Bytes();
-    _call_link_closed_pending = false;
+    _call_dest_hash = Bytes();
+    _call_start_ms = 0;
+    _call_timeout_ms = 0;
+    _call_muted = false;
+    _call_answer_pending.store(false, std::memory_order_release);
+    _call_signal_write = 0;
+    _call_signal_read = 0;
+    _call_audio_rx_count = 0;
+    _call_audio_tx_count = 0;
+    _call_commands.take();
+    _call_liveness.disarm();
     _call_state = CallState::IDLE;
     call_clear_generation(generation);
 
@@ -1188,31 +1245,49 @@ void UIManager::call_set_mute(bool muted) {
 
 void UIManager::call_request_hangup() {
     _call_commands.requestHangup(
-        _call_generation.load(std::memory_order_acquire));
+        call_current_generation());
 }
 
 void UIManager::call_request_mute(bool muted) {
     _call_commands.requestMute(
-        _call_generation.load(std::memory_order_acquire), muted);
+        call_current_generation(), muted);
 }
 
-bool UIManager::call_begin_generation() {
-    uint32_t generation = 0;
-    while (generation == 0) {
-        generation = _call_generation_counter.fetch_add(
-            1, std::memory_order_relaxed) & CallCommandMailbox::MAX_GENERATION;
-    }
-    uint32_t expected = 0;
-    return _call_generation.compare_exchange_strong(
-        expected, generation, std::memory_order_acq_rel,
-        std::memory_order_acquire);
+uint32_t UIManager::call_begin_generation() {
+    return _call_generation_guard.tryReserve();
 }
 
 void UIManager::call_clear_generation(uint32_t expected_generation) {
-    if (expected_generation == 0) return;
-    _call_generation.compare_exchange_strong(
-        expected_generation, 0, std::memory_order_acq_rel,
-        std::memory_order_acquire);
+    // Callback ownership was detached before Link teardown/reset. Release call
+    // admission last so a new owner cannot overlap old owner-side cleanup.
+    _call_generation_guard.release(expected_generation);
+}
+
+uint32_t UIManager::call_current_generation() const {
+    return _call_generation_guard.current();
+}
+
+bool UIManager::call_extract_link_id(
+    const Link& link, CallLinkOwnership::LinkId& id) {
+    // link_id() asserts on a default/invalid Link in pinned microReticulum.
+    if (!link) return false;
+    const Bytes& link_id = link.link_id();
+    if (link_id.size() != id.size()) return false;
+    for (size_t i = 0; i < id.size(); ++i) id[i] = link_id[i];
+    return true;
+}
+
+bool UIManager::call_publish_link(const Link& link, uint32_t generation) {
+    CallLinkOwnership::LinkId id{};
+    return call_extract_link_id(link, id) &&
+           _call_link_ownership.publish(generation, id);
+}
+
+bool UIManager::call_owns_link(
+    const CallLinkOwnership::LinkId& id, uint32_t generation) const {
+    return generation != 0 &&
+           _call_generation_guard.owns(generation) &&
+           _call_link_ownership.owns(generation, id);
 }
 
 void UIManager::call_teardown_audio() {
@@ -1225,7 +1300,22 @@ void UIManager::call_teardown_audio() {
 }
 
 void UIManager::call_send_signal(int signal) {
+    call_send_signal_on_link(_call_link, signal);
+}
+
+void UIManager::call_send_terminal_burst() {
     if (!_call_link || _call_link.status() != Type::Link::ACTIVE) return;
+
+    for (int attempt = 0; attempt < TERMINAL_SIGNAL_SEND_COUNT; ++attempt) {
+        call_send_signal(LXST_STATUS_TERMINATED);
+        if (attempt + 1 < TERMINAL_SIGNAL_SEND_COUNT) {
+            delay(TERMINAL_SIGNAL_DRAIN_MS);
+        }
+    }
+}
+
+void UIManager::call_send_signal_on_link(const Link& link, int signal) {
+    if (!link || link.status() != Type::Link::ACTIVE) return;
 
     // Msgpack: {0x00: [signal]}
     // fixmap(1) + key(0) + fixarray(1) + msgpack-encoded integer
@@ -1255,7 +1345,7 @@ void UIManager::call_send_signal(int signal) {
 
     try {
         Bytes signal_data(msgpack_buf, len);
-        Packet packet(_call_link, signal_data);
+        Packet packet(link, signal_data);
         packet.send();
 
         char buf[48];
@@ -1285,12 +1375,11 @@ void UIManager::call_send_audio_batch(const uint8_t* batch_data, int batch_len,
     // Match LXST-kt (Columba) wire format exactly:
     //   {0x01: bin8(batch)} for single batch, or
     //   {0x01: fixarray(N)[bin8(b1), bin8(b2), ...]} for multiple batches.
-    // Each batch = [codec_type(0x02)] + [mode_header] + [10 * raw_codec2].
-    // Columba's native ring buffer expects exactly frameSamples (1600) decoded
-    // samples per writeEncodedPacket call.  For Codec2 3200: 10 * 160 = 1600.
+    // Each batch = [codec_type(0x02)] + [mode_header] + [N * raw_codec2].
+    // Production Pyxis sends the ULBW 400 ms quantum: 10 Codec2-700C frames.
     // batch_len is the EXACT byte length of one batch, computed by the caller from
     // the real encoded size (codec_type + mode_header + N*raw_codec2). It VARIES by
-    // Codec2 mode: 42 bytes for 700C (4 bytes/frame), 82 for 1600/3200 (8/frame).
+    // ULBW batch length is 42 bytes: codec type + mode header + 10*4 bytes.
     // (Previously hardcoded to 82, which shipped 40 bytes of uninitialized stack and
     // a lying bin8 length on every 700C packet -- the voice-quality root cause.)
 
@@ -1356,6 +1445,10 @@ void UIManager::call_rx_audio_frame(const uint8_t* frame, size_t frame_len) {
     // Guard: packets can arrive after hangup from the network pipeline.
     // In loopback mode _call_state stays IDLE, so bypass the IDLE guard.
     if (!_lxst_audio || (!_call_loopback && _call_state == CallState::IDLE)) return;
+    if (!frame || frame_len < 2) {
+        WARNING("LXST: RX audio dropped (truncated frame)");
+        return;
+    }
 
     // Wire format: [codec_type_byte] + [mode_header + codec2_subframes...]
     // codec_type: 0x00=Raw, 0x01=Opus, 0x02=Codec2 (matches LXST Codecs/__init__.py)
@@ -1374,14 +1467,31 @@ void UIManager::call_rx_audio_frame(const uint8_t* frame, size_t frame_len) {
         return;  // Can't decode Opus (0x01) or Raw (0x00) — only Codec2
     }
 
-    if (_lxst_audio && _lxst_audio->isPlaying()) {
-        _lxst_audio->writeEncodedPacket(codec_data, codec_data_len);
-        _call_audio_rx_count++;
-        if (_call_audio_rx_count <= 3) {
-            char dbg[80];
-            snprintf(dbg, sizeof(dbg), "LXST: RX audio #%lu mode=0x%02X len=%d",
-                     (unsigned long)_call_audio_rx_count, codec_data[0], (int)codec_data_len);
-            INFO(dbg);
+    // The encoder and decoder deliberately share one Codec2 state object. Never
+    // pass a wider-mode header into decode(), since its dynamic mode switch would
+    // also mutate the transmitter away from the ULBW-only production contract.
+    if (!ULBWVoiceProfilePolicy::acceptsCodec2ModeHeader(codec_data[0])) {
+        char dbg[72];
+        snprintf(dbg, sizeof(dbg),
+                 "LXST: RX audio dropped (non-ULBW mode 0x%02X)", codec_data[0]);
+        WARNING(dbg);
+        return;
+    }
+
+    if (_lxst_audio->isPlaying()) {
+        if (_lxst_audio->writeEncodedPacket(codec_data, codec_data_len)) {
+            _call_audio_rx_count++;
+            if (!_call_loopback && _call_state == CallState::ACTIVE) {
+                _call_liveness.observe(millis());
+            }
+            if (_call_audio_rx_count <= 3) {
+                char dbg[80];
+                snprintf(dbg, sizeof(dbg), "LXST: RX audio #%lu mode=0x%02X len=%d",
+                         (unsigned long)_call_audio_rx_count, codec_data[0], (int)codec_data_len);
+                INFO(dbg);
+            }
+        } else {
+            WARNING("LXST: RX audio dropped (invalid Codec2 frame)");
         }
     } else if (_call_audio_rx_count == 0) {
         WARNING("LXST: RX audio dropped (playback not active)");
@@ -1438,9 +1548,9 @@ void UIManager::call_on_packet(const Bytes& data) {
             return;
         }
 
-        // Handle PREFERRED_PROFILE signals (0xFF+)
-        // Remote sends PREFERRED_PROFILE + profile_id to request a codec profile.
-        // Pyxis only supports Codec2, so respond with LBW (Codec2 3200bps).
+        // Remote sends PREFERRED_PROFILE + profile_id to request a transmit
+        // profile. Pyxis is ULBW-only for LoRa: never adopt the request, and
+        // respond with ULBW so the peer switches its transmit pipeline to 700C.
         if (signal >= LXST_PREFERRED_PROFILE) {
             int remote_profile = signal - LXST_PREFERRED_PROFILE;
             char dbg[80];
@@ -1448,7 +1558,7 @@ void UIManager::call_on_packet(const Bytes& data) {
                      "LXST: Remote prefers profile 0x%02X, responding 0x%02X",
                      remote_profile, _preferred_profile);
             INFO(dbg);
-            call_send_signal(LXST_PREFERRED_PROFILE + _preferred_profile);
+            call_send_signal(ULBWVoiceProfilePolicy::preferredProfileSignal());
             return;
         }
 
@@ -1537,6 +1647,18 @@ void UIManager::call_process_signal(uint8_t signal) {
         INFO(dbg);
     }
 
+    // Terminal is generation-scoped and valid in every owned non-idle call
+    // state. call_ended() is idempotent with the subsequent Link-close callback
+    // because it clears link ownership before teardown.
+    if (signal == LXST_STATUS_TERMINATED) {
+        if (_call_state != CallState::IDLE ||
+            call_current_generation() != 0) {
+            INFO("LXST: Remote terminated call");
+            call_ended();
+        }
+        return;
+    }
+
     switch (_call_state) {
         case CallState::WAIT_AVAILABLE:
             if (signal == LXST_STATUS_AVAILABLE) {
@@ -1554,7 +1676,7 @@ void UIManager::call_process_signal(uint8_t signal) {
             if (signal == LXST_STATUS_RINGING) {
                 INFO("LXST: Remote is ringing");
                 // Tell remote our preferred profile (default ULBW = Codec2-700C)
-                call_send_signal(LXST_PREFERRED_PROFILE + _preferred_profile);
+                call_send_signal(ULBWVoiceProfilePolicy::preferredProfileSignal());
                 _call_state = CallState::RINGING;
                 _call_timeout_ms = millis() + 60000;
                 _call_screen->set_state(CallScreen::CallState::RINGING);
@@ -1598,6 +1720,7 @@ void UIManager::call_process_signal(uint8_t signal) {
                 INFO("LXST: Call established!");
                 _call_state = CallState::ACTIVE;
                 _call_start_ms = millis();
+                _call_liveness.arm(_call_start_ms);
                 _call_screen->set_state(CallScreen::CallState::ACTIVE);
                 lxst_breadcrumb(24, ESP.getFreeHeap());
 
@@ -1634,6 +1757,7 @@ void UIManager::call_process_signal(uint8_t signal) {
                 INFO("LXST: Call established!");
                 _call_state = CallState::ACTIVE;
                 _call_start_ms = millis();
+                _call_liveness.arm(_call_start_ms);
                 _call_screen->set_state(CallScreen::CallState::ACTIVE);
 
                 // Ensure full-duplex is running
@@ -1658,7 +1782,11 @@ void UIManager::call_ended() {
     INFO("LXST: Call ended");
 
     const uint32_t generation =
-        _call_generation.load(std::memory_order_acquire);
+        call_current_generation();
+
+    // Reject all callbacks before shared Link teardown/reset. Keep the call
+    // generation reserved until owner-side cleanup is complete.
+    _call_link_ownership.clear(generation);
 
     call_teardown_audio();
 
@@ -1669,7 +1797,17 @@ void UIManager::call_ended() {
     }
 
     _call_peer_hash = Bytes();
-    _call_link_closed_pending = false;
+    _call_dest_hash = Bytes();
+    _call_start_ms = 0;
+    _call_timeout_ms = 0;
+    _call_muted = false;
+    _call_answer_pending.store(false, std::memory_order_release);
+    _call_signal_write = 0;
+    _call_signal_read = 0;
+    _call_audio_rx_count = 0;
+    _call_audio_tx_count = 0;
+    _call_commands.take();
+    _call_liveness.disarm();
     _call_state = CallState::IDLE;
     call_clear_generation(generation);
 
@@ -1699,13 +1837,14 @@ void UIManager::pump_call_tx() {
         }
         if (encoded_len < 2) { available--; continue; }
 
-        // Prepend codec type byte: [0x02] + [encoded: mode_header + 10*8 raw]
+        // Prepend codec type byte: [0x02] + [mode_header + N raw Codec2 frames].
         uint8_t batch_data[128];
         batch_data[0] = LXST_CODEC_CODEC2;
         memcpy(batch_data + 1, encoded_buf, encoded_len);
         int batch_len = 1 + encoded_len;
 
-        call_send_audio_batch(batch_data, batch_len, 1, encoded_len / 8);
+        const int framesPerPacket = ULBWVoiceProfilePolicy::framesPerPacket(320);
+        call_send_audio_batch(batch_data, batch_len, 1, framesPerPacket);
         _call_audio_tx_count++;
         available--;
 
@@ -1722,7 +1861,7 @@ void UIManager::start_loopback() {
     // Don't stomp a live real call. (The harness never overlaps the two, but
     // be defensive: a real call owns _lxst_audio and must not be torn down.)
     if (_call_state != CallState::IDLE ||
-        _call_generation.load(std::memory_order_acquire) != 0) {
+        call_current_generation() != 0) {
         WARNING("LXST: Loopback refused — call in progress");
         return;
     }
@@ -1767,9 +1906,9 @@ void UIManager::stop_loopback() {
 void UIManager::call_update() {
     uint32_t now = millis();
 
-    // Process deferred link closed (set by Reticulum callback, consumed here under LVGL lock)
-    if (_call_link_closed_pending) {
-        _call_link_closed_pending = false;
+    // Consume only the current owner's atomically generation-bound close. No
+    // shared Link read is needed on this callback-to-loopTask handoff.
+    if (_call_link_ownership.takeClosed() != 0) {
         call_ended();
         return;
     }
@@ -1783,8 +1922,7 @@ void UIManager::call_update() {
     }
 
     // Process deferred answer (set by LVGL task, consumed here on main thread)
-    if (_call_answer_pending) {
-        _call_answer_pending = false;
+    if (_call_answer_pending.exchange(false, std::memory_order_acq_rel)) {
         call_answer();
     }
 
@@ -1817,7 +1955,15 @@ void UIManager::call_update() {
             }
             Destination peer_dest(peer_identity, Type::Destination::OUT,
                                   Type::Destination::SINGLE, "lxst", "telephony");
+            const uint32_t generation = call_current_generation();
+            // Register callbacks before the constructor sends the link request,
+            // then publish its exact ID immediately after construction.
             _call_link = Link(peer_dest, on_call_link_established, on_call_link_closed);
+            if (!call_publish_link(_call_link, generation)) {
+                WARNING("LXST: Link has invalid ID, aborting call");
+                call_ended();
+                return;
+            }
             _call_state = CallState::LINK_ESTABLISHING;
             _call_timeout_ms = millis() + 30000;
             INFO("LXST: Link establishing, 30s timeout");
@@ -1844,6 +1990,10 @@ void UIManager::call_update() {
                 WARNING("LXST: Ring timed out (no answer)");
                 call_ended();
                 return;
+            case CallState::INCOMING_IDENTIFYING:
+                WARNING("LXST: Incoming caller identification timed out");
+                call_ended();
+                return;
             case CallState::INCOMING_RINGING:
                 WARNING("LXST: Incoming call timed out (no answer)");
                 call_ended();
@@ -1858,6 +2008,13 @@ void UIManager::call_update() {
     if (_call_state == CallState::ACTIVE || _call_state == CallState::CONNECTING) {
         if (!_call_link || _call_link.status() == Type::Link::CLOSED) {
             WARNING("LXST: Link closed during call");
+            call_ended();
+            return;
+        }
+
+        if (_call_state == CallState::ACTIVE &&
+            _call_liveness.expired(now, CALL_MEDIA_LIVENESS_TIMEOUT_MS)) {
+            WARNING("LXST: Call media liveness timed out");
             call_ended();
             return;
         }
@@ -1895,57 +2052,109 @@ void UIManager::call_update() {
 
 void UIManager::on_call_link_established(Link& link) {
     if (!s_call_instance) return;
+    LVGL_LOCK();
+    auto* self = s_call_instance;
+
+    CallLinkOwnership::LinkId link_id{};
+    if (!call_extract_link_id(link, link_id)) {
+        WARNING("LXST: Established link has invalid ID (ignoring)");
+        return;
+    }
+    const uint32_t generation =
+        self->_call_link_ownership.generationFor(link_id);
+    if (!self->call_owns_link(link_id, generation) ||
+        self->_call_state != CallState::LINK_ESTABLISHING) {
+        WARNING("LXST: Stale outgoing link established (ignoring)");
+        return;
+    }
 
     char buf[80];
     snprintf(buf, sizeof(buf), "LXST: Outgoing link established (status=%d)", (int)link.status());
     INFO(buf);
 
-    // Update stored link with the established reference and register callbacks
-    s_call_instance->_call_link = link;
-    s_call_instance->_call_link.set_packet_callback(on_call_link_packet);
-    s_call_instance->_call_link.set_link_closed_callback(on_call_link_closed);
+    // Register through the validated callback argument; never read the
+    // manager's shared Link object from a transport-thread callback.
+    link.set_packet_callback(on_call_link_packet);
+    link.set_link_closed_callback(on_call_link_closed);
     INFO("LXST: Packet callback registered on outgoing link");
 
     // Transition to waiting for STATUS_AVAILABLE
-    s_call_instance->_call_state = CallState::WAIT_AVAILABLE;
-    s_call_instance->_call_timeout_ms = millis() + 10000;  // 10s timeout
+    self->_call_state = CallState::WAIT_AVAILABLE;
+    self->_call_timeout_ms = millis() + 10000;  // 10s timeout
     INFO("LXST: Waiting for STATUS_AVAILABLE (10s timeout)");
 }
 
 void UIManager::on_call_link_closed(Link& link) {
     if (!s_call_instance) return;
+    LVGL_LOCK();
+    auto* self = s_call_instance;
 
-    // Ignore stale link closures (e.g. old link teardown completing after a
-    // new call started). A missing current link is stale too: teardown may
-    // have reset _call_link before its later close callback is dispatched.
-    if (!s_call_instance->_call_link || link != s_call_instance->_call_link) {
+    CallLinkOwnership::LinkId link_id{};
+    if (!call_extract_link_id(link, link_id)) {
+        WARNING("LXST: Closed link has invalid ID (ignoring)");
+        return;
+    }
+    const uint32_t generation =
+        self->_call_link_ownership.generationFor(link_id);
+    if (!self->call_owns_link(link_id, generation)) {
         WARNING("LXST: Stale link closed (ignoring)");
         return;
     }
 
     WARNING("LXST: Link closed (deferred)");
 
-    // Don't call call_ended() here — defer to call_update() on loopTask.
-    if (s_call_instance->_call_state != CallState::IDLE) {
-        s_call_instance->_call_link_closed_pending = true;
+    // Bind pending and generation in one CAS. If ownership changed after the
+    // validation above, this exact old state cannot overwrite the new slot.
+    if (!self->_call_link_ownership.markClosed(generation, link_id)) {
+        WARNING("LXST: Link owner changed before close deferral (ignoring)");
     }
 }
 
 void UIManager::on_call_link_packet(const Bytes& plaintext, const Packet& packet) {
     if (!s_call_instance) return;
-    s_call_instance->call_on_packet(plaintext);
+    LVGL_LOCK();
+    auto* self = s_call_instance;
+    const Link& callback_link = packet.link();
+    CallLinkOwnership::LinkId link_id{};
+    if (!call_extract_link_id(callback_link, link_id)) {
+        WARNING("LXST: Packet link has invalid ID (ignoring)");
+        return;
+    }
+    const uint32_t generation =
+        self->_call_link_ownership.generationFor(link_id);
+    if (!self->call_owns_link(link_id, generation)) {
+        WARNING("LXST: Stale link packet (ignoring)");
+        return;
+    }
+    self->call_on_packet(plaintext);
 }
 
 // ── LXST Incoming Call Callbacks ──
 
 void UIManager::on_lxst_link_established(Link& link) {
-    if (!s_call_instance) return;
+    if (!s_call_instance) {
+        link.teardown();
+        return;
+    }
+    LVGL_LOCK();
     auto* self = s_call_instance;
+
+    CallLinkOwnership::LinkId link_id{};
+    if (!call_extract_link_id(link, link_id)) {
+        WARNING("LXST: Incoming link has invalid ID (rejecting)");
+        link.teardown();
+        return;
+    }
+
+    // Incoming and outgoing admissions are ordered by the recursive LVGL
+    // mutex, including when an interface worker dispatches this callback. The
+    // atomic generation reservation remains the definitive ownership decision.
+    const uint32_t generation = self->call_begin_generation();
     lxst_breadcrumb(10, ESP.getFreeHeap());
     INFO("LXST: Incoming link established");
-
-    if (self->_call_state != CallState::IDLE) {
-        // Already in a call — send busy directly on the new link
+    if (generation == 0) {
+        // Another call owns the manager. Reject using only this callback's link;
+        // never touch the stored owner link or any owner-side call state.
         INFO("LXST: Busy, rejecting incoming link");
         uint8_t busy_buf[4] = { 0x81, 0x00, 0x91, LXST_STATUS_BUSY };
         Bytes busy_data(busy_buf, 4);
@@ -1955,31 +2164,61 @@ void UIManager::on_lxst_link_established(Link& link) {
         return;
     }
 
-    // Accept the incoming link
+    // Store the accepted Link before publishing its exact 128-bit ID. No
+    // callbacks are installed on the stored owner until publication and call
+    // state initialization are complete.
     lxst_breadcrumb(11, ESP.getFreeHeap());
     self->_call_link = link;
+    if (!self->_call_link_ownership.publish(generation, link_id)) {
+        WARNING("LXST: Incoming link has invalid ID (rejecting)");
+        self->_call_link.teardown();
+        self->_call_link = Link(Type::NONE);
+        self->_call_generation_guard.release(generation);
+        return;
+    }
+    self->_call_state = CallState::INCOMING_IDENTIFYING;
+    self->_call_peer_hash = Bytes();
+    self->_call_dest_hash = Bytes();
     self->_call_muted = false;
+    self->_call_answer_pending.store(false, std::memory_order_release);
+    self->_call_signal_write = 0;
+    self->_call_signal_read = 0;
+    self->_call_audio_rx_count = 0;
+    self->_call_audio_tx_count = 0;
+    self->_call_commands.take();
+    self->_call_timeout_ms = millis() + INCOMING_IDENTIFY_TIMEOUT_MS;
+
+    // Wait for the accepted caller to identify and observe closure. Install on
+    // the validated callback argument, not the manager's shared Link handle.
+    link.set_remote_identified_callback(on_lxst_caller_identified);
+    link.set_link_closed_callback(on_call_link_closed);
 
     // Send STATUS_AVAILABLE
     lxst_breadcrumb(12, ESP.getFreeHeap());
-    self->call_send_signal(LXST_STATUS_AVAILABLE);
+    call_send_signal_on_link(link, LXST_STATUS_AVAILABLE);
 
-    // Wait for caller to identify themselves
     lxst_breadcrumb(13, ESP.getFreeHeap());
-    link.set_remote_identified_callback(on_lxst_caller_identified);
-    link.set_link_closed_callback(on_call_link_closed);
+    INFO("LXST: Waiting for caller identity (15s timeout)");
     lxst_breadcrumb(14, ESP.getFreeHeap());
 }
 
 void UIManager::on_lxst_caller_identified(const Link& link, const Identity& identity) {
     if (!s_call_instance) return;
+    LVGL_LOCK();
     auto* self = s_call_instance;
     lxst_breadcrumb(15, ESP.getFreeHeap());
 
-    // Identification can arrive after another call replaced this pending link.
-    // Reticulum invokes this callback synchronously from loopTask, so equality
-    // with the current owner link is sufficient here; do not mutate newer state.
-    if (!self->_call_link || link != self->_call_link) {
+    CallLinkOwnership::LinkId link_id{};
+    if (!call_extract_link_id(link, link_id)) {
+        WARNING("LXST: Identified link has invalid ID (ignoring)");
+        return;
+    }
+    // Bind identity to the exact current owner ID and generation. Validation
+    // never reads the manager's shared Link object.
+    const uint32_t generation =
+        self->_call_link_ownership.generationFor(link_id);
+    if (!self->call_owns_link(link_id, generation) ||
+        self->_call_state != CallState::INCOMING_IDENTIFYING) {
         WARNING("LXST: Stale caller identified (ignoring)");
         return;
     }
@@ -1987,24 +2226,20 @@ void UIManager::on_lxst_caller_identified(const Link& link, const Identity& iden
     std::string hash_hex = identity.hash().toHex().substr(0, 16);
     INFO(("LXST: Caller identified: " + hash_hex + "...").c_str());
 
-    // Reserve admission only once the incoming call is identified and is about
-    // to become actionable. A newer accepted call wins this CAS.
-    if (!self->call_begin_generation()) {
-        WARNING("LXST: Caller identified after another call was accepted (ignoring)");
-        return;
-    }
-
-    // The generation is now reserved for this current identified link.
-    self->_call_state = CallState::INCOMING_RINGING;
-
     // Store peer info
     self->_call_peer_hash = identity.hash();
 
-    // Set packet callback for signalling + audio on this link
-    self->_call_link.set_packet_callback(on_call_link_packet);
+    // Set callbacks and send through a callback-local shared-object copy, not
+    // through the manager's concurrently resettable Link handle.
+    Link callback_link(link);
+    callback_link.set_packet_callback(on_call_link_packet);
+
+    // Identification completed for the reserved owner; ringing can now become
+    // visible and actionable on the next call_update().
+    self->_call_state = CallState::INCOMING_RINGING;
 
     // Send STATUS_RINGING
-    self->call_send_signal(LXST_STATUS_RINGING);
+    call_send_signal_on_link(callback_link, LXST_STATUS_RINGING);
 
     // Incoming ringing UI will be shown in call_update().
     self->_call_timeout_ms = millis() + 60000;  // 60s ring timeout
@@ -2064,7 +2299,7 @@ void UIManager::call_answer() {
 
     // Send profile preference (default ULBW = Codec2-700C). Answerer
     // sends last and wins.
-    call_send_signal(LXST_PREFERRED_PROFILE + _preferred_profile);
+    call_send_signal(ULBWVoiceProfilePolicy::preferredProfileSignal());
 
     // Send STATUS_ESTABLISHED
     call_send_signal(LXST_STATUS_ESTABLISHED);
@@ -2072,6 +2307,7 @@ void UIManager::call_answer() {
     // Transition to active call
     _call_state = CallState::ACTIVE;
     _call_start_ms = millis();
+    _call_liveness.arm(_call_start_ms);
     INFO("LXST: Call active (answerer, full-duplex)");
 }
 

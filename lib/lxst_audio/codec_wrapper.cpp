@@ -2,8 +2,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include "codec_wrapper.h"
+#include "ULBWVoiceProfilePolicy.h"
 #include <codec2.h>
 #include <cstring>
+
+static_assert(CODEC2_MODE_700C == ULBWVoiceProfilePolicy::CODEC2_MODE_700C_VALUE,
+              "Pinned Codec2-700C mode value changed");
 
 #ifdef ARDUINO
 #include <esp_log.h>
@@ -106,6 +110,14 @@ int Codec2Wrapper::decode(const uint8_t* encoded, int encodedBytes,
     // Skip header byte, decode remaining sub-frames
     const uint8_t* data = encoded + 1;
     int dataLen = encodedBytes - 1;
+    if (dataLen <= 0 || bytesPerFrame_ <= 0 || dataLen % bytesPerFrame_ != 0) {
+        LOGW("Codec2 decode: invalid sub-frame batch (%d bytes, frame size %d)",
+             dataLen, bytesPerFrame_);
+#ifdef ARDUINO
+        if (mutex_) xSemaphoreGive(mutex_);
+#endif
+        return -1;
+    }
     int numFrames = dataLen / bytesPerFrame_;
     int totalSamples = numFrames * samplesPerFrame_;
 

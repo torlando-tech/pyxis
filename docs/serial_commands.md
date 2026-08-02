@@ -29,8 +29,8 @@ or `<X>` is misspelled.
 | `T:ID` | — | `T:OK <hex>` | Local Reticulum identity hash (32 hex). |
 | `T:DEST` | — | `T:OK <hex>` | LXMF delivery destination hash (16 hex). |
 | `T:LXSTDEST` | — | `T:OK <hex>` | LXST telephony destination hash. Used to share with the test bot before `T:CALL`. |
-| `T:ANN` | — | `T:OK announced` | Force a fresh LXMF delivery announce. |
-| `T:ANNLXST` | — | `T:OK announced` | Force a fresh LXST telephony announce. Required before pyxis-as-callee tests because the TCP-reconnect path only re-announces LXMF. |
+| `T:ANN` | — | `T:OK announced` | Force paired fresh LXMF delivery and LXST telephony announces. |
+| `T:ANNLXST` | — | `T:OK announced` | Force only a fresh LXST telephony announce for protocol diagnostics. Normal announce paths publish LXMF and LXST together. |
 | `T:PATHS` | — | `T:OK count=N` then `T:PATH <hex>` per row | Dump the in-memory path table. |
 | `T:HASPATH` | `<hex>` | `T:OK 0/1 mem=0/1 mem_count=N` | Has-path check + diagnostic split between disk-backed `Transport::has_path` and the in-memory `_path_table`. |
 | `T:RECALL` | `<hex>` | `T:OK <hex>` or `T:ERR not recallable` | Try to resolve `<hex>` to its identity hash via `Identity::recall`. |
@@ -65,7 +65,7 @@ or `<X>` is misspelled.
 | `T:CALL_STATE` | — | `T:OK <state>` | Current call FSM state name. |
 | `T:CALL_STATS` | — | `T:OK …` | Audio frame counters for the most recent call. |
 | `T:CALL_QOS` | — | `T:OK …` | Wire-level audio fidelity counters (decoded RMS, frame loss, etc). |
-| `T:CALL_PROFILE` | `[hex]` | `T:OK <hex>` | Get (no arg) or set (hex arg) preferred Codec2 profile. Profiles: `0x10` ULBW (700C), `0x20` VLBW (1600), `0x30` LBW (3200). |
+| `T:CALL_PROFILE` | `[hex]` | `T:OK <hex>` | Get (no arg) or set (hex arg) the production Codec2 profile. Only `0x10` ULBW (700C) is supported. |
 | `T:CALL_INJECT` | `<on\|off> [freq_hz] [amp_pct]` | `T:OK inject=<on/off> freq=<f> amp=<a>` | Replace mic capture with a synthesized sine wave for the active call. Useful for end-to-end audio fidelity checks against a bot that decodes pyxis's audio frames. Defaults: 1000 Hz, amp 0.5. |
 
 ### BLE interface

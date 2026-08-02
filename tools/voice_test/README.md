@@ -14,12 +14,12 @@ harness re-aligns and scores the round-trip.
 ## Firmware contract (`T:LOOPBACK` test mode)
 - UDP multicast `239.0.99.99:9998`, each datagram = `[uint32 LE byte-offset][int16 LE
   mono @ 8 kHz PCM]`, ≤1284 B.
-- Serial hooks: `T:CALL_PROFILE 0x10|0x20|0x30` (ULBW/VLBW/LBW), `T:LOOPBACK on|off`.
+- Serial hooks: `T:CALL_PROFILE 0x10` (ULBW/Codec2-700C only), `T:LOOPBACK on|off`.
 
 ## Run
 ```bash
 cd tools/voice_test
-.venv/bin/python run_voice_test.py --port /dev/cu.usbmodem101 --profiles ULBW,VLBW,LBW
+.venv/bin/python run_voice_test.py --port /dev/cu.usbmodem101 --profiles ULBW
 # options: --ref my.wav   --text "..."   --output "Mac mini Speakers"   --tail 1.2
 ```
 
@@ -34,8 +34,8 @@ summary table.
 - **hf**: high-band (2–3.4 kHz) survival — Codec2 low profiles roll off the top.
 - **pkts / dropped**: UDP delivery health.
 
-Lower-bitrate profiles (700C) score lower by design; compare profiles and before/after
-firmware changes. The venv was created with `uv venv --python 3.12` +
+Codec2-700C scores lower than wider codecs by design; compare before/after firmware
+changes, not alternate profiles. The venv was created with `uv venv --python 3.12` +
 `numpy scipy soundfile sounddevice pyserial pystoi`.
 
 ## Sideband/LXST end-to-end regression
@@ -47,13 +47,27 @@ T-Deck serial hooks to verify:
 - Sideband calls Pyxis and exchanges synthetic Codec2 audio in both directions.
 - Pyxis still accepts another incoming call after both calls and hangups.
 - Every Pyxis decode succeeds and produces non-zero PCM.
+- A raw LXST caller can hold the incoming reservation without identifying; a
+  second raw link receives `STATUS_BUSY` and cannot replace it.
+- A local `T:CALL` request cannot displace an incoming link that is still
+  identifying.
+- Closing reserved caller A and then ringing caller B proves that closed-link
+  `identify()` is a no-op and that B remains stable while A's queued callbacks
+  drain. The harness does not inject a fabricated stale callback.
+- A non-identifying caller is closed after the 15-second firmware timeout, and a
+  subsequent normal call still rings, answers, reaches `ACTIVE`, exchanges audio
+  in both directions, and hangs up cleanly.
 
 Build the test firmware with the Mac TCP server baked in, then upload it:
 
 ```bash
-export PYXIS_TEST_TCP_HOST=10.0.0.145 PYXIS_TEST_TCP_PORT=4242
+export PYXIS_TEST_TCP_HOST="<RNSD-HOST>" PYXIS_TEST_TCP_PORT=4242
 /opt/homebrew/bin/pio run -e tdeck -t upload --upload-port /dev/cu.usbmodem101
 ```
+
+After testing, remove/disable `PYXIS_TEST_HOOKS` and the test TCP overrides and
+restore the normal release firmware on the device. Do not leave test-hook
+firmware deployed as the normal user build.
 
 Run from the Mac with its Reticulum venv (defaults to the local TCP server on
 `127.0.0.1:4242`):
@@ -63,8 +77,25 @@ Run from the Mac with its Reticulum venv (defaults to the local TCP server on
 ```
 
 Optional overrides: `PYXIS_SERIAL_PORT`, `PYXIS_RNS_HOST`,
-`PYXIS_RNS_PORT`, and `PYXIS_CALL_SECONDS`. Each run uses a fresh Sideband
-identity and isolated RNS storage so stale cached paths cannot false-pass setup.
+`PYXIS_RNS_PORT`, `PYXIS_CALL_SECONDS`, and
+`PYXIS_IDENTIFY_TIMEOUT_MARGIN` (seconds beyond the fixed 15-second firmware
+identification timeout; default `3`, must be positive). Each run uses a fresh
+Sideband identity and isolated RNS storage so stale cached paths cannot false-pass setup.
 On Apple Silicon the harness re-executes itself with `/opt/homebrew/lib` on
 `DYLD_LIBRARY_PATH`, allowing LXST/PyOgg to load Homebrew `libopus` for incoming
 calls.
+
+The contention cases use the ordinary Reticulum `Identity`, `Destination`, and
+`Link` APIs directly and print the observed `RNS.__version__` at startup. The
+legacy Sideband environment was validated with RNS 1.3.8 for API compatibility;
+that is an observation, not a pin or downgrade recommendation. Torlando's
+security-patched deployments require RNS 1.3.9 or newer for Luthen. Use the
+current security-patched version and do not force an insecure rollback merely
+to run this harness.
+
+The physical run requires current Pyxis and Sideband LXST announces, the TCP
+Reticulum hub, a serial-connected T-Deck running the test-hooks firmware, and
+the Mac Reticulum environment shown above. Run the host-native generation guard
+tests separately for the deterministic portable stale-callback model. The
+physical closed-link case proves close/B-redial stability plus callback drain;
+it does not inject a stale callback.

@@ -293,6 +293,23 @@ class TestSignallingFormat:
 class TestWireFormatEdgeCases:
     """Edge cases and boundary conditions."""
 
+    def test_production_ulbw_packet_is_exact_42_byte_batch(self, codec2_700, sine_8khz_1s):
+        """Pyxis ULBW TX matches Python LXST's 400 ms Codec2-700C quantum."""
+        pcm = sine_8khz_1s[:3200]
+        subframes = encode_codec2_subframes(codec2_700, pcm, MODE_HEADERS[700])
+        batch = batch_subframes_pyxis_style(subframes, MODE_HEADERS[700])
+        wire = build_pyxis_audio_packet(batch)
+
+        assert len(subframes) == 10
+        assert all(len(frame) == 5 for frame in subframes)
+        assert len(batch) == 41
+        assert batch[0] == 0x00
+        assert wire[:6] == bytes([0x81, 0x01, 0xC4, 42, CODEC_CODEC2, 0x00])
+
+        for parser in (parse_lxst_python_rx, parse_pyxis_rx):
+            parsed = parser(wire)
+            assert parsed["frames"] == [(CODEC_CODEC2, batch)]
+
     def test_max_bin8_payload(self, codec2_3200, sine_8khz_1s):
         """Test maximum bin8 payload (255 bytes)."""
         # 30 sub-frames: [mode(1)] + [30*8] = 241 bytes + codec_type(1) = 242 bytes

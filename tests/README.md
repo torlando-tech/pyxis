@@ -21,6 +21,9 @@ System Python 3.9 has pytest pre-installed; Homebrew Python does not.
 - `native/test_ring_buffers.{cpp,py}` — PCM + encoded SPSC ring buffers, including 100k-frame multithreaded producer/consumer stress
 - `native/test_audio_filters.{cpp,py}` — VoiceFilterChain frequency response, peak limiting, multichannel
 - `native/test_call_command_mailbox.{cpp,py}` — generation-scoped LXST hangup/mute command handoff and producer/consumer stress
+- `native/test_call_start_mailbox.{cpp,py}` — exact 16-byte LXST outgoing-call handoff, duplicate rejection, and reusable producer/consumer stress
+- `native/test_call_generation_guard.{cpp,py}` — atomic, generation-scoped call admission, stale-owner protection, and repeated two-thread reservation races
+- `native/test_call_link_ownership.{cpp,py}` — exact 128-bit LXST link ownership publication, mixed-ID publication stress, and generation-bound deferred-close concurrency
 
 ### Adding a new native C++ test
 
