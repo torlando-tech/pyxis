@@ -130,7 +130,7 @@ private:
     // Accumulation buffer: I2S delivers variable bursts, we need fixed-size frames
     int16_t* accumBuffer_ = nullptr;
     int accumCount_ = 0;
-    int frameSamples_ = 0;  // Codec2 samples per frame (e.g., 320 for 700C, 160 for 1600/3200)
+    int frameSamples_ = 0;  // PCM samples per LXST packet quantum
 
     // PSRAM staging buffer used by loopTask while encoding queued PCM.
     int16_t* encodePcmBuffer_ = nullptr;
@@ -142,10 +142,8 @@ private:
 
     static constexpr int I2S_SAMPLE_RATE = 16000;  // EXACT-LilyGO test: 16kHz capture, decimated 2:1 to 8kHz. (ES7210 ADC warp unresolved -- see es7210.cpp.)
     static constexpr int CODEC_SAMPLE_RATE = 8000; // Codec2 expects 8kHz
-    // Accumulate this many codec frames before filter+encode.
-    // Matches Columba's 200ms batch (1600 samples for Codec2 3200).
-    // The AGC needs large blocks for stable gain tracking.
-    static constexpr int FRAMES_PER_BATCH = 10;
+    // LXST ULBW packet quantum at 8 kHz: 400 ms of mono PCM.
+    static constexpr int PCM_SAMPLES_PER_BATCH = 3200;
     static constexpr int PCM_RING_SLOTS = 8;
     // Codec2 no longer runs on this task. 8 KiB covers local I2S buffers,
     // filters and bounded diagnostic sendto without starving playback.

@@ -61,6 +61,12 @@ PROFILE_MQ = 0x40
 
 
 @pytest.fixture
+def codec2_700():
+    """Create a pycodec2 instance for the production ULBW/700C mode."""
+    return pycodec2.Codec2(700)
+
+
+@pytest.fixture
 def codec2_3200():
     """Create a pycodec2 instance for 3200 bps mode."""
     return pycodec2.Codec2(3200)

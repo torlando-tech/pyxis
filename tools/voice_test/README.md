@@ -14,12 +14,12 @@ harness re-aligns and scores the round-trip.
 ## Firmware contract (`T:LOOPBACK` test mode)
 - UDP multicast `239.0.99.99:9998`, each datagram = `[uint32 LE byte-offset][int16 LE
   mono @ 8 kHz PCM]`, ≤1284 B.
-- Serial hooks: `T:CALL_PROFILE 0x10|0x20|0x30` (ULBW/VLBW/LBW), `T:LOOPBACK on|off`.
+- Serial hooks: `T:CALL_PROFILE 0x10` (ULBW/Codec2-700C only), `T:LOOPBACK on|off`.
 
 ## Run
 ```bash
 cd tools/voice_test
-.venv/bin/python run_voice_test.py --port /dev/cu.usbmodem101 --profiles ULBW,VLBW,LBW
+.venv/bin/python run_voice_test.py --port /dev/cu.usbmodem101 --profiles ULBW
 # options: --ref my.wav   --text "..."   --output "Mac mini Speakers"   --tail 1.2
 ```
 
@@ -34,8 +34,8 @@ summary table.
 - **hf**: high-band (2–3.4 kHz) survival — Codec2 low profiles roll off the top.
 - **pkts / dropped**: UDP delivery health.
 
-Lower-bitrate profiles (700C) score lower by design; compare profiles and before/after
-firmware changes. The venv was created with `uv venv --python 3.12` +
+Codec2-700C scores lower than wider codecs by design; compare before/after firmware
+changes, not alternate profiles. The venv was created with `uv venv --python 3.12` +
 `numpy scipy soundfile sounddevice pyserial pystoi`.
 
 ## Sideband/LXST end-to-end regression

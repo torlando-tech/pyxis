@@ -273,10 +273,8 @@ public:
     void test_call_set_inject_sine(bool enabled, int freq = 1000, float amp = 0.5f);
 
     /**
-     * Get/set the preferred Codec2 profile pyxis advertises and uses
-     * for the next call. Valid values: LXST_PROFILE_ULBW (0x10,
-     * Codec2-700C, LoRa-friendly default), LXST_PROFILE_VLBW (0x20,
-     * Codec2-1600), LXST_PROFILE_LBW (0x30, Codec2-3200, used pre-2026).
+     * Get/set the production voice profile. Only ULBW (0x10,
+     * Codec2-700C) is accepted; wider profiles violate the LoRa budget.
      */
     int test_call_get_profile() const { return _preferred_profile; }
     bool test_call_set_profile(int profile);
@@ -380,14 +378,11 @@ private:
 
     // LXST profile negotiation
     static constexpr int LXST_PREFERRED_PROFILE = 0xFF;
-    static constexpr int LXST_PROFILE_ULBW      = 0x10;  // Codec2 700C  (~700 bps)  — heaviest CPU; reserve for marginal LoRa
-    static constexpr int LXST_PROFILE_VLBW      = 0x20;  // Codec2 1600bps — DEFAULT (good quality, low CPU)
-    static constexpr int LXST_PROFILE_LBW       = 0x30;  // Codec2 3200bps — best quality + lowest CPU; fast links
+    static constexpr int LXST_PROFILE_ULBW      = 0x10;  // Codec2 700C; sole production profile
+    static constexpr int LXST_PROFILE_VLBW      = 0x20;  // protocol value; unsupported locally
+    static constexpr int LXST_PROFILE_LBW       = 0x30;  // protocol value; unsupported locally
 
-    // The profile we ASK the remote for and CONFIGURE locally on every new call.
-    // Defaults to VLBW (Codec2-1600): 700C is the heaviest AND lowest-quality mode,
-    // so it is reserved for marginal LoRa links (select ULBW there). Test harness can
-    // override via T:CALL_PROFILE.
+    // The sole profile Pyxis asks the peer for and configures locally.
     static int _preferred_profile;
 
     // Map profile byte to the Codec2 library mode constant

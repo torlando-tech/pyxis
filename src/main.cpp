@@ -2307,9 +2307,9 @@ static void handle_test_hook_command(const String& line) {
         Serial.println(ui_manager->test_call_state_name());
     }
     else if (cmd == "T:CALL_PROFILE") {
-        // T:CALL_PROFILE [hex] — get/set pyxis's preferred Codec2 profile.
+        // T:CALL_PROFILE [hex] — get/set pyxis's production Codec2 profile.
         // No arg: print current. With arg: set.
-        // Valid: 0x10 (ULBW/700C), 0x20 (VLBW/1600), 0x30 (LBW/3200).
+        // Only 0x10 (ULBW/700C) is valid; wider profiles violate the LoRa budget.
         if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
         if (args.length() == 0) {
             int p = ui_manager->test_call_get_profile();
@@ -2320,7 +2320,7 @@ static void handle_test_hook_command(const String& line) {
         }
         int profile = (int)strtol(args.c_str(), nullptr, 0);
         if (!ui_manager->test_call_set_profile(profile)) {
-            Serial.println("T:ERR unknown profile");
+            Serial.println("T:ERR unsupported profile (ULBW 0x10 required)");
             return;
         }
         Serial.print("T:OK profile=0x");

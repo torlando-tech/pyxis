@@ -13,6 +13,7 @@
 #include "codec_wrapper.h"
 #include "audio_filters.h"
 #include "encoded_ring_buffer.h"
+#include "ULBWVoiceProfilePolicy.h"
 #include <Arduino.h>
 #include <freertos/semphr.h>
 
@@ -106,11 +107,19 @@ bool I2SCapture::configureEncoder(Codec2Wrapper* codec, bool enableFilters) {
     }
     codec_ = codec;
 
-    // Accumulate FRAMES_PER_BATCH codec frames before filter+encode.
-    // Columba uses 200ms (1600 samples for Codec2 3200) so the AGC operates
-    // on meaningful block sizes.  With only 160 samples (20ms) the AGC blocks
-    // are 16 samples and gain-pump, producing buzzy audio.
-    frameSamples_ = codec_->samplesPerFrame() * FRAMES_PER_BATCH;
+    // Production Pyxis supports only LXST ULBW/Codec2-700C for LoRa.
+    if (codec_->libraryMode() != ULBWVoiceProfilePolicy::CODEC2_MODE_700C_VALUE) {
+        ESP_LOGE(TAG, "Unsupported non-ULBW Codec2 mode %d", codec_->libraryMode());
+        return false;
+    }
+    const int framesPerBatch =
+        ULBWVoiceProfilePolicy::framesPerPacket(codec_->samplesPerFrame());
+    if (framesPerBatch <= 0 ||
+            PCM_SAMPLES_PER_BATCH != ULBWVoiceProfilePolicy::pcmSamplesPerPacket()) {
+        ESP_LOGE(TAG, "Invalid ULBW Codec2 packet quantum");
+        return false;
+    }
+    frameSamples_ = PCM_SAMPLES_PER_BATCH;
     filtersEnabled_ = enableFilters;
 
     // Queue filtered PCM in PSRAM. Encoding is deferred to loopTask; Codec2's
@@ -144,7 +153,7 @@ bool I2SCapture::configureEncoder(Codec2Wrapper* codec, bool enableFilters) {
     }
 
     ESP_LOGI(TAG, "Encoder configured: Codec2 mode %d, %d samples/batch (%d x %d), %d bytes/frame, filters=%d",
-             codec_->libraryMode(), frameSamples_, FRAMES_PER_BATCH,
+             codec_->libraryMode(), frameSamples_, framesPerBatch,
              codec_->samplesPerFrame(), codec_->bytesPerFrame(), enableFilters);
     return true;
 }

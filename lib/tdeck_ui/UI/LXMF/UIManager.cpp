@@ -14,6 +14,7 @@
 #include "Tone.h"
 #include "../LVGL/LVGLLock.h"
 #include "lxst_audio.h"
+#include "ULBWVoiceProfilePolicy.h"
 #include <microReticulum/Packet.h>
 #include <microReticulum/Transport.h>
 #include <microReticulum/Destination.h>
@@ -74,21 +75,12 @@ public:
 };
 static std::shared_ptr<LXSTAnnounceHandler> s_lxst_announce_handler;
 
-// Default preferred profile: Codec2-1600 (VLBW). Good quality at low CPU and the
-// right default for WiFi/IP calls (where most calls run with the app). 700C (ULBW)
-// is BOTH the lowest quality AND the heaviest Codec2 mode (newamp1) -- reserve it for
-// marginal LoRa links by selecting ULBW (via the call profile setting / T:CALL_PROFILE
-// hook). TODO: auto-select per active interface (WiFi->LBW/3200, LoRa-only->ULBW/700C).
-// See the LXST voice audit (2026-06-23).
-int UIManager::_preferred_profile = UIManager::LXST_PROFILE_VLBW;
+// LoRa bandwidth is a production constraint: Pyxis advertises and accepts only
+// LXST ULBW/Codec2-700C.
+int UIManager::_preferred_profile = UIManager::LXST_PROFILE_ULBW;
 
 int UIManager::profile_to_codec2_mode(int profile) {
-    switch (profile) {
-        case LXST_PROFILE_ULBW: return CODEC2_MODE_700C;
-        case LXST_PROFILE_VLBW: return CODEC2_MODE_1600;
-        case LXST_PROFILE_LBW:  return CODEC2_MODE_3200;
-        default:                return -1;
-    }
+    return ULBWVoiceProfilePolicy::codecModeForProfile(profile);
 }
 
 UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::MessageStore& store)
@@ -1383,12 +1375,11 @@ void UIManager::call_send_audio_batch(const uint8_t* batch_data, int batch_len,
     // Match LXST-kt (Columba) wire format exactly:
     //   {0x01: bin8(batch)} for single batch, or
     //   {0x01: fixarray(N)[bin8(b1), bin8(b2), ...]} for multiple batches.
-    // Each batch = [codec_type(0x02)] + [mode_header] + [10 * raw_codec2].
-    // Columba's native ring buffer expects exactly frameSamples (1600) decoded
-    // samples per writeEncodedPacket call.  For Codec2 3200: 10 * 160 = 1600.
+    // Each batch = [codec_type(0x02)] + [mode_header] + [N * raw_codec2].
+    // Production Pyxis sends the ULBW 400 ms quantum: 10 Codec2-700C frames.
     // batch_len is the EXACT byte length of one batch, computed by the caller from
     // the real encoded size (codec_type + mode_header + N*raw_codec2). It VARIES by
-    // Codec2 mode: 42 bytes for 700C (4 bytes/frame), 82 for 1600/3200 (8/frame).
+    // ULBW batch length is 42 bytes: codec type + mode header + 10*4 bytes.
     // (Previously hardcoded to 82, which shipped 40 bytes of uninitialized stack and
     // a lying bin8 length on every 700C packet -- the voice-quality root cause.)
 
@@ -1476,6 +1467,17 @@ void UIManager::call_rx_audio_frame(const uint8_t* frame, size_t frame_len) {
         return;  // Can't decode Opus (0x01) or Raw (0x00) — only Codec2
     }
 
+    // The encoder and decoder deliberately share one Codec2 state object. Never
+    // pass a wider-mode header into decode(), since its dynamic mode switch would
+    // also mutate the transmitter away from the ULBW-only production contract.
+    if (!ULBWVoiceProfilePolicy::acceptsCodec2ModeHeader(codec_data[0])) {
+        char dbg[72];
+        snprintf(dbg, sizeof(dbg),
+                 "LXST: RX audio dropped (non-ULBW mode 0x%02X)", codec_data[0]);
+        WARNING(dbg);
+        return;
+    }
+
     if (_lxst_audio->isPlaying()) {
         if (_lxst_audio->writeEncodedPacket(codec_data, codec_data_len)) {
             _call_audio_rx_count++;
@@ -1546,9 +1548,9 @@ void UIManager::call_on_packet(const Bytes& data) {
             return;
         }
 
-        // Handle PREFERRED_PROFILE signals (0xFF+)
-        // Remote sends PREFERRED_PROFILE + profile_id to request a codec profile.
-        // Pyxis only supports Codec2, so respond with LBW (Codec2 3200bps).
+        // Remote sends PREFERRED_PROFILE + profile_id to request a transmit
+        // profile. Pyxis is ULBW-only for LoRa: never adopt the request, and
+        // respond with ULBW so the peer switches its transmit pipeline to 700C.
         if (signal >= LXST_PREFERRED_PROFILE) {
             int remote_profile = signal - LXST_PREFERRED_PROFILE;
             char dbg[80];
@@ -1556,7 +1558,7 @@ void UIManager::call_on_packet(const Bytes& data) {
                      "LXST: Remote prefers profile 0x%02X, responding 0x%02X",
                      remote_profile, _preferred_profile);
             INFO(dbg);
-            call_send_signal(LXST_PREFERRED_PROFILE + _preferred_profile);
+            call_send_signal(ULBWVoiceProfilePolicy::preferredProfileSignal());
             return;
         }
 
@@ -1674,7 +1676,7 @@ void UIManager::call_process_signal(uint8_t signal) {
             if (signal == LXST_STATUS_RINGING) {
                 INFO("LXST: Remote is ringing");
                 // Tell remote our preferred profile (default ULBW = Codec2-700C)
-                call_send_signal(LXST_PREFERRED_PROFILE + _preferred_profile);
+                call_send_signal(ULBWVoiceProfilePolicy::preferredProfileSignal());
                 _call_state = CallState::RINGING;
                 _call_timeout_ms = millis() + 60000;
                 _call_screen->set_state(CallScreen::CallState::RINGING);
@@ -1835,13 +1837,14 @@ void UIManager::pump_call_tx() {
         }
         if (encoded_len < 2) { available--; continue; }
 
-        // Prepend codec type byte: [0x02] + [encoded: mode_header + 10*8 raw]
+        // Prepend codec type byte: [0x02] + [mode_header + N raw Codec2 frames].
         uint8_t batch_data[128];
         batch_data[0] = LXST_CODEC_CODEC2;
         memcpy(batch_data + 1, encoded_buf, encoded_len);
         int batch_len = 1 + encoded_len;
 
-        call_send_audio_batch(batch_data, batch_len, 1, encoded_len / 8);
+        const int framesPerPacket = ULBWVoiceProfilePolicy::framesPerPacket(320);
+        call_send_audio_batch(batch_data, batch_len, 1, framesPerPacket);
         _call_audio_tx_count++;
         available--;
 
@@ -2296,7 +2299,7 @@ void UIManager::call_answer() {
 
     // Send profile preference (default ULBW = Codec2-700C). Answerer
     // sends last and wins.
-    call_send_signal(LXST_PREFERRED_PROFILE + _preferred_profile);
+    call_send_signal(ULBWVoiceProfilePolicy::preferredProfileSignal());
 
     // Send STATUS_ESTABLISHED
     call_send_signal(LXST_STATUS_ESTABLISHED);

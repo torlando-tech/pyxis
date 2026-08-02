@@ -2,8 +2,12 @@
 // SPDX-License-Identifier: MPL-2.0
 
 #include "codec_wrapper.h"
+#include "ULBWVoiceProfilePolicy.h"
 #include <codec2.h>
 #include <cstring>
+
+static_assert(CODEC2_MODE_700C == ULBWVoiceProfilePolicy::CODEC2_MODE_700C_VALUE,
+              "Pinned Codec2-700C mode value changed");
 
 #ifdef ARDUINO
 #include <esp_log.h>

@@ -7,18 +7,18 @@ This harness plays a known reference signal out the Mac speaker; the T-Deck mic
 captures it, runs the real pipeline (ES7210 -> filters/AGC -> Codec2 encode ->
 call_send_audio_batch framing -> call_on_packet parse -> Codec2 decode), and dumps
 the decoded PCM back over UDP multicast. We re-align and score the round-trip so we
-can (a) confirm a profile produces intelligible audio and (b) compare profiles and
-before/after a firmware change.
+can confirm the production ULBW profile produces intelligible audio before/after
+a firmware change.
 
 Firmware contract (T:LOOPBACK test mode):
   - UDP multicast 239.0.99.99:9998, each datagram = [uint32 LE byte_offset][int16 LE
     mono PCM @ 8 kHz], payload <= 1284 bytes.
-  - Serial T: hooks: `T:CALL_PROFILE 0x10|0x20|0x30` (ULBW/VLBW/LBW),
+  - Serial T: hooks: `T:CALL_PROFILE 0x10` (ULBW only),
     `T:LOOPBACK on`, `T:LOOPBACK off`.
 
 Usage:
-  python3 run_voice_test.py --port /dev/cu.usbmodem101 --profiles ULBW,VLBW,LBW
-  python3 run_voice_test.py --port /dev/cu.usbmodem101 --profiles LBW --ref my.wav
+  python3 run_voice_test.py --port /dev/cu.usbmodem101 --profiles ULBW
+  python3 run_voice_test.py --port /dev/cu.usbmodem101 --profiles ULBW --ref my.wav
 
 Deps:  pip install numpy scipy soundfile sounddevice pyserial    (optional: pystoi)
 Make sure the Mac OUTPUT device is the built-in speaker next to the T-Deck, and
@@ -26,10 +26,11 @@ turn the volume to a consistent, moderate level.
 """
 
 import argparse, socket, struct, sys, time, threading, subprocess, os
+from voice_profile_contract import require_ulbw_confirmation, validate_requested_profiles
 
 SR = 8000                         # Codec2 / pipeline sample rate
 MCAST_GRP, MCAST_PORT = "239.0.99.99", 9998
-PROFILES = {"ULBW": 0x10, "VLBW": 0x20, "LBW": 0x30}   # 700C / 1600 / 3200
+PROFILES = {"ULBW": 0x10}   # Codec2-700C; sole production profile
 OUTDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "out")
 
 
@@ -258,7 +259,9 @@ def verdict(res):
 # ---------------- one profile run ----------------
 def run_profile(dev, name, ref, chirp_len, tail_s):
     print(f"\n=== profile {name} (0x{PROFILES[name]:02X}) ===")
-    print("  set profile:", dev.cmd(f"T:CALL_PROFILE 0x{PROFILES[name]:02X}").strip())
+    profile_response = dev.cmd(f"T:CALL_PROFILE 0x{PROFILES[name]:02X}")
+    require_ulbw_confirmation(profile_response)
+    print("  set profile:", profile_response.strip())
     rx = PcmReceiver(); rx.start()
     time.sleep(0.2)
     print("  loopback on:", dev.cmd("T:LOOPBACK on").strip())
@@ -285,7 +288,7 @@ def run_profile(dev, name, ref, chirp_len, tail_s):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", default="/dev/cu.usbmodem101")
-    ap.add_argument("--profiles", default="ULBW,VLBW,LBW")
+    ap.add_argument("--profiles", default="ULBW", help="must be ULBW")
     ap.add_argument("--ref", help="reference WAV (else generated chirp+speech)")
     ap.add_argument("--text", default="The quick brown fox jumps over the lazy dog. "
                     "She sells seashells. Numbers: one two three four five.")
@@ -293,6 +296,10 @@ def main():
     ap.add_argument("--output", default="speaker",
                     help="output device name substring (the Mac speaker next to the T-Deck mic)")
     args = ap.parse_args()
+    try:
+        requested_profiles = validate_requested_profiles(args.profiles)
+    except ValueError as exc:
+        ap.error(str(exc))
 
     # Select the output device so audio plays out the speaker (not a monitor/HDMI).
     out_dev = next((i for i, d in enumerate(sd.query_devices())
@@ -324,9 +331,7 @@ def main():
         # BLE holds enough heap to make that allocation fail intermittently. Free it
         # for the duration of the test, restore after.
         print("BLE off (free heap):", dev.cmd("T:BLE off", wait=1.8).strip().splitlines()[-1:])
-        for name in [p.strip().upper() for p in args.profiles.split(",") if p.strip()]:
-            if name not in PROFILES:
-                print(f"  skip unknown profile {name}"); continue
+        for name in requested_profiles:
             results[name] = run_profile(dev, name, ref, chirp_len, args.tail)
     finally:
         try:
