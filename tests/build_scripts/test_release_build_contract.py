@@ -38,3 +38,18 @@ def test_disabled_instrumentation_macros_remain_defined():
     assert "#include <Instrumentation/BootProfiler.h>" in main
     assert "#define MEMORY_MONITOR_POLL() ((void)0)" in memory
     assert "#define BOOT_PROFILE_COMPLETE() ((void)0)" in boot
+
+
+def test_ci_and_deployment_build_the_release_environment():
+    build_check = (ROOT / ".github/workflows/build-check.yml").read_text()
+    release = (ROOT / ".github/workflows/release-firmware.yml").read_text()
+
+    assert "environment: [tdeck, tdeck-release]" in build_check
+    assert "matrix.environment == 'tdeck-release'" in build_check
+    assert ".pio/build/tdeck-release/firmware.bin" in build_check
+
+    assert "pio run -e tdeck-release" in release
+    assert ".pio/build/tdeck-release/bootloader.bin" in release
+    assert ".pio/build/tdeck-release/partitions.bin" in release
+    assert ".pio/build/tdeck-release/firmware.bin" in release
+    assert ".pio/build/tdeck/firmware.bin" not in release

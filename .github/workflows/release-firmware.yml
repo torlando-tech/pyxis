@@ -30,8 +30,8 @@ jobs:
       - name: Install PlatformIO
         run: pip install platformio
 
-      - name: Build T-Deck firmware (NimBLE)
-        run: pio run -e tdeck
+      - name: Build release-qualified T-Deck firmware
+        run: pio run -e tdeck-release
 
       - name: Determine version string
         id: version
@@ -45,9 +45,9 @@ jobs:
       - name: Copy firmware binaries
         run: |
           mkdir -p docs/flasher/firmware
-          cp .pio/build/tdeck/bootloader.bin docs/flasher/firmware/
-          cp .pio/build/tdeck/partitions.bin docs/flasher/firmware/
-          cp .pio/build/tdeck/firmware.bin docs/flasher/firmware/
+          cp .pio/build/tdeck-release/bootloader.bin docs/flasher/firmware/
+          cp .pio/build/tdeck-release/partitions.bin docs/flasher/firmware/
+          cp .pio/build/tdeck-release/firmware.bin docs/flasher/firmware/
           BOOT_APP0=$(find ~/.platformio -name "boot_app0.bin" | head -1)
           cp "$BOOT_APP0" docs/flasher/firmware/
 
@@ -56,9 +56,9 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             TAG="${GITHUB_REF#refs/tags/}"
             mkdir -p "docs/flasher/firmware/releases/${TAG}"
-            cp .pio/build/tdeck/bootloader.bin "docs/flasher/firmware/releases/${TAG}/"
-            cp .pio/build/tdeck/partitions.bin "docs/flasher/firmware/releases/${TAG}/"
-            cp .pio/build/tdeck/firmware.bin "docs/flasher/firmware/releases/${TAG}/"
+            cp .pio/build/tdeck-release/bootloader.bin "docs/flasher/firmware/releases/${TAG}/"
+            cp .pio/build/tdeck-release/partitions.bin "docs/flasher/firmware/releases/${TAG}/"
+            cp .pio/build/tdeck-release/firmware.bin "docs/flasher/firmware/releases/${TAG}/"
             cp "$BOOT_APP0" "docs/flasher/firmware/releases/${TAG}/"
           fi
 
