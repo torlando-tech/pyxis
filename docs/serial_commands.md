@@ -65,7 +65,7 @@ or `<X>` is misspelled.
 | `T:CALL_STATE` | — | `T:OK <state>` | Current call FSM state name. |
 | `T:CALL_STATS` | — | `T:OK …` | Audio frame counters for the most recent call. |
 | `T:CALL_QOS` | — | `T:OK …` | Wire-level audio fidelity counters (decoded RMS, frame loss, etc). |
-| `T:CALL_PROFILE` | `[hex]` | `T:OK <hex>` | Get (no arg) or set (hex arg) preferred Codec2 profile. Profiles: `0x10` ULBW (700C), `0x20` VLBW (1600), `0x30` LBW (3200). |
+| `T:CALL_PROFILE` | `[hex]` | `T:OK <hex>` | Get (no arg) or set (hex arg) the production Codec2 profile. Only `0x10` ULBW (700C) is supported. |
 | `T:CALL_INJECT` | `<on\|off> [freq_hz] [amp_pct]` | `T:OK inject=<on/off> freq=<f> amp=<a>` | Replace mic capture with a synthesized sine wave for the active call. Useful for end-to-end audio fidelity checks against a bot that decodes pyxis's audio frames. Defaults: 1000 Hz, amp 0.5. |
 
 ### BLE interface
