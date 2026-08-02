@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        environment: [tdeck]
+        environment: [tdeck, tdeck-release]
 
     steps:
       - name: Checkout repository
@@ -28,12 +28,16 @@ jobs:
       - name: Build ${{ matrix.environment }}
         run: pio run -e ${{ matrix.environment }}
 
+      - name: Audit release artifact
+        if: matrix.environment == 'tdeck-release'
+        run: python tools/audit_release_build.py
+
       - name: Upload firmware artifact
-        if: matrix.environment == 'tdeck'
+        if: matrix.environment == 'tdeck-release'
         uses: actions/upload-artifact@v4
         with:
-          name: firmware-${{ github.event.pull_request.head.sha }}
+          name: release-firmware-${{ github.event.pull_request.head.sha }}
           path: |
-            .pio/build/tdeck/firmware.bin
-            .pio/build/tdeck/bootloader.bin
-            .pio/build/tdeck/partitions.bin
+            .pio/build/tdeck-release/firmware.bin
+            .pio/build/tdeck-release/bootloader.bin
+            .pio/build/tdeck-release/partitions.bin

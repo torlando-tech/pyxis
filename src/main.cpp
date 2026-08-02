@@ -93,15 +93,9 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 
-// Memory instrumentation
-#ifdef MEMORY_INSTRUMENTATION_ENABLED
+// These headers provide no-op macros when their release flags are disabled.
 #include <Instrumentation/MemoryMonitor.h>
-#endif
-
-// Boot profiling
-#ifdef BOOT_PROFILING_ENABLED
 #include <Instrumentation/BootProfiler.h>
-#endif
 
 // Firmware version for web flasher detection
 #ifndef FIRMWARE_VERSION
