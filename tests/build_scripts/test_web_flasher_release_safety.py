@@ -67,6 +67,20 @@ def test_custom_firmware_upload_is_explicit_validated_and_update_only():
     assert "const useFullInstall = customFirmwareBytes ? false : eraseCheckbox.checked;" in source
 
 
+def test_custom_firmware_selection_invalidates_stale_async_results():
+    source = FLASHER.read_text()
+    handler = source[source.index("customFirmwareInput.addEventListener('change'"):source.index("function selectPublishedRelease")]
+
+    assert "let customFirmwareSelectionToken = 0;" in source
+    assert "const selectionToken = ++customFirmwareSelectionToken;" in handler
+    assert handler.index("customFirmwareBytes = null;") < handler.index("await file.arrayBuffer()")
+    assert handler.index("flashBtn.disabled = true;") < handler.index("await file.arrayBuffer()")
+    assert handler.count("if (selectionToken !== customFirmwareSelectionToken) return;") >= 3
+    assert "customFirmwareSelectionToken++;" in source[source.index("function selectPublishedRelease"):]
+    assert "if (customFirmwareSelectionToken === 0) {" in source
+    assert "versionSelect.options[0].textContent = 'Select a published release...'" in source
+
+
 def test_rom_connection_timeout_explains_manual_boot_sequence_and_cleans_up():
     source = FLASHER.read_text()
 

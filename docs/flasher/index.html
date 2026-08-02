@@ -354,6 +354,7 @@
         let firmwarePathPrefix = null;
         let selectedReleaseMetadata = null;
         let customFirmwareBytes = null;
+        let customFirmwareSelectionToken = 0;
         // Track whether the selected release has all assets for full install
         let releaseHasFullAssets = false;
 
@@ -560,19 +561,31 @@
         }
 
         customFirmwareInput.addEventListener('change', async function() {
+            const selectionToken = ++customFirmwareSelectionToken;
+            customFirmwareBytes = null;
+            firmwarePathPrefix = null;
+            selectedReleaseMetadata = null;
+            releaseHasFullAssets = false;
+            flashBtn.disabled = true;
+            eraseCheckbox.checked = false;
+            eraseCheckbox.disabled = true;
+            versionSelect.selectedIndex = 0;
+
             const file = this.files?.[0];
-            if (!file) return;
-            setCustomFirmwareStatus('Reading firmware.bin...');
+            if (!file) {
+                setCustomFirmwareStatus('No custom firmware selected.');
+                return;
+            }
+            document.getElementById('firmware-version').textContent = file.name;
+            setCustomFirmwareStatus(`Reading firmware.bin: ${file.name} (${file.size} bytes)...`);
             try {
                 const bytes = new Uint8Array(await file.arrayBuffer());
+                if (selectionToken !== customFirmwareSelectionToken) return;
                 await validateCustomFirmware(bytes);
+                if (selectionToken !== customFirmwareSelectionToken) return;
                 const hash = await sha256Hex(bytes);
+                if (selectionToken !== customFirmwareSelectionToken) return;
                 customFirmwareBytes = bytes;
-                firmwarePathPrefix = null;
-                selectedReleaseMetadata = null;
-                versionSelect.selectedIndex = 0;
-                eraseCheckbox.checked = false;
-                eraseCheckbox.disabled = true;
                 versionNote.textContent = `Custom firmware update only — ${bytes.byteLength} bytes — SHA-256 ${hash}`;
                 versionNote.classList.remove('hidden');
                 document.getElementById('firmware-version').textContent = file.name;
@@ -581,9 +594,10 @@
                 const serialWarning = navigator.serial ? '' : ' Web Serial is unavailable in this browser context.';
                 setCustomFirmwareStatus(`Ready: ${file.name} (${bytes.byteLength} bytes).${serialWarning}`, 'success');
             } catch (error) {
+                if (selectionToken !== customFirmwareSelectionToken) return;
                 customFirmwareBytes = null;
                 this.value = '';
-                flashBtn.disabled = !firmwarePathPrefix;
+                flashBtn.disabled = true;
                 versionNote.textContent = error.message;
                 versionNote.classList.remove('hidden');
                 setCustomFirmwareStatus(error.message, 'error');
@@ -594,6 +608,7 @@
             const selected = versionSelect.options[versionSelect.selectedIndex];
             if (!selected || !selected.dataset.downloadUrl || !selected.releaseMetadata) return;
 
+            customFirmwareSelectionToken++;
             firmwarePathPrefix = selected.dataset.downloadUrl;
             selectedReleaseMetadata = selected.releaseMetadata;
             customFirmwareBytes = null;
@@ -650,7 +665,7 @@
                 }
 
                 if (publishedCount === 0) {
-                    if (!customFirmwareBytes) {
+                    if (customFirmwareSelectionToken === 0) {
                         versionNote.textContent = 'No persistence-safe published firmware releases are available.';
                         versionNote.classList.remove('hidden');
                         document.getElementById('firmware-version').textContent = 'unavailable';
@@ -658,11 +673,14 @@
                     return;
                 }
 
-                versionSelect.selectedIndex = 1;
+                versionSelect.options[0].textContent = 'Select a published release...';
                 versionSelect.disabled = false;
-                if (!customFirmwareBytes) selectPublishedRelease();
+                if (customFirmwareSelectionToken === 0) {
+                    versionSelect.selectedIndex = 1;
+                    selectPublishedRelease();
+                }
             } catch (e) {
-                if (!customFirmwareBytes) {
+                if (customFirmwareSelectionToken === 0) {
                     versionNote.textContent = 'Unable to load published firmware releases.';
                     versionNote.classList.remove('hidden');
                     document.getElementById('firmware-version').textContent = 'unavailable';

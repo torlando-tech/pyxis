@@ -1055,6 +1055,13 @@ void enter_storage_recovery_mode() {
     INFO("Storage recovery UI active");
 }
 
+static void configure_loop_watchdog() {
+    esp_task_wdt_init(60, false);
+    esp_task_wdt_add(NULL);
+    RNS::Utilities::OS::set_loop_callback([]() { esp_task_wdt_reset(); });
+    INFO("Task Watchdog: loopTask subscribed (60s timeout, log-only)");
+}
+
 void setup_reticulum() {
     INFO("\n=== Reticulum Initialization ===");
 
@@ -1770,6 +1777,7 @@ void setup() {
     BOOT_PROFILE_END("lvgl");
 
     if (!persistent_storage_ready) {
+        configure_loop_watchdog();
         enter_storage_recovery_mode();
         return;
     }
@@ -1901,9 +1909,7 @@ void setup() {
     // re-adds it on the next loop iteration (CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
     // is baked in and sdkconfig.defaults can't override without a framework
     // rebuild from source).
-    esp_task_wdt_init(60, false);
-    esp_task_wdt_add(NULL);       // Subscribe loopTask
-    INFO("Task Watchdog: loopTask subscribed (60s timeout, log-only)");
+    configure_loop_watchdog();
 
     // Feed WDT during long persistence + clean_cache operations (71+ entries
     // to SPIFFS can take >30s). Upstream microReticulum @ 0.3.0 moved the
@@ -1911,8 +1917,6 @@ void setup() {
     // callback (set via set_loop_callback), invoked during long operations
     // like clean_caches, identity persistence, and the path-table flush.
     // Was: Identity::set_persist_yield_callback (fork-only).
-    RNS::Utilities::OS::set_loop_callback([]() { esp_task_wdt_reset(); });
-
     // Show startup message
     INFO("Press any key to start messaging");
 }
