@@ -1,7 +1,6 @@
 {
   "name": "Pyxis T-Deck",
-  "version": "dev-a0cba05",
-  "new_install_prompt_erase": false,
+  "version": "v0.2.3",
   "builds": [
     {
       "chipFamily": "ESP32-S3",
