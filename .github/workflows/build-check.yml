@@ -28,6 +28,10 @@ jobs:
       - name: Build ${{ matrix.environment }}
         run: pio run -e ${{ matrix.environment }}
 
+      - name: Audit release artifact
+        if: matrix.environment == 'tdeck-release'
+        run: python tools/audit_release_build.py
+
       - name: Upload firmware artifact
         if: matrix.environment == 'tdeck-release'
         uses: actions/upload-artifact@v4

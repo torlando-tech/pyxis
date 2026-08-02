@@ -47,8 +47,10 @@ def test_ci_and_deployment_build_the_release_environment():
     assert "environment: [tdeck, tdeck-release]" in build_check
     assert "matrix.environment == 'tdeck-release'" in build_check
     assert ".pio/build/tdeck-release/firmware.bin" in build_check
+    assert "python tools/audit_release_build.py" in build_check
 
     assert "pio run -e tdeck-release" in release
+    assert "python tools/audit_release_build.py" in release
     assert ".pio/build/tdeck-release/bootloader.bin" in release
     assert ".pio/build/tdeck-release/partitions.bin" in release
     assert ".pio/build/tdeck-release/firmware.bin" in release
