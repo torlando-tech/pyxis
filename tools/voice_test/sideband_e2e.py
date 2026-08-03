@@ -30,7 +30,10 @@ from LXST.Primitives.Telephony import Profiles
 from sideband.voice import ReticulumTelephone
 
 PORT = os.environ.get("PYXIS_SERIAL_PORT") or sorted(glob.glob("/dev/cu.usbmodem*"))[0]
-PROFILE = Profiles.BANDWIDTH_ULTRA_LOW
+# Deliberately originate at Sideband's MQ/Opus profile. Pyxis is ULBW-only and
+# must parse the combined LXST 0.5.1 [profile, duplex-mode] signal and force the
+# peer's transmit pipeline to Codec2-700C.
+PROFILE = Profiles.QUALITY_MEDIUM
 RUN_SECONDS = float(os.environ.get("PYXIS_CALL_SECONDS", "7"))
 IDENTIFY_TIMEOUT_SECONDS = 15.0
 IDENTIFY_TIMEOUT_MARGIN = float(os.environ.get("PYXIS_IDENTIFY_TIMEOUT_MARGIN", "3"))
@@ -414,6 +417,18 @@ def run_audio(dev, label):
         val(qos,"decode_ok")>0 and val(qos,"decode_fail")==0 and val(qos,"pcm_n")>0)
     return ok,{"sideband":d,"qos":qos,"stats":stat,"rms":rms}
 
+def assert_sideband_ulbw(phone, label, timeout=8):
+    deadline=time.monotonic()+timeout
+    seen=[]
+    while time.monotonic()<deadline:
+        profile=phone.telephone.active_profile
+        seen.append(profile)
+        if profile==Profiles.BANDWIDTH_ULTRA_LOW:
+            print(f"{label} SIDEBAND_PROFILE=ULBW",flush=True)
+            return
+        time.sleep(.2)
+    raise AssertionError(f"{label}: Sideband remained non-ULBW; profiles={seen}")
+
 def main():
     print(f"PORT={PORT}",flush=True)
     print(f"RNS_VERSION={RNS.__version__}",flush=True)
@@ -565,6 +580,7 @@ def main():
         deadline=time.monotonic()+15
         while not phone.is_in_call and time.monotonic()<deadline: time.sleep(.2)
         assert phone.is_in_call,"Sideband did not become active after identification timeout"
+        assert_sideband_ulbw(phone,"TEST_IDENTIFY_TIMEOUT")
         ok,data=run_audio(dev,"TEST_IDENTIFY_TIMEOUT")
         phone.hangup()
         idle_ok,hangup_states=dev.wait_state("IDLE",15)
@@ -590,6 +606,7 @@ def main():
         deadline=time.monotonic()+15
         while not phone.is_in_call and time.monotonic()<deadline: time.sleep(.2)
         assert phone.is_in_call,"Sideband did not become active on incoming call"
+        assert_sideband_ulbw(phone,"TEST1")
         ok,data=run_audio(dev,"TEST1")
         results.append(("pyxis_to_sideband_bidirectional",ok,data))
         dev.cmd("T:CALL_HANGUP"); dev.wait_state("IDLE",15); time.sleep(1)
@@ -605,6 +622,7 @@ def main():
         deadline=time.monotonic()+15
         while not phone.is_in_call and time.monotonic()<deadline: time.sleep(.2)
         assert phone.is_in_call,"Sideband did not become active"
+        assert_sideband_ulbw(phone,"TEST2")
         ok,data=run_audio(dev,"TEST2")
         results.append(("sideband_to_pyxis_bidirectional",ok,data))
         phone.hangup(); dev.wait_state("IDLE",15); time.sleep(1)

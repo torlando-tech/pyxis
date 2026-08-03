@@ -260,6 +260,16 @@ class TestSignallingFormat:
         assert pyxis_result["signals"] == [signal]
         assert lxst_result["signals"] == [signal]
 
+    def test_lxst_0_5_1_profile_and_mode_signal_list(self):
+        """Current LXST combines MQ profile and FDX mode in one packet."""
+        signals = [PREFERRED_PROFILE + PROFILE_MQ, 0xF0 + 0x01]
+        wire = build_signal_packet(signals)
+
+        # Golden bytes from authoritative LXST 0.5.1 umsgpack output.
+        assert wire == bytes([0x81, 0x00, 0x92, 0xCD, 0x01, 0x3F, 0xCC, 0xF1])
+        assert parse_pyxis_rx(wire)["signals"] == signals
+        assert parse_lxst_python_rx(wire)["signals"] == signals
+
     def test_pyxis_manual_signal_construction(self):
         """
         Verify Pyxis call_send_signal() manual msgpack matches standard msgpack.

@@ -377,6 +377,8 @@ private:
     static constexpr uint8_t LXST_CODEC_CODEC2 = 0x02;
 
     // LXST profile negotiation
+    static constexpr int LXST_PREFERRED_MODE    = 0xF0;
+    static constexpr int LXST_MODE_FULL_DUPLEX  = 0x01;
     static constexpr int LXST_PREFERRED_PROFILE = 0xFF;
     static constexpr int LXST_PROFILE_ULBW      = 0x10;  // Codec2 700C; sole production profile
     static constexpr int LXST_PROFILE_VLBW      = 0x20;  // protocol value; unsupported locally

@@ -228,9 +228,10 @@ def build_signal_packet(signal_value):
     """
     Build a signalling packet matching all implementations.
 
-    Format: {0x00: [signal_value]}
+    Format: {0x00: [signal_value, ...]}
     """
-    packet_data = {FIELD_SIGNALLING: [signal_value]}
+    signals = signal_value if isinstance(signal_value, list) else [signal_value]
+    packet_data = {FIELD_SIGNALLING: signals}
     return msgpack.packb(packet_data)
 
 
@@ -256,17 +257,16 @@ def parse_pyxis_rx(wire_bytes):
     result = {"field": field, "frames": [], "signals": []}
 
     if field == FIELD_SIGNALLING:
-        # {0x00: [signal]}
-        if buf[2] != 0x91:
-            return {"error": f"expected fixarray(1), got 0x{buf[2]:02x}"}
-        if buf[3] <= 0x7F:
-            result["signals"].append(buf[3])
-        elif buf[3] == 0xCC and len(buf) >= 5:
-            result["signals"].append(buf[4])
-        elif buf[3] == 0xCD and len(buf) >= 6:
-            result["signals"].append((buf[4] << 8) | buf[5])
-        else:
-            return {"error": f"unparseable signal 0x{buf[3]:02x}"}
+        # {0x00: [signal, ...]}; production C++ parsing is covered by the
+        # native LXSTSignalParser golden-vector test.
+        unpacked = msgpack.unpackb(wire_bytes)
+        signals = unpacked.get(FIELD_SIGNALLING)
+        if not isinstance(signals, list) or not 1 <= len(signals) <= 8:
+            return {"error": "invalid signalling list"}
+        if not all(isinstance(signal, int) and 0 <= signal <= 0x7FFFFFFF
+                   for signal in signals):
+            return {"error": "invalid signal value"}
+        result["signals"] = signals
 
     elif field == FIELD_FRAMES:
         fmt = buf[2]
