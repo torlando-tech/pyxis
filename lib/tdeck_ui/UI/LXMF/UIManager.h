@@ -23,6 +23,7 @@
 #include "CallGenerationGuard.h"
 #include "CallLinkOwnership.h"
 #include "CallLivenessWatchdog.h"
+#include "LXSTSignalParser.h"
 #include "LXMF/LXMRouter.h"
 #include "LXMF/PropagationNodeManager.h"
 #include "LXMF/MessageStore.h"
@@ -433,7 +434,8 @@ private:
     std::atomic<bool> _call_answer_pending;
 
     // Signal queue: written by Reticulum thread, consumed by call_update under LVGL lock
-    static constexpr int SIGNAL_QUEUE_SIZE = 8;
+    static constexpr int SIGNAL_QUEUE_SIZE =
+        static_cast<int>(LXSTSignalParser::MIN_SENTINEL_QUEUE_SIZE);
     volatile uint8_t _call_signal_queue[SIGNAL_QUEUE_SIZE];
     volatile uint8_t _call_signal_write;  // Next write index (Reticulum thread)
     volatile uint8_t _call_signal_read;   // Next read index (main thread)

@@ -23,4 +23,4 @@ def test_lxst_signal_parser(tmp_path):
     assert compiled.returncode == 0, compiled.stderr
     ran = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30)
     assert ran.returncode == 0, ran.stdout + ran.stderr
-    assert "15 passed, 0 failed" in ran.stdout
+    assert "16 passed, 0 failed" in ran.stdout

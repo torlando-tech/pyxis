@@ -9,6 +9,9 @@
 // one signal per packet. Accept canonical and valid wider integer containers.
 struct LXSTSignalParser {
     static constexpr size_t MAX_SIGNALS = 8;
+    // Sentinel-based circular queues require one unused slot to distinguish
+    // empty from full while retaining one complete maximum-size packet.
+    static constexpr size_t MIN_SENTINEL_QUEUE_SIZE = MAX_SIGNALS + 1;
 
     static size_t parse(const uint8_t* data, size_t length, int* output,
                         size_t output_capacity) {

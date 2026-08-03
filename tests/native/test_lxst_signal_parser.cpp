@@ -15,6 +15,9 @@ void expect(bool condition, const char* name) {
 
 int main() {
     int signals[LXSTSignalParser::MAX_SIGNALS] = {};
+    expect(LXSTSignalParser::MIN_SENTINEL_QUEUE_SIZE ==
+               LXSTSignalParser::MAX_SIGNALS + 1,
+           "sentinel queue can hold one maximum signalling array");
 
     const uint8_t legacy[] = {0x81, 0x00, 0x91, 0xCD, 0x01, 0x0F};
     size_t count = LXSTSignalParser::parse(legacy, sizeof(legacy), signals,
