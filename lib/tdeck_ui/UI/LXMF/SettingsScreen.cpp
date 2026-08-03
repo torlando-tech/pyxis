@@ -69,7 +69,8 @@ SettingsScreen::SettingsScreen(lv_obj_t* parent)
       _slider_lora_power(nullptr), _label_lora_power_value(nullptr),
       _lora_params_container(nullptr), _switch_auto_enabled(nullptr), _switch_ble_enabled(nullptr),
       _ta_announce_interval(nullptr), _ta_sync_interval(nullptr), _switch_gps_sync(nullptr),
-      _switch_transport_enabled(nullptr), _transport_warning_modal(nullptr), _transport_enable_confirmed(false),
+      _switch_transport_enabled(nullptr), _transport_warning_modal(nullptr),
+      _transport_modal_group(nullptr), _transport_enable_confirmed(false),
       _btn_propagation_nodes(nullptr), _switch_prop_fallback(nullptr), _switch_prop_only(nullptr),
       _gps(nullptr) {
     LVGL_LOCK();
@@ -974,19 +975,43 @@ void SettingsScreen::show_transport_warning() {
     lv_label_set_text(confirm_label, "ENABLE ANYWAY");
     lv_obj_center(confirm_label);
 
-    lv_group_t* group = LVGL::LVGLInit::get_default_group();
-    if (group) {
-        lv_group_add_obj(group, cancel);
-        lv_group_add_obj(group, confirm);
+    _transport_modal_group = lv_group_create();
+    if (_transport_modal_group) {
+        lv_group_add_obj(_transport_modal_group, cancel);
+        lv_group_add_obj(_transport_modal_group, confirm);
         lv_group_focus_obj(cancel);
+
+        // Isolate keyboard and trackball focus inside the warning. Otherwise
+        // users can navigate into and activate Settings controls behind the
+        // still-visible modal.
+        lv_indev_t* keyboard = LVGL::LVGLInit::get_keyboard();
+        lv_indev_t* trackball = LVGL::LVGLInit::get_trackball();
+        if (keyboard) lv_indev_set_group(keyboard, _transport_modal_group);
+        if (trackball) lv_indev_set_group(trackball, _transport_modal_group);
     }
 }
 
 void SettingsScreen::close_transport_warning() {
     if (!_transport_warning_modal) return;
+
+    lv_group_t* default_group = LVGL::LVGLInit::get_default_group();
+    lv_indev_t* keyboard = LVGL::LVGLInit::get_keyboard();
+    lv_indev_t* trackball = LVGL::LVGLInit::get_trackball();
+    if (keyboard) lv_indev_set_group(keyboard, default_group);
+    if (trackball) lv_indev_set_group(trackball, default_group);
+
+    if (_transport_modal_group) {
+        lv_group_del(_transport_modal_group);
+        _transport_modal_group = nullptr;
+    }
+
     lv_obj_t* modal = _transport_warning_modal;
     _transport_warning_modal = nullptr;
     lv_obj_del_async(modal);
+
+    if (default_group && _switch_transport_enabled) {
+        lv_group_focus_obj(_switch_transport_enabled);
+    }
 }
 
 void SettingsScreen::load_settings() {

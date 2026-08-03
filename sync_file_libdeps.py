@@ -48,6 +48,8 @@ def mirror(src: Path, dst: Path):
         return False
     src_files = 0
     copied = 0
+    removed = 0
+    mirrored_paths = set()
     for root, dirs, files in os.walk(src):
         # Skip git, build artifacts.
         dirs[:] = [d for d in dirs if d not in (".git", ".pio", "__pycache__", "build")]
@@ -57,6 +59,7 @@ def mirror(src: Path, dst: Path):
                 continue
             sp = Path(root) / fn
             dp = dst / rel / fn
+            mirrored_paths.add((rel / fn).as_posix())
             src_files += 1
             # A freshly fetched dependency can have a newer mtime than an older
             # local checkout even when the local bytes contain the intended fix.
@@ -68,8 +71,26 @@ def mirror(src: Path, dst: Path):
                 # incremental PlatformIO builds recompile changed dependency code.
                 dp.touch()
                 copied += 1
-    if copied > 0:
-        print(f"SYNC: {dst.name}: refreshed {copied}/{src_files} files from {src}")
+
+    # A mirror must also remove source files deleted from the explicit local
+    # checkout. Otherwise PlatformIO can continue compiling stale translation
+    # units that no longer exist in the dependency being tested.
+    for root, dirs, files in os.walk(dst):
+        dirs[:] = [d for d in dirs if d not in (".git", ".pio", "__pycache__", "build")]
+        rel = Path(root).relative_to(dst)
+        for fn in files:
+            if fn == ".piopm" or fn.endswith((".pyc", ".o", ".a", ".elf", ".bin")):
+                continue
+            relative_path = (rel / fn).as_posix()
+            if relative_path not in mirrored_paths:
+                (Path(root) / fn).unlink()
+                removed += 1
+
+    if copied > 0 or removed > 0:
+        print(
+            f"SYNC: {dst.name}: refreshed {copied}/{src_files} files, "
+            f"removed {removed} stale files from {src}"
+        )
     return True
 
 

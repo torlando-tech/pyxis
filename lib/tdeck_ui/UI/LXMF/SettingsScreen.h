@@ -297,6 +297,7 @@ private:
     // Dangerous transport-mode section (must remain last in Settings)
     lv_obj_t* _switch_transport_enabled;
     lv_obj_t* _transport_warning_modal;
+    lv_group_t* _transport_modal_group;
     bool _transport_enable_confirmed;
 
     // Delivery/Propagation section

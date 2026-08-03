@@ -22,8 +22,10 @@ def test_local_override_uses_content_not_mtime(tmp_path, monkeypatch):
 
     source_file = source / "Transport.cpp"
     destination_file = destination / "Transport.cpp"
+    orphan_file = destination / "Removed.cpp"
     source_file.write_text("patched source\n")
     destination_file.write_text("stale fetched source\n")
+    orphan_file.write_text("removed local source\n")
 
     # A just-fetched dependency can have a newer mtime than the local checkout.
     # The override must still win based on bytes, not timestamps.
@@ -43,6 +45,7 @@ def test_local_override_uses_content_not_mtime(tmp_path, monkeypatch):
 
     assert destination_file.read_text() == "patched source\n"
     assert destination_file.stat().st_mtime > 2
+    assert not orphan_file.exists()
 
 
 def test_local_override_runs_before_dependency_patch_scripts():

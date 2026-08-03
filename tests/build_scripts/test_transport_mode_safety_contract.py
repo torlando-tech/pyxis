@@ -34,3 +34,6 @@ def test_transport_toggle_is_last_and_requires_explicit_warning_confirmation():
     assert "Takes effect after reboot" in SETTINGS_CPP
     assert "on_transport_enabled_changed" in SETTINGS_CPP
     assert "on_transport_confirm_enable" in SETTINGS_CPP
+    assert "lv_group_create()" in SETTINGS_CPP
+    assert "lv_indev_set_group(keyboard, _transport_modal_group)" in SETTINGS_CPP
+    assert "lv_indev_set_group(trackball, _transport_modal_group)" in SETTINGS_CPP
