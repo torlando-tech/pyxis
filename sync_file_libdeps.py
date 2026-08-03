@@ -17,6 +17,7 @@ Import("env")
 import os
 import sys
 import shutil
+import filecmp
 from pathlib import Path
 sys.path.insert(0, env.get("PROJECT_DIR", "."))
 from _build_helpers import env_libdeps_dir  # per-env libdeps path; never hardcode the env
@@ -57,9 +58,15 @@ def mirror(src: Path, dst: Path):
             sp = Path(root) / fn
             dp = dst / rel / fn
             src_files += 1
-            if not dp.exists() or sp.stat().st_mtime > dp.stat().st_mtime:
+            # A freshly fetched dependency can have a newer mtime than an older
+            # local checkout even when the local bytes contain the intended fix.
+            # Compare content so the explicit local override always wins.
+            if not dp.exists() or not filecmp.cmp(sp, dp, shallow=False):
                 dp.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(sp, dp)
+                # copy2 preserves the source mtime. Touch the mirrored file so
+                # incremental PlatformIO builds recompile changed dependency code.
+                dp.touch()
                 copied += 1
     if copied > 0:
         print(f"SYNC: {dst.name}: refreshed {copied}/{src_files} files from {src}")
