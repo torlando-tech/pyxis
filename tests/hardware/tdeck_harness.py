@@ -33,14 +33,13 @@ What it does:
    - Send long (~1KB) message and repeat.
    - Sleep `--cadence` seconds between rounds.
 
-6. Soak: run for at least `--soak-hours` hours (default 1.1). Crash =
-   fail. Mid-test failures are logged but don't abort.
+6. Soak: pass `--soak-hours 1.0` for the watchdog acceptance run. The
+   default is one pass. Any crash or reset after initialization is a failure.
 
 Usage:
     # Run with a python that has pyserial available. PlatformIO's
     # bundled python works:
-    "$(pio system info | awk -F: '/Python Executable/{print $2}' | xargs)" \\
-        tests/soak/tdeck_soak_harness.py [--soak-hours 1.1] [--cadence 30]
+    python3 tests/hardware/tdeck_harness.py --soak-hours 1.0 --cadence 30
 
 Outputs:
     /tmp/tdeck-harness.log         — combined timestamped event log
@@ -76,6 +75,18 @@ ECHOBOT_PY = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # importable via the bot's repo-path insert). Override with PYXIS_BOT_PY if the
 # bot needs a different interpreter than the harness.
 BOT_PY = os.environ.get("PYXIS_BOT_PY") or sys.executable
+FAULT_MARKERS = (
+    "Guru Meditation",
+    "PANIC",
+    "abort",
+    "assertion",
+    "rst:0x",
+    "Reset reason:",
+)
+
+
+def is_fault_line(text):
+    return any(marker in text for marker in FAULT_MARKERS)
 
 
 def ts():
@@ -102,8 +113,11 @@ class TDeck:
     def __init__(self, port=PORT, baud=BAUD):
         self.ser = serial.Serial(port, baud, timeout=0.1)
         self._line_q = queue.Queue()           # raw text lines
+        self._fault_q = queue.Queue()          # crash/reset evidence, never consumed by commands
+        self._fault_lock = threading.Lock()    # atomic boot-to-soak monitor handoff
         self._tdeck_log = open(TDECK_LOG, "wb")
         self._stop = threading.Event()
+        self._fault_monitor_armed = threading.Event()
         self._reader = threading.Thread(target=self._read_loop, daemon=True)
         self._reader.start()
 
@@ -126,6 +140,7 @@ class TDeck:
                 d = self.ser.read(4096)
             except Exception as e:
                 log("HARNESS", f"Serial read error: {e}")
+                self._record_fault_if_armed(f"Serial read error: {e}")
                 return
             if not d:
                 continue
@@ -139,6 +154,34 @@ class TDeck:
                 except Exception:
                     text = repr(line)
                 self._line_q.put(text)
+                if is_fault_line(text):
+                    self._record_fault_if_armed(text)
+
+    def _record_fault_if_armed(self, text):
+        """Record fault evidence atomically with the monitor-arm transition."""
+        with self._fault_lock:
+            if self._fault_monitor_armed.is_set():
+                self._fault_q.put(text)
+
+    def arm_fault_monitor(self):
+        """Start treating every subsequent reset/crash line as a soak failure."""
+        with self._fault_lock:
+            while True:
+                try:
+                    self._fault_q.get_nowait()
+                except queue.Empty:
+                    break
+            self._fault_monitor_armed.set()
+
+    def drain_faults(self):
+        """Return crash/reset evidence without competing with command responses."""
+        out = []
+        while True:
+            try:
+                out.append(self._fault_q.get_nowait())
+            except queue.Empty:
+                break
+        return out
 
     def drain_lines(self):
         """Pop all currently-buffered lines (non-blocking)."""
@@ -492,6 +535,9 @@ def main():
     # 5. Round-trip tests. DIRECT + OPPORTUNISTIC always run; PROPAGATED runs
     #    only when PYXIS_PROPAGATION_NODE_HEX is set (deployment-specific hash
     #    kept out of source). Runs one pass minimum, then loops for --soak-hours.
+    #    Initial harness reset/boot evidence is intentionally ignored; every
+    #    crash or reset after this point is a stability failure.
+    t.arm_fault_monitor()
     deadline = time.time() + args.soak_hours * 3600
     round_n = 0
     payloads = [
@@ -632,16 +678,13 @@ def main():
             log("HARNESS", f"=== Round {round_n} / {label}: PASS "
                            f"(total: {successes} pass, {fails} fail) ===")
 
-        # Stability check: peek for any panic/abort/assert in the T-Deck log
-        # (drain new lines but don't block on them).
-        for line in t.drain_lines():
-            if any(k in line for k in (
-                "Guru Meditation", "PANIC", "abort", "assertion", "rst:0x"
-            )):
-                log("HARNESS", f"CRASH detected: {line}")
-                fails += 1
-                deadline = 0
-                break
+        # Fault lines are mirrored by the serial reader before command polling
+        # can consume them, so a reset cannot hide inside send_command().
+        for line in t.drain_faults():
+            log("HARNESS", f"CRASH/reset detected: {line}")
+            fails += 1
+            deadline = 0
+            break
 
         time.sleep(args.cadence)
 

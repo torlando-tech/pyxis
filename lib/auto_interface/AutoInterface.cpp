@@ -27,6 +27,11 @@
 
 using namespace RNS;
 
+// Bound each non-blocking socket drain so a continuous multicast/data flood
+// cannot keep loopTask inside AutoInterface long enough to miss its watchdog
+// deadline. Remaining datagrams stay queued for the next main-loop pass.
+static constexpr size_t SOCKET_RX_BUDGET = 16;
+
 // Helper: Convert IPv6 address bytes to compressed string format (RFC 5952)
 // This matches Python's inet_ntop output
 static std::string ipv6_to_compressed_string(const uint8_t* addr) {
@@ -943,7 +948,9 @@ void AutoInterface::process_discovery() {
 
     // Hot path - no logging to avoid heap allocation on every packet
 
-    while (len > 0) {
+    for (size_t packet_count = 0;
+         packet_count < SOCKET_RX_BUDGET && len > 0;
+         ++packet_count) {
         _stat_discovery_rx++;
         // Convert source address to COMPRESSED string format (match Python)
         std::string src_str = ipv6_to_compressed_string((const uint8_t*)&src_addr.sin6_addr);
@@ -997,7 +1004,9 @@ void AutoInterface::process_data() {
     ssize_t len = recvfrom(_data_socket, recv_buffer, sizeof(recv_buffer), 0,
                            (struct sockaddr*)&src_addr, &src_len);
 
-    while (len > 0) {
+    for (size_t packet_count = 0;
+         packet_count < SOCKET_RX_BUDGET && len > 0;
+         ++packet_count) {
         _stat_data_rx++;
         _buffer.clear();
         _buffer.append(recv_buffer, len);
@@ -1038,7 +1047,9 @@ void AutoInterface::process_unicast_discovery() {
     ssize_t len = recvfrom(_unicast_discovery_socket, recv_buffer, sizeof(recv_buffer), 0,
                            (struct sockaddr*)&src_addr, &src_len);
 
-    while (len > 0) {
+    for (size_t packet_count = 0;
+         packet_count < SOCKET_RX_BUDGET && len > 0;
+         ++packet_count) {
         // Convert source address to COMPRESSED string format (match Python)
         std::string src_str = ipv6_to_compressed_string((const uint8_t*)&src_addr.sin6_addr);
 
@@ -1246,7 +1257,7 @@ void AutoInterface::process_discovery() {
     struct sockaddr_in6 src_addr;
     socklen_t addr_len = sizeof(src_addr);
 
-    while (true) {
+    for (size_t packet_count = 0; packet_count < SOCKET_RX_BUDGET; ++packet_count) {
         ssize_t len = recvfrom(_discovery_socket, recv_buffer, sizeof(recv_buffer), 0,
                                (struct sockaddr*)&src_addr, &addr_len);
         if (len <= 0) break;
@@ -1280,7 +1291,7 @@ void AutoInterface::process_data() {
     struct sockaddr_in6 src_addr;
     socklen_t addr_len = sizeof(src_addr);
 
-    while (true) {
+    for (size_t packet_count = 0; packet_count < SOCKET_RX_BUDGET; ++packet_count) {
         _buffer.clear();
         ssize_t len = recvfrom(_data_socket, _buffer.writable(Type::Reticulum::MTU),
                                Type::Reticulum::MTU, 0,
@@ -1353,7 +1364,7 @@ void AutoInterface::process_unicast_discovery() {
     struct sockaddr_in6 src_addr;
     socklen_t addr_len = sizeof(src_addr);
 
-    while (true) {
+    for (size_t packet_count = 0; packet_count < SOCKET_RX_BUDGET; ++packet_count) {
         ssize_t len = recvfrom(_unicast_discovery_socket, recv_buffer, sizeof(recv_buffer), 0,
                                (struct sockaddr*)&src_addr, &addr_len);
         if (len <= 0) break;
