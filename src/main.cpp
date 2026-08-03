@@ -685,9 +685,10 @@ void load_app_settings() {
     app_settings.ble_enabled = prefs.getBool("ble_en", false);
 
     // Advanced
-    app_settings.announce_interval = prefs.getULong("announce", 3600);
+    app_settings.announce_interval = prefs.getULong("announce", 14400);
     app_settings.sync_interval = prefs.getULong("sync_int", 14400);  // Default 14400s = 4 hours
     app_settings.gps_time_sync = prefs.getBool("gps_sync", true);
+    app_settings.transport_enabled = prefs.getBool("transport", false);
 
     // Propagation
     app_settings.prop_auto_select = prefs.getBool("prop_auto", true);
@@ -1068,18 +1069,15 @@ void setup_reticulum() {
     // Create Reticulum instance (no auto-init)
     reticulum = new Reticulum();
 
-    // Enable transport mode so Transport::start() initializes the path
-    // store. Without this, the entire `_path_store.init()` block at
-    // Transport.cpp:244 is gated out, _new_path_table.put() always
-    // returns false at TypedStore::isValid(), and every announce
-    // surfaces as "Failed to add destination to path table". The UI's
-    // announce list reads from the path table, so on a busy network
-    // (TLAN) nothing ever appears.
-    //
-    // Transport mode also enables relaying packets for other nodes —
-    // typically a desktop-class node behavior, but acceptable on a
-    // T-Deck Plus with PSRAM and LittleFS-backed path persistence.
-    Reticulum::transport_enabled(true);
+    // Transport mode makes this handheld route traffic for other nodes across
+    // every enabled interface. Keep it off unless the user explicitly accepts
+    // the warning in Settings. Endpoint path persistence does not require it.
+    Reticulum::transport_enabled(app_settings.transport_enabled);
+    if (app_settings.transport_enabled) {
+        WARNING("Reticulum transport mode ENABLED: this device will relay traffic for other nodes");
+    } else {
+        INFO("Reticulum transport mode disabled (endpoint-only)");
+    }
 
     // Reduce transport log verbosity — LOG_TRACE floods serial with
     // token/link/announce details that drown out audio diagnostics.
@@ -1388,8 +1386,13 @@ void setup_ui_manager() {
                                         (new_settings.lora_power != app_settings.lora_power);
             bool auto_settings_changed = (new_settings.auto_enabled != app_settings.auto_enabled);
             bool ble_settings_changed = (new_settings.ble_enabled != app_settings.ble_enabled);
+            bool transport_settings_changed = (new_settings.transport_enabled != app_settings.transport_enabled);
 
             app_settings = new_settings;
+
+            if (transport_settings_changed) {
+                WARNING("Transport mode setting changed; reboot required before it takes effect");
+            }
 
             // Handle WiFi credential changes - auto reconnect
             if (wifi_settings_changed && new_settings.wifi_ssid.length() > 0) {

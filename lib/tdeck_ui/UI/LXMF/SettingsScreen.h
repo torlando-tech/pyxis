@@ -52,9 +52,10 @@ struct AppSettings {
     bool ble_enabled;         // Enable BLE mesh interface
 
     // Advanced
-    uint32_t announce_interval;  // seconds (UI shows minutes; default 3600 = 1h)
+    uint32_t announce_interval;  // seconds (UI shows minutes; default 14400 = 4h)
     uint32_t sync_interval;      // seconds (0 = disabled; UI shows hours; default 14400 = 4h)
     bool gps_time_sync;
+    bool transport_enabled;     // Route traffic for other nodes; default off, requires reboot
 
     // Propagation
     bool prop_auto_select;          // Auto-select best propagation node
@@ -80,9 +81,10 @@ struct AppSettings {
         lora_power(17),
         auto_enabled(false),
         ble_enabled(false),
-        announce_interval(3600),
+        announce_interval(14400),
         sync_interval(14400),
         gps_time_sync(true),
+        transport_enabled(false),
         prop_auto_select(true),
         prop_selected_node(""),
         prop_fallback_enabled(true),
@@ -292,6 +294,11 @@ private:
     lv_obj_t* _ta_sync_interval;
     lv_obj_t* _switch_gps_sync;
 
+    // Dangerous transport-mode section (must remain last in Settings)
+    lv_obj_t* _switch_transport_enabled;
+    lv_obj_t* _transport_warning_modal;
+    bool _transport_enable_confirmed;
+
     // Delivery/Propagation section
     lv_obj_t* _btn_propagation_nodes;
     lv_obj_t* _switch_prop_fallback;
@@ -321,6 +328,7 @@ private:
     void create_gps_section(lv_obj_t* parent);
     void create_system_section(lv_obj_t* parent);
     void create_advanced_section(lv_obj_t* parent);
+    void create_transport_mode_section(lv_obj_t* parent);
     void create_delivery_section(lv_obj_t* parent);
 
     // Helpers
@@ -344,6 +352,11 @@ private:
     static void on_lora_power_changed(lv_event_t* event);
     static void on_propagation_nodes_clicked(lv_event_t* event);
     static void on_notification_volume_changed(lv_event_t* event);
+    static void on_transport_enabled_changed(lv_event_t* event);
+    static void on_transport_confirm_enable(lv_event_t* event);
+    static void on_transport_cancel_enable(lv_event_t* event);
+    void show_transport_warning();
+    void close_transport_warning();
 };
 
 } // namespace LXMF

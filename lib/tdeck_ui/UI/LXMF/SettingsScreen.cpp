@@ -33,6 +33,7 @@ static const char* KEY_TIMEOUT = "timeout";
 static const char* KEY_ANNOUNCE_INT = "announce";
 static const char* KEY_SYNC_INT = "sync_int";
 static const char* KEY_GPS_SYNC = "gps_sync";
+static const char* KEY_TRANSPORT_ENABLED = "transport";
 // Notification settings
 static const char* KEY_NOTIF_SND = "notif_snd";
 static const char* KEY_NOTIF_VOL = "notif_vol";
@@ -68,6 +69,7 @@ SettingsScreen::SettingsScreen(lv_obj_t* parent)
       _slider_lora_power(nullptr), _label_lora_power_value(nullptr),
       _lora_params_container(nullptr), _switch_auto_enabled(nullptr), _switch_ble_enabled(nullptr),
       _ta_announce_interval(nullptr), _ta_sync_interval(nullptr), _switch_gps_sync(nullptr),
+      _switch_transport_enabled(nullptr), _transport_warning_modal(nullptr), _transport_enable_confirmed(false),
       _btn_propagation_nodes(nullptr), _switch_prop_fallback(nullptr), _switch_prop_only(nullptr),
       _gps(nullptr) {
     LVGL_LOCK();
@@ -178,6 +180,8 @@ void SettingsScreen::create_content() {
     create_gps_section(_content);
     create_system_section(_content);
     create_advanced_section(_content);
+    // This dangerous opt-in must remain the final Settings section.
+    create_transport_mode_section(_content);
 }
 
 lv_obj_t* SettingsScreen::create_section_header(lv_obj_t* parent, const char* title) {
@@ -864,6 +868,127 @@ void SettingsScreen::create_advanced_section(lv_obj_t* parent) {
     lv_obj_set_style_bg_color(_switch_gps_sync, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
 }
 
+void SettingsScreen::create_transport_mode_section(lv_obj_t* parent) {
+    create_section_header(parent, "== DANGER: Transport Mode ==");
+
+    lv_obj_t* warning = lv_label_create(parent);
+    lv_obj_set_width(warning, LV_PCT(100));
+    lv_label_set_long_mode(warning, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(
+        warning,
+        "NOT RECOMMENDED. Transport mode routes other nodes' Reticulum traffic "
+        "across every enabled interface. It can saturate LoRa airtime, drain the battery, "
+        "and turn this handheld into network infrastructure. Enable only if you understand "
+        "Reticulum routing and intend this device to be a transport node. Takes effect after reboot.");
+    lv_obj_set_style_text_color(warning, Theme::error(), 0);
+    lv_obj_set_style_text_font(warning, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_pad_bottom(warning, 4, 0);
+
+    // Keep this row as the final object in Settings so the opt-in cannot be
+    // mistaken for an ordinary interface switch higher in the screen.
+    lv_obj_t* transport_row = lv_obj_create(parent);
+    lv_obj_set_width(transport_row, LV_PCT(100));
+    lv_obj_set_height(transport_row, 32);
+    lv_obj_set_style_bg_opa(transport_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(transport_row, 0, 0);
+    lv_obj_set_style_pad_all(transport_row, 0, 0);
+    lv_obj_clear_flag(transport_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* label = lv_label_create(transport_row);
+    lv_label_set_text(label, "Enable Transport Node:");
+    lv_obj_align(label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_text_color(label, Theme::error(), 0);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+
+    _switch_transport_enabled = lv_switch_create(transport_row);
+    lv_obj_set_size(_switch_transport_enabled, 40, 20);
+    lv_obj_align(_switch_transport_enabled, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_set_style_bg_color(_switch_transport_enabled, Theme::border(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(_switch_transport_enabled, Theme::error(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_add_event_cb(_switch_transport_enabled, on_transport_enabled_changed, LV_EVENT_VALUE_CHANGED, this);
+
+    lv_group_t* group = LVGL::LVGLInit::get_default_group();
+    if (group) {
+        lv_group_add_obj(group, _switch_transport_enabled);
+    }
+}
+
+void SettingsScreen::show_transport_warning() {
+    if (_transport_warning_modal) return;
+
+    _transport_warning_modal = lv_obj_create(_screen);
+    lv_obj_set_size(_transport_warning_modal, LV_PCT(100), LV_PCT(100));
+    lv_obj_center(_transport_warning_modal);
+    lv_obj_set_style_bg_color(_transport_warning_modal, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(_transport_warning_modal, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(_transport_warning_modal, 0, 0);
+    lv_obj_set_style_radius(_transport_warning_modal, 0, 0);
+    lv_obj_set_style_pad_all(_transport_warning_modal, 8, 0);
+    lv_obj_clear_flag(_transport_warning_modal, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(_transport_warning_modal, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_t* panel = lv_obj_create(_transport_warning_modal);
+    lv_obj_set_size(panel, LV_PCT(100), LV_PCT(100));
+    lv_obj_center(panel);
+    lv_obj_set_style_bg_color(panel, Theme::surface(), 0);
+    lv_obj_set_style_border_color(panel, Theme::error(), 0);
+    lv_obj_set_style_border_width(panel, 2, 0);
+    lv_obj_set_style_radius(panel, 6, 0);
+    lv_obj_set_style_pad_all(panel, 8, 0);
+    lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* title = lv_label_create(panel);
+    lv_label_set_text(title, "DANGER: Transport Mode");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_text_color(title, Theme::error(), 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+
+    lv_obj_t* text = lv_label_create(panel);
+    lv_obj_set_width(text, LV_PCT(100));
+    lv_label_set_long_mode(text, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(
+        text,
+        "This is NOT RECOMMENDED. The device will relay other nodes' traffic and may "
+        "saturate LoRa airtime, drain the battery, and disrupt nearby Reticulum users.\n\n"
+        "Enable only if you understand the consequences and deliberately want this T-Deck "
+        "to operate as network infrastructure. Takes effect after reboot.");
+    lv_obj_align(text, LV_ALIGN_TOP_LEFT, 0, 28);
+    lv_obj_set_style_text_color(text, Theme::textPrimary(), 0);
+    lv_obj_set_style_text_font(text, &lv_font_montserrat_12, 0);
+
+    lv_obj_t* cancel = lv_btn_create(panel);
+    lv_obj_set_size(cancel, 100, 32);
+    lv_obj_align(cancel, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+    lv_obj_set_style_bg_color(cancel, Theme::btnSecondary(), 0);
+    lv_obj_add_event_cb(cancel, on_transport_cancel_enable, LV_EVENT_CLICKED, this);
+    lv_obj_t* cancel_label = lv_label_create(cancel);
+    lv_label_set_text(cancel_label, "Cancel");
+    lv_obj_center(cancel_label);
+
+    lv_obj_t* confirm = lv_btn_create(panel);
+    lv_obj_set_size(confirm, 145, 32);
+    lv_obj_align(confirm, LV_ALIGN_BOTTOM_RIGHT, 0, 0);
+    lv_obj_set_style_bg_color(confirm, Theme::error(), 0);
+    lv_obj_add_event_cb(confirm, on_transport_confirm_enable, LV_EVENT_CLICKED, this);
+    lv_obj_t* confirm_label = lv_label_create(confirm);
+    lv_label_set_text(confirm_label, "ENABLE ANYWAY");
+    lv_obj_center(confirm_label);
+
+    lv_group_t* group = LVGL::LVGLInit::get_default_group();
+    if (group) {
+        lv_group_add_obj(group, cancel);
+        lv_group_add_obj(group, confirm);
+        lv_group_focus_obj(cancel);
+    }
+}
+
+void SettingsScreen::close_transport_warning() {
+    if (!_transport_warning_modal) return;
+    lv_obj_t* modal = _transport_warning_modal;
+    _transport_warning_modal = nullptr;
+    lv_obj_del_async(modal);
+}
+
 void SettingsScreen::load_settings() {
     Preferences prefs;
     prefs.begin(NVS_NAMESPACE, true);  // read-only
@@ -876,9 +1001,10 @@ void SettingsScreen::load_settings() {
     _settings.brightness = prefs.getUChar(KEY_BRIGHTNESS, 180);
     _settings.keyboard_light = prefs.getBool(KEY_KB_LIGHT, false);
     _settings.screen_timeout = prefs.getUShort(KEY_TIMEOUT, 60);
-    _settings.announce_interval = prefs.getUInt(KEY_ANNOUNCE_INT, 3600);   // Default 3600s = 1 hour
+    _settings.announce_interval = prefs.getUInt(KEY_ANNOUNCE_INT, 14400);  // Default 14400s = 4 hours
     _settings.sync_interval = prefs.getUInt(KEY_SYNC_INT, 14400);  // Default 14400s = 4 hours
     _settings.gps_time_sync = prefs.getBool(KEY_GPS_SYNC, true);
+    _settings.transport_enabled = prefs.getBool(KEY_TRANSPORT_ENABLED, false);
 
     // Notification settings
     _settings.notification_sound = prefs.getBool(KEY_NOTIF_SND, true);
@@ -928,6 +1054,7 @@ void SettingsScreen::save_settings() {
     prefs.putUInt(KEY_ANNOUNCE_INT, _settings.announce_interval);
     prefs.putUInt(KEY_SYNC_INT, _settings.sync_interval);
     prefs.putBool(KEY_GPS_SYNC, _settings.gps_time_sync);
+    prefs.putBool(KEY_TRANSPORT_ENABLED, _settings.transport_enabled);
 
     // Notification settings
     prefs.putBool(KEY_NOTIF_SND, _settings.notification_sound);
@@ -1027,6 +1154,16 @@ void SettingsScreen::update_ui_from_settings() {
         } else {
             lv_obj_clear_state(_switch_gps_sync, LV_STATE_CHECKED);
         }
+    }
+    if (_switch_transport_enabled) {
+        // Bypass the user-confirmation handler while reflecting persisted state.
+        _transport_enable_confirmed = true;
+        if (_settings.transport_enabled) {
+            lv_obj_add_state(_switch_transport_enabled, LV_STATE_CHECKED);
+        } else {
+            lv_obj_clear_state(_switch_transport_enabled, LV_STATE_CHECKED);
+        }
+        _transport_enable_confirmed = false;
     }
 
     // Interface settings
@@ -1162,6 +1299,9 @@ void SettingsScreen::update_settings_from_ui() {
     }
     if (_switch_gps_sync) {
         _settings.gps_time_sync = lv_obj_has_state(_switch_gps_sync, LV_STATE_CHECKED);
+    }
+    if (_switch_transport_enabled) {
+        _settings.transport_enabled = lv_obj_has_state(_switch_transport_enabled, LV_STATE_CHECKED);
     }
 
     // Interface settings
@@ -1384,6 +1524,7 @@ void SettingsScreen::show() {
 
 void SettingsScreen::hide() {
     LVGL_LOCK();
+    close_transport_warning();
     // Remove from focus group when hiding
     lv_group_t* group = LVGL::LVGLInit::get_default_group();
     if (group) {
@@ -1464,6 +1605,41 @@ void SettingsScreen::on_notification_volume_changed(lv_event_t* event) {
 
     // Update label
     lv_label_set_text(screen->_label_notification_volume_value, String(volume).c_str());
+}
+
+void SettingsScreen::on_transport_enabled_changed(lv_event_t* event) {
+    SettingsScreen* screen = (SettingsScreen*)lv_event_get_user_data(event);
+    bool enabled = lv_obj_has_state(screen->_switch_transport_enabled, LV_STATE_CHECKED);
+
+    if (!enabled) {
+        screen->_transport_enable_confirmed = false;
+        return;
+    }
+
+    if (screen->_transport_enable_confirmed) {
+        return;
+    }
+
+    // Never leave the switch enabled merely because it was toggled. The user
+    // must complete the explicit second confirmation in the danger dialog.
+    lv_obj_clear_state(screen->_switch_transport_enabled, LV_STATE_CHECKED);
+    screen->show_transport_warning();
+}
+
+void SettingsScreen::on_transport_confirm_enable(lv_event_t* event) {
+    SettingsScreen* screen = (SettingsScreen*)lv_event_get_user_data(event);
+    screen->_transport_enable_confirmed = true;
+    lv_obj_add_state(screen->_switch_transport_enabled, LV_STATE_CHECKED);
+    screen->_transport_enable_confirmed = false;
+    screen->close_transport_warning();
+    INFO("Transport mode opt-in confirmed; save settings and reboot to activate");
+}
+
+void SettingsScreen::on_transport_cancel_enable(lv_event_t* event) {
+    SettingsScreen* screen = (SettingsScreen*)lv_event_get_user_data(event);
+    screen->_transport_enable_confirmed = false;
+    lv_obj_clear_state(screen->_switch_transport_enabled, LV_STATE_CHECKED);
+    screen->close_transport_warning();
 }
 
 void SettingsScreen::on_propagation_nodes_clicked(lv_event_t* event) {
