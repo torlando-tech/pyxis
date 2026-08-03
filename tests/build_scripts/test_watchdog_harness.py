@@ -2,8 +2,11 @@
 
 import importlib.util
 import queue
+import sys
 import threading
+import types
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -12,7 +15,8 @@ SPEC = importlib.util.spec_from_file_location("tdeck_harness", HARNESS_PATH)
 assert SPEC is not None
 HARNESS = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
-SPEC.loader.exec_module(HARNESS)
+with patch.dict(sys.modules, {"serial": types.ModuleType("serial")}):
+    SPEC.loader.exec_module(HARNESS)
 
 
 def test_fault_classifier_detects_watchdog_panic_and_reboot_evidence():
