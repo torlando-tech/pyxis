@@ -24,6 +24,7 @@ System Python 3.9 has pytest pre-installed; Homebrew Python does not.
 - `native/test_call_start_mailbox.{cpp,py}` — exact 16-byte LXST outgoing-call handoff, duplicate rejection, and reusable producer/consumer stress
 - `native/test_call_generation_guard.{cpp,py}` — atomic, generation-scoped call admission, stale-owner protection, and repeated two-thread reservation races
 - `native/test_call_link_ownership.{cpp,py}` — exact 128-bit LXST link ownership publication, mixed-ID publication stress, and generation-bound deferred-close concurrency
+- `native/test_lxst_signal_parser.{cpp,py}` — bounded MessagePack parsing for legacy one-signal and current LXST profile+duplex signalling arrays
 
 ### Adding a new native C++ test
 

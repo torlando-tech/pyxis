@@ -14,6 +14,7 @@
 #include "Tone.h"
 #include "../LVGL/LVGLLock.h"
 #include "lxst_audio.h"
+#include "LXSTSignalParser.h"
 #include "ULBWVoiceProfilePolicy.h"
 #include <microReticulum/Packet.h>
 #include <microReticulum/Transport.h>
@@ -1522,60 +1523,60 @@ void UIManager::call_on_packet(const Bytes& data) {
     uint8_t field = buf[1];
 
     if (field == 0x00) {
-        // Signalling: {0x00: [signal]}
-        // fixarray(1) = 0x91, then signal is a msgpack integer:
-        //   0x00-0x7F = fixint (1 byte)
-        //   0xCC XX   = uint8  (2 bytes)
-        //   0xCD XX XX = uint16 (3 bytes)
-        if (buf[2] != 0x91) return;
-
-        int signal = -1;
-        if (buf[3] <= 0x7F) {
-            // fixint: value is the byte itself
-            signal = buf[3];
-        } else if (buf[3] == 0xCC && data.size() >= 5) {
-            // uint8
-            signal = buf[4];
-        } else if (buf[3] == 0xCD && data.size() >= 6) {
-            // uint16 (big-endian)
-            signal = ((int)buf[4] << 8) | buf[5];
-        }
-
-        if (signal < 0) {
-            char dbg[64];
-            snprintf(dbg, sizeof(dbg), "LXST: Unparseable signal (0x%02X), %d bytes", buf[3], (int)data.size());
-            WARNING(dbg);
+        // Signalling: {0x00: [signal, ...]}. LXST 0.5.1 combines the
+        // preferred profile and duplex mode in one two-element array; older
+        // peers send one signal per packet.
+        int signals[LXSTSignalParser::MAX_SIGNALS] = {};
+        const size_t signal_count = LXSTSignalParser::parse(
+            buf, data.size(), signals, LXSTSignalParser::MAX_SIGNALS);
+        if (signal_count == 0) {
+            WARNING("LXST: Unparseable signalling packet");
             return;
         }
 
-        // Remote sends PREFERRED_PROFILE + profile_id to request a transmit
-        // profile. Pyxis is ULBW-only for LoRa: never adopt the request, and
-        // respond with ULBW so the peer switches its transmit pipeline to 700C.
-        if (signal >= LXST_PREFERRED_PROFILE) {
-            int remote_profile = signal - LXST_PREFERRED_PROFILE;
-            char dbg[80];
-            snprintf(dbg, sizeof(dbg),
-                     "LXST: Remote prefers profile 0x%02X, responding 0x%02X",
-                     remote_profile, _preferred_profile);
-            INFO(dbg);
-            call_send_signal(ULBWVoiceProfilePolicy::preferredProfileSignal());
-            return;
-        }
+        for (size_t i = 0; i < signal_count; ++i) {
+            const int signal = signals[i];
 
-        {
-            char dbg[48];
-            snprintf(dbg, sizeof(dbg), "LXST: Received signal 0x%02X (queued)", signal);
-            INFO(dbg);
-        }
+            // Remote sends PREFERRED_PROFILE + profile_id to request a
+            // transmit profile. Pyxis is ULBW-only for LoRa: never adopt the
+            // request, and respond with ULBW so the peer switches to 700C.
+            if (signal >= LXST_PREFERRED_PROFILE) {
+                const int remote_profile = signal - LXST_PREFERRED_PROFILE;
+                char dbg[80];
+                snprintf(dbg, sizeof(dbg),
+                         "LXST: Remote prefers profile 0x%02X, responding 0x%02X",
+                         remote_profile, _preferred_profile);
+                INFO(dbg);
+                call_send_signal(ULBWVoiceProfilePolicy::preferredProfileSignal());
+                continue;
+            }
 
-        // Enqueue for processing in call_update() under LVGL lock
-        uint8_t w = _call_signal_write;
-        uint8_t next_w = (w + 1) % SIGNAL_QUEUE_SIZE;
-        if (next_w != _call_signal_read) {  // Not full
-            _call_signal_queue[w] = (uint8_t)signal;
-            _call_signal_write = next_w;
-        } else {
-            WARNING("LXST: Signal queue full, dropping signal!");
+            // Pyxis voice is always full duplex. Accept FDX and explicitly
+            // counter an HDX request without treating mode as call status.
+            if (signal >= LXST_PREFERRED_MODE) {
+                const int remote_mode = signal - LXST_PREFERRED_MODE;
+                if (remote_mode != LXST_MODE_FULL_DUPLEX) {
+                    INFO("LXST: Remote requested non-FDX mode, responding FDX");
+                    call_send_signal(LXST_PREFERRED_MODE + LXST_MODE_FULL_DUPLEX);
+                }
+                continue;
+            }
+
+            {
+                char dbg[48];
+                snprintf(dbg, sizeof(dbg), "LXST: Received signal 0x%02X (queued)", signal);
+                INFO(dbg);
+            }
+
+            // Enqueue for processing in call_update() under LVGL lock.
+            uint8_t w = _call_signal_write;
+            uint8_t next_w = (w + 1) % SIGNAL_QUEUE_SIZE;
+            if (next_w != _call_signal_read) {  // Not full
+                _call_signal_queue[w] = static_cast<uint8_t>(signal);
+                _call_signal_write = next_w;
+            } else {
+                WARNING("LXST: Signal queue full, dropping signal!");
+            }
         }
 
     } else if (field == 0x01) {

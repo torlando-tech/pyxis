@@ -23,6 +23,7 @@
 #include "CallGenerationGuard.h"
 #include "CallLinkOwnership.h"
 #include "CallLivenessWatchdog.h"
+#include "LXSTSignalParser.h"
 #include "LXMF/LXMRouter.h"
 #include "LXMF/PropagationNodeManager.h"
 #include "LXMF/MessageStore.h"
@@ -377,6 +378,8 @@ private:
     static constexpr uint8_t LXST_CODEC_CODEC2 = 0x02;
 
     // LXST profile negotiation
+    static constexpr int LXST_PREFERRED_MODE    = 0xF0;
+    static constexpr int LXST_MODE_FULL_DUPLEX  = 0x01;
     static constexpr int LXST_PREFERRED_PROFILE = 0xFF;
     static constexpr int LXST_PROFILE_ULBW      = 0x10;  // Codec2 700C; sole production profile
     static constexpr int LXST_PROFILE_VLBW      = 0x20;  // protocol value; unsupported locally
@@ -431,7 +434,8 @@ private:
     std::atomic<bool> _call_answer_pending;
 
     // Signal queue: written by Reticulum thread, consumed by call_update under LVGL lock
-    static constexpr int SIGNAL_QUEUE_SIZE = 8;
+    static constexpr int SIGNAL_QUEUE_SIZE =
+        static_cast<int>(LXSTSignalParser::MIN_SENTINEL_QUEUE_SIZE);
     volatile uint8_t _call_signal_queue[SIGNAL_QUEUE_SIZE];
     volatile uint8_t _call_signal_write;  // Next write index (Reticulum thread)
     volatile uint8_t _call_signal_read;   // Next read index (main thread)
