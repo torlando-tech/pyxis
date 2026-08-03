@@ -10,10 +10,21 @@
 #ifdef ARDUINO
 #include <Arduino.h>
 #include <esp_heap_caps.h>
+#include <esp_task_wdt.h>
 #endif
 
 using namespace RNS;
 using namespace RNS::BLE;
+
+static void feed_ble_watchdog_if_owner(const void* owner) {
+#ifdef ARDUINO
+    if (owner != nullptr && owner == static_cast<const void*>(xTaskGetCurrentTaskHandle())) {
+        esp_task_wdt_reset();
+    }
+#else
+    (void)owner;
+#endif
+}
 
 BLEInterface::BLEInterface(const char* name) : InterfaceImpl(name) {
     _IN = true;
@@ -135,6 +146,16 @@ void BLEInterface::stop() {
 }
 
 void BLEInterface::loop() {
+#ifdef ARDUINO
+    // Once the dedicated BLE task exists, it is the sole owner of polling and
+    // blocking GATT work. Reticulum::loop() also invokes every registered
+    // interface from loopTask; ignore that duplicate call so BLE cannot run
+    // concurrently on both cores or block the watchdog-subscribed loopTask.
+    if (_task_handle != nullptr && xTaskGetCurrentTaskHandle() != _task_handle) {
+        return;
+    }
+#endif
+
     static double last_loop_log = 0;
     static bool local_mac_set = false;
     double now = Utilities::OS::time();
@@ -651,6 +672,7 @@ void BLEInterface::onConnected(const ConnectionHandle& conn) {
               " mtu=" + std::to_string(conn.mtu) + " (we are central)");
     }  // _mutex released BEFORE blocking GATT service discovery
 
+    feed_ble_watchdog_if_owner(_task_handle);
     // Discover services — this does blocking GATT reads (3-15s) and must NOT
     // hold _mutex, otherwise the NimBLE host task and main loop both block.
     _platform->discoverServices(conn.handle);
@@ -707,6 +729,7 @@ void BLEInterface::onMTUChanged(const ConnectionHandle& conn, uint16_t mtu) {
 }
 
 void BLEInterface::onServicesDiscovered(const ConnectionHandle& conn, bool success) {
+    feed_ble_watchdog_if_owner(_task_handle);
     if (!success) {
         WARNING("BLEInterface: Service discovery failed for " + conn.peer_address.toString());
 
@@ -731,6 +754,7 @@ void BLEInterface::onServicesDiscovered(const ConnectionHandle& conn, bool succe
 
     // Enable notifications on TX characteristic
     _platform->enableNotifications(conn.handle, true);
+    feed_ble_watchdog_if_owner(_task_handle);
 
     // Protocol v2.2: Read peer's identity characteristic before sending ours
     // This matches the Kotlin implementation's 4-step handshake
@@ -740,6 +764,7 @@ void BLEInterface::onServicesDiscovered(const ConnectionHandle& conn, bool succe
 
         _platform->read(conn.handle, conn.identity_handle,
             [this, mac, handle](OperationResult result, const Bytes& identity) {
+                feed_ble_watchdog_if_owner(_task_handle);
                 if (result == OperationResult::SUCCESS &&
                     identity.size() == Limits::IDENTITY_SIZE) {
                     DEBUG("BLEInterface: Read peer identity: " + identity.toHex().substr(0, 8) + "...");
@@ -1153,17 +1178,18 @@ void BLEInterface::ble_task(void* param) {
     BLEInterface* self = static_cast<BLEInterface*>(param);
     Serial.printf("BLE task started on core %d\n", xPortGetCoreID());
 
-    // NOTE: BLE task is intentionally NOT subscribed to the FreeRTOS Task WDT.
-    // Blocking NimBLE GATT operations (service discovery, subscribe, read, write)
-    // each have ~30s internal timeouts. A full connect chain (connect + discover +
-    // enable notifications + identity read) can legitimately block 30-60s total,
-    // which exceeds the 30s WDT. NimBLE's own timeouts provide recovery.
+    // GATT operations are individually bounded and the handshake feeds at each
+    // demonstrated forward-progress boundary. A stalled operation must now
+    // trigger the production 60s TWDT instead of leaving BLE wedged forever.
+    ESP_ERROR_CHECK(esp_task_wdt_add(nullptr));
 
     while (true) {
+        esp_task_wdt_reset();
         // Run the BLE loop (already has internal mutex protection)
         self->loop();
 
         // Yield to other tasks
+        esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }

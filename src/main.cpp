@@ -1057,10 +1057,18 @@ void enter_storage_recovery_mode() {
 }
 
 static void configure_loop_watchdog() {
-    esp_task_wdt_init(60, false);
-    esp_task_wdt_add(NULL);
+    // The 60-second panic policy is installed at the start of setup(), before
+    // any application worker can subscribe to Arduino's shorter default TWDT.
+    // Subscribe loopTask here after startup has completed. Recovery mode uses
+    // this same path before starting its LVGL worker.
+    esp_err_t loop_wdt_status = esp_task_wdt_status(nullptr);
+    if (loop_wdt_status == ESP_ERR_NOT_FOUND) {
+        ESP_ERROR_CHECK(esp_task_wdt_add(nullptr));
+    } else {
+        ESP_ERROR_CHECK(loop_wdt_status);
+    }
     RNS::Utilities::OS::set_loop_callback([]() { esp_task_wdt_reset(); });
-    INFO("Task Watchdog: loopTask subscribed (60s timeout, log-only)");
+    INFO("Task Watchdog: loopTask subscribed (60s timeout, panic enabled)");
 }
 
 void setup_reticulum() {
@@ -1531,6 +1539,15 @@ void setup_ui_manager() {
                         INFO("BLE interface started");
                         // Register with transport if not already registered
                         Transport::register_interface(*ble_interface);
+                        // Runtime enable must use the same single, watched BLE
+                        // owner as boot-time initialization. If the worker
+                        // already survived a prior disable, start_task is a no-op.
+                        if (ble_interface_impl->start_task(1, 0)) {
+                            INFO("BLE task running on core 0");
+                        } else {
+                            ERROR("Failed to start BLE task; disabling BLE interface");
+                            ble_interface_impl->stop();
+                        }
                     } else {
                         ERROR("Failed to start BLE interface!");
                     }
@@ -1633,6 +1650,12 @@ void setup() {
     // Initialize serial
     Serial.begin(115200);
     delay(100);
+
+    // Apply the production TWDT policy before any application worker task is
+    // created. Arduino-ESP32 starts with a baked 5s policy; BLE/LVGL workers
+    // subscribe later and require the audited 60s window for bounded flash and
+    // GATT operations. Task subscriptions are added at their creation sites.
+    ESP_ERROR_CHECK(esp_task_wdt_init(60, true));
 
     // Create diagnostic recorder synchronization before any audio task starts.
     g_rec_mutex = xSemaphoreCreateMutex();
@@ -1895,31 +1918,21 @@ void setup() {
     INFO("╚══════════════════════════════════════╝");
     INFO("");
 
-    // Reconfigure Task Watchdog with 30s timeout (default 10s is too tight
-    // for SPIFFS flash I/O — identity persistence writes 40-50 entries and
-    // can take 5-15s with sector erases and garbage collection)
-    // Task Watchdog config:
-    // - 60s timeout (was 30s; bumped to tolerate WiFi-stack busy windows
-    //   on CPU0 — `pm_tx_data_done_process` in ESP-IDF's `ppTask` can
-    //   starve CPU0 idle for >30s under heavy multicast/mDNS traffic)
-    // - panic=false: log warnings, don't reset. The reset behavior was
-    //   blocking pyxis from running long enough to debug anything else
-    //   on the graft. Will revisit panic=true once the WDT culprit is
-    //   tracked down — see pyxis_microReticulum_graft_spike_findings.md
+    // The Task Watchdog uses a 60s timeout. Identity/path
+    // persistence can spend 5-15s in flash erase/GC, and ESP-IDF's CPU0 WiFi
+    // task has previously kept the subscribed CPU0 idle task from running for
+    // more than 30s under heavy multicast traffic. The production watchdog must
+    // still panic and reboot on a genuine deadlock instead of logging forever.
     //
-    // We tried `esp_task_wdt_delete(xTaskGetIdleTaskHandleForCPU(0))` to
-    // unsubscribe just CPU0 idle, but Arduino-ESP32's prebuilt framework
-    // re-adds it on the next loop iteration (CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
-    // is baked in and sdkconfig.defaults can't override without a framework
-    // rebuild from source).
+    // The runtime policy was installed before worker creation. Subscribe
+    // loopTask only when it is not already present, and fail loudly if the
+    // production watchdog cannot be configured.
     configure_loop_watchdog();
 
-    // Feed WDT during long persistence + clean_cache operations (71+ entries
-    // to SPIFFS can take >30s). Upstream microReticulum @ 0.3.0 moved the
-    // per-Identity yield hook to a global RNS::Utilities::OS::_on_loop
-    // callback (set via set_loop_callback), invoked during long operations
-    // like clean_caches, identity persistence, and the path-table flush.
-    // Was: Identity::set_persist_yield_callback (fork-only).
+    // Feed the WDT at microReticulum's explicit OS::run_loop() progress points
+    // (currently cache cleanup/clear paths). Current path persistence does not
+    // invoke this callback, so the main loop measures that whole operation below
+    // instead of using a timer-based feed that could conceal a storage hang.
     // Show startup message
     INFO("Press any key to start messaging");
 }
@@ -2742,7 +2755,8 @@ void loop() {
     // NOTE: Persistence writes 40-50 entries via microStore (which routes
     // through the new microStore::FileSystem to SPIFFS or whichever backend
     // is configured). Sector erases (100ms each) can stretch the call to
-    // 5-15s; the OS::set_loop_callback above feeds the WDT between entries.
+    // 5-15s. Current upstream persistence does not expose a per-entry progress
+    // callback; measure the complete operation and let TWDT recover a true hang.
     //
     // Upstream microReticulum @ 0.3.0 unified persistence into a single
     // Reticulum::should_persist_data() entry point — the fork had a
@@ -2753,29 +2767,21 @@ void loop() {
     // crashes, revisit microStore's flush cadence rather than re-adding
     // the fork-only Identity API.)
     LOOP_STEP(5);  // persist data
+    uint32_t persistence_started_ms = millis();
     reticulum->should_persist_data();
+    uint32_t persistence_elapsed_ms = millis() - persistence_started_ms;
+    if (persistence_elapsed_ms > 30000) {
+        WARNINGF("Reticulum persistence took %lu ms (TWDT limit is 60000 ms)",
+                 (unsigned long)persistence_elapsed_ms);
+    }
     esp_task_wdt_reset();
 
-    // Process TCP interface
-    LOOP_STEP(6);  // TCP loop
-    if (tcp_interface) {
-        tcp_interface->loop();
-    }
-
-    // Process LoRa interface
-    LOOP_STEP(7);  // LoRa loop
-    if (lora_interface) {
-        lora_interface->loop();
-    }
-
-    // Process BLE interface (skip if running on its own task)
-    LOOP_STEP(8);  // BLE loop
-    if (ble_interface && ble_interface_impl && !ble_interface_impl->is_task_running()) {
-        ble_interface->loop();
-    }
+    // Reticulum::loop() above polls every registered interface exactly once.
+    // Do not poll TCP/LoRa/BLE again here; BLE additionally enforces dedicated
+    // task ownership when its worker is running.
 
     // Process LXMF router queues
-    LOOP_STEP(9);  // Router processing
+    LOOP_STEP(6);  // Router processing
     if (router) {
         router->process_outbound();
         router->process_inbound();
@@ -2783,17 +2789,17 @@ void loop() {
     }
 
     // Update UI manager (processes LXMF messages)
-    LOOP_STEP(10);  // UI manager update
+    LOOP_STEP(7);  // UI manager update
     if (ui_manager) {
         ui_manager->update();
     }
 
-    LOOP_STEP(11);  // Memory monitor
+    LOOP_STEP(8);  // Memory monitor
     // Process deferred memory monitor logging (flag set by timer callback)
     MEMORY_MONITOR_POLL();
 
     // Periodic announce (using interval from settings)
-    LOOP_STEP(12);  // Periodic tasks
+    LOOP_STEP(9);  // Periodic tasks
     if (app_settings.announce_interval > 0) {  // 0 = disabled
         uint32_t announce_interval_ms = app_settings.announce_interval * 1000;
         if (millis() - last_announce > announce_interval_ms) {
@@ -2976,7 +2982,7 @@ void loop() {
     }
 
     // Screen timeout handling
-    LOOP_STEP(13);  // Screen timeout
+    LOOP_STEP(10);  // Screen timeout
     if (app_settings.screen_timeout > 0) {  // 0 = never timeout
         uint32_t inactive_ms;
         {

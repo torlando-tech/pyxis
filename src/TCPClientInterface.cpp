@@ -23,6 +23,22 @@
 
 using namespace RNS;
 
+// Keep TCP work per main-loop pass bounded. A peer that continuously fills the
+// receive socket must not prevent loopTask from returning to its watchdog feed.
+static constexpr size_t MAX_TCP_BYTES_PER_LOOP = 4096;
+static constexpr size_t MAX_TCP_FRAMES_PER_LOOP = 32;
+static constexpr size_t MAX_TCP_FRAME_BUFFER = 16384;
+
+static bool contains_complete_hdlc_frame(const RNS::Bytes& buffer) {
+    bool saw_start = false;
+    for (size_t i = 0; i < buffer.size(); ++i) {
+        if (buffer.data()[i] != HDLC::FLAG) continue;
+        if (saw_start) return true;
+        saw_start = true;
+    }
+    return false;
+}
+
 TCPClientInterface::TCPClientInterface(const char* name /*= "TCPClientInterface"*/)
     : RNS::InterfaceImpl(name) {
 
@@ -342,6 +358,19 @@ void TCPClientInterface::task_loop() {
 }
 
 /*virtual*/ void TCPClientInterface::loop() {
+    // Drain existing complete frames before accepting more bytes. If 32 frames
+    // remain after one pass, defer socket reads until later passes rather than
+    // dropping valid backlog. An over-limit buffer with no complete frame is an
+    // invalid/hostile partial HDLC frame and can be discarded safely.
+    extract_and_process_frames();
+    if (_frame_buffer.size() >= MAX_TCP_FRAME_BUFFER) {
+        if (!contains_complete_hdlc_frame(_frame_buffer)) {
+            WARNING("TCPClientInterface: oversized incomplete HDLC frame; discarding");
+            _frame_buffer.clear();
+        }
+        return;
+    }
+
 #ifdef ARDUINO
     // tcp_task owns _client while (re)connecting; the main loop only touches the
     // socket once CONNECTED. read/write/frame all happen here (same low-latency
@@ -360,9 +389,14 @@ void TCPClientInterface::task_loop() {
     }
     if (_client.available() > 0) {
         _last_data_received = millis();
-        while (_client.available() > 0) {
-            uint8_t byte = _client.read();
-            _frame_buffer.append(byte);
+        size_t room = MAX_TCP_FRAME_BUFFER - _frame_buffer.size();
+        size_t read_budget = std::min(MAX_TCP_BYTES_PER_LOOP, room);
+        size_t bytes_read = 0;
+        while (bytes_read < read_budget && _client.available() > 0) {
+            int byte = _client.read();
+            if (byte < 0) break;
+            _frame_buffer.append(static_cast<uint8_t>(byte));
+            bytes_read++;
         }
     }
     extract_and_process_frames();
@@ -415,47 +449,12 @@ void TCPClientInterface::task_loop() {
     // Note: ESP32 WiFiClient.connected() has known bugs where it returns false incorrectly
     // See: https://github.com/espressif/arduino-esp32/issues/1714
     // Workaround: only disconnect if connected() is false AND no data available
-#ifdef ARDUINO
-    if (!_client.connected() && _client.available() == 0) {
-        Serial.printf("[TCP] Connection closed (connected=false, available=0)\n");
-        handle_disconnect();
-        return;
-    }
-
-    // Stale connection detection disabled - was causing frequent reconnects
-    // TODO: investigate why this triggers even when receiving data
-    // if (_last_data_received > 0 && (now - _last_data_received) > STALE_CONNECTION_MS) {
-    //     WARNING("TCPClientInterface: Connection appears stale, forcing reconnection");
-    //     handle_disconnect();
-    //     return;
-    // }
-
-    // Read available data
-    int avail = _client.available();
-    if (avail > 0) {
-        bool dbg = RNS::loglevel() >= RNS::LOG_DEBUG;
-        if (dbg) Serial.printf("[TCP] Reading %d bytes\n", avail);
-        total_rx += avail;
-        _last_data_received = now;  // Update stale timer on any data receipt
-        size_t start_pos = _frame_buffer.size();
-        while (_client.available() > 0) {
-            uint8_t byte = _client.read();
-            _frame_buffer.append(byte);
-        }
-        if (dbg) {
-            Serial.printf("[TCP] First bytes: ");
-            size_t dump_len = (_frame_buffer.size() - start_pos);
-            if (dump_len > 20) dump_len = 20;
-            for (size_t i = 0; i < dump_len; ++i) {
-                Serial.printf("%02x ", _frame_buffer.data()[start_pos + i]);
-            }
-            Serial.printf("\n");
-        }
-    }
-#else
+#ifndef ARDUINO
     // Non-blocking read
     uint8_t buf[4096];
-    ssize_t len = recv(_socket, buf, sizeof(buf), MSG_DONTWAIT);
+    size_t room = MAX_TCP_FRAME_BUFFER - _frame_buffer.size();
+    size_t read_budget = std::min(sizeof(buf), room);
+    ssize_t len = recv(_socket, buf, read_budget, MSG_DONTWAIT);
     if (len > 0) {
         DEBUG("TCPClientInterface: Received " + std::to_string(len) + " bytes");
         _frame_buffer.append(buf, len);
@@ -484,7 +483,7 @@ void TCPClientInterface::extract_and_process_frames() {
     // Find and process complete HDLC frames: [FLAG][data][FLAG]
     static uint32_t frame_count = 0;
 
-    while (true) {
+    for (size_t frame_budget = 0; frame_budget < MAX_TCP_FRAMES_PER_LOOP; ++frame_budget) {
         if (_frame_buffer.size() == 0) break;
 
         // Find first FLAG byte
