@@ -3,7 +3,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MICROSTORE_PIN = "https://github.com/attermann/microStore.git#c5fb69d68229e684c7fbd17692a67ae8193b84e2"
-MICRORETICULUM_PIN = "https://github.com/torlando-tech/microReticulum.git#6054f6ba82367628a85cd07fcb668b95e947f046"
+MICRORETICULUM_PIN = "https://github.com/torlando-tech/microReticulum.git#1bbd422a3b25b4a710642fc5cd01039e5774a4a7"
 
 
 def test_microstore_pin_resolves_before_transitive_registry_requirement():
@@ -12,6 +12,13 @@ def test_microstore_pin_resolves_before_transitive_registry_requirement():
 
     assert dependencies.count(MICROSTORE_PIN) == 1
     assert dependencies.index(MICROSTORE_PIN) < dependencies.index(MICRORETICULUM_PIN)
+
+
+def test_release_auditor_expects_the_configured_microreticulum_pin():
+    audit = (ROOT / "tools/audit_release_build.py").read_text()
+    expected_revision = MICRORETICULUM_PIN.rsplit("#", 1)[1]
+
+    assert f'"microReticulum": "{expected_revision}"' in audit
 
 
 def test_tdeck_release_removes_diagnostic_flags():
