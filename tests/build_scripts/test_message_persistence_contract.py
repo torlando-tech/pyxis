@@ -130,3 +130,19 @@ def test_system_info_reports_littlefs_not_unmounted_spiffs():
     assert "LittleFS.totalBytes()" in source
     assert "LittleFS.usedBytes()" in source
     assert "SPIFFS.totalBytes()" not in source
+
+
+def test_failed_littlefs_mount_enters_stable_recovery_mode_before_reticulum():
+    source = MAIN.read_text()
+    setup = function_body(source, "void setup()", "void loop()")
+    loop = source[source.index("void loop()"):]
+
+    assert "persistent_storage_ready = fs.init(false);" in source
+    assert "Persistent storage unavailable" in source
+    assert "USB serial recovery remains available." in source
+    assert setup.index("if (!persistent_storage_ready)") < setup.index("setup_reticulum();")
+    assert "enter_storage_recovery_mode();" in setup
+    recovery_branch = setup[setup.index("if (!persistent_storage_ready)"):setup.index("return;", setup.index("if (!persistent_storage_ready)"))]
+    assert recovery_branch.index("configure_loop_watchdog();") < recovery_branch.index("enter_storage_recovery_mode();")
+    assert "if (storage_recovery_mode)" in loop
+    assert loop.index("if (storage_recovery_mode)") < loop.index("reticulum->loop();")

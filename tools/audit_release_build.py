@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -26,6 +27,11 @@ EXCLUDED_STRINGS = (
     b"PYXIS_TEST_HOOKS",
     b"Boot Profile Summary",
     b"Memory monitor started",
+    b"Firmware: v1.0.0",
+    b"SPIFFS FileSystem mount failed",
+)
+REQUIRED_STRINGS = (
+    b"FileSystem mount failed; preserving persistent data",
 )
 EXCLUDED_SYMBOLS = (
     "test_call_",
@@ -95,6 +101,14 @@ def main() -> None:
     firmware_bytes = firmware.read_bytes()
     strings_present = [value.decode() for value in EXCLUDED_STRINGS if value in firmware_bytes]
     require(not strings_present, f"excluded firmware strings present: {', '.join(strings_present)}")
+    strings_missing = [value.decode() for value in REQUIRED_STRINGS if value not in firmware_bytes]
+    require(not strings_missing, f"required firmware strings missing: {', '.join(strings_missing)}")
+
+    expected_version = os.environ.get("PYXIS_VERSION_OVERRIDE") or run(
+        "git", "describe", "--tags", "--always", "--dirty"
+    ).removeprefix("v")
+    expected_version_label = f"Firmware: {expected_version}".encode()
+    require(expected_version_label in firmware_bytes, f"embedded version label missing: {expected_version}")
 
     symbols = run(locate_nm(), "-C", str(elf))
     symbols_present = [value for value in EXCLUDED_SYMBOLS if value in symbols]
@@ -107,6 +121,7 @@ def main() -> None:
     compile_commands.unlink()
     print("release audit passed")
     print(f"firmware_size={len(firmware_bytes)}")
+    print(f"firmware_version={expected_version}")
     for name, expected in PINNED_DEPENDENCIES.items():
         print(f"{name}={expected}")
 

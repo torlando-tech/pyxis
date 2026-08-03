@@ -125,6 +125,8 @@ AutoInterface* auto_interface_impl = nullptr;
 Interface* auto_interface = nullptr;
 BLEInterface* ble_interface_impl = nullptr;
 Interface* ble_interface = nullptr;
+static bool persistent_storage_ready = false;
+static bool storage_recovery_mode = false;
 
 // Timing
 uint32_t last_ui_update = 0;
@@ -941,7 +943,8 @@ void setup_hardware() {
     // Pyxis's lib/universal_filesystem/ is now dead code on this build path and
     // can be deleted once the graft lands.
     static microStore::Adapters::LittleFSFileSystem fs;
-    if (!fs.init(false)) {
+    persistent_storage_ready = fs.init(false);
+    if (!persistent_storage_ready) {
         ERROR("FileSystem mount failed; preserving persistent data");
     } else {
         INFO("FileSystem mounted");
@@ -1019,6 +1022,44 @@ void setup_lvgl_and_ui() {
         WARNING("Failed to start memory monitor");
     }
 #endif
+}
+
+void enter_storage_recovery_mode() {
+    storage_recovery_mode = true;
+    ERROR("Persistent storage unavailable; entering non-destructive recovery mode");
+
+    lv_obj_clean(lv_scr_act());
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0x1D1A1E), 0);
+
+    lv_obj_t* title = lv_label_create(lv_scr_act());
+    lv_label_set_text(title, "Persistent storage unavailable");
+    lv_obj_set_style_text_color(title, lv_color_hex(0xFF6B6B), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 48);
+
+    lv_obj_t* detail = lv_label_create(lv_scr_act());
+    lv_obj_set_width(detail, 280);
+    lv_label_set_long_mode(detail, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(detail, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(detail, lv_color_hex(0xF0F0F0), 0);
+    lv_label_set_text(detail,
+        "LittleFS could not be mounted.\n\n"
+        "Persistent data was not erased.\n"
+        "Messaging is disabled to prevent further damage.\n\n"
+        "USB serial recovery remains available.");
+    lv_obj_align(detail, LV_ALIGN_CENTER, 0, 18);
+
+    if (!UI::LVGL::LVGLInit::start_task(1, 1)) {
+        ERROR("Failed to start LVGL recovery task");
+        while (1) delay(1000);
+    }
+    INFO("Storage recovery UI active");
+}
+
+static void configure_loop_watchdog() {
+    esp_task_wdt_init(60, false);
+    esp_task_wdt_add(NULL);
+    RNS::Utilities::OS::set_loop_callback([]() { esp_task_wdt_reset(); });
+    INFO("Task Watchdog: loopTask subscribed (60s timeout, log-only)");
 }
 
 void setup_reticulum() {
@@ -1735,6 +1776,12 @@ void setup() {
     setup_lvgl_and_ui();
     BOOT_PROFILE_END("lvgl");
 
+    if (!persistent_storage_ready) {
+        configure_loop_watchdog();
+        enter_storage_recovery_mode();
+        return;
+    }
+
     // Set SPI mutex on LoRa interface (before setup_reticulum creates it)
     if (spi_mutex) {
         SX1262Interface::set_spi_mutex(spi_mutex);
@@ -1862,9 +1909,7 @@ void setup() {
     // re-adds it on the next loop iteration (CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
     // is baked in and sdkconfig.defaults can't override without a framework
     // rebuild from source).
-    esp_task_wdt_init(60, false);
-    esp_task_wdt_add(NULL);       // Subscribe loopTask
-    INFO("Task Watchdog: loopTask subscribed (60s timeout, log-only)");
+    configure_loop_watchdog();
 
     // Feed WDT during long persistence + clean_cache operations (71+ entries
     // to SPIFFS can take >30s). Upstream microReticulum @ 0.3.0 moved the
@@ -1872,8 +1917,6 @@ void setup() {
     // callback (set via set_loop_callback), invoked during long operations
     // like clean_caches, identity persistence, and the path-table flush.
     // Was: Identity::set_persist_yield_callback (fork-only).
-    RNS::Utilities::OS::set_loop_callback([]() { esp_task_wdt_reset(); });
-
     // Show startup message
     INFO("Press any key to start messaging");
 }
@@ -2649,6 +2692,11 @@ void loop() {
     LOOP_STEP(2);  // Display health
     // Monitor display health
     Hardware::TDeck::Display::log_health();
+
+    if (storage_recovery_mode) {
+        delay(10);
+        return;
+    }
 
     // Handle deferred WiFi reconnect (from LVGL task)
     LOOP_STEP(3);  // WiFi reconnect check

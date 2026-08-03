@@ -213,6 +213,28 @@
             margin-top: 0.5rem;
         }
 
+        .custom-firmware-group {
+            margin: -0.5rem 0 1.5rem;
+            padding-top: 1rem;
+            border-top: 1px solid rgba(255,255,255,0.1);
+        }
+        .custom-firmware-group label {
+            display: block;
+            color: var(--muted);
+            font-size: 0.875rem;
+            margin-bottom: 0.5rem;
+        }
+        .custom-firmware-group input { width: 100%; color: var(--text); }
+        .custom-firmware-status {
+            min-height: 1.2rem;
+            margin-top: 0.65rem;
+            color: var(--muted);
+            font-size: 0.8rem;
+            overflow-wrap: anywhere;
+        }
+        .custom-firmware-status.success { color: var(--success); }
+        .custom-firmware-status.error { color: var(--error); }
+
         footer {
             text-align: center;
             margin-top: 2rem;
@@ -242,10 +264,16 @@
 
             <div class="version-select-group">
                 <label for="version-select">Firmware Version</label>
-                <select id="version-select">
-                    <option value="latest">Latest (loading...)</option>
+                <select id="version-select" disabled>
+                    <option value="" disabled selected>Loading published releases...</option>
                 </select>
                 <div id="version-note" class="version-note hidden"></div>
+            </div>
+
+            <div class="custom-firmware-group">
+                <label for="custom-firmware">Or choose a custom firmware.bin (advanced, update only)</label>
+                <input id="custom-firmware" type="file" accept=".bin,application/octet-stream">
+                <div id="custom-firmware-status" class="custom-firmware-status">No custom firmware selected.</div>
             </div>
 
             <div class="checkbox-group">
@@ -254,7 +282,7 @@
             </div>
 
             <div class="button-group">
-                <button id="flash-btn" class="btn-primary">Flash Firmware</button>
+                <button id="flash-btn" class="btn-primary" disabled>Flash Firmware</button>
             </div>
 
             <div id="progress-container" class="progress-container hidden">
@@ -266,7 +294,7 @@
 
             <div id="log"></div>
 
-            <p class="version">Firmware version: <span id="firmware-version">dev</span></p>
+            <p class="version">Firmware version: <span id="firmware-version">loading...</span></p>
         </div>
 
         <div class="card requirements">
@@ -314,13 +342,21 @@
         const progressText = document.getElementById('progress-text');
         const versionSelect = document.getElementById('version-select');
         const versionNote = document.getElementById('version-note');
+        const customFirmwareInput = document.getElementById('custom-firmware');
+        const customFirmwareStatus = document.getElementById('custom-firmware-status');
 
         const REQUIRED_FULL_ASSETS = ['bootloader.bin', 'partitions.bin', 'boot_app0.bin', 'firmware.bin'];
+        const RELEASE_METADATA_ASSET = 'pyxis-release.json';
+        const CONNECT_TIMEOUT_MS = 15000;
+        const EXPECTED_CHIP = 'ESP32-S3';
 
-        // Current firmware path prefix — empty string for relative (latest), or a release download URL
-        let firmwarePathPrefix = '';
+        // Fail closed until the GitHub API supplies a published, non-prerelease version.
+        let firmwarePathPrefix = null;
+        let selectedReleaseMetadata = null;
+        let customFirmwareBytes = null;
+        let customFirmwareSelectionToken = 0;
         // Track whether the selected release has all assets for full install
-        let releaseHasFullAssets = true;
+        let releaseHasFullAssets = false;
 
         function makeFirmwareFiles(prefix) {
             return {
@@ -357,57 +393,231 @@
             progressText.textContent = text;
         }
 
-        // Version selector logic
-        let latestVersion = 'dev';
+        function withTimeout(promise, timeoutMs, message) {
+            let timeoutId;
+            const timeout = new Promise((_, reject) => {
+                timeoutId = setTimeout(() => reject(new Error(message)), timeoutMs);
+            });
+            return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
+        }
 
-        async function loadVersions() {
-            // Load deployed manifest version first
-            try {
-                const manifest = await fetch('manifest-install.json').then(r => r.json());
-                latestVersion = manifest.version;
-                document.getElementById('firmware-version').textContent = latestVersion;
-            } catch (e) {}
-
-            // Update the "Latest" option text
-            versionSelect.options[0].textContent = `Latest (${latestVersion})`;
-
-            // Fetch GitHub releases
-            try {
-                const resp = await fetch('https://api.github.com/repos/torlando-tech/pyxis/releases');
-                if (!resp.ok) return;
-                const releases = await resp.json();
-
-                for (const release of releases) {
-                    if (release.draft || release.prerelease) continue;
-                    const assetNames = release.assets.map(a => a.name);
-                    if (!assetNames.includes('firmware.bin')) continue;
-
-                    const option = document.createElement('option');
-                    const hasAll = REQUIRED_FULL_ASSETS.every(f => assetNames.includes(f));
-                    option.value = release.tag_name;
-                    option.textContent = release.tag_name + (release.name && release.name !== release.tag_name ? ` — ${release.name}` : '');
-                    option.dataset.downloadUrl = `firmware/releases/${release.tag_name}/`;
-                    option.dataset.hasFullAssets = hasAll ? 'true' : 'false';
-                    versionSelect.appendChild(option);
+        function sha256Fallback(bytes) {
+            const K = [
+                0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+                0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+                0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+                0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+                0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+                0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+                0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+                0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
+            ];
+            const H = new Uint32Array([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
+            const paddedLength = Math.ceil((bytes.length + 9) / 64) * 64;
+            const padded = new Uint8Array(paddedLength);
+            padded.set(bytes);
+            padded[bytes.length] = 0x80;
+            const bitLength = bytes.length * 8;
+            const view = new DataView(padded.buffer);
+            view.setUint32(paddedLength - 8, Math.floor(bitLength / 0x100000000), false);
+            view.setUint32(paddedLength - 4, bitLength >>> 0, false);
+            const w = new Uint32Array(64);
+            const rotr = (value, bits) => (value >>> bits) | (value << (32 - bits));
+            for (let offset = 0; offset < paddedLength; offset += 64) {
+                for (let i = 0; i < 16; i++) w[i] = view.getUint32(offset + i * 4, false);
+                for (let i = 16; i < 64; i++) {
+                    const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+                    const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+                    w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
                 }
-            } catch (e) {
-                // API failures are non-critical — user can still flash latest
+                let [a,b,c,d,e,f,g,h] = H;
+                for (let i = 0; i < 64; i++) {
+                    const s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+                    const ch = (e & f) ^ (~e & g);
+                    const t1 = (h + s1 + ch + K[i] + w[i]) >>> 0;
+                    const s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+                    const maj = (a & b) ^ (a & c) ^ (b & c);
+                    const t2 = (s0 + maj) >>> 0;
+                    h=g; g=f; f=e; e=(d+t1)>>>0; d=c; c=b; b=a; a=(t1+t2)>>>0;
+                }
+                H[0]=(H[0]+a)>>>0; H[1]=(H[1]+b)>>>0; H[2]=(H[2]+c)>>>0; H[3]=(H[3]+d)>>>0;
+                H[4]=(H[4]+e)>>>0; H[5]=(H[5]+f)>>>0; H[6]=(H[6]+g)>>>0; H[7]=(H[7]+h)>>>0;
+            }
+            return Array.from(H, word => word.toString(16).padStart(8, '0')).join('');
+        }
+
+        async function sha256Hex(bytes) {
+            if (globalThis.crypto?.subtle) {
+                const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+                return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+            }
+            return sha256Fallback(bytes);
+        }
+
+        async function validateEspImageStructure(bytes) {
+            const segmentCount = bytes[1];
+            if (segmentCount < 1 || segmentCount > 16) {
+                throw new Error('firmware.bin has an invalid ESP segment count');
+            }
+
+            const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+            let offset = 24;
+            let checksum = 0xef;
+            for (let segment = 0; segment < segmentCount; segment++) {
+                if (offset + 8 > bytes.length) {
+                    throw new Error('firmware.bin has a truncated ESP segment header');
+                }
+                const dataLength = view.getUint32(offset + 4, true);
+                offset += 8;
+                if (dataLength === 0 || offset + dataLength > bytes.length) {
+                    throw new Error('firmware.bin has an invalid ESP segment length');
+                }
+                for (let index = offset; index < offset + dataLength; index++) checksum ^= bytes[index];
+                offset += dataLength;
+            }
+
+            const checksumOffset = Math.ceil((offset + 1) / 16) * 16 - 1;
+            if (checksumOffset >= bytes.length || bytes[checksumOffset] !== checksum) {
+                throw new Error('firmware.bin has an invalid ESP image checksum');
+            }
+            for (let index = offset; index < checksumOffset; index++) {
+                if (bytes[index] !== 0) throw new Error('firmware.bin has invalid ESP image padding');
+            }
+
+            const hashAppended = bytes[23] === 1;
+            const expectedLength = checksumOffset + 1 + (hashAppended ? 32 : 0);
+            if (bytes.length !== expectedLength) {
+                throw new Error('firmware.bin is truncated or contains trailing data');
+            }
+            if (hashAppended) {
+                const expectedHash = await sha256Hex(bytes.slice(0, checksumOffset + 1));
+                const appendedHash = Array.from(
+                    bytes.slice(checksumOffset + 1),
+                    byte => byte.toString(16).padStart(2, '0')
+                ).join('');
+                if (appendedHash !== expectedHash) throw new Error('firmware.bin has an invalid appended SHA-256');
             }
         }
 
-        versionSelect.addEventListener('change', function() {
-            const selected = this.options[this.selectedIndex];
-            if (this.value === 'latest') {
-                firmwarePathPrefix = 'firmware/';
-                releaseHasFullAssets = true;
-                document.getElementById('firmware-version').textContent = latestVersion;
-            } else {
-                firmwarePathPrefix = selected.dataset.downloadUrl;
-                releaseHasFullAssets = selected.dataset.hasFullAssets === 'true';
-                document.getElementById('firmware-version').textContent = this.value;
-            }
+        function setCustomFirmwareStatus(text, state = '') {
+            customFirmwareStatus.textContent = text;
+            customFirmwareStatus.className = `custom-firmware-status ${state}`.trim();
+        }
 
-            // Handle full-install availability
+        async function loadReleaseMetadata(release, prefix) {
+            const response = await fetch(prefix + RELEASE_METADATA_ASSET, { cache: 'no-store' });
+            if (!response.ok) throw new Error(`Release metadata returned HTTP ${response.status}`);
+            const metadata = await response.json();
+            if (metadata.schema !== 1 || metadata.persistence_safe !== true) throw new Error('Release is not persistence-safe');
+            if (metadata.version !== release.tag_name) throw new Error('Release metadata version mismatch');
+            if (metadata.environment !== 'tdeck-release') throw new Error('Release environment mismatch');
+            if (metadata.chip_family !== 'ESP32-S3' || metadata.flash_size !== 8388608) throw new Error('Release target mismatch');
+            if (!/^[0-9a-f]{40}$/.test(metadata.source_commit || '')) throw new Error('Invalid release source commit');
+
+            const expectedOffsets = {
+                'bootloader.bin': 0x0,
+                'partitions.bin': 0x8000,
+                'boot_app0.bin': 0xe000,
+                'firmware.bin': 0x10000,
+            };
+            if (!metadata.images || Object.keys(metadata.images).length !== Object.keys(expectedOffsets).length) {
+                throw new Error('Release image descriptor set mismatch');
+            }
+            for (const [name, offset] of Object.entries(expectedOffsets)) {
+                const descriptor = metadata.images[name];
+                if (!descriptor || descriptor.file !== name || descriptor.offset !== offset ||
+                    !Number.isInteger(descriptor.size) || descriptor.size <= 0 ||
+                    !/^[0-9a-f]{64}$/.test(descriptor.sha256 || '')) {
+                    throw new Error(`Invalid release descriptor for ${name}`);
+                }
+            }
+            if (metadata.images['bootloader.bin'].size > 0x8000 ||
+                metadata.images['partitions.bin'].size > 0x1000 ||
+                metadata.images['boot_app0.bin'].size !== 0x2000 ||
+                metadata.images['firmware.bin'].size > 0x300000) {
+                throw new Error('Release image exceeds its partition bounds');
+            }
+            return metadata;
+        }
+
+        async function verifyDownloadedImage(file, bytes) {
+            const descriptor = selectedReleaseMetadata?.images?.[file.name];
+            if (!descriptor || descriptor.offset !== file.offset || descriptor.size !== bytes.byteLength) {
+                throw new Error(`Release metadata mismatch for ${file.name}`);
+            }
+            const actualHash = await sha256Hex(bytes);
+            if (actualHash !== descriptor.sha256) throw new Error(`SHA-256 mismatch for ${file.name}`);
+        }
+
+        async function validateCustomFirmware(bytes) {
+            if (bytes.byteLength === 0 || bytes.byteLength > 0x300000) {
+                throw new Error('firmware.bin exceeds the app0 partition or is empty');
+            }
+            const chipId = bytes.byteLength >= 14 ? bytes[12] | (bytes[13] << 8) : -1;
+            if (bytes.byteLength < 24 || bytes[0] !== 0xe9 || chipId !== 9) {
+                throw new Error('Selected file is not an ESP32-S3 application image');
+            }
+            await validateEspImageStructure(bytes);
+        }
+
+        customFirmwareInput.addEventListener('change', async function() {
+            const selectionToken = ++customFirmwareSelectionToken;
+            customFirmwareBytes = null;
+            firmwarePathPrefix = null;
+            selectedReleaseMetadata = null;
+            releaseHasFullAssets = false;
+            flashBtn.disabled = true;
+            eraseCheckbox.checked = false;
+            eraseCheckbox.disabled = true;
+            versionSelect.selectedIndex = 0;
+
+            const file = this.files?.[0];
+            if (!file) {
+                setCustomFirmwareStatus('No custom firmware selected.');
+                return;
+            }
+            document.getElementById('firmware-version').textContent = file.name;
+            setCustomFirmwareStatus(`Reading firmware.bin: ${file.name} (${file.size} bytes)...`);
+            try {
+                const bytes = new Uint8Array(await file.arrayBuffer());
+                if (selectionToken !== customFirmwareSelectionToken) return;
+                await validateCustomFirmware(bytes);
+                if (selectionToken !== customFirmwareSelectionToken) return;
+                const hash = await sha256Hex(bytes);
+                if (selectionToken !== customFirmwareSelectionToken) return;
+                customFirmwareBytes = bytes;
+                versionNote.textContent = `Custom firmware update only — ${bytes.byteLength} bytes — SHA-256 ${hash}`;
+                versionNote.classList.remove('hidden');
+                document.getElementById('firmware-version').textContent = file.name;
+                flashBtn.textContent = 'Flash Custom Firmware';
+                flashBtn.disabled = false;
+                const serialWarning = navigator.serial ? '' : ' Web Serial is unavailable in this browser context.';
+                setCustomFirmwareStatus(`Ready: ${file.name} (${bytes.byteLength} bytes).${serialWarning}`, 'success');
+            } catch (error) {
+                if (selectionToken !== customFirmwareSelectionToken) return;
+                customFirmwareBytes = null;
+                this.value = '';
+                flashBtn.disabled = true;
+                versionNote.textContent = error.message;
+                versionNote.classList.remove('hidden');
+                setCustomFirmwareStatus(error.message, 'error');
+            }
+        });
+
+        function selectPublishedRelease() {
+            const selected = versionSelect.options[versionSelect.selectedIndex];
+            if (!selected || !selected.dataset.downloadUrl || !selected.releaseMetadata) return;
+
+            customFirmwareSelectionToken++;
+            firmwarePathPrefix = selected.dataset.downloadUrl;
+            selectedReleaseMetadata = selected.releaseMetadata;
+            customFirmwareBytes = null;
+            customFirmwareInput.value = '';
+            setCustomFirmwareStatus('No custom firmware selected.');
+            flashBtn.textContent = 'Flash Firmware';
+            releaseHasFullAssets = selected.dataset.hasFullAssets === 'true';
+            document.getElementById('firmware-version').textContent = selected.value;
+
             if (!releaseHasFullAssets) {
                 eraseCheckbox.checked = false;
                 eraseCheckbox.disabled = true;
@@ -417,12 +627,81 @@
                 eraseCheckbox.disabled = false;
                 versionNote.classList.add('hidden');
             }
-        });
+            flashBtn.disabled = false;
+        }
+
+        async function loadVersions() {
+            flashBtn.disabled = true;
+            versionSelect.disabled = true;
+            try {
+                const resp = await fetch('https://api.github.com/repos/torlando-tech/pyxis/releases');
+                if (!resp.ok) throw new Error(`GitHub API returned HTTP ${resp.status}`);
+                const releases = await resp.json();
+                let publishedCount = 0;
+
+                for (const release of releases) {
+                    if (release.draft || release.prerelease) continue;
+                    const assetNames = release.assets.map(a => a.name);
+                    if (!assetNames.includes(RELEASE_METADATA_ASSET)) continue;
+                    if (!assetNames.includes('firmware.bin')) continue;
+
+                    const prefix = `firmware/releases/${release.tag_name}/`;
+                    let metadata;
+                    try {
+                        metadata = await loadReleaseMetadata(release, prefix);
+                    } catch (e) {
+                        continue;
+                    }
+
+                    const option = document.createElement('option');
+                    const hasAll = REQUIRED_FULL_ASSETS.every(f => assetNames.includes(f));
+                    option.value = release.tag_name;
+                    option.textContent = release.tag_name + (release.name && release.name !== release.tag_name ? ` — ${release.name}` : '');
+                    option.dataset.downloadUrl = prefix;
+                    option.dataset.hasFullAssets = hasAll ? 'true' : 'false';
+                    option.releaseMetadata = metadata;
+                    versionSelect.appendChild(option);
+                    publishedCount++;
+                }
+
+                if (publishedCount === 0) {
+                    if (customFirmwareSelectionToken === 0) {
+                        versionNote.textContent = 'No persistence-safe published firmware releases are available.';
+                        versionNote.classList.remove('hidden');
+                        document.getElementById('firmware-version').textContent = 'unavailable';
+                    }
+                    return;
+                }
+
+                versionSelect.options[0].textContent = 'Select a published release...';
+                versionSelect.disabled = false;
+                if (customFirmwareSelectionToken === 0) {
+                    versionSelect.selectedIndex = 1;
+                    selectPublishedRelease();
+                }
+            } catch (e) {
+                if (customFirmwareSelectionToken === 0) {
+                    versionNote.textContent = 'Unable to load published firmware releases.';
+                    versionNote.classList.remove('hidden');
+                    document.getElementById('firmware-version').textContent = 'unavailable';
+                }
+                versionSelect.disabled = true;
+            }
+        }
+
+        versionSelect.addEventListener('change', selectPublishedRelease);
 
         async function flash() {
-            const useFullInstall = eraseCheckbox.checked;
-            const fw = makeFirmwareFiles(firmwarePathPrefix);
-            const files = useFullInstall ? fw.full : fw.update;
+            if (!customFirmwareBytes && !firmwarePathPrefix) {
+                versionNote.textContent = 'Select a published firmware release before flashing.';
+                versionNote.classList.remove('hidden');
+                return;
+            }
+            const useFullInstall = customFirmwareBytes ? false : eraseCheckbox.checked;
+            const fw = customFirmwareBytes ? null : makeFirmwareFiles(firmwarePathPrefix);
+            const files = customFirmwareBytes
+                ? [{ offset: 0x10000, name: 'firmware.bin', dataBytes: customFirmwareBytes }]
+                : (useFullInstall ? fw.full : fw.update);
             let transport = null;
 
             flashBtn.disabled = true;
@@ -448,8 +727,16 @@
                     },
                 });
 
-                const chip = await esploader.main();
+                const chip = await withTimeout(
+                    esploader.main(),
+                    CONNECT_TIMEOUT_MS,
+                    'Timed out entering ESP32-S3 download mode. Cancel this attempt, hold BOOT, tap RESET, release BOOT, then retry.'
+                );
                 log(`Connected to ${chip}`, 'success');
+                const chipName = esploader.chip?.CHIP_NAME;
+                if (chipName !== EXPECTED_CHIP) {
+                    throw new Error(`Wrong device: expected ${EXPECTED_CHIP}, detected ${chipName || chip}`);
+                }
 
                 // Load firmware files
                 const fileArray = [];
@@ -457,17 +744,22 @@
 
                 for (const file of files) {
                     log(`Loading ${file.name}...`);
-                    const response = await fetch(file.path);
-                    if (!response.ok) throw new Error(`Failed to fetch ${file.name} (HTTP ${response.status}). This version may not be available yet — try "Latest" instead.`);
-                    const arrayBuffer = await response.arrayBuffer();
-                    const bytes = new Uint8Array(arrayBuffer);
+                    let bytes;
+                    if (file.dataBytes) {
+                        bytes = file.dataBytes;
+                    } else {
+                        const response = await fetch(file.path);
+                        if (!response.ok) throw new Error(`Failed to fetch ${file.name} (HTTP ${response.status}). Select another published version.`);
+                        bytes = new Uint8Array(await response.arrayBuffer());
+                        await verifyDownloadedImage(file, bytes);
+                    }
                     let binaryString = '';
                     for (let i = 0; i < bytes.length; i++) {
                         binaryString += String.fromCharCode(bytes[i]);
                     }
                     fileArray.push({ data: binaryString, address: file.offset });
-                    totalSize += arrayBuffer.byteLength;
-                    log(`Loaded ${file.name} (${arrayBuffer.byteLength} bytes)`);
+                    totalSize += bytes.byteLength;
+                    log(`Loaded ${file.name} (${bytes.byteLength} bytes)`);
                 }
 
                 // Flash
@@ -512,8 +804,8 @@
 
         flashBtn.addEventListener('click', flash);
 
-        // Initialize: set default prefix and load versions
-        firmwarePathPrefix = 'firmware/';
+        // Initialize with no flashable target; loadVersions enables flashing only
+        // after selecting a published, non-prerelease GitHub release.
         loadVersions();
     </script>
 </body>
