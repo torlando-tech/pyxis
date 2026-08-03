@@ -40,7 +40,7 @@ EXCLUDED_SYMBOLS = (
     "BootProfiler::",
 )
 PINNED_DEPENDENCIES = {
-    "microReticulum": "6054f6ba82367628a85cd07fcb668b95e947f046",
+    "microReticulum": "1bbd422a3b25b4a710642fc5cd01039e5774a4a7",
     "microLXMF": "d9bbc04cf69bfa9b555c3f293b89b440b4820518",
     "microStore": "c5fb69d68229e684c7fbd17692a67ae8193b84e2",
 }

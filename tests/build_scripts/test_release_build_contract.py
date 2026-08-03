@@ -14,6 +14,13 @@ def test_microstore_pin_resolves_before_transitive_registry_requirement():
     assert dependencies.index(MICROSTORE_PIN) < dependencies.index(MICRORETICULUM_PIN)
 
 
+def test_release_auditor_expects_the_configured_microreticulum_pin():
+    audit = (ROOT / "tools/audit_release_build.py").read_text()
+    expected_revision = MICRORETICULUM_PIN.rsplit("#", 1)[1]
+
+    assert f'"microReticulum": "{expected_revision}"' in audit
+
+
 def test_tdeck_release_removes_diagnostic_flags():
     config = (ROOT / "platformio.ini").read_text()
     release = config.split("[env:tdeck-release]", 1)[1].split("[env:", 1)[0]
