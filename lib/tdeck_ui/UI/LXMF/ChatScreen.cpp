@@ -275,10 +275,11 @@ void ChatScreen::refresh() {
     _bg_fill_target = (_all_message_hashes.size() > MESSAGES_PER_PAGE)
                           ? _all_message_hashes.size() - MESSAGES_PER_PAGE
                           : 0;
-    _bg_fill_active.store(_display_start_idx > _bg_fill_target);
+    const bool initial_fill_active = _display_start_idx > _bg_fill_target;
+    _keep_bottom_during_background_fill.store(initial_fill_active);
+    _bg_fill_active.store(initial_fill_active);
 
-    // Scroll to bottom
-    lv_obj_scroll_to_y(_message_list, LV_COORD_MAX, LV_ANIM_OFF);
+    scroll_to_bottom();
 }
 
 // Stream older messages in a few at a time, called from UIManager::update() on
@@ -290,12 +291,17 @@ void ChatScreen::tick_background_fill() {
     }
     if (_display_start_idx <= _bg_fill_target) {
         _bg_fill_active.store(false);
+        _keep_bottom_during_background_fill.store(false);
         return;
     }
     size_t remaining = _display_start_idx - _bg_fill_target;
     load_more_messages(remaining < BG_FILL_BATCH ? remaining : BG_FILL_BATCH);
+    if (_keep_bottom_during_background_fill.load()) {
+        scroll_to_bottom();
+    }
     if (_display_start_idx <= _bg_fill_target) {
         _bg_fill_active.store(false);
+        _keep_bottom_during_background_fill.store(false);
     }
 }
 
@@ -361,6 +367,15 @@ void ChatScreen::load_more_messages(size_t batch) {
     }
 }
 
+void ChatScreen::scroll_to_bottom() {
+    LVGL_LOCK();
+    // Flex children are laid out lazily. Resolve their final heights before
+    // asking LVGL for the maximum offset, otherwise a just-opened chat can
+    // scroll against the old zero-height layout and remain at the top.
+    lv_obj_update_layout(_message_list);
+    lv_obj_scroll_to_y(_message_list, LV_COORD_MAX, LV_ANIM_OFF);
+}
+
 void ChatScreen::on_scroll(lv_event_t* event) {
     ChatScreen* screen = (ChatScreen*)lv_event_get_user_data(event);
 
@@ -371,6 +386,7 @@ void ChatScreen::on_scroll(lv_event_t* event) {
         // Near the top: stream the next page in incrementally on the main loop
         // (tick_background_fill) rather than loading a full batch synchronously
         // under the LVGL lock here, which froze scrolling. Target before active.
+        screen->_keep_bottom_during_background_fill.store(false);
         screen->_bg_fill_target = (screen->_display_start_idx > MESSAGES_PER_PAGE)
                                       ? screen->_display_start_idx - MESSAGES_PER_PAGE
                                       : 0;
@@ -562,6 +578,9 @@ void ChatScreen::show() {
     LVGL_LOCK();
     lv_obj_clear_flag(_screen, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(_screen);  // Bring to front for touch events
+    // refresh() runs while this screen is hidden, so resolve the now-visible
+    // flex layout once more before selecting the newest message offset.
+    scroll_to_bottom();
 
     // Add buttons to default group for trackball navigation
     // Note: text area not included since edit mode consumes arrow keys
