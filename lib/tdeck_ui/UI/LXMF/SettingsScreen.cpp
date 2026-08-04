@@ -612,7 +612,7 @@ void SettingsScreen::create_interfaces_section(lv_obj_t* parent) {
     lv_obj_set_style_text_font(sf_label, &lv_font_montserrat_14, 0);
 
     _dropdown_lora_sf = lv_dropdown_create(sfcr_row);
-    lv_dropdown_set_options(_dropdown_lora_sf, "7\n8\n9\n10\n11\n12");
+    lv_dropdown_set_options(_dropdown_lora_sf, "5\n6\n7\n8\n9\n10\n11\n12");
     lv_obj_set_size(_dropdown_lora_sf, 50, 28);
     lv_obj_align(_dropdown_lora_sf, LV_ALIGN_LEFT_MID, 30, 0);
     lv_obj_set_style_bg_color(_dropdown_lora_sf, Theme::surfaceInput(), 0);
@@ -1227,8 +1227,8 @@ void SettingsScreen::update_ui_from_settings() {
         lv_dropdown_set_selected(_dropdown_lora_bandwidth, idx);
     }
     if (_dropdown_lora_sf) {
-        // SF 7-12 maps to index 0-5
-        lv_dropdown_set_selected(_dropdown_lora_sf, _settings.lora_sf - 7);
+        // SF 5-12 maps to index 0-7
+        lv_dropdown_set_selected(_dropdown_lora_sf, _settings.lora_sf - 5);
     }
     if (_dropdown_lora_cr) {
         // CR 5-8 maps to index 0-3
@@ -1348,8 +1348,8 @@ void SettingsScreen::update_settings_from_ui() {
         }
     }
     if (_dropdown_lora_sf) {
-        // Index 0-5 maps to SF 7-12
-        _settings.lora_sf = lv_dropdown_get_selected(_dropdown_lora_sf) + 7;
+        // Index 0-7 maps to SF 5-12
+        _settings.lora_sf = lv_dropdown_get_selected(_dropdown_lora_sf) + 5;
     }
     if (_dropdown_lora_cr) {
         // Index 0-3 maps to CR 5-8
