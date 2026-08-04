@@ -62,6 +62,49 @@ int main() {
     check("receive metadata shares the next bucket", has_event(marked.samples[0], Event::Rx));
     check("channel load counts activity", marked.channel_load_percent == 100);
 
+    History skipped;
+    skipped.mark_event(Event::Tx, 3);
+    skipped.record_gap();
+    skipped.record_gap();
+    skipped.record_gap();
+    auto tx_gap = skipped.snapshot();
+    check("skipped cadence buckets are represented", tx_gap.count == 3);
+    check("TX duration spans every queued bucket",
+          has_event(tx_gap.samples[0], Event::Tx) &&
+          has_event(tx_gap.samples[1], Event::Tx) &&
+          has_event(tx_gap.samples[2], Event::Tx));
+    check("gap buckets do not invent RSSI", !tx_gap.samples[0].rssi_valid);
+    check("TX gap buckets contribute to load", tx_gap.channel_load_percent == 100);
+
+    History aligned;
+    aligned.mark_event(Event::Tx, 2);
+    aligned.record_gap(false);
+    aligned.record_gap();
+    aligned.record(-100);
+    auto right_aligned = aligned.snapshot();
+    check("pending duration does not mark older catch-up gaps",
+          !has_event(right_aligned.samples[0], Event::Tx));
+    check("pending duration is right-aligned to current time",
+          has_event(right_aligned.samples[1], Event::Tx) &&
+          has_event(right_aligned.samples[2], Event::Tx));
+
+    History rx_burst;
+    rx_burst.mark_event(Event::Rx);
+    rx_burst.mark_event(Event::Rx);
+    rx_burst.record(-110);
+    rx_burst.record(-120);
+    auto rx_bucket = rx_burst.snapshot();
+    check("multiple RX events coalesce within one cadence bucket",
+          has_event(rx_bucket.samples[0], Event::Rx));
+    check("coalesced RX does not spill into a future bucket",
+          !has_event(rx_bucket.samples[1], Event::Rx));
+
+    History unknown_gap;
+    unknown_gap.record_gap();
+    auto unknown = unknown_gap.snapshot();
+    check("unknown contention gap advances time without activity",
+          unknown.count == 1 && unknown.channel_load_percent == 0);
+
     History clamped;
     clamped.record(-200);
     clamped.record(20);

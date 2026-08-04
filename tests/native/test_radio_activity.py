@@ -43,7 +43,7 @@ def test_radio_activity_history_native(tmp_path):
 
     result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.strip() == "15 passed, 0 failed"
+    assert result.stdout.strip() == "24 passed, 0 failed"
 
 
 def test_sampler_is_main_loop_owned_bounded_and_instantaneous():
@@ -55,6 +55,9 @@ def test_sampler_is_main_loop_owned_bounded_and_instantaneous():
     assert "_radio->getRSSI(false)" in sx_cpp
     assert "xSemaphoreTake(_spi_mutex, 0)" in sx_cpp
     assert "if (_transmitting)" in sx_cpp
+    assert "record_gap" in sx_cpp
+    assert "elapsed / ACTIVITY_SAMPLE_INTERVAL_MS" in sx_cpp
+    assert "_last_activity_sample_ms +=" in sx_cpp
     assert "sample_radio_activity" in main_cpp
     assert "radio_activity_visible()" in main_cpp
     assert "setFrequency" not in sx_cpp
@@ -76,6 +79,7 @@ def test_ui_contract_uses_dedicated_status_child_and_snapshot_only_rendering():
     assert "lv_canvas" not in screen_cpp
     assert "lv_chart" not in screen_cpp
     assert "lv_draw_line" in screen_cpp
+    assert "rssi_valid" in screen_cpp
     assert " · " not in screen_cpp
     assert "■" not in screen_cpp
     assert " | " in screen_cpp

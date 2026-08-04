@@ -286,6 +286,9 @@ void RadioActivityScreen::on_chart_draw(lv_event_t* event) {
         trace_dsc.width = 2;
         trace_dsc.opa = LV_OPA_COVER;
         for (std::size_t i = 1; i < snapshot.count; ++i) {
+            if (!snapshot.samples[i - 1].rssi_valid || !snapshot.samples[i].rssi_valid) {
+                continue;
+            }
             lv_point_t p1 = {x_for(i - 1), y_for(snapshot.samples[i - 1].rssi_dbm)};
             lv_point_t p2 = {x_for(i), y_for(snapshot.samples[i].rssi_dbm)};
             lv_draw_line(draw_ctx, &trace_dsc, &p1, &p2);
@@ -301,7 +304,9 @@ void RadioActivityScreen::on_chart_draw(lv_event_t* event) {
             int32_t marker_x = static_cast<int32_t>(x_for(i)) + x_offset;
             if (marker_x < area.x1) marker_x = area.x1;
             if (marker_x > area.x2) marker_x = area.x2;
-            const lv_coord_t y1 = start_at_rssi ? y_for(sample.rssi_dbm) : area.y1;
+            const lv_coord_t y1 = start_at_rssi && sample.rssi_valid
+                ? y_for(sample.rssi_dbm)
+                : area.y1;
 
             lv_draw_line_dsc_t dsc;
             lv_draw_line_dsc_init(&dsc);

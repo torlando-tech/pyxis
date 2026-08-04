@@ -20,6 +20,7 @@ constexpr uint8_t event_bit(Event event) {
 struct Sample {
     int16_t rssi_dbm = -135;
     uint8_t events = 0;
+    bool rssi_valid = true;
     uint32_t sequence = 0;
 };
 
@@ -57,13 +58,23 @@ public:
 
     void mark_event(Event event) {
         if (event == Event::Noise) return;
-        _pending_events |= event_bit(event);
+        const std::size_t index = event_index(event);
+        if (_pending_event_buckets[index] == 0) {
+            _pending_event_buckets[index] = 1;
+        }
+    }
+
+    void mark_event(Event event, std::size_t buckets) {
+        if (event == Event::Noise || buckets == 0) return;
+        const std::size_t index = event_index(event);
+        const std::size_t total = _pending_event_buckets[index] + buckets;
+        _pending_event_buckets[index] = static_cast<uint8_t>(
+            total > CAPACITY ? CAPACITY : total);
     }
 
     void record(int16_t rssi_dbm) {
         const int16_t rssi = clamp_rssi(rssi_dbm);
-        uint8_t events = _pending_events;
-        _pending_events = 0;
+        uint8_t events = take_pending_events();
         if (events == 0 && _noise_count >= MIN_BASELINE_SAMPLES &&
             rssi > static_cast<int16_t>(noise_floor() + ACTIVITY_THRESHOLD_DB)) {
             events |= event_bit(Event::Interference);
@@ -73,15 +84,20 @@ public:
             accept_noise(rssi);
         }
 
-        Sample sample;
-        sample.rssi_dbm = rssi;
-        sample.events = events;
-        sample.sequence = _next_sequence++;
-        _samples[_write_index] = sample;
-        _write_index = (_write_index + 1) % CAPACITY;
-        if (_count < CAPACITY) {
-            ++_count;
+        append_sample(rssi, true, events);
+    }
+
+    void record_gap(bool consume_events = true) {
+        append_sample(MIN_RSSI_DBM, false,
+                      consume_events ? take_pending_events() : 0);
+    }
+
+    std::size_t pending_bucket_span() const {
+        std::size_t span = 0;
+        for (const uint8_t count : _pending_event_buckets) {
+            if (count > span) span = count;
         }
+        return span;
     }
 
     Snapshot snapshot() const {
@@ -91,12 +107,14 @@ public:
         std::size_t active = 0;
         for (std::size_t i = 0; i < _count; ++i) {
             result.samples[i] = _samples[(oldest + i) % CAPACITY];
+            if (result.samples[i].rssi_valid) {
+                result.current_rssi = result.samples[i].rssi_dbm;
+            }
             if (result.samples[i].events != 0) {
                 ++active;
             }
         }
         if (_count > 0) {
-            result.current_rssi = result.samples[_count - 1].rssi_dbm;
             result.channel_load_percent = static_cast<uint8_t>((active * 100U) / _count);
         }
         result.noise_floor_ready = _noise_count >= MIN_BASELINE_SAMPLES;
@@ -105,6 +123,40 @@ public:
     }
 
 private:
+    static std::size_t event_index(Event event) {
+        switch (event) {
+            case Event::Rx: return 0;
+            case Event::Tx: return 1;
+            case Event::Interference: return 2;
+            case Event::Noise: return 0;
+        }
+        return 0;
+    }
+
+    uint8_t take_pending_events() {
+        uint8_t events = 0;
+        for (std::size_t i = 0; i < _pending_event_buckets.size(); ++i) {
+            if (_pending_event_buckets[i] > 0) {
+                events |= static_cast<uint8_t>(1U << i);
+                --_pending_event_buckets[i];
+            }
+        }
+        return events;
+    }
+
+    void append_sample(int16_t rssi, bool rssi_valid, uint8_t events) {
+        Sample sample;
+        sample.rssi_dbm = rssi;
+        sample.events = events;
+        sample.rssi_valid = rssi_valid;
+        sample.sequence = _next_sequence++;
+        _samples[_write_index] = sample;
+        _write_index = (_write_index + 1) % CAPACITY;
+        if (_count < CAPACITY) {
+            ++_count;
+        }
+    }
+
     static int16_t clamp_rssi(int16_t value) {
         if (value < MIN_RSSI_DBM) return MIN_RSSI_DBM;
         if (value > MAX_RSSI_DBM) return MAX_RSSI_DBM;
@@ -138,7 +190,7 @@ private:
     std::size_t _noise_count = 0;
     int32_t _noise_sum = 0;
     uint32_t _next_sequence = 0;
-    uint8_t _pending_events = 0;
+    std::array<uint8_t, 3> _pending_event_buckets{};
 };
 
 } // namespace RadioActivity

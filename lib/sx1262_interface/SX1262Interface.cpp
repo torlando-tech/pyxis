@@ -186,22 +186,60 @@ void SX1262Interface::start_receive() {
 void SX1262Interface::sample_radio_activity(uint32_t now_ms) {
 #ifdef ARDUINO
     if (!_online || _radio == nullptr || _spi_mutex == nullptr) return;
-    if (_transmitting) return;
-    if (now_ms - _last_activity_sample_ms < ACTIVITY_SAMPLE_INTERVAL_MS) return;
+    const uint32_t elapsed = now_ms - _last_activity_sample_ms;
+    if (elapsed < ACTIVITY_SAMPLE_INTERVAL_MS) return;
+    const uint32_t raw_due = elapsed / ACTIVITY_SAMPLE_INTERVAL_MS;
+    const std::size_t due = raw_due > RadioActivity::History::CAPACITY
+        ? RadioActivity::History::CAPACITY
+        : static_cast<std::size_t>(raw_due);
+
+    auto advance_clock = [&]() {
+        if (raw_due > RadioActivity::History::CAPACITY) {
+            _last_activity_sample_ms = now_ms;
+        } else {
+            _last_activity_sample_ms += raw_due * ACTIVITY_SAMPLE_INTERVAL_MS;
+        }
+    };
+    auto record_gaps = [&](std::size_t count) {
+        portENTER_CRITICAL(&_activity_mux);
+        const std::size_t pending_span = _activity_history.pending_bucket_span();
+        const std::size_t active_span = pending_span > count ? count : pending_span;
+        const std::size_t inactive_count = count - active_span;
+        for (std::size_t i = 0; i < count; ++i) {
+            _activity_history.record_gap(i >= inactive_count);
+        }
+        portEXIT_CRITICAL(&_activity_mux);
+        advance_clock();
+    };
+
+    if (_transmitting) {
+        record_gaps(due);
+        return;
+    }
 
     // Sampling is deliberately best-effort: display/SD/radio work always wins.
-    if (xSemaphoreTake(_spi_mutex, 0) != pdTRUE) return;
+    if (xSemaphoreTake(_spi_mutex, 0) != pdTRUE) {
+        record_gaps(due);
+        return;
+    }
     if (_transmitting) {
         xSemaphoreGive(_spi_mutex);
+        record_gaps(due);
         return;
     }
     const float instantaneous_rssi = _radio->getRSSI(false);
     xSemaphoreGive(_spi_mutex);
 
-    _last_activity_sample_ms = now_ms;
     portENTER_CRITICAL(&_activity_mux);
+    const std::size_t pending_span = _activity_history.pending_bucket_span();
+    const std::size_t active_span = pending_span > due ? due : pending_span;
+    const std::size_t inactive_count = due - active_span;
+    for (std::size_t i = 0; i + 1 < due; ++i) {
+        _activity_history.record_gap(i >= inactive_count);
+    }
     _activity_history.record(static_cast<int16_t>(instantaneous_rssi));
     portEXIT_CRITICAL(&_activity_mux);
+    advance_clock();
 #else
     (void)now_ms;
 #endif
@@ -310,9 +348,11 @@ bool SX1262Interface::send_outgoing(const Bytes& data) {
     }
 
     _transmitting = true;
+    const uint32_t tx_started_ms = millis();
 
     // Transmit (blocking)
     int16_t state = _radio->transmit(buf, len);
+    const uint32_t tx_duration_ms = millis() - tx_started_ms;
 
     _transmitting = false;
 
@@ -328,8 +368,12 @@ bool SX1262Interface::send_outgoing(const Bytes& data) {
 
     if (state == RADIOLIB_ERR_NONE) {
         DEBUG("SX1262Interface: Sent " + std::to_string(len) + " bytes");
+        std::size_t tx_buckets = static_cast<std::size_t>(
+            (tx_duration_ms + ACTIVITY_SAMPLE_INTERVAL_MS - 1) /
+            ACTIVITY_SAMPLE_INTERVAL_MS);
+        if (tx_buckets == 0) tx_buckets = 1;
         portENTER_CRITICAL(&_activity_mux);
-        _activity_history.mark_event(RadioActivity::Event::Tx);
+        _activity_history.mark_event(RadioActivity::Event::Tx, tx_buckets);
         portEXIT_CRITICAL(&_activity_mux);
         // Perform post-send housekeeping
         InterfaceImpl::handle_outgoing(data);
