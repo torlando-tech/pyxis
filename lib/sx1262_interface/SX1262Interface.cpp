@@ -24,6 +24,15 @@ void SX1262Interface::set_spi_mutex(SemaphoreHandle_t mutex) {
         DEBUG("SX1262Interface: Using external SPI mutex");
     }
 }
+
+bool SX1262Interface::lock_activity(TickType_t timeout_ticks) const {
+    return _activity_mutex != nullptr &&
+           xSemaphoreTake(_activity_mutex, timeout_ticks) == pdTRUE;
+}
+
+void SX1262Interface::unlock_activity() const {
+    xSemaphoreGive(_activity_mutex);
+}
 #endif
 
 SX1262Interface::SX1262Interface(const char* name) : InterfaceImpl(name) {
@@ -37,13 +46,36 @@ SX1262Interface::SX1262Interface(const char* name) : InterfaceImpl(name) {
         _config.spreading_factor,
         _config.coding_rate
     );
+#ifdef ARDUINO
+    _activity_mutex = xSemaphoreCreateMutex();
+    if (_activity_mutex == nullptr) {
+        ERROR("SX1262Interface: Failed to create activity mutex");
+    }
+#endif
 }
 
 SX1262Interface::~SX1262Interface() {
     stop();
+#ifdef ARDUINO
+    if (_activity_mutex != nullptr) {
+        vSemaphoreDelete(_activity_mutex);
+        _activity_mutex = nullptr;
+    }
+#endif
 }
 
 void SX1262Interface::set_config(const SX1262Config& config) {
+#ifdef ARDUINO
+    if (lock_activity(portMAX_DELAY)) {
+        _activity_history.reset();
+        _last_activity_sample_ms = millis();
+        unlock_activity();
+    }
+#else
+    _activity_history.reset();
+    _last_activity_sample_ms = 0;
+#endif
+
     _config = config;
 
     _bitrate = calculate_lora_bitrate_bps(
@@ -183,11 +215,110 @@ void SX1262Interface::start_receive() {
 #endif
 }
 
+void SX1262Interface::sample_radio_activity(uint32_t now_ms) {
+#ifdef ARDUINO
+    if (!_online || _radio == nullptr || _spi_mutex == nullptr) return;
+
+    uint32_t activity_generation = 0;
+    uint32_t last_activity_sample_ms = 0;
+    if (!lock_activity(pdMS_TO_TICKS(2))) return;
+    activity_generation = _activity_history.generation();
+    last_activity_sample_ms = _last_activity_sample_ms;
+    now_ms = millis();
+    unlock_activity();
+
+    const uint32_t elapsed = now_ms - last_activity_sample_ms;
+    if (elapsed < ACTIVITY_SAMPLE_INTERVAL_MS) return;
+    const uint32_t raw_due = elapsed / ACTIVITY_SAMPLE_INTERVAL_MS;
+    const std::size_t due = raw_due > RadioActivity::History::CAPACITY
+        ? RadioActivity::History::CAPACITY
+        : static_cast<std::size_t>(raw_due);
+
+    auto advance_clock = [&]() {
+        if (raw_due > RadioActivity::History::CAPACITY) {
+            _last_activity_sample_ms = now_ms;
+        } else {
+            _last_activity_sample_ms = last_activity_sample_ms +
+                raw_due * ACTIVITY_SAMPLE_INTERVAL_MS;
+        }
+    };
+    auto record_gaps = [&](std::size_t count) {
+        if (!lock_activity(pdMS_TO_TICKS(2))) return;
+        if (_activity_history.generation() != activity_generation) {
+            unlock_activity();
+            return;
+        }
+        const std::size_t pending_span = _activity_history.pending_bucket_span();
+        const std::size_t active_span = pending_span > count ? count : pending_span;
+        const std::size_t inactive_count = count - active_span;
+        for (std::size_t i = 0; i < count; ++i) {
+            _activity_history.record_gap(i >= inactive_count);
+        }
+        advance_clock();
+        unlock_activity();
+    };
+
+    if (_transmitting) {
+        record_gaps(due);
+        return;
+    }
+
+    // Sampling is deliberately best-effort: display/SD/radio work always wins.
+    if (xSemaphoreTake(_spi_mutex, 0) != pdTRUE) {
+        record_gaps(due);
+        return;
+    }
+    if (_transmitting) {
+        xSemaphoreGive(_spi_mutex);
+        record_gaps(due);
+        return;
+    }
+    const float instantaneous_rssi = _radio->getRSSI(false);
+    xSemaphoreGive(_spi_mutex);
+
+    if (!lock_activity(pdMS_TO_TICKS(2))) return;
+    if (_activity_history.generation() != activity_generation) {
+        unlock_activity();
+        return;
+    }
+    const std::size_t pending_span = _activity_history.pending_bucket_span();
+    const std::size_t active_span = pending_span > due ? due : pending_span;
+    const std::size_t inactive_count = due - active_span;
+    for (std::size_t i = 0; i + 1 < due; ++i) {
+        _activity_history.record_gap(i >= inactive_count);
+    }
+    _activity_history.record(static_cast<int16_t>(instantaneous_rssi));
+    advance_clock();
+    unlock_activity();
+#else
+    (void)now_ms;
+#endif
+}
+
+RadioActivity::Snapshot SX1262Interface::radio_activity_snapshot() const {
+#ifdef ARDUINO
+    if (!lock_activity(pdMS_TO_TICKS(2))) return {};
+    RadioActivity::Snapshot result = _activity_history.snapshot();
+    unlock_activity();
+    return result;
+#else
+    return _activity_history.snapshot();
+#endif
+}
+
 void SX1262Interface::loop() {
     if (!_online) return;
 
 #ifdef ARDUINO
     if (_radio == nullptr) return;
+
+    uint32_t activity_generation = 0;
+    bool activity_generation_valid = false;
+    if (lock_activity(portMAX_DELAY)) {
+        activity_generation = _activity_history.generation();
+        activity_generation_valid = true;
+        unlock_activity();
+    }
 
     // Try to acquire SPI mutex (non-blocking to avoid stalling display)
     if (xSemaphoreTake(_spi_mutex, pdMS_TO_TICKS(5)) != pdTRUE) {
@@ -229,6 +360,17 @@ void SX1262Interface::loop() {
                   "RSSI=" + std::to_string((int)_last_rssi) + " dBm, " +
                   "SNR=" + std::to_string((int)_last_snr) + " dB");
 
+            // SPI is already released. Wait for the bounded history mutex so a
+            // real receive marker cannot be dropped behind a snapshot/catch-up.
+            if (activity_generation_valid && lock_activity(portMAX_DELAY)) {
+                if (_activity_history.generation() != activity_generation) {
+                    unlock_activity();
+                } else {
+                    _activity_history.mark_event(RadioActivity::Event::Rx);
+                    unlock_activity();
+                }
+            }
+
             on_incoming(payload);
             return;
         }
@@ -246,6 +388,14 @@ bool SX1262Interface::send_outgoing(const Bytes& data) {
 
 #ifdef ARDUINO
     if (_radio == nullptr) return false;
+
+    uint32_t activity_generation = 0;
+    bool activity_generation_valid = false;
+    if (lock_activity(portMAX_DELAY)) {
+        activity_generation = _activity_history.generation();
+        activity_generation_valid = true;
+        unlock_activity();
+    }
 
     DEBUG(toString() + ": Sending " + std::to_string(data.size()) + " bytes");
 
@@ -271,9 +421,11 @@ bool SX1262Interface::send_outgoing(const Bytes& data) {
     }
 
     _transmitting = true;
+    const uint32_t tx_started_ms = millis();
 
     // Transmit (blocking)
     int16_t state = _radio->transmit(buf, len);
+    const uint32_t tx_duration_ms = millis() - tx_started_ms;
 
     _transmitting = false;
 
@@ -289,6 +441,20 @@ bool SX1262Interface::send_outgoing(const Bytes& data) {
 
     if (state == RADIOLIB_ERR_NONE) {
         DEBUG("SX1262Interface: Sent " + std::to_string(len) + " bytes");
+        std::size_t tx_buckets = static_cast<std::size_t>(
+            (tx_duration_ms + ACTIVITY_SAMPLE_INTERVAL_MS - 1) /
+            ACTIVITY_SAMPLE_INTERVAL_MS);
+        if (tx_buckets == 0) tx_buckets = 1;
+        // SPI is already released. Wait for the bounded history mutex so a
+        // completed transmission duration cannot disappear from the timeline.
+        if (activity_generation_valid && lock_activity(portMAX_DELAY)) {
+            if (_activity_history.generation() != activity_generation) {
+                unlock_activity();
+            } else {
+                _activity_history.mark_event(RadioActivity::Event::Tx, tx_buckets);
+                unlock_activity();
+            }
+        }
         // Perform post-send housekeeping
         InterfaceImpl::handle_outgoing(data);
         return true;

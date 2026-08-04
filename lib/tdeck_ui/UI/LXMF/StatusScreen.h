@@ -45,6 +45,7 @@ class StatusScreen {
 public:
     using BackCallback = std::function<void()>;
     using ShareCallback = std::function<void()>;
+    using RadioActivityCallback = std::function<void()>;
 
     /**
      * Create status screen
@@ -116,6 +117,9 @@ public:
      */
     void set_share_callback(ShareCallback callback);
 
+    /** Open the dedicated current-channel Radio Activity screen. */
+    void set_radio_activity_callback(RadioActivityCallback callback);
+
     /**
      * Show the screen
      */
@@ -137,6 +141,7 @@ private:
     lv_obj_t* _content;
     lv_obj_t* _btn_back;
     lv_obj_t* _btn_share;
+    lv_obj_t* _btn_radio_activity;
 
     // Labels for dynamic content
     lv_obj_t* _label_uptime;
@@ -164,6 +169,7 @@ private:
 
     BackCallback _back_callback;
     ShareCallback _share_callback;
+    RadioActivityCallback _radio_activity_callback;
 
     void create_header();
     void create_content();
@@ -171,6 +177,7 @@ private:
 
     static void on_back_clicked(lv_event_t* event);
     static void on_share_clicked(lv_event_t* event);
+    static void on_radio_activity_clicked(lv_event_t* event);
 };
 
 } // namespace LXMF

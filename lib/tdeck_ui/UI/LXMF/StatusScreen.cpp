@@ -18,7 +18,7 @@ namespace LXMF {
 
 StatusScreen::StatusScreen(lv_obj_t* parent)
     : _screen(nullptr), _header(nullptr), _content(nullptr), _btn_back(nullptr),
-      _btn_share(nullptr), _label_uptime(nullptr),
+      _btn_share(nullptr), _btn_radio_activity(nullptr), _label_uptime(nullptr),
       _label_identity_value(nullptr), _label_lxmf_value(nullptr),
       _label_wifi_status(nullptr), _label_wifi_ip(nullptr), _label_wifi_rssi(nullptr),
       _label_rns_status(nullptr), _label_prop_node(nullptr), _label_ble_header(nullptr),
@@ -117,6 +117,17 @@ void StatusScreen::create_content() {
     lv_obj_set_flex_align(_content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_scroll_dir(_content, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(_content, LV_SCROLLBAR_MODE_AUTO);
+
+    // Radio telemetry is a child of Status, not a persistent fifth nav tab.
+    _btn_radio_activity = lv_btn_create(_content);
+    lv_obj_set_size(_btn_radio_activity, LV_PCT(100), 34);
+    lv_obj_set_style_bg_color(_btn_radio_activity, Theme::surfaceInput(), 0);
+    lv_obj_set_style_bg_color(_btn_radio_activity, Theme::surfaceElevated(), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(_btn_radio_activity, on_radio_activity_clicked, LV_EVENT_CLICKED, this);
+    lv_obj_t* radio_label = lv_label_create(_btn_radio_activity);
+    lv_label_set_text(radio_label, "Radio Activity  " LV_SYMBOL_RIGHT);
+    lv_obj_align(radio_label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_text_color(radio_label, Theme::textPrimary(), 0);
 
     // Uptime section
     _label_uptime = lv_label_create(_content);
@@ -356,6 +367,10 @@ void StatusScreen::set_share_callback(ShareCallback callback) {
     _share_callback = callback;
 }
 
+void StatusScreen::set_radio_activity_callback(RadioActivityCallback callback) {
+    _radio_activity_callback = callback;
+}
+
 void StatusScreen::show() {
     LVGL_LOCK();
     refresh();  // Update status when shown
@@ -371,6 +386,9 @@ void StatusScreen::show() {
         if (_btn_share) {
             lv_group_add_obj(group, _btn_share);
         }
+        if (_btn_radio_activity) {
+            lv_group_add_obj(group, _btn_radio_activity);
+        }
         lv_group_focus_obj(_btn_back);
     }
 }
@@ -385,6 +403,9 @@ void StatusScreen::hide() {
         }
         if (_btn_share) {
             lv_group_remove_obj(_btn_share);
+        }
+        if (_btn_radio_activity) {
+            lv_group_remove_obj(_btn_radio_activity);
         }
     }
 
@@ -408,6 +429,13 @@ void StatusScreen::on_share_clicked(lv_event_t* event) {
 
     if (screen->_share_callback) {
         screen->_share_callback();
+    }
+}
+
+void StatusScreen::on_radio_activity_clicked(lv_event_t* event) {
+    StatusScreen* screen = static_cast<StatusScreen*>(lv_event_get_user_data(event));
+    if (screen && screen->_radio_activity_callback) {
+        screen->_radio_activity_callback();
     }
 }
 
