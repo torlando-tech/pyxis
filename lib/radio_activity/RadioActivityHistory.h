@@ -8,16 +8,24 @@ namespace RadioActivity {
 
 enum class Event : uint8_t {
     Noise = 0,
-    Rx,
-    Tx,
-    Interference,
+    Rx = 1U << 0,
+    Tx = 1U << 1,
+    Interference = 1U << 2,
 };
+
+constexpr uint8_t event_bit(Event event) {
+    return static_cast<uint8_t>(event);
+}
 
 struct Sample {
     int16_t rssi_dbm = -135;
-    Event event = Event::Noise;
+    uint8_t events = 0;
     uint32_t sequence = 0;
 };
+
+constexpr bool has_event(const Sample& sample, Event event) {
+    return (sample.events & event_bit(event)) != 0;
+}
 
 struct Snapshot {
     static constexpr std::size_t CAPACITY = 96;
@@ -49,26 +57,25 @@ public:
 
     void mark_event(Event event) {
         if (event == Event::Noise) return;
-        const int16_t marker_rssi = _count > 0
-            ? _samples[(_write_index + CAPACITY - 1) % CAPACITY].rssi_dbm
-            : MIN_RSSI_DBM;
-        record(marker_rssi, event);
+        _pending_events |= event_bit(event);
     }
 
-    void record(int16_t rssi_dbm, Event event = Event::Noise) {
+    void record(int16_t rssi_dbm) {
         const int16_t rssi = clamp_rssi(rssi_dbm);
-        if (event == Event::Noise && _noise_count >= MIN_BASELINE_SAMPLES &&
+        uint8_t events = _pending_events;
+        _pending_events = 0;
+        if (events == 0 && _noise_count >= MIN_BASELINE_SAMPLES &&
             rssi > static_cast<int16_t>(noise_floor() + ACTIVITY_THRESHOLD_DB)) {
-            event = Event::Interference;
+            events |= event_bit(Event::Interference);
         }
 
-        if (event == Event::Noise) {
+        if (events == 0) {
             accept_noise(rssi);
         }
 
         Sample sample;
         sample.rssi_dbm = rssi;
-        sample.event = event;
+        sample.events = events;
         sample.sequence = _next_sequence++;
         _samples[_write_index] = sample;
         _write_index = (_write_index + 1) % CAPACITY;
@@ -84,7 +91,7 @@ public:
         std::size_t active = 0;
         for (std::size_t i = 0; i < _count; ++i) {
             result.samples[i] = _samples[(oldest + i) % CAPACITY];
-            if (result.samples[i].event != Event::Noise) {
+            if (result.samples[i].events != 0) {
                 ++active;
             }
         }
@@ -131,6 +138,7 @@ private:
     std::size_t _noise_count = 0;
     int32_t _noise_sum = 0;
     uint32_t _next_sequence = 0;
+    uint8_t _pending_events = 0;
 };
 
 } // namespace RadioActivity

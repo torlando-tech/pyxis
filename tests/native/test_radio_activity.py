@@ -43,7 +43,7 @@ def test_radio_activity_history_native(tmp_path):
 
     result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.strip() == "14 passed, 0 failed"
+    assert result.stdout.strip() == "15 passed, 0 failed"
 
 
 def test_sampler_is_main_loop_owned_bounded_and_instantaneous():

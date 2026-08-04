@@ -265,7 +265,7 @@ void SX1262Interface::loop() {
                   "SNR=" + std::to_string((int)_last_snr) + " dB");
 
             portENTER_CRITICAL(&_activity_mux);
-            _activity_history.record(static_cast<int16_t>(_last_rssi), RadioActivity::Event::Rx);
+            _activity_history.mark_event(RadioActivity::Event::Rx);
             portEXIT_CRITICAL(&_activity_mux);
 
             on_incoming(payload);

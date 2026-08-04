@@ -293,30 +293,31 @@ void RadioActivityScreen::on_chart_draw(lv_event_t* event) {
     }
 
     for (std::size_t i = 0; i < snapshot.count; ++i) {
-        const auto event_type = snapshot.samples[i].event;
-        if (event_type == RadioActivity::Event::Noise) continue;
-        const lv_coord_t x = x_for(i);
-        int32_t y1 = area.y1;
-        lv_color_t color = Theme::primaryLight();
-        uint8_t line_width = 2;
-        if (event_type == RadioActivity::Event::Rx) {
-            color = lv_color_hex(0x55966B);
-            y1 = y_for(snapshot.samples[i].rssi_dbm);
-        } else if (event_type == RadioActivity::Event::Interference) {
-            color = lv_color_hex(0xA98BAE);
-            y1 = y_for(snapshot.samples[i].rssi_dbm);
-        } else {
-            line_width = 3;
-        }
+        const auto& sample = snapshot.samples[i];
+        auto draw_marker = [&](RadioActivity::Event event_type, int32_t x_offset,
+                               lv_color_t color, uint8_t line_width,
+                               bool start_at_rssi) {
+            if (!RadioActivity::has_event(sample, event_type)) return;
+            int32_t marker_x = static_cast<int32_t>(x_for(i)) + x_offset;
+            if (marker_x < area.x1) marker_x = area.x1;
+            if (marker_x > area.x2) marker_x = area.x2;
+            const lv_coord_t y1 = start_at_rssi ? y_for(sample.rssi_dbm) : area.y1;
 
-        lv_draw_line_dsc_t dsc;
-        lv_draw_line_dsc_init(&dsc);
-        dsc.color = color;
-        dsc.width = line_width;
-        dsc.opa = LV_OPA_80;
-        lv_point_t points[2] = {{static_cast<lv_coord_t>(x), static_cast<lv_coord_t>(y1)},
-                                {static_cast<lv_coord_t>(x), area.y2}};
-        lv_draw_line(draw_ctx, &dsc, &points[0], &points[1]);
+            lv_draw_line_dsc_t dsc;
+            lv_draw_line_dsc_init(&dsc);
+            dsc.color = color;
+            dsc.width = line_width;
+            dsc.opa = LV_OPA_80;
+            lv_point_t points[2] = {
+                {static_cast<lv_coord_t>(marker_x), y1},
+                {static_cast<lv_coord_t>(marker_x), area.y2},
+            };
+            lv_draw_line(draw_ctx, &dsc, &points[0], &points[1]);
+        };
+
+        draw_marker(RadioActivity::Event::Rx, -1, lv_color_hex(0x55966B), 2, true);
+        draw_marker(RadioActivity::Event::Interference, 0, lv_color_hex(0xA98BAE), 2, true);
+        draw_marker(RadioActivity::Event::Tx, 1, Theme::primaryLight(), 3, false);
     }
 }
 
