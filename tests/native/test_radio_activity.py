@@ -43,7 +43,7 @@ def test_radio_activity_history_native(tmp_path):
 
     result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.strip() == "13 passed, 0 failed"
+    assert result.stdout.strip() == "14 passed, 0 failed"
 
 
 def test_sampler_is_main_loop_owned_bounded_and_instantaneous():
@@ -71,11 +71,14 @@ def test_ui_contract_uses_dedicated_status_child_and_snapshot_only_rendering():
     assert "show_radio_activity" in manager_cpp
     assert "on_back_from_radio_activity" in manager_cpp
     assert "Radio Activity" in screen_cpp
-    assert "LIVE · 7 FPS" in screen_cpp
+    assert "LIVE | 7 FPS" in screen_cpp
     assert "RENDER_INTERVAL_MS = 143" in screen_cpp
     assert "lv_canvas" not in screen_cpp
     assert "lv_chart" not in screen_cpp
     assert "lv_draw_line" in screen_cpp
+    assert " · " not in screen_cpp
+    assert "■" not in screen_cpp
+    assert " | " in screen_cpp
     assert "getRSSI" not in screen_cpp
     assert "SPI" not in screen_cpp
     assert "setFrequency" not in screen_cpp

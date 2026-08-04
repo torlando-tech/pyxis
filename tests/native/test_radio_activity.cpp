@@ -51,12 +51,12 @@ int main() {
     check("accepted sample updates bounded noise estimator", accepted.noise_floor > -120);
 
     History events;
-    events.record(-118, Event::Rx);
     events.mark_event(Event::Tx);
-    events.record(-119);
+    events.record(-118, Event::Rx);
     auto marked = events.snapshot();
-    check("decoded receive metadata is preserved", marked.samples[0].event == Event::Rx);
-    check("pending transmit metadata is attached to next sample", marked.samples[1].event == Event::Tx);
+    check("transmit metadata is recorded immediately", marked.samples[0].event == Event::Tx);
+    check("decoded receive metadata is preserved", marked.samples[1].event == Event::Rx);
+    check("receive does not erase prior transmit marker", marked.count == 2);
     check("channel load counts activity", marked.channel_load_percent == 100);
 
     History clamped;

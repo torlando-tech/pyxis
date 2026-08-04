@@ -48,18 +48,15 @@ public:
     static constexpr int16_t MAX_RSSI_DBM = -20;
 
     void mark_event(Event event) {
-        if (event != Event::Noise) {
-            _pending_event = event;
-        }
+        if (event == Event::Noise) return;
+        const int16_t marker_rssi = _count > 0
+            ? _samples[(_write_index + CAPACITY - 1) % CAPACITY].rssi_dbm
+            : MIN_RSSI_DBM;
+        record(marker_rssi, event);
     }
 
     void record(int16_t rssi_dbm, Event event = Event::Noise) {
         const int16_t rssi = clamp_rssi(rssi_dbm);
-        if (event == Event::Noise && _pending_event != Event::Noise) {
-            event = _pending_event;
-        }
-        _pending_event = Event::Noise;
-
         if (event == Event::Noise && _noise_count >= MIN_BASELINE_SAMPLES &&
             rssi > static_cast<int16_t>(noise_floor() + ACTIVITY_THRESHOLD_DB)) {
             event = Event::Interference;
@@ -134,7 +131,6 @@ private:
     std::size_t _noise_count = 0;
     int32_t _noise_sum = 0;
     uint32_t _next_sequence = 0;
-    Event _pending_event = Event::Noise;
 };
 
 } // namespace RadioActivity

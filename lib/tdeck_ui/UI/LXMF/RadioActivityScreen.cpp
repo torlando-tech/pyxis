@@ -97,7 +97,7 @@ void RadioActivityScreen::create_header() {
     lv_obj_set_style_text_color(title, Theme::textPrimary(), 0);
 
     lv_obj_t* live = lv_label_create(header);
-    lv_label_set_text(live, LV_SYMBOL_BULLET " LIVE · 7 FPS");
+    lv_label_set_text(live, LV_SYMBOL_BULLET " LIVE | 7 FPS");
     lv_obj_align(live, LV_ALIGN_RIGHT_MID, -7, 0);
     lv_obj_set_style_text_font(live, &lv_font_montserrat_8, 0);
     lv_obj_set_style_text_color(live, Theme::success(), 0);
@@ -144,7 +144,8 @@ void RadioActivityScreen::create_graph() {
 
 void RadioActivityScreen::create_footer() {
     lv_obj_t* legend = lv_label_create(_screen);
-    lv_label_set_text(legend, "■ Noise    ■ LoRa RX    ■ Other RF    ■ TX");
+    lv_label_set_text(legend, LV_SYMBOL_BULLET " Noise   " LV_SYMBOL_BULLET
+                      " LoRa RX   " LV_SYMBOL_BULLET " Other RF   " LV_SYMBOL_BULLET " TX");
     lv_obj_set_pos(legend, 9, 198);
     lv_obj_set_style_text_font(legend, &lv_font_montserrat_8, 0);
     lv_obj_set_style_text_color(legend, Theme::textTertiary(), 0);
@@ -185,7 +186,7 @@ void RadioActivityScreen::render(const RadioActivity::Snapshot& snapshot,
     lv_label_set_text(_label_load, text);
 
     if (config.available) {
-        snprintf(text, sizeof(text), "%.3f MHz · BW %.1f kHz · SF%u · CR4/%u · %d dBm",
+        snprintf(text, sizeof(text), "%.3f MHz | BW %.1f kHz | SF%u | CR4/%u | %d dBm",
                  config.frequency_mhz, config.bandwidth_khz,
                  config.spreading_factor, config.coding_rate, config.tx_power_dbm);
     } else {
