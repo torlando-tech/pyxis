@@ -57,6 +57,14 @@ public:
     static constexpr int16_t MIN_RSSI_DBM = -135;
     static constexpr int16_t MAX_RSSI_DBM = -20;
 
+    uint32_t generation() const { return _generation; }
+
+    void reset() {
+        const uint32_t next_generation = _generation + 1;
+        *this = History{};
+        _generation = next_generation;
+    }
+
     void mark_event(Event event) {
         if (event == Event::Noise) return;
         const std::size_t index = event_index(event);
@@ -124,6 +132,8 @@ public:
     }
 
 private:
+    uint32_t _generation = 0;
+
     static std::size_t event_index(Event event) {
         switch (event) {
             case Event::Rx: return 0;

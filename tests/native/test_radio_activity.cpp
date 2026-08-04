@@ -120,6 +120,27 @@ int main() {
           limits.samples[1].rssi_dbm == History::MAX_RSSI_DBM);
     check("channel load is bounded", limits.channel_load_percent <= 100);
 
+    History resettable;
+    resettable.record(-121);
+    resettable.record(-120);
+    resettable.record(-119);
+    resettable.record(-120);
+    resettable.mark_event(Event::Tx);
+    const uint32_t prior_generation = resettable.generation();
+    resettable.reset();
+    auto cleared = resettable.snapshot();
+    check("reset clears samples", cleared.count == 0);
+    check("reset invalidates current RSSI", !cleared.current_rssi_valid);
+    check("reset clears learned noise floor", !cleared.noise_floor_ready);
+    check("reset clears channel load", cleared.channel_load_percent == 0);
+    check("reset advances the current-channel generation",
+          resettable.generation() != prior_generation);
+    resettable.record(-100);
+    auto after_reset = resettable.snapshot();
+    check("reset clears pending events and restarts sequence",
+          after_reset.samples[0].events == 0 &&
+          after_reset.samples[0].sequence == 0);
+
     std::cout << passed << " passed, " << failed << " failed\n";
     return failed == 0 ? 0 : 1;
 }
