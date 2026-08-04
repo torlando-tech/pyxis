@@ -45,7 +45,7 @@ struct AppSettings {
     bool lora_enabled;
     float lora_frequency;     // MHz
     float lora_bandwidth;     // kHz
-    uint8_t lora_sf;          // Spreading factor (7-12)
+    uint8_t lora_sf;          // Spreading factor (5-12)
     uint8_t lora_cr;          // Coding rate (5-8)
     int8_t lora_power;        // TX power dBm (2-22)
     bool auto_enabled;        // Enable AutoInterface (WiFi peer discovery)
