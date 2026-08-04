@@ -183,6 +183,41 @@ void SX1262Interface::start_receive() {
 #endif
 }
 
+void SX1262Interface::sample_radio_activity(uint32_t now_ms) {
+#ifdef ARDUINO
+    if (!_online || _radio == nullptr || _spi_mutex == nullptr) return;
+    if (_transmitting) return;
+    if (now_ms - _last_activity_sample_ms < ACTIVITY_SAMPLE_INTERVAL_MS) return;
+
+    // Sampling is deliberately best-effort: display/SD/radio work always wins.
+    if (xSemaphoreTake(_spi_mutex, 0) != pdTRUE) return;
+    if (_transmitting) {
+        xSemaphoreGive(_spi_mutex);
+        return;
+    }
+    const float instantaneous_rssi = _radio->getRSSI(false);
+    xSemaphoreGive(_spi_mutex);
+
+    _last_activity_sample_ms = now_ms;
+    portENTER_CRITICAL(&_activity_mux);
+    _activity_history.record(static_cast<int16_t>(instantaneous_rssi));
+    portEXIT_CRITICAL(&_activity_mux);
+#else
+    (void)now_ms;
+#endif
+}
+
+RadioActivity::Snapshot SX1262Interface::radio_activity_snapshot() const {
+#ifdef ARDUINO
+    portENTER_CRITICAL(&_activity_mux);
+    RadioActivity::Snapshot result = _activity_history.snapshot();
+    portEXIT_CRITICAL(&_activity_mux);
+    return result;
+#else
+    return _activity_history.snapshot();
+#endif
+}
+
 void SX1262Interface::loop() {
     if (!_online) return;
 
@@ -228,6 +263,10 @@ void SX1262Interface::loop() {
             DEBUG("SX1262Interface: Received " + std::to_string(len) + " bytes, " +
                   "RSSI=" + std::to_string((int)_last_rssi) + " dBm, " +
                   "SNR=" + std::to_string((int)_last_snr) + " dB");
+
+            portENTER_CRITICAL(&_activity_mux);
+            _activity_history.record(static_cast<int16_t>(_last_rssi), RadioActivity::Event::Rx);
+            portEXIT_CRITICAL(&_activity_mux);
 
             on_incoming(payload);
             return;
@@ -289,6 +328,9 @@ bool SX1262Interface::send_outgoing(const Bytes& data) {
 
     if (state == RADIOLIB_ERR_NONE) {
         DEBUG("SX1262Interface: Sent " + std::to_string(len) + " bytes");
+        portENTER_CRITICAL(&_activity_mux);
+        _activity_history.mark_event(RadioActivity::Event::Tx);
+        portEXIT_CRITICAL(&_activity_mux);
         // Perform post-send housekeeping
         InterfaceImpl::handle_outgoing(data);
         return true;

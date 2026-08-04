@@ -96,6 +96,7 @@ UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::Me
       _compose_screen(nullptr),
       _announce_list_screen(nullptr),
       _status_screen(nullptr),
+      _radio_activity_screen(nullptr),
       _qr_screen(nullptr),
       _settings_screen(nullptr),
       _propagation_nodes_screen(nullptr),
@@ -136,6 +137,7 @@ UIManager::~UIManager() {
     if (_compose_screen) delete _compose_screen;
     if (_announce_list_screen) delete _announce_list_screen;
     if (_status_screen) delete _status_screen;
+    if (_radio_activity_screen) delete _radio_activity_screen;
     if (_qr_screen) delete _qr_screen;
     if (_settings_screen) delete _settings_screen;
     if (_propagation_nodes_screen) delete _propagation_nodes_screen;
@@ -156,6 +158,7 @@ bool UIManager::init() {
     _compose_screen = new ComposeScreen();
     _announce_list_screen = new AnnounceListScreen();
     _status_screen = new StatusScreen();
+    _radio_activity_screen = new RadioActivityScreen();
     _qr_screen = new QRScreen();
     _settings_screen = new SettingsScreen();
     _propagation_nodes_screen = new PropagationNodesScreen();
@@ -235,6 +238,14 @@ bool UIManager::init() {
 
     _status_screen->set_share_callback(
         [this]() { on_share_from_status(); }
+    );
+
+    _status_screen->set_radio_activity_callback(
+        [this]() { show_radio_activity(); }
+    );
+
+    _radio_activity_screen->set_back_callback(
+        [this]() { on_back_from_radio_activity(); }
     );
 
     // Set up callbacks for QR screen
@@ -379,6 +390,13 @@ void UIManager::update() {
     if (_current_screen == SCREEN_SETTINGS && _settings_screen) {
         _settings_screen->tick();  // keep the live clock / GPS / system readouts ticking
     }
+    // Snapshot acquisition is deliberately before LVGL_LOCK. The provider only
+    // copies the bounded history; RadioActivityScreen::render owns LVGL work.
+    if (_current_screen == SCREEN_RADIO_ACTIVITY &&
+        _radio_activity_screen && _radio_activity_snapshot_provider) {
+        const RadioActivity::Snapshot snapshot = _radio_activity_snapshot_provider();
+        _radio_activity_screen->render(snapshot, _radio_activity_config, millis());
+    }
     LVGL_LOCK();
 
     // Outgoing starts are initiated here while the recursive LVGL mutex is
@@ -464,6 +482,7 @@ void UIManager::show_conversation_list() {
     _compose_screen->hide();
     _announce_list_screen->hide();
     _status_screen->hide();
+    if (_radio_activity_screen) _radio_activity_screen->hide();
     _settings_screen->hide();
     _propagation_nodes_screen->hide();
     if (_call_screen) _call_screen->hide();
@@ -485,6 +504,7 @@ void UIManager::show_chat(const Bytes& peer_hash) {
     _compose_screen->hide();
     _announce_list_screen->hide();
     _status_screen->hide();
+    if (_radio_activity_screen) _radio_activity_screen->hide();
     _settings_screen->hide();
     _propagation_nodes_screen->hide();
     if (_call_screen) _call_screen->hide();
@@ -502,6 +522,7 @@ void UIManager::show_compose() {
     _chat_screen->hide();
     _announce_list_screen->hide();
     _status_screen->hide();
+    if (_radio_activity_screen) _radio_activity_screen->hide();
     _settings_screen->hide();
     _propagation_nodes_screen->hide();
 
@@ -518,6 +539,7 @@ void UIManager::show_announces() {
     _chat_screen->hide();
     _compose_screen->hide();
     _status_screen->hide();
+    if (_radio_activity_screen) _radio_activity_screen->hide();
     _settings_screen->hide();
     _propagation_nodes_screen->hide();
 
@@ -580,8 +602,32 @@ void UIManager::show_status() {
     _announce_list_screen->hide();
     _settings_screen->hide();
     _propagation_nodes_screen->hide();
+    if (_radio_activity_screen) _radio_activity_screen->hide();
 
     _current_screen = SCREEN_STATUS;
+}
+
+void UIManager::show_radio_activity() {
+    LVGL_LOCK();
+    INFO("Showing Radio Activity screen");
+
+    _conversation_list_screen->hide();
+    _chat_screen->hide();
+    _compose_screen->hide();
+    _announce_list_screen->hide();
+    _status_screen->hide();
+    _settings_screen->hide();
+    _propagation_nodes_screen->hide();
+    if (_call_screen) _call_screen->hide();
+    _radio_activity_screen->show();
+    _current_screen = SCREEN_RADIO_ACTIVITY;
+}
+
+void UIManager::set_radio_activity_source(
+    std::function<RadioActivity::Snapshot()> snapshot_provider,
+    const RadioActivityScreen::RadioConfig& config) {
+    _radio_activity_snapshot_provider = std::move(snapshot_provider);
+    _radio_activity_config = config;
 }
 
 void UIManager::on_conversation_selected(const Bytes& peer_hash) {
@@ -603,6 +649,7 @@ void UIManager::show_settings() {
     _compose_screen->hide();
     _announce_list_screen->hide();
     _status_screen->hide();
+    if (_radio_activity_screen) _radio_activity_screen->hide();
     _propagation_nodes_screen->hide();
 
     _current_screen = SCREEN_SETTINGS;
@@ -641,6 +688,7 @@ void UIManager::show_propagation_nodes() {
     _compose_screen->hide();
     _announce_list_screen->hide();
     _status_screen->hide();
+    if (_radio_activity_screen) _radio_activity_screen->hide();
     _settings_screen->hide();
 
     _current_screen = SCREEN_PROPAGATION_NODES;
@@ -722,9 +770,14 @@ void UIManager::on_back_from_status() {
     show_conversation_list();
 }
 
+void UIManager::on_back_from_radio_activity() {
+    show_status();
+}
+
 void UIManager::on_share_from_status() {
     LVGL_LOCK();
     _status_screen->hide();
+    if (_radio_activity_screen) _radio_activity_screen->hide();
     _qr_screen->show();
     _current_screen = SCREEN_QR;
 }

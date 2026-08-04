@@ -7,6 +7,7 @@
 #include <microReticulum/Bytes.h>
 #include <microReticulum/Type.h>
 #include <microReticulum/Cryptography/Random.h>
+#include "radio_activity/RadioActivityHistory.h"
 
 #ifdef ARDUINO
 #include <RadioLib.h>
@@ -78,6 +79,16 @@ public:
     float get_snr() const { return _last_snr; }
     bool is_transmitting() const { return _transmitting; }
 
+    /**
+     * Take one instantaneous current-channel RSSI sample. This is called by the
+     * application main loop only while the Radio Activity screen is visible.
+     * It never retunes and skips TX, cadence misses, and SPI contention.
+     */
+    void sample_radio_activity(uint32_t now_ms);
+
+    /** Copy the bounded history without touching the radio or SPI bus. */
+    RadioActivity::Snapshot radio_activity_snapshot() const;
+
     virtual std::string toString() const override;
 
 protected:
@@ -98,6 +109,7 @@ private:
     // SPI mutex for shared bus with display
     static SemaphoreHandle_t _spi_mutex;
     static bool _mutex_initialized;
+    mutable portMUX_TYPE _activity_mux = portMUX_INITIALIZER_UNLOCKED;
 #endif
 
     // Configuration
@@ -107,6 +119,9 @@ private:
     bool _transmitting = false;
     float _last_rssi = 0.0f;
     float _last_snr = 0.0f;
+    RadioActivity::History _activity_history;
+    uint32_t _last_activity_sample_ms = 0;
+    static constexpr uint32_t ACTIVITY_SAMPLE_INTERVAL_MS = 100;
 
     // Receive buffer
     RNS::Bytes _rx_buffer;

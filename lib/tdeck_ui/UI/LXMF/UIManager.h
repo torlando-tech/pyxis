@@ -14,6 +14,7 @@
 #include "ComposeScreen.h"
 #include "AnnounceListScreen.h"
 #include "StatusScreen.h"
+#include "RadioActivityScreen.h"
 #include "QRScreen.h"
 #include "SettingsScreen.h"
 #include "PropagationNodesScreen.h"
@@ -120,6 +121,17 @@ public:
      * Show status screen
      */
     void show_status();
+
+    /** Show current-channel activity history from the Status screen. */
+    void show_radio_activity();
+
+    /** True only while sampling/rendering the dedicated activity screen. */
+    bool radio_activity_visible() const { return _current_screen == SCREEN_RADIO_ACTIVITY; }
+
+    /** Install a copied snapshot provider and immutable active RF settings. */
+    void set_radio_activity_source(
+        std::function<RadioActivity::Snapshot()> snapshot_provider,
+        const RadioActivityScreen::RadioConfig& config);
 
     /**
      * Show settings screen
@@ -288,6 +300,7 @@ private:
         SCREEN_COMPOSE,
         SCREEN_ANNOUNCES,
         SCREEN_STATUS,
+        SCREEN_RADIO_ACTIVITY,
         SCREEN_QR,
         SCREEN_SETTINGS,
         SCREEN_PROPAGATION_NODES,
@@ -317,10 +330,13 @@ private:
     ComposeScreen* _compose_screen;
     AnnounceListScreen* _announce_list_screen;
     StatusScreen* _status_screen;
+    RadioActivityScreen* _radio_activity_screen;
     QRScreen* _qr_screen;
     SettingsScreen* _settings_screen;
     PropagationNodesScreen* _propagation_nodes_screen;
     CallScreen* _call_screen;
+    std::function<RadioActivity::Snapshot()> _radio_activity_snapshot_provider;
+    RadioActivityScreen::RadioConfig _radio_activity_config;
 
     ::LXMF::PropagationNodeManager* _propagation_manager;
     RNS::Interface* _ble_interface;
@@ -339,6 +355,7 @@ private:
     void on_back_from_announces();
     void on_back_from_status();
     void on_share_from_status();
+    void on_back_from_radio_activity();
     void on_back_from_qr();
     void on_back_from_settings();
     void on_back_from_propagation_nodes();

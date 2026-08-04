@@ -1298,6 +1298,28 @@ void setup_lxmf() {
     INFO(msg.c_str());
 }
 
+void update_radio_activity_source() {
+    if (!ui_manager) return;
+
+    UI::LXMF::RadioActivityScreen::RadioConfig display_config;
+    if (lora_interface_impl) {
+        const SX1262Config& config = lora_interface_impl->get_config();
+        display_config.frequency_mhz = config.frequency;
+        display_config.bandwidth_khz = config.bandwidth;
+        display_config.spreading_factor = config.spreading_factor;
+        display_config.coding_rate = config.coding_rate;
+        display_config.tx_power_dbm = config.tx_power;
+        display_config.available = lora_interface && lora_interface->online();
+    }
+    ui_manager->set_radio_activity_source(
+        []() {
+            return lora_interface_impl
+                ? lora_interface_impl->radio_activity_snapshot()
+                : RadioActivity::Snapshot{};
+        },
+        display_config);
+}
+
 void setup_ui_manager() {
     INFO("\n=== UI Manager Initialization ===");
 
@@ -1308,6 +1330,7 @@ void setup_ui_manager() {
         ERROR("UI manager initialization failed!");
         while (1) delay(1000);
     }
+    update_radio_activity_source();
 
     // Set initial RNS connection status (check all interfaces)
     {
@@ -1479,6 +1502,7 @@ void setup_ui_manager() {
                 } else {
                     INFO("LoRa interface disabled");
                 }
+                update_radio_activity_source();
             }
 
             // Handle Auto interface changes at runtime
@@ -2744,6 +2768,12 @@ void loop() {
     // Process Reticulum
     LOOP_STEP(4);  // reticulum->loop()
     reticulum->loop();
+
+    // Best-effort instantaneous RSSI sampling is main-loop owned and enabled
+    // only for the dedicated view. The interface skips TX and SPI contention.
+    if (lora_interface_impl && ui_manager && ui_manager->radio_activity_visible()) {
+        lora_interface_impl->sample_radio_activity(millis());
+    }
 
     // Pump TX audio immediately after Reticulum — low-latency path that
     // bypasses LVGL lock and all other loop steps.  No-ops when not in a call.
