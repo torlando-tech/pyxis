@@ -390,12 +390,14 @@ void UIManager::update() {
     if (_current_screen == SCREEN_SETTINGS && _settings_screen) {
         _settings_screen->tick();  // keep the live clock / GPS / system readouts ticking
     }
-    // Snapshot acquisition is deliberately before LVGL_LOCK. The provider only
-    // copies the bounded history; RadioActivityScreen::render owns LVGL work.
+    const uint32_t now = millis();
+    // Snapshot acquisition is deliberately before LVGL_LOCK and is coalesced
+    // to the screen's render cadence. The provider never touches radio or SPI.
     if (_current_screen == SCREEN_RADIO_ACTIVITY &&
-        _radio_activity_screen && _radio_activity_snapshot_provider) {
+        _radio_activity_screen && _radio_activity_snapshot_provider &&
+        _radio_activity_screen->render_due(now)) {
         const RadioActivity::Snapshot snapshot = _radio_activity_snapshot_provider();
-        _radio_activity_screen->render(snapshot, _radio_activity_config, millis());
+        _radio_activity_screen->render(snapshot, _radio_activity_config, now);
     }
     LVGL_LOCK();
 
@@ -440,7 +442,6 @@ void UIManager::update() {
 
     // Update status indicators (WiFi/battery) on conversation list
     static uint32_t last_status_update = 0;
-    uint32_t now = millis();
     if (now - last_status_update > 3000) {  // Update every 3 seconds
         last_status_update = now;
         if (_conversation_list_screen) {

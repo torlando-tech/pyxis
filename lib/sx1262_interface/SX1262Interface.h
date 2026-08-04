@@ -97,6 +97,10 @@ protected:
 private:
     void on_incoming(const RNS::Bytes& data);
     void start_receive();
+#ifdef ARDUINO
+    bool lock_activity(TickType_t timeout_ticks) const;
+    void unlock_activity() const;
+#endif
 
 #ifdef ARDUINO
     // RadioLib objects
@@ -109,7 +113,7 @@ private:
     // SPI mutex for shared bus with display
     static SemaphoreHandle_t _spi_mutex;
     static bool _mutex_initialized;
-    mutable portMUX_TYPE _activity_mux = portMUX_INITIALIZER_UNLOCKED;
+    mutable SemaphoreHandle_t _activity_mutex = nullptr;
 #endif
 
     // Configuration

@@ -24,6 +24,15 @@ void SX1262Interface::set_spi_mutex(SemaphoreHandle_t mutex) {
         DEBUG("SX1262Interface: Using external SPI mutex");
     }
 }
+
+bool SX1262Interface::lock_activity(TickType_t timeout_ticks) const {
+    return _activity_mutex != nullptr &&
+           xSemaphoreTake(_activity_mutex, timeout_ticks) == pdTRUE;
+}
+
+void SX1262Interface::unlock_activity() const {
+    xSemaphoreGive(_activity_mutex);
+}
 #endif
 
 SX1262Interface::SX1262Interface(const char* name) : InterfaceImpl(name) {
@@ -37,10 +46,22 @@ SX1262Interface::SX1262Interface(const char* name) : InterfaceImpl(name) {
         _config.spreading_factor,
         _config.coding_rate
     );
+#ifdef ARDUINO
+    _activity_mutex = xSemaphoreCreateMutex();
+    if (_activity_mutex == nullptr) {
+        ERROR("SX1262Interface: Failed to create activity mutex");
+    }
+#endif
 }
 
 SX1262Interface::~SX1262Interface() {
     stop();
+#ifdef ARDUINO
+    if (_activity_mutex != nullptr) {
+        vSemaphoreDelete(_activity_mutex);
+        _activity_mutex = nullptr;
+    }
+#endif
 }
 
 void SX1262Interface::set_config(const SX1262Config& config) {
@@ -201,14 +222,14 @@ void SX1262Interface::sample_radio_activity(uint32_t now_ms) {
         }
     };
     auto record_gaps = [&](std::size_t count) {
-        portENTER_CRITICAL(&_activity_mux);
+        if (!lock_activity(pdMS_TO_TICKS(2))) return;
         const std::size_t pending_span = _activity_history.pending_bucket_span();
         const std::size_t active_span = pending_span > count ? count : pending_span;
         const std::size_t inactive_count = count - active_span;
         for (std::size_t i = 0; i < count; ++i) {
             _activity_history.record_gap(i >= inactive_count);
         }
-        portEXIT_CRITICAL(&_activity_mux);
+        unlock_activity();
         advance_clock();
     };
 
@@ -230,7 +251,7 @@ void SX1262Interface::sample_radio_activity(uint32_t now_ms) {
     const float instantaneous_rssi = _radio->getRSSI(false);
     xSemaphoreGive(_spi_mutex);
 
-    portENTER_CRITICAL(&_activity_mux);
+    if (!lock_activity(pdMS_TO_TICKS(2))) return;
     const std::size_t pending_span = _activity_history.pending_bucket_span();
     const std::size_t active_span = pending_span > due ? due : pending_span;
     const std::size_t inactive_count = due - active_span;
@@ -238,7 +259,7 @@ void SX1262Interface::sample_radio_activity(uint32_t now_ms) {
         _activity_history.record_gap(i >= inactive_count);
     }
     _activity_history.record(static_cast<int16_t>(instantaneous_rssi));
-    portEXIT_CRITICAL(&_activity_mux);
+    unlock_activity();
     advance_clock();
 #else
     (void)now_ms;
@@ -247,9 +268,9 @@ void SX1262Interface::sample_radio_activity(uint32_t now_ms) {
 
 RadioActivity::Snapshot SX1262Interface::radio_activity_snapshot() const {
 #ifdef ARDUINO
-    portENTER_CRITICAL(&_activity_mux);
+    if (!lock_activity(pdMS_TO_TICKS(2))) return {};
     RadioActivity::Snapshot result = _activity_history.snapshot();
-    portEXIT_CRITICAL(&_activity_mux);
+    unlock_activity();
     return result;
 #else
     return _activity_history.snapshot();
@@ -302,9 +323,12 @@ void SX1262Interface::loop() {
                   "RSSI=" + std::to_string((int)_last_rssi) + " dBm, " +
                   "SNR=" + std::to_string((int)_last_snr) + " dB");
 
-            portENTER_CRITICAL(&_activity_mux);
-            _activity_history.mark_event(RadioActivity::Event::Rx);
-            portEXIT_CRITICAL(&_activity_mux);
+            // SPI is already released. Wait for the bounded history mutex so a
+            // real receive marker cannot be dropped behind a snapshot/catch-up.
+            if (lock_activity(portMAX_DELAY)) {
+                _activity_history.mark_event(RadioActivity::Event::Rx);
+                unlock_activity();
+            }
 
             on_incoming(payload);
             return;
@@ -372,9 +396,12 @@ bool SX1262Interface::send_outgoing(const Bytes& data) {
             (tx_duration_ms + ACTIVITY_SAMPLE_INTERVAL_MS - 1) /
             ACTIVITY_SAMPLE_INTERVAL_MS);
         if (tx_buckets == 0) tx_buckets = 1;
-        portENTER_CRITICAL(&_activity_mux);
-        _activity_history.mark_event(RadioActivity::Event::Tx, tx_buckets);
-        portEXIT_CRITICAL(&_activity_mux);
+        // SPI is already released. Wait for the bounded history mutex so a
+        // completed transmission duration cannot disappear from the timeline.
+        if (lock_activity(portMAX_DELAY)) {
+            _activity_history.mark_event(RadioActivity::Event::Tx, tx_buckets);
+            unlock_activity();
+        }
         // Perform post-send housekeeping
         InterfaceImpl::handle_outgoing(data);
         return true;

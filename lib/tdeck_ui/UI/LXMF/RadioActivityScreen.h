@@ -33,6 +33,7 @@ public:
     void show();
     void hide();
     bool visible() const { return _visible; }
+    bool render_due(uint32_t now_ms) const;
 
 private:
     lv_obj_t* _screen = nullptr;

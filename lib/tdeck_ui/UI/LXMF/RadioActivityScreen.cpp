@@ -143,12 +143,27 @@ void RadioActivityScreen::create_graph() {
 }
 
 void RadioActivityScreen::create_footer() {
-    lv_obj_t* legend = lv_label_create(_screen);
-    lv_label_set_text(legend, LV_SYMBOL_BULLET " Noise   " LV_SYMBOL_BULLET
-                      " LoRa RX   " LV_SYMBOL_BULLET " Other RF   " LV_SYMBOL_BULLET " TX");
-    lv_obj_set_pos(legend, 9, 198);
-    lv_obj_set_style_text_font(legend, &lv_font_montserrat_8, 0);
-    lv_obj_set_style_text_color(legend, Theme::textTertiary(), 0);
+    auto style_legend = [](lv_obj_t* label, int x, lv_color_t color) {
+        lv_obj_set_pos(label, x, 198);
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_8, 0);
+        lv_obj_set_style_text_color(label, color, 0);
+    };
+
+    lv_obj_t* legend_noise = lv_label_create(_screen);
+    lv_label_set_text(legend_noise, LV_SYMBOL_BULLET " Noise");
+    style_legend(legend_noise, 9, lv_color_hex(0x675A70));
+
+    lv_obj_t* legend_rx = lv_label_create(_screen);
+    lv_label_set_text(legend_rx, LV_SYMBOL_BULLET " LoRa RX");
+    style_legend(legend_rx, 72, lv_color_hex(0x55966B));
+
+    lv_obj_t* legend_other = lv_label_create(_screen);
+    lv_label_set_text(legend_other, LV_SYMBOL_BULLET " Other RF");
+    style_legend(legend_other, 155, lv_color_hex(0xA98BAE));
+
+    lv_obj_t* legend_tx = lv_label_create(_screen);
+    lv_label_set_text(legend_tx, LV_SYMBOL_BULLET " TX");
+    style_legend(legend_tx, 264, Theme::primaryLight());
 
     _label_footer = lv_label_create(_screen);
     lv_label_set_text(_label_footer, "Radio unavailable");
@@ -162,17 +177,17 @@ void RadioActivityScreen::create_footer() {
 void RadioActivityScreen::render(const RadioActivity::Snapshot& snapshot,
                                  const RadioConfig& config,
                                  uint32_t now_ms) {
-    if (!_visible || now_ms - _last_render_ms < RENDER_INTERVAL_MS) return;
+    if (!render_due(now_ms)) return;
     _last_render_ms = now_ms;
 
     LVGL_LOCK();
     _draw_snapshot = snapshot;
 
     char text[64];
-    if (snapshot.count > 0) {
+    if (snapshot.current_rssi_valid) {
         snprintf(text, sizeof(text), "%d dBm", snapshot.current_rssi);
     } else {
-        snprintf(text, sizeof(text), "Warming up");
+        snprintf(text, sizeof(text), "-- dBm");
     }
     lv_label_set_text(_label_current, text);
 
@@ -194,6 +209,10 @@ void RadioActivityScreen::render(const RadioActivity::Snapshot& snapshot,
     }
     lv_label_set_text(_label_footer, text);
     lv_obj_invalidate(_chart);
+}
+
+bool RadioActivityScreen::render_due(uint32_t now_ms) const {
+    return _visible && now_ms - _last_render_ms >= RENDER_INTERVAL_MS;
 }
 
 void RadioActivityScreen::show() {

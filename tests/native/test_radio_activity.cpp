@@ -104,6 +104,12 @@ int main() {
     auto unknown = unknown_gap.snapshot();
     check("unknown contention gap advances time without activity",
           unknown.count == 1 && unknown.channel_load_percent == 0);
+    check("newest gap makes current RSSI unavailable", !unknown.current_rssi_valid);
+
+    unknown_gap.record(-101);
+    auto current = unknown_gap.snapshot();
+    check("newest measured bucket makes current RSSI valid", current.current_rssi_valid);
+    check("current RSSI comes from the newest measured bucket", current.current_rssi == -101);
 
     History clamped;
     clamped.record(-200);

@@ -43,7 +43,7 @@ def test_radio_activity_history_native(tmp_path):
 
     result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.strip() == "24 passed, 0 failed"
+    assert result.stdout.strip() == "27 passed, 0 failed"
 
 
 def test_sampler_is_main_loop_owned_bounded_and_instantaneous():
@@ -58,6 +58,9 @@ def test_sampler_is_main_loop_owned_bounded_and_instantaneous():
     assert "record_gap" in sx_cpp
     assert "elapsed / ACTIVITY_SAMPLE_INTERVAL_MS" in sx_cpp
     assert "_last_activity_sample_ms +=" in sx_cpp
+    assert "portENTER_CRITICAL(&_activity_mux)" not in sx_cpp
+    assert "xSemaphoreTake(_activity_mutex" in sx_cpp
+    assert sx_cpp.count("lock_activity(portMAX_DELAY)") == 2
     assert "sample_radio_activity" in main_cpp
     assert "radio_activity_visible()" in main_cpp
     assert "setFrequency" not in sx_cpp
@@ -76,13 +79,21 @@ def test_ui_contract_uses_dedicated_status_child_and_snapshot_only_rendering():
     assert "Radio Activity" in screen_cpp
     assert "LIVE | 7 FPS" in screen_cpp
     assert "RENDER_INTERVAL_MS = 143" in screen_cpp
+    assert "render_due" in screen_cpp
+    assert manager_cpp.index("render_due(now)") < manager_cpp.index("_radio_activity_snapshot_provider()")
     assert "lv_canvas" not in screen_cpp
     assert "lv_chart" not in screen_cpp
     assert "lv_draw_line" in screen_cpp
     assert "rssi_valid" in screen_cpp
+    assert "current_rssi_valid" in screen_cpp
+    assert '"-- dBm"' in screen_cpp
     assert " · " not in screen_cpp
     assert "■" not in screen_cpp
     assert " | " in screen_cpp
     assert "getRSSI" not in screen_cpp
     assert "SPI" not in screen_cpp
     assert "setFrequency" not in screen_cpp
+    assert "legend_noise" in screen_cpp
+    assert "legend_rx" in screen_cpp
+    assert "legend_other" in screen_cpp
+    assert "legend_tx" in screen_cpp

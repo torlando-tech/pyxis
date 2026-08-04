@@ -34,6 +34,7 @@ struct Snapshot {
     std::array<Sample, CAPACITY> samples{};
     std::size_t count = 0;
     int16_t current_rssi = -135;
+    bool current_rssi_valid = false;
     int16_t noise_floor = -135;
     bool noise_floor_ready = false;
     uint8_t channel_load_percent = 0;
@@ -107,14 +108,14 @@ public:
         std::size_t active = 0;
         for (std::size_t i = 0; i < _count; ++i) {
             result.samples[i] = _samples[(oldest + i) % CAPACITY];
-            if (result.samples[i].rssi_valid) {
-                result.current_rssi = result.samples[i].rssi_dbm;
-            }
             if (result.samples[i].events != 0) {
                 ++active;
             }
         }
         if (_count > 0) {
+            const Sample& newest = result.samples[_count - 1];
+            result.current_rssi_valid = newest.rssi_valid;
+            result.current_rssi = newest.rssi_valid ? newest.rssi_dbm : MIN_RSSI_DBM;
             result.channel_load_percent = static_cast<uint8_t>((active * 100U) / _count);
         }
         result.noise_floor_ready = _noise_count >= MIN_BASELINE_SAMPLES;
