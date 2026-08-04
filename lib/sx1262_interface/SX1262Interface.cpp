@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "SX1262Interface.h"
+#include "SX1262Bitrate.h"
 #include <microReticulum/Log.h>
 #include <microReticulum/Utilities/OS.h>
 
@@ -31,11 +32,11 @@ SX1262Interface::SX1262Interface(const char* name) : InterfaceImpl(name) {
     _HW_MTU = HW_MTU;
     _AUTOCONFIGURE_MTU = true;
 
-    // Calculate bitrate from modulation parameters (matching Python RNS formula)
-    // bitrate = sf * ((4.0/cr) / (2^sf / (bw/1000))) * 1000
-    _bitrate = (double)_config.spreading_factor *
-               ((4.0 / _config.coding_rate) /
-                (pow(2, _config.spreading_factor) / (_config.bandwidth / 1000.0))) * 1000.0;
+    _bitrate = calculate_lora_bitrate_bps(
+        _config.bandwidth,
+        _config.spreading_factor,
+        _config.coding_rate
+    );
 }
 
 SX1262Interface::~SX1262Interface() {
@@ -45,10 +46,11 @@ SX1262Interface::~SX1262Interface() {
 void SX1262Interface::set_config(const SX1262Config& config) {
     _config = config;
 
-    // Recalculate bitrate
-    _bitrate = (double)_config.spreading_factor *
-               ((4.0 / _config.coding_rate) /
-                (pow(2, _config.spreading_factor) / (_config.bandwidth / 1000.0))) * 1000.0;
+    _bitrate = calculate_lora_bitrate_bps(
+        _config.bandwidth,
+        _config.spreading_factor,
+        _config.coding_rate
+    );
 }
 
 std::string SX1262Interface::toString() const {
