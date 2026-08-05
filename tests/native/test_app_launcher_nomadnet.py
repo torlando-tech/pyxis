@@ -151,6 +151,16 @@ def test_generated_font_compression_is_enabled_in_lvgl():
     assert "#define LV_USE_FONT_COMPRESSED 1" in config
 
 
+def test_directory_icons_use_lvgl_symbol_font_separately_from_remote_text():
+    screen = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    assert "add_row(LV_SYMBOL" not in screen
+    assert "const char* symbol=nullptr" in screen
+    assert "lv_label_set_text(icon,symbol)" in screen
+    assert "lv_obj_set_style_text_font(icon,&lv_font_montserrat_12,0)" in screen
+    for symbol in ("LV_SYMBOL_DIRECTORY", "LV_SYMBOL_SAVE", "LV_SYMBOL_LIST", "LV_SYMBOL_EDIT"):
+        assert f",{symbol});" in screen
+
+
 def test_nomadnet_latency_and_path_lifecycle_contracts():
     manager_cpp = (INCLUDE / "UIManager.cpp").read_text()
     main_cpp = (ROOT / "src" / "main.cpp").read_text()

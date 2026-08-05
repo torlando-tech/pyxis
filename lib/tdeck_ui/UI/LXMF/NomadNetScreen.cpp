@@ -118,13 +118,20 @@ void NomadNetScreen::render_directory(View view){
     lv_obj_clear_flag(_directory,LV_OBJ_FLAG_HIDDEN);
     for(auto* object:{_address_row,_status,_content,_reload_button,_save_button})lv_obj_add_flag(object,LV_OBJ_FLAG_HIDDEN);
 
-    auto add_row=[&](const std::string& title,const std::string& detail,std::size_t code){
+    auto add_row=[&](const std::string& title,const std::string& detail,std::size_t code,const char* symbol=nullptr){
         lv_obj_t* button=lv_btn_create(_directory);lv_obj_set_size(button,306,35);lv_obj_set_flex_grow(button,0);
         lv_obj_set_style_bg_color(button,Theme::surfaceContainer(),0);lv_obj_set_style_bg_color(button,Theme::primaryPressed(),LV_STATE_FOCUSED);
         lv_obj_set_style_border_width(button,0,0);lv_obj_set_style_radius(button,8,0);lv_obj_set_style_pad_all(button,4,0);
+        lv_coord_t title_x=2;
+        lv_coord_t title_width=286;
+        if(symbol){
+            lv_obj_t* icon=lv_label_create(button);lv_label_set_text(icon,symbol);
+            lv_obj_set_style_text_font(icon,&lv_font_montserrat_12,0);lv_obj_align(icon,LV_ALIGN_TOP_LEFT,2,0);
+            title_x=20;title_width=268;
+        }
         const auto rendered_title=NomadNet::display_text(title);
         lv_obj_t* primary=lv_label_create(button);lv_label_set_text(primary,rendered_title.c_str());lv_label_set_long_mode(primary,LV_LABEL_LONG_DOT);
-        lv_obj_set_width(primary,286);lv_obj_set_style_text_font(primary,&nomadnet_font_12,0);lv_obj_align(primary,LV_ALIGN_TOP_LEFT,2,0);
+        lv_obj_set_width(primary,title_width);lv_obj_set_style_text_font(primary,&nomadnet_font_12,0);lv_obj_align(primary,LV_ALIGN_TOP_LEFT,title_x,0);
         if(!detail.empty()){
             const auto rendered_detail=NomadNet::display_text(detail);
             lv_obj_t* secondary=lv_label_create(button);lv_label_set_text(secondary,rendered_detail.c_str());lv_label_set_long_mode(secondary,LV_LABEL_LONG_DOT);
@@ -136,11 +143,11 @@ void NomadNetScreen::render_directory(View view){
     };
 
     if(view==View::START){
-        add_row(LV_SYMBOL_DIRECTORY "  Heard Nodes","Recently announced NomadNet nodes",1001);
-        add_row(LV_SYMBOL_DIRECTORY "  Saved Nodes","Bookmarked destinations",1002);
-        add_row(LV_SYMBOL_SAVE "  Saved Pages","Bookmarked destination and path",1003);
-        add_row(LV_SYMBOL_LIST "  Recent Pages","Bounded browsing history",1004);
-        add_row(LV_SYMBOL_EDIT "  Enter Address","Advanced destination/path entry",1005);
+        add_row("Heard Nodes","Recently announced NomadNet nodes",1001,LV_SYMBOL_DIRECTORY);
+        add_row("Saved Nodes","Bookmarked destinations",1002,LV_SYMBOL_DIRECTORY);
+        add_row("Saved Pages","Bookmarked destination and path",1003,LV_SYMBOL_SAVE);
+        add_row("Recent Pages","Bounded browsing history",1004,LV_SYMBOL_LIST);
+        add_row("Enter Address","Advanced destination/path entry",1005,LV_SYMBOL_EDIT);
     }else if(view==View::HEARD||view==View::SAVED_NODES){
         for(const auto& node:_library.nodes()){
             if(view==View::SAVED_NODES&&!node.saved)continue;
