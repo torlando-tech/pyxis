@@ -140,6 +140,17 @@ def test_bounded_nomadnet_fonts_match_display_allowlist():
         assert "nomadnet_font_has_codepoint(letter)" in source
 
 
+def test_generated_font_compression_is_enabled_in_lvgl():
+    config = (ROOT / "lib" / "lv_conf.h").read_text()
+    for size in (12, 16):
+        source = (ROOT / "lib" / "tdeck_ui" / "UI" / "Fonts" /
+                  f"nomadnet_font_{size}.c").read_text()
+        assert ".bitmap_format = 1" in source
+        assert "#if !LV_USE_FONT_COMPRESSED" in source
+        assert "#error \"NomadNet fonts require LV_USE_FONT_COMPRESSED=1\"" in source
+    assert "#define LV_USE_FONT_COMPRESSED 1" in config
+
+
 def test_nomadnet_latency_and_path_lifecycle_contracts():
     manager_cpp = (INCLUDE / "UIManager.cpp").read_text()
     main_cpp = (ROOT / "src" / "main.cpp").read_text()

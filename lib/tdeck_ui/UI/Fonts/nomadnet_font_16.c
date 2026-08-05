@@ -13,6 +13,10 @@
 #endif
 #include "NomadNetFontCoverage.h"
 
+#if !LV_USE_FONT_COMPRESSED
+#error "NomadNet fonts require LV_USE_FONT_COMPRESSED=1"
+#endif
+
 #ifndef NOMADNET_FONT_16
 #define NOMADNET_FONT_16 1
 #endif
