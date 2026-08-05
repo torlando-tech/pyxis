@@ -72,6 +72,7 @@ public:
     using ComposeCallback = std::function<void()>;
     using SyncCallback = std::function<void()>;
     using HomeCallback = std::function<void()>;
+    using PeersCallback = std::function<void()>;
 
     /**
      * Create conversation list screen
@@ -130,6 +131,7 @@ public:
      * @param callback Function to call when settings button is pressed
      */
     void set_home_callback(HomeCallback callback);
+    void set_peers_callback(PeersCallback callback) { _peers_callback = std::move(callback); }
 
     /**
      * Show the screen
@@ -193,6 +195,7 @@ private:
     lv_obj_t* _btn_new;
     lv_obj_t* _btn_home;
     lv_obj_t* _btn_compose;
+    lv_obj_t* _btn_peers;
     bool _visible = false;
     lv_obj_t* _label_wifi;
     lv_obj_t* _label_lora;
@@ -223,6 +226,7 @@ private:
     ComposeCallback _compose_callback;
     SyncCallback _sync_callback;
     HomeCallback _home_callback;
+    PeersCallback _peers_callback;
 
     // UI construction
     void create_header();

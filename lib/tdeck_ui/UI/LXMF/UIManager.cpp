@@ -7,7 +7,9 @@
 
 #include <lvgl.h>
 #include <Preferences.h>
+#include <LittleFS.h>
 #include <microReticulum/Log.h>
+#include <microReticulum/Utilities/OS.h>
 #ifdef PYXIS_TEST_HOOKS
 #include "pyxis_test_hooks.h"
 #endif
@@ -37,6 +39,27 @@ namespace UI {
 namespace LXMF {
 
 namespace {
+
+constexpr const char* NOMAD_LIBRARY_DIR = "/nomadnet";
+constexpr const char* NOMAD_LIBRARY_PATH = "/nomadnet/library.pxnn";
+constexpr const char* NOMAD_LIBRARY_TMP = "/nomadnet/library.tmp";
+constexpr const char* NOMAD_LIBRARY_STAGE = "/nomadnet/library.new";
+constexpr const char* NOMAD_LIBRARY_BACKUP = "/nomadnet/library.bak";
+constexpr const char* NOMAD_LIBRARY_OLD = "/nomadnet/library.old";
+
+bool read_nomad_library_file(const char* path, NomadNet::ExternalVector<uint8_t>& bytes) {
+    File file = LittleFS.open(path, "r");
+    if (!file) return false;
+    const std::size_t size = file.size();
+    if (size == 0 || size > NomadNet::Library::MAX_ENCODED_BYTES) {
+        file.close();
+        return false;
+    }
+    bytes.resize(size);
+    const std::size_t read = file.read(bytes.data(), size);
+    file.close();
+    return read == size;
+}
 
 lv_obj_t* storage_error_dialog = nullptr;
 
@@ -160,10 +183,13 @@ UIManager::~UIManager() {
 }
 
 bool UIManager::init() {
-    LVGL_LOCK();
     if (_initialized) {
         return true;
     }
+    // Read the bounded NomadNet index before taking the render lock. A corrupt
+    // primary never replaces the in-memory library; the backup is tried next.
+    nomad_load_library();
+    LVGL_LOCK();
 
     INFO("Initializing UIManager");
 
@@ -188,15 +214,24 @@ bool UIManager::init() {
     _home_screen->set_settings_callback([this]() { show_settings(); });
     _network_screen->set_back_callback([this]() { back(); });
     _network_screen->set_home_callback([this]() { home(); });
-    _network_screen->set_announces_callback([this]() { show_announces(); });
     _network_screen->set_status_callback([this]() { show_status(); });
     _network_screen->set_radio_activity_callback([this]() { show_radio_activity(); });
     _network_screen->set_propagation_nodes_callback([this]() { show_propagation_nodes(); });
-    _nomadnet_screen->set_back_callback([this]() { back(); });
-    _nomadnet_screen->set_home_callback([this]() { home(); });
-    _nomadnet_screen->set_reload_callback([this]() { nomad_reload(); });
-    _nomadnet_screen->set_open_callback([this](const std::string& address) { nomad_open(address); });
-    _nomadnet_screen->set_link_callback([this](const std::string& target) { nomad_open(target); });
+    _nomadnet_screen->set_back_callback([this]() { _nomad_actions.publish(NomadNet::UserActionKind::BACK, {}); });
+    _nomadnet_screen->set_home_callback([this]() { _nomad_actions.publish(NomadNet::UserActionKind::HOME, {}); });
+    _nomadnet_screen->set_reload_callback([this](const std::string& address) {
+        return _nomad_actions.publish(NomadNet::UserActionKind::OPEN, address);
+    });
+    _nomadnet_screen->set_open_callback([this](const std::string& address) {
+        return _nomad_actions.publish(NomadNet::UserActionKind::OPEN, address);
+    });
+    _nomadnet_screen->set_link_callback([this](const std::string& target) {
+        return _nomad_actions.publish(NomadNet::UserActionKind::OPEN, target);
+    });
+    _nomadnet_screen->set_save_callback([this](const std::string& target) {
+        return _nomad_actions.publish(NomadNet::UserActionKind::SAVE, target);
+    });
+    _nomadnet_screen->set_library(_nomad_library);
 
     // Set up callbacks for conversation list screen
     _conversation_list_screen->set_conversation_selected_callback(
@@ -211,6 +246,7 @@ bool UIManager::init() {
         [this]() { on_propagation_sync(); }
     );
     _conversation_list_screen->set_home_callback([this]() { home(); });
+    _conversation_list_screen->set_peers_callback([this]() { show_announces(); });
 
     // Set up callbacks for chat screen
     _chat_screen->set_back_callback(
@@ -412,6 +448,8 @@ void UIManager::update() {
         _settings_screen->tick();  // keep the live clock / GPS / system readouts ticking
     }
     const uint32_t now = millis();
+    nomad_update_user_actions();
+    nomad_update_library();
     nomad_update();
     // Snapshot acquisition is deliberately before LVGL_LOCK and is coalesced
     // to the screen's render cadence. The provider never touches radio or SPI.
@@ -518,6 +556,12 @@ void UIManager::show_network() {
 }
 
 void UIManager::show_nomadnet() {
+    _nomad_history.clear();
+    _nomad_directory_refresh_pending.store(true, std::memory_order_release);
+    {
+        LVGL_LOCK();
+        _nomadnet_screen->show_start();
+    }
     navigate(Route::NOMADNET);
 }
 
@@ -540,7 +584,14 @@ void UIManager::back() {
         nomad_open(_nomad_history.current(), false);
         return;
     }
-    if (_navigation.current() == Route::NOMADNET) nomad_stop_transport();
+    if (_navigation.current() == Route::NOMADNET) {
+        nomad_stop_transport();
+        LVGL_LOCK();
+        if (_nomadnet_screen->handle_library_back()) {
+            _nomad_history.clear();
+            return;
+        }
+    }
     LVGL_LOCK();
     if (!_navigation.back()) return;
     render_route(_navigation.current());
@@ -1097,6 +1148,214 @@ void UIManager::refresh_current_screen() {
 
 // ── NomadNet browser transport ──
 
+bool UIManager::nomad_load_library() {
+    NomadNet::ExternalVector<uint8_t> bytes;
+    NomadNet::Library loaded;
+    if (read_nomad_library_file(NOMAD_LIBRARY_PATH, bytes) &&
+        loaded.decode(bytes.data(), bytes.size())) {
+        _nomad_library = std::move(loaded);
+        return true;
+    }
+    bytes.clear();
+    if (read_nomad_library_file(NOMAD_LIBRARY_BACKUP, bytes) &&
+        loaded.decode(bytes.data(), bytes.size())) {
+        _nomad_library = std::move(loaded);
+        WARNING("Recovered NomadNet library from backup");
+        return true;
+    }
+    bytes.clear();
+    if (read_nomad_library_file(NOMAD_LIBRARY_TMP, bytes) &&
+        loaded.decode(bytes.data(), bytes.size())) {
+        _nomad_library = std::move(loaded);
+        // Primary and backup were already rejected above. Promote the valid
+        // interrupted generation now so the next save never deletes its only
+        // durable copy before writing a replacement.
+        bool promoted = true;
+        if (LittleFS.exists(NOMAD_LIBRARY_PATH)) promoted = LittleFS.remove(NOMAD_LIBRARY_PATH);
+        if (promoted) promoted = LittleFS.rename(NOMAD_LIBRARY_TMP, NOMAD_LIBRARY_PATH);
+        _nomad_library_dirty = !promoted;
+        WARNING(promoted ? "Recovered interrupted NomadNet library write" :
+                           "Using retained NomadNet temp generation; promotion pending");
+        return true;
+    }
+    bytes.clear();
+    if (read_nomad_library_file(NOMAD_LIBRARY_STAGE, bytes) &&
+        loaded.decode(bytes.data(), bytes.size())) {
+        _nomad_library = std::move(loaded);
+        bool promoted = true;
+        if (LittleFS.exists(NOMAD_LIBRARY_PATH)) promoted = LittleFS.remove(NOMAD_LIBRARY_PATH);
+        if (promoted) promoted = LittleFS.rename(NOMAD_LIBRARY_STAGE, NOMAD_LIBRARY_PATH);
+        _nomad_library_dirty = !promoted;
+        WARNING(promoted ? "Recovered staged NomadNet library write" :
+                           "Using retained NomadNet stage generation; promotion pending");
+        return true;
+    }
+    bytes.clear();
+    if (read_nomad_library_file(NOMAD_LIBRARY_OLD, bytes) &&
+        loaded.decode(bytes.data(), bytes.size())) {
+        _nomad_library = std::move(loaded);
+        _nomad_library_dirty = true;
+        WARNING("Recovered NomadNet library from retained generation");
+        return true;
+    }
+    // No file is the normal first-boot state. Never format or remove unrelated
+    // LittleFS content when the index is absent or malformed.
+    return !LittleFS.exists(NOMAD_LIBRARY_PATH) && !LittleFS.exists(NOMAD_LIBRARY_BACKUP);
+}
+
+bool UIManager::nomad_save_library() {
+    const auto bytes = _nomad_library.encode();
+    if (bytes.empty()) return false;
+    if (!LittleFS.exists(NOMAD_LIBRARY_DIR) && !LittleFS.mkdir(NOMAD_LIBRARY_DIR)) return false;
+    const auto file_valid = [](const char* path) {
+        NomadNet::ExternalVector<uint8_t> stored;
+        NomadNet::Library parsed;
+        return read_nomad_library_file(path, stored) && parsed.decode(stored.data(), stored.size());
+    };
+    const bool had_primary = LittleFS.exists(NOMAD_LIBRARY_PATH);
+    const bool had_backup = LittleFS.exists(NOMAD_LIBRARY_BACKUP);
+    const bool primary_valid = file_valid(NOMAD_LIBRARY_PATH);
+    const bool backup_valid = file_valid(NOMAD_LIBRARY_BACKUP);
+    const bool old_valid = file_valid(NOMAD_LIBRARY_OLD);
+    const bool committed_valid = primary_valid || backup_valid || old_valid;
+    const bool temp_valid = file_valid(NOMAD_LIBRARY_TMP);
+    const bool stage_valid = file_valid(NOMAD_LIBRARY_STAGE);
+    // Never overwrite the sole valid recovery generation. Alternate staging
+    // names when an interrupted write is the only durable copy.
+    const char* stage_path = NOMAD_LIBRARY_TMP;
+    if (!committed_valid && temp_valid) stage_path = NOMAD_LIBRARY_STAGE;
+    else if (!committed_valid && stage_valid) stage_path = NOMAD_LIBRARY_TMP;
+
+    if (LittleFS.exists(stage_path) && !LittleFS.remove(stage_path)) return false;
+    File file = LittleFS.open(stage_path, "w");
+    if (!file) return false;
+    const std::size_t written = file.write(bytes.data(), bytes.size());
+    file.flush();
+    file.close();
+    if (written != bytes.size()) { LittleFS.remove(stage_path); return false; }
+
+    NomadNet::ExternalVector<uint8_t> verify_bytes;
+    NomadNet::Library verified;
+    if (!read_nomad_library_file(stage_path, verify_bytes) ||
+        verify_bytes.size() != bytes.size() ||
+        !std::equal(bytes.begin(), bytes.end(), verify_bytes.begin()) ||
+        !verified.decode(verify_bytes.data(), verify_bytes.size())) {
+        LittleFS.remove(stage_path);
+        return false;
+    }
+
+    bool backup_now_valid = backup_valid;
+    if (primary_valid) {
+        // Retain the previous backup as a third generation until the new
+        // primary passes exact read-back. Every interruption point retains at
+        // least one prior generation in primary, backup, or old.
+        if (LittleFS.exists(NOMAD_LIBRARY_OLD) && !LittleFS.remove(NOMAD_LIBRARY_OLD)) return false;
+        if (had_backup && !LittleFS.rename(NOMAD_LIBRARY_BACKUP, NOMAD_LIBRARY_OLD)) return false;
+        if (!LittleFS.rename(NOMAD_LIBRARY_PATH, NOMAD_LIBRARY_BACKUP)) {
+            if (had_backup) LittleFS.rename(NOMAD_LIBRARY_OLD, NOMAD_LIBRARY_BACKUP);
+            return false;
+        }
+        backup_now_valid = true;
+    } else if (had_primary) {
+        // Never rotate a corrupt primary over a potentially valid backup or
+        // retained generation. The validated temp is already durable enough
+        // to promote, so only the known-corrupt primary is discarded.
+        if (!LittleFS.remove(NOMAD_LIBRARY_PATH)) return false;
+    }
+    if (!LittleFS.rename(stage_path, NOMAD_LIBRARY_PATH)) return false;
+    verify_bytes.clear();
+    if (!read_nomad_library_file(NOMAD_LIBRARY_PATH, verify_bytes) ||
+        verify_bytes.size() != bytes.size() ||
+        !std::equal(bytes.begin(), bytes.end(), verify_bytes.begin()) ||
+        !verified.decode(verify_bytes.data(), verify_bytes.size())) {
+        LittleFS.remove(NOMAD_LIBRARY_PATH);
+        return false;
+    }
+    // If recovery came from OLD while backup was corrupt, retain that known
+    // good generation as the backup instead of deleting the last prior copy.
+    if (!backup_now_valid && old_valid && LittleFS.exists(NOMAD_LIBRARY_OLD)) {
+        if (LittleFS.exists(NOMAD_LIBRARY_BACKUP)) LittleFS.remove(NOMAD_LIBRARY_BACKUP);
+        backup_now_valid = LittleFS.rename(NOMAD_LIBRARY_OLD, NOMAD_LIBRARY_BACKUP);
+    }
+    if (backup_now_valid && LittleFS.exists(NOMAD_LIBRARY_OLD)) LittleFS.remove(NOMAD_LIBRARY_OLD);
+    const char* stale_stage = stage_path == NOMAD_LIBRARY_TMP ? NOMAD_LIBRARY_STAGE : NOMAD_LIBRARY_TMP;
+    if (LittleFS.exists(stale_stage)) LittleFS.remove(stale_stage);
+    return true;
+}
+
+void UIManager::nomad_refresh_nodes() {
+    bool changed = false;
+    const auto& destinations = Transport::path_table();
+    for (auto it = destinations.begin(); it != destinations.end(); ++it) {
+        const Bytes& destination_hash = it->first;
+        Identity identity = Identity::recall(destination_hash);
+        if (!identity) continue;
+        if (destination_hash != Destination::hash(identity, "nomadnetwork", "node")) continue;
+        const Bytes app_data = Identity::recall_app_data(destination_hash);
+        const std::string name = app_data
+            ? NomadNet::sanitize_directory_name(app_data.data(), app_data.size()) : std::string{};
+        const auto& entry = it->second;
+        changed = _nomad_library.hear_node(destination_hash.toHex(), name,
+            static_cast<uint64_t>(entry._timestamp), static_cast<uint8_t>(entry._hops)) || changed;
+    }
+    if (!changed) return;
+    _nomad_library_dirty = true;
+    LVGL_LOCK();
+    _nomadnet_screen->set_library(_nomad_library);
+}
+
+void UIManager::nomad_update_library() {
+    const uint32_t now = millis();
+    if (_navigation.current() == Route::NOMADNET &&
+        now - _nomad_last_directory_refresh_ms >= 10000) {
+        _nomad_directory_refresh_pending.store(true, std::memory_order_release);
+    }
+    if (_nomad_directory_refresh_pending.exchange(false, std::memory_order_acq_rel)) {
+        _nomad_last_directory_refresh_ms = now;
+        nomad_refresh_nodes();
+    }
+
+    if (_nomad_library_dirty && now - _nomad_last_library_save_ms >= 5000) {
+        _nomad_last_library_save_ms = now;
+        if (nomad_save_library()) _nomad_library_dirty = false;
+        else WARNING("Could not persist NomadNet library; preserving existing file");
+    }
+}
+
+void UIManager::nomad_update_user_actions() {
+    NomadNet::UserAction action;
+    if (!_nomad_actions.pop(action)) return;
+    const std::string target = action.target();
+    switch (action.kind) {
+        case NomadNet::UserActionKind::OPEN: {
+            {
+                LVGL_LOCK();
+                _nomadnet_screen->begin_navigation(target);
+            }
+            nomad_open(target);
+            break;
+        }
+        case NomadNet::UserActionKind::SAVE: {
+            const bool save = !_nomad_library.page_saved(target);
+            if (!_nomad_library.set_page_saved(target, save)) break;
+            _nomad_library_dirty = true;
+            const bool current_page = !_nomad_url.destination_hex.empty() && _nomad_url.str() == target;
+            LVGL_LOCK();
+            _nomadnet_screen->set_library(_nomad_library);
+            if (current_page) _nomadnet_screen->set_page_saved(save);
+            break;
+        }
+        case NomadNet::UserActionKind::BACK:
+            back();
+            if (_navigation.current() != Route::NOMADNET) _nomad_actions.clear();
+            break;
+        case NomadNet::UserActionKind::HOME:
+            _nomad_actions.clear();
+            home();
+            break;
+    }
+}
+
 void UIManager::nomad_release_request() {
     if (!_nomad_request) return;
     RequestReceipt receipt = _nomad_request;
@@ -1280,11 +1539,26 @@ void UIManager::nomad_update() {
             const auto& bytes = _nomad_response.bytes();
             const NomadNet::Document document = _nomad_parser.parse(
                 reinterpret_cast<const char*>(bytes.data()), bytes.size());
+            if (!(document.malformed && document.blocks.empty())) {
+                std::vector<std::string> heading_runs;
+                for (const auto& block : document.blocks) {
+                    if (block.type != NomadNet::BlockType::HEADING) continue;
+                    for (const auto& run : block.runs) heading_runs.push_back(run.text);
+                    break;
+                }
+                const std::string title = NomadNet::page_title(_nomad_url.path, heading_runs);
+                if (_nomad_library.record_page(_nomad_url.str(), title,
+                        static_cast<uint64_t>(Utilities::OS::time())))
+                    _nomad_library_dirty = true;
+            }
+            const bool page_saved = _nomad_library.page_saved(_nomad_url.str());
             LVGL_LOCK();
             if (document.malformed && document.blocks.empty())
                 _nomadnet_screen->set_status("Page is not valid UTF-8/Micron");
             else {
+                _nomadnet_screen->set_library(_nomad_library);
                 _nomadnet_screen->set_page(document);
+                _nomadnet_screen->set_page_saved(page_saved);
                 _nomadnet_screen->set_status(document.truncated ? "Page loaded (truncated)" : "Page loaded");
             }
             break;

@@ -25,11 +25,11 @@ NetworkScreen::NetworkScreen() {
     lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0); lv_obj_set_style_border_width(content, 0, 0);
     lv_obj_set_style_pad_all(content, 0, 0); lv_obj_set_style_pad_gap(content, 4, 0);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
-    static const char* labels[] = {"Announces", "Status", "Radio Activity", "Propagation Nodes"};
-    static const char* details[] = {"Discovered peers", "Interfaces & storage", "Signal history", "Delivery relays"};
-    static const char* symbols[] = {LV_SYMBOL_BELL, LV_SYMBOL_LIST, LV_SYMBOL_WIFI, LV_SYMBOL_UPLOAD};
-    for (int i = 0; i < 4; ++i) {
-        _buttons[i] = lv_btn_create(content); lv_obj_set_size(_buttons[i], LV_PCT(100), 43);
+    static const char* labels[] = {"Status", "Radio Activity", "Propagation Nodes"};
+    static const char* details[] = {"Interfaces & storage", "Signal history", "Delivery relays"};
+    static const char* symbols[] = {LV_SYMBOL_LIST, LV_SYMBOL_WIFI, LV_SYMBOL_UPLOAD};
+    for (int i = 0; i < 3; ++i) {
+        _buttons[i] = lv_btn_create(content); lv_obj_set_size(_buttons[i], LV_PCT(100), 58);
         lv_obj_set_style_bg_color(_buttons[i], Theme::surfaceContainer(), 0);
         lv_obj_set_style_bg_color(_buttons[i], Theme::primaryPressed(), LV_STATE_FOCUSED);
         lv_obj_set_style_border_width(_buttons[i], 0, 0);
@@ -58,6 +58,6 @@ NetworkScreen::NetworkScreen() {
 NetworkScreen::~NetworkScreen() { if (_screen) lv_obj_del(_screen); }
 void NetworkScreen::show() { lv_obj_clear_flag(_screen, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(_screen); auto* g=LVGL::LVGLInit::get_default_group(); if(g){lv_group_add_obj(g,_back_button);lv_group_add_obj(g,_home_button);for(auto* b:_buttons)lv_group_add_obj(g,b);lv_group_focus_obj(_buttons[0]);}}
 void NetworkScreen::hide() { auto* g=LVGL::LVGLInit::get_default_group(); if(g){lv_group_remove_obj(_back_button);lv_group_remove_obj(_home_button);for(auto* b:_buttons)lv_group_remove_obj(b);} lv_obj_add_flag(_screen, LV_OBJ_FLAG_HIDDEN); }
-void NetworkScreen::clicked(lv_event_t* e) { auto* s=static_cast<NetworkScreen*>(lv_event_get_user_data(e)); auto* t=lv_event_get_target(e); if(t==s->_back_button&&s->_back)s->_back(); else if(t==s->_home_button&&s->_home)s->_home(); else for(int i=0;i<4;++i)if(t==s->_buttons[i]&&s->_callbacks[i])s->_callbacks[i](); }
+void NetworkScreen::clicked(lv_event_t* e) { auto* s=static_cast<NetworkScreen*>(lv_event_get_user_data(e)); auto* t=lv_event_get_target(e); if(t==s->_back_button&&s->_back)s->_back(); else if(t==s->_home_button&&s->_home)s->_home(); else for(int i=0;i<3;++i)if(t==s->_buttons[i]&&s->_callbacks[i])s->_callbacks[i](); }
 }
 #endif

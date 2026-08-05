@@ -5,6 +5,7 @@
 #include "../LVGL/LVGLInit.h"
 #include "../TextAreaHelper.h"
 #include <algorithm>
+#include <cstdio>
 
 namespace UI::LXMF {
 NomadNetScreen::NomadNetScreen() {
@@ -19,7 +20,9 @@ NomadNetScreen::NomadNetScreen() {
     lv_obj_t* title=lv_label_create(header);lv_label_set_text(title,"NomadNet");lv_obj_set_style_text_font(title,&lv_font_montserrat_14,0);lv_obj_center(title);
     _reload_button=lv_btn_create(header);lv_obj_set_size(_reload_button,36,28);lv_obj_align(_reload_button,LV_ALIGN_RIGHT_MID,0,0);
     lv_obj_t* rl=lv_label_create(_reload_button);lv_label_set_text(rl,LV_SYMBOL_REFRESH);lv_obj_center(rl);
-    for(auto* button:{_back_button,_home_button,_reload_button}) {
+    _save_button=lv_btn_create(header);lv_obj_set_size(_save_button,36,28);lv_obj_align(_save_button,LV_ALIGN_RIGHT_MID,-40,0);
+    lv_obj_t* sl=lv_label_create(_save_button);lv_label_set_text(sl,LV_SYMBOL_SAVE);lv_obj_center(sl);
+    for(auto* button:{_back_button,_home_button,_reload_button,_save_button}) {
         lv_obj_set_style_bg_color(button,Theme::surfaceContainer(),0);
         lv_obj_set_style_bg_color(button,Theme::primaryPressed(),LV_STATE_FOCUSED);
         lv_obj_set_style_border_width(button,0,0);
@@ -50,9 +53,14 @@ NomadNetScreen::NomadNetScreen() {
     lv_obj_set_style_bg_color(_content,Theme::surface(),0);lv_obj_set_style_border_width(_content,0,0);lv_obj_set_style_pad_all(_content,8,0);
     lv_obj_set_flex_flow(_content,LV_FLEX_FLOW_COLUMN);lv_obj_set_flex_align(_content,LV_FLEX_ALIGN_START,LV_FLEX_ALIGN_START,LV_FLEX_ALIGN_START);
     lv_obj_set_scroll_dir(_content,LV_DIR_VER);lv_obj_set_scrollbar_mode(_content,LV_SCROLLBAR_MODE_AUTO);
-    for(auto* o:{_back_button,_home_button,_reload_button,_go_button,_edit_button})lv_obj_add_event_cb(o,clicked,LV_EVENT_CLICKED,this);
+    _directory=lv_obj_create(_screen);lv_obj_set_size(_directory,320,206);lv_obj_align(_directory,LV_ALIGN_BOTTOM_MID,0,0);
+    lv_obj_set_style_bg_color(_directory,Theme::surface(),0);lv_obj_set_style_border_width(_directory,0,0);lv_obj_set_style_pad_all(_directory,7,0);
+    lv_obj_set_flex_flow(_directory,LV_FLEX_FLOW_COLUMN);lv_obj_set_flex_align(_directory,LV_FLEX_ALIGN_START,LV_FLEX_ALIGN_START,LV_FLEX_ALIGN_START);
+    lv_obj_set_style_pad_row(_directory,4,0);lv_obj_set_scroll_dir(_directory,LV_DIR_VER);lv_obj_set_scrollbar_mode(_directory,LV_SCROLLBAR_MODE_AUTO);
+    for(auto* o:{_back_button,_home_button,_reload_button,_save_button,_go_button,_edit_button})lv_obj_add_event_cb(o,clicked,LV_EVENT_CLICKED,this);
     lv_obj_add_event_cb(_address,clicked,LV_EVENT_READY,this);
-    set_status("Enter a NomadNet address");hide();
+    lv_obj_add_flag(_save_button,LV_OBJ_FLAG_HIDDEN);
+    set_status("Enter a NomadNet address");show_start();hide();
 }
 NomadNetScreen::~NomadNetScreen(){if(_screen)lv_obj_del(_screen);}
 void NomadNetScreen::set_address(const std::string& value){
@@ -61,6 +69,117 @@ void NomadNetScreen::set_address(const std::string& value){
     lv_label_set_text(_address_summary,summary.c_str());
 }
 std::string NomadNetScreen::address()const{return lv_textarea_get_text(_address);}
+void NomadNetScreen::set_library(const NomadNet::Library& library){
+    _library=library;
+    if(_view!=View::BROWSER)render_directory(_view);
+}
+void NomadNetScreen::set_page_saved(bool saved){
+    lv_obj_set_style_bg_color(_save_button,saved?Theme::primary():Theme::surfaceContainer(),0);
+}
+void NomadNetScreen::clear_document(){
+    auto* group=LVGL::LVGLInit::get_default_group();
+    if(group)for(auto* object:_focusables)lv_group_remove_obj(object);
+    _focusables.clear();
+    _link_targets.clear();
+    lv_obj_clean(_content);
+    _page_loaded=false;
+    set_page_saved(false);
+}
+void NomadNetScreen::begin_navigation(const std::string& target){
+    clear_document();
+    set_address(target);
+    show_browser(false);
+    set_status("Opening NomadNet page...");
+}
+void NomadNetScreen::show_start(){
+    clear_document();
+    render_directory(View::START);
+}
+bool NomadNetScreen::handle_library_back(){
+    if(_view==View::START)return false;
+    show_start();
+    return true;
+}
+void NomadNetScreen::show_browser(bool editing){
+    _view=View::BROWSER;
+    lv_obj_add_flag(_directory,LV_OBJ_FLAG_HIDDEN);
+    for(auto* object:{_address_row,_status,_content,_reload_button})lv_obj_clear_flag(object,LV_OBJ_FLAG_HIDDEN);
+    if(_page_loaded)lv_obj_clear_flag(_save_button,LV_OBJ_FLAG_HIDDEN);else lv_obj_add_flag(_save_button,LV_OBJ_FLAG_HIDDEN);
+    set_address_editing(editing);
+    rebuild_focus();
+}
+void NomadNetScreen::render_directory(View view){
+    auto* group=LVGL::LVGLInit::get_default_group();
+    if(group)for(auto* object:_directory_focusables)lv_group_remove_obj(object);
+    _directory_focusables.clear();_directory_targets.clear();lv_obj_clean(_directory);_view=view;
+    lv_obj_clear_flag(_directory,LV_OBJ_FLAG_HIDDEN);
+    for(auto* object:{_address_row,_status,_content,_reload_button,_save_button})lv_obj_add_flag(object,LV_OBJ_FLAG_HIDDEN);
+
+    auto add_row=[&](const std::string& title,const std::string& detail,std::size_t code){
+        lv_obj_t* button=lv_btn_create(_directory);lv_obj_set_size(button,306,35);lv_obj_set_flex_grow(button,0);
+        lv_obj_set_style_bg_color(button,Theme::surfaceContainer(),0);lv_obj_set_style_bg_color(button,Theme::primaryPressed(),LV_STATE_FOCUSED);
+        lv_obj_set_style_border_width(button,0,0);lv_obj_set_style_radius(button,8,0);lv_obj_set_style_pad_all(button,4,0);
+        lv_obj_t* primary=lv_label_create(button);lv_label_set_text(primary,title.c_str());lv_label_set_long_mode(primary,LV_LABEL_LONG_DOT);
+        lv_obj_set_width(primary,286);lv_obj_set_style_text_font(primary,&lv_font_montserrat_12,0);lv_obj_align(primary,LV_ALIGN_TOP_LEFT,2,0);
+        if(!detail.empty()){
+            lv_obj_t* secondary=lv_label_create(button);lv_label_set_text(secondary,detail.c_str());lv_label_set_long_mode(secondary,LV_LABEL_LONG_DOT);
+            lv_obj_set_width(secondary,286);lv_obj_set_style_text_font(secondary,&lv_font_montserrat_12,0);lv_obj_set_style_text_color(secondary,Theme::textTertiary(),0);
+            lv_obj_align(secondary,LV_ALIGN_BOTTOM_LEFT,2,0);
+        }
+        lv_obj_set_user_data(button,reinterpret_cast<void*>(code));lv_obj_add_event_cb(button,clicked,LV_EVENT_CLICKED,this);
+        _directory_focusables.push_back(button);
+    };
+
+    if(view==View::START){
+        add_row(LV_SYMBOL_DIRECTORY "  Heard Nodes","Recently announced NomadNet nodes",1001);
+        add_row(LV_SYMBOL_DIRECTORY "  Saved Nodes","Bookmarked destinations",1002);
+        add_row(LV_SYMBOL_SAVE "  Saved Pages","Bookmarked destination and path",1003);
+        add_row(LV_SYMBOL_LIST "  Recent Pages","Bounded browsing history",1004);
+        add_row(LV_SYMBOL_EDIT "  Enter Address","Advanced destination/path entry",1005);
+    }else if(view==View::HEARD||view==View::SAVED_NODES){
+        for(const auto& node:_library.nodes()){
+            if(view==View::SAVED_NODES&&!node.saved)continue;
+            const std::string target=node.destination_hex+":/page/index.mu";
+            _directory_targets.push_back(target);
+            char detail[48];
+            std::snprintf(detail,sizeof(detail),"%s / %s",node.hops==0?"Direct":(std::to_string(node.hops)+" hops").c_str(),node.saved?"Saved":"Heard");
+            add_row(node.name.empty()?NomadNet::compact_address(target,28):node.name,detail,2000+_directory_targets.size());
+        }
+    }else{
+        for(const auto& page:_library.pages()){
+            if(view==View::SAVED_PAGES&&!page.saved)continue;
+            _directory_targets.push_back(page.url);
+            const auto colon=page.url.find(':');
+            const std::string path=colon==std::string::npos?page.url:page.url.substr(colon+1);
+            add_row(page.title.empty()?NomadNet::compact_address(page.url,28):page.title,path,2000+_directory_targets.size());
+        }
+    }
+    if(_directory_focusables.empty()){
+        lv_obj_t* empty=lv_label_create(_directory);
+        lv_label_set_text(empty,view==View::HEARD?"No NomadNet nodes heard yet":view==View::SAVED_NODES?"No saved nodes":view==View::SAVED_PAGES?"No saved pages":"No recent pages");
+        lv_obj_set_style_text_color(empty,Theme::textTertiary(),0);lv_obj_set_style_text_font(empty,&lv_font_montserrat_12,0);
+    }
+    rebuild_focus();
+}
+void NomadNetScreen::rebuild_focus(){
+    if(!_visible)return;
+    auto* group=LVGL::LVGLInit::get_default_group();if(!group)return;
+    for(auto* object:{_back_button,_home_button,_reload_button,_save_button,_address,_go_button,_edit_button})lv_group_remove_obj(object);
+    for(auto* object:_focusables)lv_group_remove_obj(object);
+    for(auto* object:_directory_focusables)lv_group_remove_obj(object);
+    lv_group_add_obj(group,_back_button);lv_group_add_obj(group,_home_button);
+    if(_view!=View::BROWSER){
+        for(auto* object:_directory_focusables)lv_group_add_obj(group,object);
+        if(!_directory_focusables.empty())lv_group_focus_obj(_directory_focusables.front());else lv_group_focus_obj(_back_button);
+        return;
+    }
+    lv_group_add_obj(group,_reload_button);
+    if(!lv_obj_has_flag(_save_button,LV_OBJ_FLAG_HIDDEN))lv_group_add_obj(group,_save_button);
+    if(_editing){lv_group_add_obj(group,_address);lv_group_add_obj(group,_go_button);}
+    else lv_group_add_obj(group,_edit_button);
+    for(auto* object:_focusables)lv_group_add_obj(group,object);
+    if(!_editing&&!_focusables.empty())lv_group_focus_obj(_focusables.front());else lv_group_focus_obj(_editing?_address:_edit_button);
+}
 void NomadNetScreen::apply_browser_layout(bool show_status){
     if(_editing){
         lv_obj_set_height(_address_row,38);lv_obj_align(_address_row,LV_ALIGN_TOP_MID,0,34);
@@ -178,7 +297,7 @@ void NomadNetScreen::set_page(const NomadNet::Document& document) {
             lv_obj_set_user_data(button, reinterpret_cast<void*>(_link_targets.size()));
             lv_obj_add_event_cb(button, clicked, LV_EVENT_CLICKED, this);
             _focusables.push_back(button);
-            if (_visible && group) lv_group_add_obj(group, button);
+            if (_visible && _view == View::BROWSER && group) lv_group_add_obj(group, button);
             objects += 2;
         }
     }
@@ -192,25 +311,19 @@ void NomadNetScreen::set_page(const NomadNet::Document& document) {
         lv_obj_set_style_text_color(notice, Theme::warning(), 0);
     }
     _page_loaded=true;
-    set_address_editing(false);
+    show_browser(false);
     if(_visible&&group&&!_focusables.empty())lv_group_focus_obj(_focusables.front());
 }
 void NomadNetScreen::show(){
     _visible=true;lv_obj_clear_flag(_screen,LV_OBJ_FLAG_HIDDEN);lv_obj_move_foreground(_screen);
-    auto* group=LVGL::LVGLInit::get_default_group();
-    if(!group)return;
-    for(auto* object:{_back_button,_home_button,_reload_button})lv_group_add_obj(group,object);
-    if(_editing){lv_group_add_obj(group,_address);lv_group_add_obj(group,_go_button);}
-    else lv_group_add_obj(group,_edit_button);
-    for(auto* object:_focusables)lv_group_add_obj(group,object);
-    if(!_editing&&!_focusables.empty())lv_group_focus_obj(_focusables.front());
-    else lv_group_focus_obj(_editing?_address:_edit_button);
+    rebuild_focus();
 }
 void NomadNetScreen::hide(){
     _visible=false;auto* group=LVGL::LVGLInit::get_default_group();
     if(group){
-        for(auto* object:{_back_button,_home_button,_reload_button,_address,_go_button,_edit_button})lv_group_remove_obj(object);
+        for(auto* object:{_back_button,_home_button,_reload_button,_save_button,_address,_go_button,_edit_button})lv_group_remove_obj(object);
         for(auto* object:_focusables)lv_group_remove_obj(object);
+        for(auto* object:_directory_focusables)lv_group_remove_obj(object);
     }
     lv_obj_add_flag(_screen,LV_OBJ_FLAG_HIDDEN);
 }
@@ -218,12 +331,22 @@ void NomadNetScreen::clicked(lv_event_t* event){
     auto* self=static_cast<NomadNetScreen*>(lv_event_get_user_data(event));auto* target=lv_event_get_target(event);
     if(target==self->_back_button&&self->_back)self->_back();
     else if(target==self->_home_button&&self->_home)self->_home();
-    else if(target==self->_reload_button&&self->_reload)self->_reload();
+    else if(target==self->_reload_button&&self->_reload){const std::string address=self->address();if(self->_reload(address))self->begin_navigation(address);else self->set_status("Browser action queue is busy");}
+    else if(target==self->_save_button&&self->_save){if(!self->_save(self->address()))self->set_status("Browser action queue is busy");}
     else if(target==self->_edit_button){self->set_address_editing(true);self->set_status("Edit destination or page path");}
-    else if((target==self->_go_button||target==self->_address)&&self->_open)self->_open(self->address());
+    else if((target==self->_go_button||target==self->_address)&&self->_open){const std::string address=self->address();if(self->_open(address))self->begin_navigation(address);else self->set_status("Browser action queue is busy");}
     else{
-        const std::size_t index=reinterpret_cast<std::size_t>(lv_obj_get_user_data(target));
-        if(index>0&&index<=self->_link_targets.size()&&self->_link)self->_link(self->_link_targets[index-1]);
+        const std::size_t code=reinterpret_cast<std::size_t>(lv_obj_get_user_data(target));
+        if(code==1001)self->render_directory(View::HEARD);
+        else if(code==1002)self->render_directory(View::SAVED_NODES);
+        else if(code==1003)self->render_directory(View::SAVED_PAGES);
+        else if(code==1004)self->render_directory(View::RECENT);
+        else if(code==1005){self->clear_document();self->show_browser(true);self->set_status("Enter a NomadNet address");}
+        else if(code>2000&&code<=2000+self->_directory_targets.size()){
+            const std::string selected=self->_directory_targets[code-2001];
+            if(self->_open&&self->_open(selected))self->begin_navigation(selected);
+            else self->set_status("Browser action queue is busy");
+        }else if(code>0&&code<=self->_link_targets.size()&&self->_link){const std::string selected=self->_link_targets[code-1];if(self->_link(selected))self->begin_navigation(selected);else self->set_status("Browser action queue is busy");}
     }
 }
 }

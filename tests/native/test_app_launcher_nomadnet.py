@@ -36,6 +36,7 @@ def test_app_launcher_nomadnet_native(tmp_path):
         _cxx(), "-std=c++17", "-Wall", "-Wextra", "-Werror",
         f"-I{INCLUDE}", str(SOURCE),
         str(INCLUDE / "NomadNetDocument.cpp"),
+        str(INCLUDE / "NomadNetLibrary.cpp"),
         str(INCLUDE / "NomadNetUrl.cpp"),
         "-o", str(binary),
     ]
@@ -56,8 +57,14 @@ def test_ui_wiring_contract():
 
     for tile in ("Messages", "NomadNet", "Network", "Settings"):
         assert tile in launcher_cpp
-    for child in ("Announces", "Status", "Radio Activity", "Propagation Nodes"):
+    for child in ("Status", "Radio Activity", "Propagation Nodes"):
         assert child in network_cpp
+    assert "Announces" not in network_cpp
+    assert "set_peers_callback" in manager_cpp
+    assert "_nomad_actions.publish" in manager_cpp
+    assert "nomad_update_user_actions();" in manager_cpp
+    assert "begin_navigation" in browser_cpp
+    assert "clear_document" in browser_cpp
     assert "NavigationStack" in manager_h
     assert "void UIManager::navigate(" in manager_cpp
     assert "void UIManager::back()" in manager_cpp
@@ -77,8 +84,13 @@ def test_ui_wiring_contract():
     assert "lv_font_" in browser_cpp
     for detail in ("Inbox & calls", "Browse Micron", "Links & radio", "Device options"):
         assert detail in launcher_cpp
-    for detail in ("Discovered peers", "Interfaces & storage", "Signal history", "Delivery relays"):
+    for detail in ("Interfaces & storage", "Signal history", "Delivery relays"):
         assert detail in network_cpp
-    assert "set_address_editing(false)" in browser_cpp
+    assert "show_browser(false)" in browser_cpp
     assert "_address_summary" in browser_cpp
     assert "for(auto* button:{_back_button,_home_button})" in network_cpp
+    for section in ("Heard Nodes", "Saved Nodes", "Saved Pages", "Recent Pages", "Enter Address"):
+        assert section in browser_cpp
+    assert "handle_library_back" in browser_cpp
+    assert "set_library" in browser_cpp
+    assert "set_save_callback" in manager_cpp

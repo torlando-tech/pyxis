@@ -18,6 +18,8 @@
 #include "NomadNetProtocol.h"
 #include "NomadNetHistory.h"
 #include "NomadNetMailbox.h"
+#include "NomadNetActionMailbox.h"
+#include "NomadNetLibrary.h"
 #include "ConversationListScreen.h"
 #include "ChatScreen.h"
 #include "ComposeScreen.h"
@@ -354,6 +356,13 @@ private:
     NomadNet::ResponseBuffer _nomad_response;
     NomadNet::PageHistory _nomad_history;
     NomadNet::AsyncMailbox _nomad_mailbox;
+    NomadNet::ActionMailbox _nomad_actions;
+    NomadNet::Library _nomad_library;
+
+    std::atomic<bool> _nomad_directory_refresh_pending{false};
+    bool _nomad_library_dirty = false;
+    uint32_t _nomad_last_library_save_ms = 0;
+    uint32_t _nomad_last_directory_refresh_ms = 0;
     RNS::Bytes _nomad_destination_hash;
     RNS::Link _nomad_link{RNS::Type::NONE};
     RNS::RequestReceipt _nomad_request{RNS::Type::NONE};
@@ -372,6 +381,11 @@ private:
     void nomad_send_request();
     void nomad_release_request();
     void nomad_stop_transport();
+    void nomad_refresh_nodes();
+    bool nomad_load_library();
+    bool nomad_save_library();
+    void nomad_update_library();
+    void nomad_update_user_actions();
     static void on_nomad_link_established(RNS::Link& link);
     static void on_nomad_link_closed(RNS::Link& link);
     static void on_nomad_response(const RNS::RequestReceipt& receipt);

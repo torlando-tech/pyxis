@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -9,6 +10,8 @@
 #include "NomadNetDocument.h"
 #include "NomadNetDisplay.h"
 #include "NomadNetHistory.h"
+#include "NomadNetLibrary.h"
+#include "NomadNetActionMailbox.h"
 #include "NomadNetMailbox.h"
 #include "NomadNetProtocol.h"
 #include "NomadNetUrl.h"
@@ -20,6 +23,12 @@ using UI::LXMF::NomadNet::BlockType;
 using UI::LXMF::NomadNet::DocumentParser;
 using UI::LXMF::NomadNet::compact_address;
 using UI::LXMF::NomadNet::PageHistory;
+using UI::LXMF::NomadNet::Library;
+using UI::LXMF::NomadNet::ActionMailbox;
+using UI::LXMF::NomadNet::UserAction;
+using UI::LXMF::NomadNet::UserActionKind;
+using UI::LXMF::NomadNet::sanitize_directory_name;
+using UI::LXMF::NomadNet::page_title;
 using UI::LXMF::NomadNet::AsyncMailbox;
 using UI::LXMF::NomadNet::ResponseBuffer;
 using UI::LXMF::NomadNet::Url;
@@ -247,6 +256,152 @@ int main(int argc, char** argv) {
               "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:/._- ") == std::string::npos);
     check("compact address remains bounded for long paths",
           compact_address("a8d24177d946de4f1f0a0fe1af9a1338:/page/a-very-long-page-name.mu", 24).size() <= 24);
+
+    Library library;
+    const std::string node_hash = "a8d24177d946de4f1f0a0fe1af9a1338";
+    const std::string page_url = node_hash + ":/page/index.mu";
+    check("heard NomadNet node is retained", library.hear_node(node_hash, "Example Node", 100, 2) &&
+          library.nodes().size() == 1 && library.nodes()[0].name == "Example Node");
+    check("heard node updates in place", library.hear_node(node_hash, "Renamed Node", 200, 1) &&
+          library.nodes().size() == 1 && library.nodes()[0].last_heard == 200);
+    check("page navigation records bounded recent page", library.record_page(page_url, "Home", 300) &&
+          library.pages().size() == 1 && library.pages()[0].title == "Home");
+    check("saving page also saves its node", library.set_page_saved(page_url, true) &&
+          library.pages()[0].saved && library.nodes()[0].saved);
+    Library removal_library;
+    removal_library.hear_node(node_hash, "Remove Me", 1, 0);
+    removal_library.record_page(page_url, "Remove Me", 1);
+    removal_library.set_page_saved(page_url, true);
+    check("removing the last saved page removes its derived saved node",
+          removal_library.set_page_saved(page_url, false) &&
+          !removal_library.page_saved(page_url) && !removal_library.node_saved(node_hash));
+    Library atomic_library;
+    char bounded_hash[33]{};
+    for (std::size_t i = 0; i < Library::MAX_NODES; ++i) {
+        std::snprintf(bounded_hash, sizeof(bounded_hash), "%032zx", i + 1);
+        atomic_library.set_node_saved(bounded_hash, true);
+    }
+    for (std::size_t i = 0; i < Library::MAX_PAGES; ++i) {
+        const std::string recent = std::string(32, '0').replace(31, 1, "1") +
+            ":/page/recent-" + std::to_string(i) + ".mu";
+        atomic_library.record_page(recent, "Recent", i + 1);
+    }
+    const auto before_failed_save = atomic_library.encode();
+    const std::string unretainable_page = std::string(32, 'f') + ":/page/new.mu";
+    check("failed unrecorded page save is atomic",
+          !atomic_library.set_page_saved(unretainable_page, true) &&
+          atomic_library.encode() == before_failed_save);
+    const auto encoded_library = library.encode();
+    Library restored_library;
+    check("NomadNet library round trips", restored_library.decode(encoded_library.data(), encoded_library.size()) &&
+          restored_library.nodes().size() == 1 && restored_library.pages().size() == 1 &&
+          restored_library.pages()[0].saved);
+    const uint8_t corrupt_library[] = {'P', 'X', 'N', 'N', '9', '\n'};
+    check("corrupt NomadNet library fails closed",
+          !restored_library.decode(corrupt_library, sizeof(corrupt_library)) && restored_library.nodes().size() == 1);
+    const std::string invalid_utf8_library = "PXNN1\nN\t" + node_hash + "\tff\t1\t0\t0\n";
+    Library invalid_utf8_decoded;
+    check("persisted invalid UTF-8 metadata is rejected",
+          !invalid_utf8_decoded.decode(reinterpret_cast<const uint8_t*>(invalid_utf8_library.data()),
+                                       invalid_utf8_library.size()));
+    std::string invalid_utf8_url = node_hash + ":/page/";
+    invalid_utf8_url.push_back(static_cast<char>(0xff));
+    invalid_utf8_url += ".mu";
+    Library invalid_url_library;
+    check("invalid UTF-8 page URL is rejected at admission",
+          !invalid_url_library.record_page(invalid_utf8_url, "Invalid", 1) &&
+          !invalid_url_library.set_page_saved(invalid_utf8_url, true));
+    std::string encoded_invalid_url;
+    static constexpr char HEX[] = "0123456789abcdef";
+    for (const unsigned char byte : invalid_utf8_url) {
+        encoded_invalid_url.push_back(HEX[byte >> 4]);
+        encoded_invalid_url.push_back(HEX[byte & 0x0f]);
+    }
+    const std::string invalid_utf8_url_record = "PXNN1\nP\t" + encoded_invalid_url + "\t\t1\t0\n";
+    check("persisted invalid UTF-8 page URL is rejected",
+          !invalid_url_library.decode(reinterpret_cast<const uint8_t*>(invalid_utf8_url_record.data()),
+                                      invalid_utf8_url_record.size()));
+    Library bounded_library;
+    for (std::size_t i = 0; i < Library::MAX_NODES + 8; ++i) {
+        char hash[33];
+        std::snprintf(hash, sizeof(hash), "%032zx", i + 1);
+        bounded_library.hear_node(hash, "node", i, 0);
+    }
+    check("heard-node library is bounded", bounded_library.nodes().size() == Library::MAX_NODES);
+    const std::string pinned_hash = bounded_library.nodes().back().destination_hex;
+    bounded_library.set_node_saved(pinned_hash, true);
+    for (std::size_t i = Library::MAX_NODES + 8; i < Library::MAX_NODES + 20; ++i) {
+        char hash[33];
+        std::snprintf(hash, sizeof(hash), "%032zx", i + 1);
+        bounded_library.hear_node(hash, "new", i, 0);
+    }
+    check("saved node survives heard-node eviction", bounded_library.node_saved(pinned_hash));
+    Library sorted_library;
+    sorted_library.hear_node("11111111111111111111111111111111", "Older", 100, 1);
+    sorted_library.hear_node("22222222222222222222222222222222", "Newer", 200, 1);
+    sorted_library.hear_node("33333333333333333333333333333333", "Oldest arrival", 50, 1);
+    check("heard nodes are newest first", sorted_library.nodes().front().name == "Newer" &&
+          sorted_library.nodes().back().name == "Oldest arrival");
+    const uint8_t unsafe_name[] = {' ', 'N', 'o', 'd', 'e', '\n', 'X', 0xff};
+    check("announce name is bounded and sanitized",
+          sanitize_directory_name(unsafe_name, sizeof(unsafe_name)) == "Node X");
+    check("first heading supplies saved-page title",
+          page_title("/page/index.mu", {"Example ", "Node"}) == "Example Node");
+    check("control characters are rejected in saved URLs",
+          !sorted_library.record_page("11111111111111111111111111111111:/page/bad\n.mu", "bad", 1));
+    const std::string new_saved_url = "33333333333333333333333333333333:/page/saved.mu";
+    sorted_library.record_page("22222222222222222222222222222222:/page/recent.mu", "Recent", 500);
+    check("saving an unrecorded page marks the requested URL",
+          sorted_library.set_page_saved(new_saved_url, true) && sorted_library.page_saved(new_saved_url) &&
+          !sorted_library.page_saved("22222222222222222222222222222222:/page/recent.mu"));
+    Library saturated_library;
+    for (std::size_t i = 0; i < Library::MAX_NODES; ++i) {
+        char hash[33]; std::snprintf(hash, sizeof(hash), "%032zx", i + 1000);
+        saturated_library.hear_node(hash, "saved", i, 0);
+        saturated_library.set_node_saved(hash, true);
+    }
+    const std::string orphan_url = "ffffffffffffffffffffffffffffffff:/page/index.mu";
+    saturated_library.record_page(orphan_url, "Orphan", 10);
+    check("page save fails atomically when its node cannot be retained",
+          !saturated_library.set_page_saved(orphan_url, true) && !saturated_library.page_saved(orphan_url));
+    const uint8_t overlong_utf8[] = {0xe0, 0x80, 0x80};
+    check("overlong UTF-8 is rejected from announce names",
+          sanitize_directory_name(overlong_utf8, sizeof(overlong_utf8)).empty());
+
+    ActionMailbox actions;
+    check("NomadNet open action is accepted", actions.publish(UserActionKind::OPEN, page_url));
+    check("NomadNet save action preserves its own target", actions.publish(UserActionKind::SAVE, new_saved_url));
+    UserAction action;
+    check("NomadNet actions are FIFO", actions.pop(action) && action.kind == UserActionKind::OPEN &&
+          action.target() == page_url);
+    check("save target does not drift with current browser URL", actions.pop(action) &&
+          action.kind == UserActionKind::SAVE && action.target() == new_saved_url);
+    for (std::size_t i = 0; i < ActionMailbox::CAPACITY; ++i)
+        check("bounded NomadNet action queue accepts capacity", actions.publish(UserActionKind::OPEN, page_url));
+    check("bounded NomadNet action queue rejects ordinary overflow",
+          !actions.publish(UserActionKind::OPEN, page_url));
+    check("Home supersedes a full pending action queue",
+          actions.publish(UserActionKind::HOME, {}) && actions.pop(action) &&
+          action.kind == UserActionKind::HOME && !actions.pop(action));
+    actions.publish(UserActionKind::SAVE, new_saved_url);
+    actions.publish(UserActionKind::OPEN, page_url);
+    actions.publish(UserActionKind::BACK, {});
+    check("Back preserves an explicit save but cancels pending opens",
+          actions.pop(action) && action.kind == UserActionKind::SAVE &&
+          actions.pop(action) && action.kind == UserActionKind::BACK && !actions.pop(action));
+    actions.publish(UserActionKind::SAVE, new_saved_url);
+    actions.publish(UserActionKind::SAVE, new_saved_url);
+    actions.publish(UserActionKind::BACK, {});
+    check("duplicate queued save toggles are coalesced",
+          actions.pop(action) && action.kind == UserActionKind::SAVE &&
+          actions.pop(action) && action.kind == UserActionKind::BACK && !actions.pop(action));
+    for (std::size_t i = 0; i < ActionMailbox::CAPACITY; ++i)
+        actions.publish(UserActionKind::SAVE, new_saved_url + std::to_string(i));
+    actions.publish(UserActionKind::BACK, {});
+    std::size_t retained_saves = 0;
+    while (actions.pop(action) && action.kind == UserActionKind::SAVE) ++retained_saves;
+    check("terminal slot preserves every queued explicit save",
+          retained_saves == ActionMailbox::CAPACITY && action.kind == UserActionKind::BACK);
 
     std::cout << passed << " passed, " << failed << " failed\n";
     return failed == 0 ? 0 : 1;

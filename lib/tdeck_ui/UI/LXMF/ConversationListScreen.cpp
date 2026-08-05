@@ -30,7 +30,7 @@ namespace LXMF {
 
 ConversationListScreen::ConversationListScreen(lv_obj_t* parent)
     : _screen(nullptr), _header(nullptr), _list(nullptr), _bottom_nav(nullptr),
-      _btn_new(nullptr), _btn_home(nullptr), _btn_compose(nullptr), _label_wifi(nullptr), _label_lora(nullptr),
+      _btn_new(nullptr), _btn_home(nullptr), _btn_compose(nullptr), _btn_peers(nullptr), _label_wifi(nullptr), _label_lora(nullptr),
       _label_gps(nullptr), _label_ble(nullptr), _battery_container(nullptr),
       _label_battery_icon(nullptr), _label_battery_pct(nullptr),
       _lora_interface(nullptr), _ble_interface(nullptr), _gps(nullptr),
@@ -164,12 +164,13 @@ void ConversationListScreen::create_bottom_nav() {
     lv_obj_set_flex_flow(_bottom_nav, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(_bottom_nav, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    // Messages is a child of the launcher: only Home and Compose belong here.
-    const char* labels[] = {LV_SYMBOL_HOME "  Home", LV_SYMBOL_EDIT "  Compose"};
+    // Application-local actions: LXMF peers stay in Messages rather than the
+    // Network or NomadNet announce directories.
+    const char* labels[] = {LV_SYMBOL_HOME " Home", LV_SYMBOL_BELL " Peers", LV_SYMBOL_EDIT " Compose"};
 
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 3; i++) {
         lv_obj_t* btn = lv_btn_create(_bottom_nav);
-        lv_obj_set_size(btn, 145, 30);
+        lv_obj_set_size(btn, 98, 30);
         lv_obj_set_user_data(btn, (void*)(intptr_t)i);
         lv_obj_set_style_bg_color(btn, Theme::surfaceInput(), 0);
         lv_obj_set_style_bg_color(btn, lv_color_hex(0x3a3a3a), LV_STATE_PRESSED);
@@ -180,6 +181,7 @@ void ConversationListScreen::create_bottom_nav() {
         lv_obj_center(label);
         lv_obj_set_style_text_color(label, Theme::textTertiary(), 0);
         if (i == 0) _btn_home = btn;
+        else if (i == 1) _btn_peers = btn;
         else _btn_compose = btn;
     }
 }
@@ -421,6 +423,7 @@ void ConversationListScreen::show() {
             lv_group_add_obj(group, _btn_new);
         }
         if (_btn_home) lv_group_add_obj(group, _btn_home);
+        if (_btn_peers) lv_group_add_obj(group, _btn_peers);
         if (_btn_compose) lv_group_add_obj(group, _btn_compose);
 
         // Focus first conversation if available, otherwise New button
@@ -447,6 +450,7 @@ void ConversationListScreen::hide() {
             lv_group_remove_obj(_btn_new);
         }
         if (_btn_home) lv_group_remove_obj(_btn_home);
+        if (_btn_peers) lv_group_remove_obj(_btn_peers);
         if (_btn_compose) lv_group_remove_obj(_btn_compose);
     }
 
@@ -672,7 +676,10 @@ void ConversationListScreen::on_bottom_nav_clicked(lv_event_t* event) {
         case 0: // Launcher home
             if (screen->_home_callback) screen->_home_callback();
             break;
-        case 1: // Compose new message
+        case 1: // Heard LXMF peers
+            if (screen->_peers_callback) screen->_peers_callback();
+            break;
+        case 2: // Compose new message
             if (screen->_compose_callback) {
                 screen->_compose_callback();
             }
