@@ -80,6 +80,8 @@ def test_ui_wiring_contract():
     assert "lv_textarea_set_max_length" in browser_cpp
     assert "set_link_callback" in manager_cpp
     assert "_link_targets" in browser_cpp
+    assert "lv_obj_scroll_to_y(_content,0,LV_ANIM_OFF);" in browser_cpp
+    assert "lv_group_focus_obj(_focusables.front())" not in browser_cpp
     assert "LV_SYMBOL_HOME" in browser_cpp
     assert "lv_font_" in browser_cpp
     for detail in ("Inbox & calls", "Browse Micron", "Links & radio", "Device options"):

@@ -178,7 +178,9 @@ void NomadNetScreen::rebuild_focus(){
     if(_editing){lv_group_add_obj(group,_address);lv_group_add_obj(group,_go_button);}
     else lv_group_add_obj(group,_edit_button);
     for(auto* object:_focusables)lv_group_add_obj(group,object);
-    if(!_editing&&!_focusables.empty())lv_group_focus_obj(_focusables.front());else lv_group_focus_obj(_editing?_address:_edit_button);
+    // Keep a newly loaded document at its beginning. Focusing the first link
+    // makes LVGL auto-scroll that link into view, which can hide the heading.
+    lv_group_focus_obj(_editing?_address:_edit_button);
 }
 void NomadNetScreen::apply_browser_layout(bool show_status){
     if(_editing){
@@ -312,7 +314,7 @@ void NomadNetScreen::set_page(const NomadNet::Document& document) {
     }
     _page_loaded=true;
     show_browser(false);
-    if(_visible&&group&&!_focusables.empty())lv_group_focus_obj(_focusables.front());
+    lv_obj_scroll_to_y(_content,0,LV_ANIM_OFF);
 }
 void NomadNetScreen::show(){
     _visible=true;lv_obj_clear_flag(_screen,LV_OBJ_FLAG_HIDDEN);lv_obj_move_foreground(_screen);
