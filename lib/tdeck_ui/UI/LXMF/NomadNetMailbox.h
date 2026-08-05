@@ -24,6 +24,7 @@ public:
 
     void begin(const std::vector<uint8_t>& link_token) {
         Guard guard(_lock);
+        _sealed = false;
         if (_link_token == link_token &&
             (_event.kind == Kind::LINK_ESTABLISHED || _event.kind == Kind::LINK_CLOSED)) return;
         _link_token = link_token;
@@ -33,6 +34,7 @@ public:
 
     void expect_request(const std::vector<uint8_t>& request_token) {
         Guard guard(_lock);
+        _sealed = false;
         if (_request_token == request_token &&
             (_event.kind == Kind::RESPONSE || _event.kind == Kind::FAILED ||
              _event.kind == Kind::OVERSIZED)) return;
@@ -42,6 +44,7 @@ public:
 
     bool publish_link(const std::vector<uint8_t>& token, bool established) {
         Guard guard(_lock);
+        if (_sealed) return false;
         if (token.empty()) return false;
         if (_link_token.empty()) _link_token = token;
         if (token != _link_token) return false;
@@ -60,6 +63,7 @@ public:
     bool publish_response(const std::vector<uint8_t>& token, const uint8_t* data,
                           std::size_t size, std::size_t transfer_size) {
         Guard guard(_lock);
+        if (_sealed) return false;
         if (token.empty()) return false;
         if (_request_token.empty()) _request_token = token;
         if (token != _request_token) return false;
@@ -76,6 +80,7 @@ public:
 
     bool publish_failed(const std::vector<uint8_t>& token) {
         Guard guard(_lock);
+        if (_sealed) return false;
         if (token.empty()) return false;
         if (_request_token.empty()) _request_token = token;
         if (token != _request_token) return false;
@@ -88,6 +93,7 @@ public:
 
     bool publish_progress(const std::vector<uint8_t>& token, std::size_t transfer_size) {
         Guard guard(_lock);
+        if (_sealed) return false;
         if (token.empty()) return false;
         if (_request_token.empty()) _request_token = token;
         if (token != _request_token) return false;
@@ -106,12 +112,31 @@ public:
 
     void clear() {
         Guard guard(_lock);
-        _link_token.clear();
-        _request_token.clear();
-        _event = Event{};
+        reset(false);
+    }
+
+    // Open an explicit pre-arm window before constructing a Link. Some
+    // implementations can call back before begin() receives its token.
+    void prepare() {
+        Guard guard(_lock);
+        reset(false);
+    }
+
+    // Terminal cleanup can synchronously invoke RequestReceipt's failed
+    // callback. Reject all callbacks until the next operation calls prepare().
+    void seal() {
+        Guard guard(_lock);
+        reset(true);
     }
 
 private:
+    void reset(bool sealed) {
+        _link_token.clear();
+        _request_token.clear();
+        _event = Event{};
+        _sealed = sealed;
+    }
+
     class Guard {
     public:
         explicit Guard(std::atomic_flag& lock) : _lock(lock) {
@@ -129,6 +154,7 @@ private:
     }
 
     std::atomic_flag _lock = ATOMIC_FLAG_INIT;
+    bool _sealed = false;
     std::vector<uint8_t> _link_token;
     std::vector<uint8_t> _request_token;
     Event _event;

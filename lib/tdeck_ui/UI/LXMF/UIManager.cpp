@@ -1357,13 +1357,17 @@ void UIManager::nomad_update_user_actions() {
 }
 
 void UIManager::nomad_release_request() {
+    // request_timed_out() is the pinned dependency's only public pending-set
+    // erasure path, and it synchronously invokes the failed callback. Seal the
+    // callback mailbox first so successful terminal state cannot be replaced.
+    _nomad_mailbox.seal();
     if (!_nomad_request) return;
     RequestReceipt receipt = _nomad_request;
     _nomad_request = RequestReceipt(Type::NONE);
     // Pinned 1bbd422 does not erase successful packet receipts or pending
     // receipts on Link close. request_timed_out() is the only public erasure
-    // path; mailbox tokens are cleared by callers before this compatibility
-    // cleanup so its failed callback cannot replace the terminal UI event.
+    // path. The sealed mailbox rejects the synthetic failed callback generated
+    // by this compatibility cleanup.
     if (receipt.get_status() != Type::RequestReceipt::FAILED) {
         receipt.request_timed_out(PacketReceipt(Type::NONE));
     }
@@ -1435,6 +1439,7 @@ void UIManager::nomad_start_link() {
         _nomadnet_screen->set_status("Identity does not match node address");
         return;
     }
+    _nomad_mailbox.prepare();
     _nomad_link = Link(destination, on_nomad_link_established, on_nomad_link_closed);
     _nomad_mailbox.begin(token(_nomad_link.link_id()));
     _nomad_state = NomadState::LINK;
@@ -1452,7 +1457,7 @@ void UIManager::nomad_send_request() {
         on_nomad_progress, 30.0);
     if (!_nomad_request) {
         _nomad_state = NomadState::IDLE;
-        _nomad_mailbox.clear();
+        _nomad_mailbox.seal();
         if (_nomad_link) _nomad_link.teardown();
         _nomad_link = Link(Type::NONE);
         _nomad_request = RequestReceipt(Type::NONE);

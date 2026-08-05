@@ -99,6 +99,14 @@ int main(int argc, char** argv) {
     check("terminal response is not overwritten by a racing link-close callback",
           !mailbox.publish_link(new_link, false));
     check("response event crosses mailbox", mailbox.take(event) && event.kind == AsyncMailbox::Kind::RESPONSE && event.data.size() == sizeof(tiny));
+    mailbox.seal();
+    check("terminal cleanup rejects its synthetic failed callback",
+          !mailbox.publish_failed(new_request));
+    mailbox.prepare();
+    check("next operation still accepts an early link callback",
+          mailbox.publish_link(new_link, true));
+    check("prepared early link event crosses mailbox",
+          mailbox.take(event) && event.kind == AsyncMailbox::Kind::LINK_ESTABLISHED);
     mailbox.expect_request(new_request);
     check("oversized transfer is rejected before payload retention",
           mailbox.publish_progress(new_request, AsyncMailbox::MAX_WIRE_BYTES + 1) && mailbox.take(event) &&
