@@ -7,6 +7,7 @@
 
 #include "NavigationStack.h"
 #include "NomadNetDocument.h"
+#include "NomadNetDisplay.h"
 #include "NomadNetHistory.h"
 #include "NomadNetMailbox.h"
 #include "NomadNetProtocol.h"
@@ -17,6 +18,7 @@ using UI::LXMF::Route;
 using UI::LXMF::NomadNet::Alignment;
 using UI::LXMF::NomadNet::BlockType;
 using UI::LXMF::NomadNet::DocumentParser;
+using UI::LXMF::NomadNet::compact_address;
 using UI::LXMF::NomadNet::PageHistory;
 using UI::LXMF::NomadNet::AsyncMailbox;
 using UI::LXMF::NomadNet::ResponseBuffer;
@@ -235,6 +237,16 @@ int main(int argc, char** argv) {
     check("oversize advertised payload is rejected before retention",
           !UI::LXMF::NomadNet::normalize_response(oversize_advertised, sizeof(oversize_advertised), response) && response.size() == 0);
     check("null and empty responses are rejected", !UI::LXMF::NomadNet::normalize_response(nullptr, 0, response));
+
+    check("compact address preserves short values", compact_address("node:/page/a.mu", 32) == "node:/page/a.mu");
+    check("compact address abbreviates destination but preserves path",
+          compact_address("a8d24177d946de4f1f0a0fe1af9a1338:/page/index.mu", 30) ==
+              "a8d24177...1338 /page/index.mu");
+    check("compact address uses compiled-font-safe ASCII",
+          compact_address("a8d24177d946de4f1f0a0fe1af9a1338:/page/index.mu", 30).find_first_not_of(
+              "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:/._- ") == std::string::npos);
+    check("compact address remains bounded for long paths",
+          compact_address("a8d24177d946de4f1f0a0fe1af9a1338:/page/a-very-long-page-name.mu", 24).size() <= 24);
 
     std::cout << passed << " passed, " << failed << " failed\n";
     return failed == 0 ? 0 : 1;

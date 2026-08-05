@@ -1,6 +1,7 @@
 #include "NomadNetScreen.h"
 #ifdef ARDUINO
 #include "Theme.h"
+#include "NomadNetDisplay.h"
 #include "../LVGL/LVGLInit.h"
 #include "../TextAreaHelper.h"
 #include <algorithm>
@@ -11,34 +12,92 @@ NomadNetScreen::NomadNetScreen() {
     lv_obj_set_style_bg_color(_screen,Theme::surface(),0); lv_obj_set_style_border_width(_screen,0,0); lv_obj_set_style_pad_all(_screen,0,0);
     lv_obj_t* header=lv_obj_create(_screen); lv_obj_set_size(header,LV_PCT(100),34); lv_obj_align(header,LV_ALIGN_TOP_MID,0,0);
     lv_obj_set_style_bg_color(header,Theme::surfaceHeader(),0); lv_obj_set_style_border_width(header,0,0); lv_obj_set_style_pad_all(header,2,0);
-    _back_button=lv_btn_create(header); lv_obj_set_size(_back_button,38,28); lv_obj_align(_back_button,LV_ALIGN_LEFT_MID,0,0);
+    _back_button=lv_btn_create(header); lv_obj_set_size(_back_button,36,28); lv_obj_align(_back_button,LV_ALIGN_LEFT_MID,0,0);
     lv_obj_t* bl=lv_label_create(_back_button);lv_label_set_text(bl,LV_SYMBOL_LEFT);lv_obj_center(bl);
-    _home_button=lv_btn_create(header);lv_obj_set_size(_home_button,38,28);lv_obj_align(_home_button,LV_ALIGN_LEFT_MID,42,0);
+    _home_button=lv_btn_create(header);lv_obj_set_size(_home_button,36,28);lv_obj_align(_home_button,LV_ALIGN_LEFT_MID,40,0);
     lv_obj_t* hl=lv_label_create(_home_button);lv_label_set_text(hl,LV_SYMBOL_HOME);lv_obj_center(hl);
-    lv_obj_t* title=lv_label_create(header);lv_label_set_text(title,"NomadNet");lv_obj_center(title);
-    _reload_button=lv_btn_create(header);lv_obj_set_size(_reload_button,42,28);lv_obj_align(_reload_button,LV_ALIGN_RIGHT_MID,0,0);
+    lv_obj_t* title=lv_label_create(header);lv_label_set_text(title,"NomadNet");lv_obj_set_style_text_font(title,&lv_font_montserrat_14,0);lv_obj_center(title);
+    _reload_button=lv_btn_create(header);lv_obj_set_size(_reload_button,36,28);lv_obj_align(_reload_button,LV_ALIGN_RIGHT_MID,0,0);
     lv_obj_t* rl=lv_label_create(_reload_button);lv_label_set_text(rl,LV_SYMBOL_REFRESH);lv_obj_center(rl);
-    lv_obj_t* address_row=lv_obj_create(_screen);lv_obj_set_size(address_row,LV_PCT(100),38);lv_obj_align(address_row,LV_ALIGN_TOP_MID,0,34);
-    lv_obj_set_style_bg_color(address_row,Theme::surface(),0);lv_obj_set_style_border_width(address_row,0,0);lv_obj_set_style_pad_all(address_row,3,0);
-    _address=lv_textarea_create(address_row);lv_obj_set_size(_address,270,30);lv_obj_align(_address,LV_ALIGN_LEFT_MID,0,0);
-    lv_textarea_set_one_line(_address,true);lv_textarea_set_max_length(_address,511);lv_textarea_set_placeholder_text(_address,"32-hex-destination:/page/path");
-    lv_obj_set_style_text_font(_address,&lv_font_montserrat_12,0);TextAreaHelper::enable_paste(_address);
-    _go_button=lv_btn_create(address_row);lv_obj_set_size(_go_button,42,30);lv_obj_align(_go_button,LV_ALIGN_RIGHT_MID,0,0);
+    for(auto* button:{_back_button,_home_button,_reload_button}) {
+        lv_obj_set_style_bg_color(button,Theme::surfaceContainer(),0);
+        lv_obj_set_style_bg_color(button,Theme::primaryPressed(),LV_STATE_FOCUSED);
+        lv_obj_set_style_border_width(button,0,0);
+        lv_obj_set_style_radius(button,8,0);
+    }
+
+    _address_row=lv_obj_create(_screen);lv_obj_set_size(_address_row,LV_PCT(100),38);lv_obj_align(_address_row,LV_ALIGN_TOP_MID,0,34);
+    lv_obj_set_style_bg_color(_address_row,Theme::surface(),0);lv_obj_set_style_border_width(_address_row,0,0);lv_obj_set_style_pad_all(_address_row,3,0);
+    _address=lv_textarea_create(_address_row);lv_obj_set_size(_address,270,30);lv_obj_align(_address,LV_ALIGN_LEFT_MID,0,0);
+    lv_textarea_set_one_line(_address,true);lv_textarea_set_max_length(_address,511);lv_textarea_set_placeholder_text(_address,"destination:/page/path");
+    lv_obj_set_style_text_font(_address,&lv_font_montserrat_12,0);lv_obj_set_style_bg_color(_address,Theme::surfaceInput(),0);TextAreaHelper::enable_paste(_address);
+    _go_button=lv_btn_create(_address_row);lv_obj_set_size(_go_button,42,30);lv_obj_align(_go_button,LV_ALIGN_RIGHT_MID,0,0);
+    lv_obj_set_style_bg_color(_go_button,Theme::primary(),0);lv_obj_set_style_radius(_go_button,8,0);
     lv_obj_t* gl=lv_label_create(_go_button);lv_label_set_text(gl,"Go");lv_obj_center(gl);
+
+    _address_summary=lv_label_create(_address_row);lv_obj_set_size(_address_summary,266,24);lv_obj_align(_address_summary,LV_ALIGN_LEFT_MID,4,0);
+    lv_label_set_long_mode(_address_summary,LV_LABEL_LONG_DOT);lv_obj_set_style_text_font(_address_summary,&lv_font_montserrat_12,0);
+    lv_obj_set_style_text_color(_address_summary,Theme::textSecondary(),0);
+    _edit_button=lv_btn_create(_address_row);lv_obj_set_size(_edit_button,36,26);lv_obj_align(_edit_button,LV_ALIGN_RIGHT_MID,0,0);
+    lv_obj_set_style_bg_color(_edit_button,Theme::surfaceContainer(),0);lv_obj_set_style_bg_color(_edit_button,Theme::primaryPressed(),LV_STATE_FOCUSED);
+    lv_obj_set_style_border_width(_edit_button,0,0);lv_obj_set_style_radius(_edit_button,8,0);
+    lv_obj_t* edit=lv_label_create(_edit_button);lv_label_set_text(edit,LV_SYMBOL_EDIT);lv_obj_center(edit);
+    lv_obj_add_flag(_address_summary,LV_OBJ_FLAG_HIDDEN);lv_obj_add_flag(_edit_button,LV_OBJ_FLAG_HIDDEN);
+
     _status=lv_label_create(_screen);lv_obj_set_size(_status,312,18);lv_obj_align(_status,LV_ALIGN_TOP_LEFT,4,72);
     lv_obj_set_style_text_font(_status,&lv_font_montserrat_12,0);lv_obj_set_style_text_color(_status,Theme::textTertiary(),0);
     _content=lv_obj_create(_screen);lv_obj_set_size(_content,320,150);lv_obj_align(_content,LV_ALIGN_BOTTOM_MID,0,0);
-    lv_obj_set_style_bg_color(_content,Theme::surface(),0);lv_obj_set_style_border_width(_content,0,0);lv_obj_set_style_pad_all(_content,6,0);
+    lv_obj_set_style_bg_color(_content,Theme::surface(),0);lv_obj_set_style_border_width(_content,0,0);lv_obj_set_style_pad_all(_content,8,0);
     lv_obj_set_flex_flow(_content,LV_FLEX_FLOW_COLUMN);lv_obj_set_flex_align(_content,LV_FLEX_ALIGN_START,LV_FLEX_ALIGN_START,LV_FLEX_ALIGN_START);
     lv_obj_set_scroll_dir(_content,LV_DIR_VER);lv_obj_set_scrollbar_mode(_content,LV_SCROLLBAR_MODE_AUTO);
-    for(auto* o:{_back_button,_home_button,_reload_button,_go_button})lv_obj_add_event_cb(o,clicked,LV_EVENT_CLICKED,this);
+    for(auto* o:{_back_button,_home_button,_reload_button,_go_button,_edit_button})lv_obj_add_event_cb(o,clicked,LV_EVENT_CLICKED,this);
     lv_obj_add_event_cb(_address,clicked,LV_EVENT_READY,this);
     set_status("Enter a NomadNet address");hide();
 }
 NomadNetScreen::~NomadNetScreen(){if(_screen)lv_obj_del(_screen);}
-void NomadNetScreen::set_address(const std::string& value){lv_textarea_set_text(_address,value.c_str());}
+void NomadNetScreen::set_address(const std::string& value){
+    lv_textarea_set_text(_address,value.c_str());
+    const auto summary=NomadNet::compact_address(value);
+    lv_label_set_text(_address_summary,summary.c_str());
+}
 std::string NomadNetScreen::address()const{return lv_textarea_get_text(_address);}
-void NomadNetScreen::set_status(const char* value){lv_label_set_text(_status,value?value:"");}
+void NomadNetScreen::apply_browser_layout(bool show_status){
+    if(_editing){
+        lv_obj_set_height(_address_row,38);lv_obj_align(_address_row,LV_ALIGN_TOP_MID,0,34);
+        lv_obj_align(_status,LV_ALIGN_TOP_LEFT,4,72);
+        lv_obj_set_height(_content,show_status?150:168);
+    }else{
+        lv_obj_set_height(_address_row,30);lv_obj_align(_address_row,LV_ALIGN_TOP_MID,0,34);
+        lv_obj_align(_status,LV_ALIGN_TOP_LEFT,4,64);
+        lv_obj_set_height(_content,show_status?158:176);
+    }
+    if(show_status)lv_obj_clear_flag(_status,LV_OBJ_FLAG_HIDDEN);else lv_obj_add_flag(_status,LV_OBJ_FLAG_HIDDEN);
+    lv_obj_align(_content,LV_ALIGN_BOTTOM_MID,0,0);
+}
+void NomadNetScreen::set_address_editing(bool editing){
+    auto* group=LVGL::LVGLInit::get_default_group();
+    if(_visible&&group){lv_group_remove_obj(_address);lv_group_remove_obj(_go_button);lv_group_remove_obj(_edit_button);}
+    _editing=editing;
+    if(editing){
+        lv_obj_clear_flag(_address,LV_OBJ_FLAG_HIDDEN);lv_obj_clear_flag(_go_button,LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(_address_summary,LV_OBJ_FLAG_HIDDEN);lv_obj_add_flag(_edit_button,LV_OBJ_FLAG_HIDDEN);
+    }else{
+        lv_obj_add_flag(_address,LV_OBJ_FLAG_HIDDEN);lv_obj_add_flag(_go_button,LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(_address_summary,LV_OBJ_FLAG_HIDDEN);lv_obj_clear_flag(_edit_button,LV_OBJ_FLAG_HIDDEN);
+    }
+    const bool show_status=!lv_obj_has_flag(_status,LV_OBJ_FLAG_HIDDEN);
+    apply_browser_layout(show_status);
+    if(_visible&&group){
+        if(editing){lv_group_add_obj(group,_address);lv_group_add_obj(group,_go_button);lv_group_focus_obj(_address);}
+        else{lv_group_add_obj(group,_edit_button);lv_group_focus_obj(_edit_button);}
+    }
+}
+void NomadNetScreen::set_status(const char* value){
+    const std::string status=value?value:"";
+    lv_label_set_text(_status,status.c_str());
+    const bool loaded_ack=_page_loaded&&status.rfind("Page loaded",0)==0;
+    apply_browser_layout(!loaded_ack);
+}
 void NomadNetScreen::set_page(const NomadNet::Document& document) {
     auto* group = LVGL::LVGLInit::get_default_group();
     if (group) for (auto* object : _focusables) lv_group_remove_obj(object);
@@ -132,9 +191,40 @@ void NomadNetScreen::set_page(const NomadNet::Document& document) {
         lv_label_set_text(notice, "Forms, partials, tables and downloads are unsupported in this MVP.");
         lv_obj_set_style_text_color(notice, Theme::warning(), 0);
     }
+    _page_loaded=true;
+    set_address_editing(false);
+    if(_visible&&group&&!_focusables.empty())lv_group_focus_obj(_focusables.front());
 }
-void NomadNetScreen::show(){_visible=true;lv_obj_clear_flag(_screen,LV_OBJ_FLAG_HIDDEN);lv_obj_move_foreground(_screen);auto*g=LVGL::LVGLInit::get_default_group();if(g){for(auto*o:{_back_button,_home_button,_reload_button,_address,_go_button})lv_group_add_obj(g,o);for(auto*o:_focusables)lv_group_add_obj(g,o);lv_group_focus_obj(_address);}}
-void NomadNetScreen::hide(){_visible=false;auto*g=LVGL::LVGLInit::get_default_group();if(g){for(auto*o:{_back_button,_home_button,_reload_button,_address,_go_button})lv_group_remove_obj(o);for(auto*o:_focusables)lv_group_remove_obj(o);}lv_obj_add_flag(_screen,LV_OBJ_FLAG_HIDDEN);}
-void NomadNetScreen::clicked(lv_event_t*e){auto*s=static_cast<NomadNetScreen*>(lv_event_get_user_data(e));auto*t=lv_event_get_target(e);if(t==s->_back_button&&s->_back)s->_back();else if(t==s->_home_button&&s->_home)s->_home();else if(t==s->_reload_button&&s->_reload)s->_reload();else if((t==s->_go_button||t==s->_address)&&s->_open)s->_open(s->address());else{std::size_t n=reinterpret_cast<std::size_t>(lv_obj_get_user_data(t));if(n>0&&n<=s->_link_targets.size()&&s->_link)s->_link(s->_link_targets[n-1]);}}
+void NomadNetScreen::show(){
+    _visible=true;lv_obj_clear_flag(_screen,LV_OBJ_FLAG_HIDDEN);lv_obj_move_foreground(_screen);
+    auto* group=LVGL::LVGLInit::get_default_group();
+    if(!group)return;
+    for(auto* object:{_back_button,_home_button,_reload_button})lv_group_add_obj(group,object);
+    if(_editing){lv_group_add_obj(group,_address);lv_group_add_obj(group,_go_button);}
+    else lv_group_add_obj(group,_edit_button);
+    for(auto* object:_focusables)lv_group_add_obj(group,object);
+    if(!_editing&&!_focusables.empty())lv_group_focus_obj(_focusables.front());
+    else lv_group_focus_obj(_editing?_address:_edit_button);
+}
+void NomadNetScreen::hide(){
+    _visible=false;auto* group=LVGL::LVGLInit::get_default_group();
+    if(group){
+        for(auto* object:{_back_button,_home_button,_reload_button,_address,_go_button,_edit_button})lv_group_remove_obj(object);
+        for(auto* object:_focusables)lv_group_remove_obj(object);
+    }
+    lv_obj_add_flag(_screen,LV_OBJ_FLAG_HIDDEN);
+}
+void NomadNetScreen::clicked(lv_event_t* event){
+    auto* self=static_cast<NomadNetScreen*>(lv_event_get_user_data(event));auto* target=lv_event_get_target(event);
+    if(target==self->_back_button&&self->_back)self->_back();
+    else if(target==self->_home_button&&self->_home)self->_home();
+    else if(target==self->_reload_button&&self->_reload)self->_reload();
+    else if(target==self->_edit_button){self->set_address_editing(true);self->set_status("Edit destination or page path");}
+    else if((target==self->_go_button||target==self->_address)&&self->_open)self->_open(self->address());
+    else{
+        const std::size_t index=reinterpret_cast<std::size_t>(lv_obj_get_user_data(target));
+        if(index>0&&index<=self->_link_targets.size()&&self->_link)self->_link(self->_link_targets[index-1]);
+    }
+}
 }
 #endif

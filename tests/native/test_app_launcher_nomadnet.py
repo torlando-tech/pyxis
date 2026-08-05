@@ -75,3 +75,10 @@ def test_ui_wiring_contract():
     assert "_link_targets" in browser_cpp
     assert "LV_SYMBOL_HOME" in browser_cpp
     assert "lv_font_" in browser_cpp
+    for detail in ("Inbox & calls", "Browse Micron", "Links & radio", "Device options"):
+        assert detail in launcher_cpp
+    for detail in ("Discovered peers", "Interfaces & storage", "Signal history", "Delivery relays"):
+        assert detail in network_cpp
+    assert "set_address_editing(false)" in browser_cpp
+    assert "_address_summary" in browser_cpp
+    assert "for(auto* button:{_back_button,_home_button})" in network_cpp

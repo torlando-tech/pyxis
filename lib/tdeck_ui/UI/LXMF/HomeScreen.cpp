@@ -23,19 +23,39 @@ HomeScreen::HomeScreen() {
     lv_obj_set_style_text_color(title, Theme::textPrimary(), 0);
     lv_obj_set_grid_cell(title, LV_GRID_ALIGN_CENTER, 0, 2, LV_GRID_ALIGN_CENTER, 0, 1);
     static const char* labels[] = {"Messages", "NomadNet", "Network", "Settings"};
+    static const char* details[] = {"Inbox & calls", "Browse Micron", "Links & radio", "Device options"};
+    static const char* symbols[] = {LV_SYMBOL_ENVELOPE, LV_SYMBOL_DIRECTORY, LV_SYMBOL_WIFI, LV_SYMBOL_SETTINGS};
     for (int i = 0; i < 4; ++i) {
         _buttons[i] = lv_btn_create(_screen);
         lv_obj_set_grid_cell(_buttons[i], LV_GRID_ALIGN_STRETCH, i % 2, 1,
                              LV_GRID_ALIGN_STRETCH, 1 + i / 2, 1);
         lv_obj_set_style_bg_color(_buttons[i], Theme::surfaceContainer(), 0);
-        lv_obj_set_style_bg_color(_buttons[i], Theme::surfaceElevated(), LV_STATE_FOCUSED);
-        lv_obj_set_style_border_color(_buttons[i], Theme::info(), LV_STATE_FOCUSED);
-        lv_obj_set_style_border_width(_buttons[i], 2, LV_STATE_FOCUSED);
+        lv_obj_set_style_bg_color(_buttons[i], Theme::primaryPressed(), LV_STATE_FOCUSED);
+        lv_obj_set_style_border_width(_buttons[i], 0, 0);
+        lv_obj_set_style_outline_color(_buttons[i], Theme::primaryLight(), LV_STATE_FOCUSED);
+        lv_obj_set_style_outline_width(_buttons[i], 1, LV_STATE_FOCUSED);
+        lv_obj_set_style_outline_pad(_buttons[i], 1, LV_STATE_FOCUSED);
+        lv_obj_set_style_radius(_buttons[i], 10, 0);
+        lv_obj_set_style_pad_all(_buttons[i], 8, 0);
         lv_obj_add_event_cb(_buttons[i], clicked, LV_EVENT_CLICKED, this);
+
+        lv_obj_t* icon = lv_label_create(_buttons[i]);
+        lv_label_set_text(icon, symbols[i]);
+        lv_obj_set_style_text_font(icon, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(icon, Theme::primaryLight(), 0);
+        lv_obj_align(icon, LV_ALIGN_TOP_LEFT, 0, 0);
+
         lv_obj_t* label = lv_label_create(_buttons[i]);
         lv_label_set_text(label, labels[i]);
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(label, Theme::textPrimary(), 0);
-        lv_obj_center(label);
+        lv_obj_align(label, LV_ALIGN_TOP_LEFT, 0, 24);
+
+        lv_obj_t* detail = lv_label_create(_buttons[i]);
+        lv_label_set_text(detail, details[i]);
+        lv_obj_set_style_text_font(detail, &lv_font_montserrat_8, 0);
+        lv_obj_set_style_text_color(detail, Theme::textTertiary(), 0);
+        lv_obj_align(detail, LV_ALIGN_TOP_LEFT, 0, 44);
     }
     hide();
 }

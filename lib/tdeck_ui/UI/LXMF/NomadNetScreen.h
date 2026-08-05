@@ -27,12 +27,17 @@ private:
     static constexpr std::size_t MAX_UI_OBJECTS = 96;
     static constexpr std::size_t MAX_UI_SPANS = 256;
     lv_obj_t* _screen=nullptr; lv_obj_t* _back_button=nullptr; lv_obj_t* _home_button=nullptr;
-    lv_obj_t* _reload_button=nullptr; lv_obj_t* _address=nullptr; lv_obj_t* _go_button=nullptr;
+    lv_obj_t* _reload_button=nullptr; lv_obj_t* _address_row=nullptr; lv_obj_t* _address=nullptr;
+    lv_obj_t* _go_button=nullptr; lv_obj_t* _address_summary=nullptr; lv_obj_t* _edit_button=nullptr;
     lv_obj_t* _status=nullptr; lv_obj_t* _content=nullptr;
     std::vector<lv_obj_t*> _focusables;
     std::vector<std::string> _link_targets;
     bool _visible = false;
+    bool _editing = true;
+    bool _page_loaded = false;
     Callback _back,_home,_reload; OpenCallback _open; LinkCallback _link;
+    void set_address_editing(bool editing);
+    void apply_browser_layout(bool show_status);
     static void clicked(lv_event_t* event);
 };
 }
