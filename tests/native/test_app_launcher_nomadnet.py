@@ -96,3 +96,28 @@ def test_ui_wiring_contract():
     assert "handle_library_back" in browser_cpp
     assert "set_library" in browser_cpp
     assert "set_save_callback" in manager_cpp
+
+
+def test_nomadnet_latency_and_path_lifecycle_contracts():
+    manager_cpp = (INCLUDE / "UIManager.cpp").read_text()
+    main_cpp = (ROOT / "src" / "main.cpp").read_text()
+    screen_h = (INCLUDE / "NomadNetScreen.h").read_text()
+
+    # User actions must be serviced before the known 5-15 second persistence
+    # boundary, otherwise Back/Open remains frozen behind flash erase/GC.
+    assert main_cpp.index("ui_manager->update();") < main_cpp.index("reticulum->should_persist_data();")
+
+    refresh = manager_cpp[manager_cpp.index("void UIManager::nomad_refresh_nodes()"):
+                          manager_cpp.index("void UIManager::nomad_update_library()")]
+    assert refresh.index("Transport::has_path(destination_hash)") < refresh.index("Identity::recall(destination_hash)")
+
+    # Browser rendering must not trigger the expensive path-table/library poll.
+    assert "directory_visible() const" in screen_h
+    assert "std::atomic<bool> _directory_visible" in screen_h
+    update_library = manager_cpp[manager_cpp.index("void UIManager::nomad_update_library()"):
+                                 manager_cpp.index("void UIManager::nomad_update_user_actions()")]
+    assert "directory_visible()" in update_library
+
+    back = manager_cpp[manager_cpp.index("void UIManager::back()"):
+                       manager_cpp.index("void UIManager::home()")]
+    assert back.index("handle_library_back()") < back.index("nomad_stop_transport();")

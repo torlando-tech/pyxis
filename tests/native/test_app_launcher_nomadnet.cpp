@@ -14,6 +14,7 @@
 #include "NomadNetActionMailbox.h"
 #include "NomadNetMailbox.h"
 #include "NomadNetProtocol.h"
+#include "NomadNetRequestPolicy.h"
 #include "NomadNetUrl.h"
 
 using UI::LXMF::NavigationStack;
@@ -31,6 +32,7 @@ using UI::LXMF::NomadNet::sanitize_directory_name;
 using UI::LXMF::NomadNet::page_title;
 using UI::LXMF::NomadNet::AsyncMailbox;
 using UI::LXMF::NomadNet::ResponseBuffer;
+using UI::LXMF::NomadNet::RequestPolicy;
 using UI::LXMF::NomadNet::Url;
 
 int main(int argc, char** argv) {
@@ -344,6 +346,14 @@ int main(int argc, char** argv) {
         bounded_library.hear_node(hash, "new", i, 0);
     }
     check("saved node survives heard-node eviction", bounded_library.node_saved(pinned_hash));
+    Library live_library;
+    live_library.hear_node("11111111111111111111111111111111", "Stale", 100, 1);
+    live_library.hear_node("22222222222222222222222222222222", "Saved", 100, 1);
+    live_library.set_node_saved("22222222222222222222222222222222", true);
+    check("unroutable heard node can be pruned without deleting saved nodes",
+          live_library.remove_heard_node("11111111111111111111111111111111") &&
+          !live_library.remove_heard_node("22222222222222222222222222222222") &&
+          live_library.nodes().size() == 1 && live_library.nodes()[0].saved);
     Library sorted_library;
     sorted_library.hear_node("11111111111111111111111111111111", "Older", 100, 1);
     sorted_library.hear_node("22222222222222222222222222222222", "Newer", 200, 1);
@@ -410,6 +420,22 @@ int main(int argc, char** argv) {
     while (actions.pop(action) && action.kind == UserActionKind::SAVE) ++retained_saves;
     check("terminal slot preserves every queued explicit save",
           retained_saves == ActionMailbox::CAPACITY && action.kind == UserActionKind::BACK);
+
+    RequestPolicy request_policy;
+    check("path discovery deadline does not undercut transport timeout",
+          RequestPolicy::PATH_WAIT_MS >= 15000);
+    check("first Link timeout performs one bounded fresh-path retry",
+          request_policy.on_link_timeout() == RequestPolicy::LinkTimeoutAction::REFRESH_PATH &&
+          request_policy.path_refreshes() == 1);
+    check("second Link timeout terminates instead of looping forever",
+          request_policy.on_link_timeout() == RequestPolicy::LinkTimeoutAction::FAIL &&
+          request_policy.path_refreshes() == 1);
+    check("fresh-path retry rejects failed stale-route invalidation",
+          !RequestPolicy::path_invalidation_succeeded(true) &&
+          RequestPolicy::path_invalidation_succeeded(false));
+    request_policy.reset();
+    check("new page navigation resets the bounded retry budget",
+          request_policy.path_refreshes() == 0);
 
     std::cout << passed << " passed, " << failed << " failed\n";
     return failed == 0 ? 0 : 1;

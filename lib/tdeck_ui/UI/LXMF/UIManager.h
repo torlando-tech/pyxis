@@ -18,6 +18,7 @@
 #include "NomadNetProtocol.h"
 #include "NomadNetHistory.h"
 #include "NomadNetMailbox.h"
+#include "NomadNetRequestPolicy.h"
 #include "NomadNetActionMailbox.h"
 #include "NomadNetLibrary.h"
 #include "ConversationListScreen.h"
@@ -358,6 +359,7 @@ private:
     NomadNet::AsyncMailbox _nomad_mailbox;
     NomadNet::ActionMailbox _nomad_actions;
     NomadNet::Library _nomad_library;
+    NomadNet::RequestPolicy _nomad_request_policy;
 
     std::atomic<bool> _nomad_directory_refresh_pending{false};
     bool _nomad_library_dirty = false;
@@ -381,6 +383,7 @@ private:
     void nomad_send_request();
     void nomad_release_request();
     void nomad_stop_transport();
+    bool nomad_refresh_path_after_link_failure();
     void nomad_refresh_nodes();
     bool nomad_load_library();
     bool nomad_save_library();

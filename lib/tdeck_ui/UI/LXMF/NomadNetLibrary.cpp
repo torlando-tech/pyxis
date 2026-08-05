@@ -264,6 +264,17 @@ bool Library::set_page_saved(const std::string& url, bool saved) {
     return false;
 }
 
+bool Library::remove_heard_node(const std::string& destination_hex) {
+    if (!is_hex32(destination_hex)) return false;
+    const std::string normalized = lower_hex(destination_hex);
+    const auto found = std::find_if(_nodes.begin(), _nodes.end(), [&](const NodeRecord& node) {
+        return node.destination_hex == normalized;
+    });
+    if (found == _nodes.end() || found->saved) return false;
+    _nodes.erase(found);
+    return true;
+}
+
 bool Library::node_saved(const std::string& destination_hex) const {
     if (!is_hex32(destination_hex)) return false;
     const std::string normalized = lower_hex(destination_hex);

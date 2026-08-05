@@ -50,6 +50,7 @@ public:
     bool record_page(const std::string& url, const std::string& title, uint64_t timestamp);
     bool set_node_saved(const std::string& destination_hex, bool saved);
     bool set_page_saved(const std::string& url, bool saved);
+    bool remove_heard_node(const std::string& destination_hex);
     bool node_saved(const std::string& destination_hex) const;
     bool page_saved(const std::string& url) const;
 

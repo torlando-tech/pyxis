@@ -1,5 +1,6 @@
 #pragma once
 #ifdef ARDUINO
+#include <atomic>
 #include <functional>
 #include <string>
 #include <vector>
@@ -30,6 +31,7 @@ public:
     void begin_navigation(const std::string& target);
     void show_start();
     bool handle_library_back();
+    bool directory_visible() const { return _directory_visible.load(std::memory_order_acquire); }
     void show(); void hide();
 private:
     static constexpr std::size_t MAX_UI_OBJECTS = 96;
@@ -46,6 +48,7 @@ private:
     NomadNet::Library _library;
     enum class View { START, HEARD, SAVED_NODES, SAVED_PAGES, RECENT, BROWSER };
     View _view = View::START;
+    std::atomic<bool> _directory_visible{true};
     bool _visible = false;
     bool _editing = true;
     bool _page_loaded = false;

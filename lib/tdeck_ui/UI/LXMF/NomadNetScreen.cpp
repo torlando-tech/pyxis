@@ -102,6 +102,7 @@ bool NomadNetScreen::handle_library_back(){
 }
 void NomadNetScreen::show_browser(bool editing){
     _view=View::BROWSER;
+    _directory_visible.store(false,std::memory_order_release);
     lv_obj_add_flag(_directory,LV_OBJ_FLAG_HIDDEN);
     for(auto* object:{_address_row,_status,_content,_reload_button})lv_obj_clear_flag(object,LV_OBJ_FLAG_HIDDEN);
     if(_page_loaded)lv_obj_clear_flag(_save_button,LV_OBJ_FLAG_HIDDEN);else lv_obj_add_flag(_save_button,LV_OBJ_FLAG_HIDDEN);
@@ -112,6 +113,7 @@ void NomadNetScreen::render_directory(View view){
     auto* group=LVGL::LVGLInit::get_default_group();
     if(group)for(auto* object:_directory_focusables)lv_group_remove_obj(object);
     _directory_focusables.clear();_directory_targets.clear();lv_obj_clean(_directory);_view=view;
+    _directory_visible.store(true,std::memory_order_release);
     lv_obj_clear_flag(_directory,LV_OBJ_FLAG_HIDDEN);
     for(auto* object:{_address_row,_status,_content,_reload_button,_save_button})lv_obj_add_flag(object,LV_OBJ_FLAG_HIDDEN);
 

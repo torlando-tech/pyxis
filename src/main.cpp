@@ -2783,6 +2783,14 @@ void loop() {
         ui_manager->pump_call_tx();
     }
 
+    // Service UI-owned actions immediately after transport polling. In
+    // particular, NomadNet Back/Open must render before the periodic
+    // persistence boundary below, which can spend 5-15 seconds in flash GC.
+    LOOP_STEP(5);  // UI manager update
+    if (ui_manager) {
+        ui_manager->update();
+    }
+
     // Periodically persist identity/transport data (display names, paths, etc.)
     // NOTE: Persistence writes 40-50 entries via microStore (which routes
     // through the new microStore::FileSystem to SPIFFS or whichever backend
@@ -2798,12 +2806,12 @@ void loop() {
     // dropped here. (If we observe excessive lost-known-destinations after
     // crashes, revisit microStore's flush cadence rather than re-adding
     // the fork-only Identity API.)
-    LOOP_STEP(5);  // persist data
+    LOOP_STEP(6);  // persist data
     uint32_t persistence_started_ms = millis();
     reticulum->should_persist_data();
     uint32_t persistence_elapsed_ms = millis() - persistence_started_ms;
-    if (persistence_elapsed_ms > 30000) {
-        WARNINGF("Reticulum persistence took %lu ms (TWDT limit is 60000 ms)",
+    if (persistence_elapsed_ms > 1000) {
+        WARNINGF("Reticulum persistence stalled loopTask for %lu ms (TWDT limit is 60000 ms)",
                  (unsigned long)persistence_elapsed_ms);
     }
     esp_task_wdt_reset();
@@ -2813,17 +2821,11 @@ void loop() {
     // task ownership when its worker is running.
 
     // Process LXMF router queues
-    LOOP_STEP(6);  // Router processing
+    LOOP_STEP(7);  // Router processing
     if (router) {
         router->process_outbound();
         router->process_inbound();
         router->process_sync();
-    }
-
-    // Update UI manager (processes LXMF messages)
-    LOOP_STEP(7);  // UI manager update
-    if (ui_manager) {
-        ui_manager->update();
     }
 
     LOOP_STEP(8);  // Memory monitor

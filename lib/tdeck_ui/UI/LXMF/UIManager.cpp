@@ -560,11 +560,17 @@ void UIManager::show_nomadnet() {
 }
 
 void UIManager::navigate(Route route) {
-    if (_navigation.current() == Route::NOMADNET && route != Route::NOMADNET)
-        nomad_stop_transport();
-    LVGL_LOCK();
-    _navigation.navigate(route);
-    render_route(route);
+    const bool leaving_nomadnet = _navigation.current() == Route::NOMADNET && route != Route::NOMADNET;
+    if (leaving_nomadnet) {
+        _nomad_state = NomadState::IDLE;
+        _nomad_mailbox.seal();
+    }
+    {
+        LVGL_LOCK();
+        _navigation.navigate(route);
+        render_route(route);
+    }
+    if (leaving_nomadnet) nomad_stop_transport();
 }
 
 void UIManager::replace_route(Route route) {
@@ -579,23 +585,41 @@ void UIManager::back() {
         return;
     }
     if (_navigation.current() == Route::NOMADNET) {
-        nomad_stop_transport();
-        LVGL_LOCK();
-        if (_nomadnet_screen->handle_library_back()) {
+        bool handled = false;
+        {
+            LVGL_LOCK();
+            handled = _nomadnet_screen->handle_library_back();
+        }
+        if (handled) {
             _nomad_history.clear();
+            nomad_stop_transport();
+            _nomad_directory_refresh_pending.store(true, std::memory_order_release);
             return;
         }
+        _nomad_state = NomadState::IDLE;
+        _nomad_mailbox.seal();
     }
-    LVGL_LOCK();
-    if (!_navigation.back()) return;
-    render_route(_navigation.current());
+    const bool leaving_nomadnet = _navigation.current() == Route::NOMADNET;
+    {
+        LVGL_LOCK();
+        if (!_navigation.back()) return;
+        render_route(_navigation.current());
+    }
+    if (leaving_nomadnet) nomad_stop_transport();
 }
 
 void UIManager::home() {
-    if (_navigation.current() == Route::NOMADNET) nomad_stop_transport();
-    LVGL_LOCK();
-    _navigation.home();
-    render_route(Route::HOME);
+    const bool leaving_nomadnet = _navigation.current() == Route::NOMADNET;
+    if (leaving_nomadnet) {
+        _nomad_state = NomadState::IDLE;
+        _nomad_mailbox.seal();
+    }
+    {
+        LVGL_LOCK();
+        _navigation.home();
+        render_route(Route::HOME);
+    }
+    if (leaving_nomadnet) nomad_stop_transport();
 }
 
 void UIManager::render_route(Route route) {
@@ -1282,6 +1306,9 @@ void UIManager::nomad_refresh_nodes() {
     const auto& destinations = Transport::path_table();
     for (auto it = destinations.begin(); it != destinations.end(); ++it) {
         const Bytes& destination_hash = it->first;
+        // The enumerable mirror in pinned microReticulum is add-only, while
+        // has_path() consults the authoritative persistent routable store.
+        if (!Transport::has_path(destination_hash)) continue;
         Identity identity = Identity::recall(destination_hash);
         if (!identity) continue;
         if (destination_hash != Destination::hash(identity, "nomadnetwork", "node")) continue;
@@ -1292,6 +1319,15 @@ void UIManager::nomad_refresh_nodes() {
         changed = _nomad_library.hear_node(destination_hash.toHex(), name,
             static_cast<uint64_t>(entry._timestamp), static_cast<uint8_t>(entry._hops)) || changed;
     }
+    std::vector<std::string> unroutable;
+    for (const auto& node : _nomad_library.nodes()) {
+        if (node.saved) continue;
+        Bytes destination_hash;
+        destination_hash.assignHex(node.destination_hex.c_str());
+        if (!Transport::has_path(destination_hash)) unroutable.push_back(node.destination_hex);
+    }
+    for (const auto& destination_hex : unroutable)
+        changed = _nomad_library.remove_heard_node(destination_hex) || changed;
     if (!changed) return;
     _nomad_library_dirty = true;
     LVGL_LOCK();
@@ -1300,7 +1336,7 @@ void UIManager::nomad_refresh_nodes() {
 
 void UIManager::nomad_update_library() {
     const uint32_t now = millis();
-    if (_navigation.current() == Route::NOMADNET &&
+    if (_navigation.current() == Route::NOMADNET && _nomadnet_screen->directory_visible() &&
         now - _nomad_last_directory_refresh_ms >= 10000) {
         _nomad_directory_refresh_pending.store(true, std::memory_order_release);
     }
@@ -1370,10 +1406,28 @@ void UIManager::nomad_release_request() {
 void UIManager::nomad_stop_transport() {
     _nomad_state = NomadState::IDLE;
     _nomad_deadline_ms = 0;
-    _nomad_mailbox.clear();
+    _nomad_mailbox.seal();
     nomad_release_request();
     if (_nomad_link && _nomad_link.status() != Type::Link::CLOSED) _nomad_link.teardown();
     _nomad_link = Link(Type::NONE);
+}
+
+bool UIManager::nomad_refresh_path_after_link_failure() {
+    if (_nomad_request_policy.on_link_timeout() !=
+        NomadNet::RequestPolicy::LinkTimeoutAction::REFRESH_PATH) return false;
+    _nomad_mailbox.seal();
+    if (_nomad_link && _nomad_link.status() != Type::Link::CLOSED) _nomad_link.teardown();
+    _nomad_link = Link(Type::NONE);
+    _nomad_request = RequestReceipt(Type::NONE);
+    Transport::expire_path(_nomad_destination_hash);
+    if (!NomadNet::RequestPolicy::path_invalidation_succeeded(
+            Transport::has_path(_nomad_destination_hash))) return false;
+    Transport::request_path(_nomad_destination_hash);
+    _nomad_state = NomadState::PATH;
+    _nomad_deadline_ms = millis() + NomadNet::RequestPolicy::PATH_WAIT_MS;
+    LVGL_LOCK();
+    _nomadnet_screen->set_status("Refreshing stale path...");
+    return true;
 }
 
 void UIManager::nomad_open(const std::string& address, bool add_history) {
@@ -1391,6 +1445,7 @@ void UIManager::nomad_open(const std::string& address, bool add_history) {
     _nomad_link = Link(Type::NONE);
     _nomad_request = RequestReceipt(Type::NONE);
     _nomad_response.clear();
+    _nomad_request_policy.reset();
     _nomad_url = parsed;
     _nomad_history.open(parsed.str(), add_history);
     _nomad_destination_hash = Bytes();
@@ -1404,7 +1459,7 @@ void UIManager::nomad_open(const std::string& address, bool add_history) {
     else {
         Transport::request_path(_nomad_destination_hash);
         _nomad_state = NomadState::PATH;
-        _nomad_deadline_ms = millis() + 10000;
+        _nomad_deadline_ms = millis() + NomadNet::RequestPolicy::PATH_WAIT_MS;
     }
 }
 
@@ -1437,7 +1492,7 @@ void UIManager::nomad_start_link() {
     _nomad_link = Link(destination, on_nomad_link_established, on_nomad_link_closed);
     _nomad_mailbox.begin(token(_nomad_link.link_id()));
     _nomad_state = NomadState::LINK;
-    _nomad_deadline_ms = millis() + 30000;
+    _nomad_deadline_ms = millis() + NomadNet::RequestPolicy::LINK_WAIT_MS;
     LVGL_LOCK();
     _nomadnet_screen->set_status("Establishing encrypted link...");
 }
@@ -1472,6 +1527,7 @@ void UIManager::nomad_update() {
         nomad_start_link();
     } else if (_nomad_state != NomadState::IDLE && _nomad_deadline_ms != 0 &&
                static_cast<int32_t>(now - _nomad_deadline_ms) >= 0) {
+        if (_nomad_state == NomadState::LINK && nomad_refresh_path_after_link_failure()) return;
         _nomad_state = NomadState::IDLE;
         _nomad_mailbox.clear();
         nomad_release_request();
@@ -1493,6 +1549,7 @@ void UIManager::nomad_update() {
             }
             break;
         case NomadNet::AsyncMailbox::Kind::LINK_CLOSED:
+            if (_nomad_state == NomadState::LINK && nomad_refresh_path_after_link_failure()) break;
             _nomad_state = NomadState::IDLE;
             _nomad_mailbox.clear();
             nomad_release_request();
