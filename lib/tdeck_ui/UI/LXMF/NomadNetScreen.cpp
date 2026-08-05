@@ -2,6 +2,7 @@
 #ifdef ARDUINO
 #include "Theme.h"
 #include "NomadNetDisplay.h"
+#include "NomadNetGlyphs.h"
 #include "../LVGL/LVGLInit.h"
 #include "../TextAreaHelper.h"
 #include <algorithm>
@@ -33,13 +34,13 @@ NomadNetScreen::NomadNetScreen() {
     lv_obj_set_style_bg_color(_address_row,Theme::surface(),0);lv_obj_set_style_border_width(_address_row,0,0);lv_obj_set_style_pad_all(_address_row,3,0);
     _address=lv_textarea_create(_address_row);lv_obj_set_size(_address,270,30);lv_obj_align(_address,LV_ALIGN_LEFT_MID,0,0);
     lv_textarea_set_one_line(_address,true);lv_textarea_set_max_length(_address,511);lv_textarea_set_placeholder_text(_address,"destination:/page/path");
-    lv_obj_set_style_text_font(_address,&lv_font_montserrat_12,0);lv_obj_set_style_bg_color(_address,Theme::surfaceInput(),0);TextAreaHelper::enable_paste(_address);
+    lv_obj_set_style_text_font(_address,&nomadnet_font_12,0);lv_obj_set_style_bg_color(_address,Theme::surfaceInput(),0);TextAreaHelper::enable_paste(_address);
     _go_button=lv_btn_create(_address_row);lv_obj_set_size(_go_button,42,30);lv_obj_align(_go_button,LV_ALIGN_RIGHT_MID,0,0);
     lv_obj_set_style_bg_color(_go_button,Theme::primary(),0);lv_obj_set_style_radius(_go_button,8,0);
     lv_obj_t* gl=lv_label_create(_go_button);lv_label_set_text(gl,"Go");lv_obj_center(gl);
 
     _address_summary=lv_label_create(_address_row);lv_obj_set_size(_address_summary,266,24);lv_obj_align(_address_summary,LV_ALIGN_LEFT_MID,4,0);
-    lv_label_set_long_mode(_address_summary,LV_LABEL_LONG_DOT);lv_obj_set_style_text_font(_address_summary,&lv_font_montserrat_12,0);
+    lv_label_set_long_mode(_address_summary,LV_LABEL_LONG_DOT);lv_obj_set_style_text_font(_address_summary,&nomadnet_font_12,0);
     lv_obj_set_style_text_color(_address_summary,Theme::textSecondary(),0);
     _edit_button=lv_btn_create(_address_row);lv_obj_set_size(_edit_button,36,26);lv_obj_align(_edit_button,LV_ALIGN_RIGHT_MID,0,0);
     lv_obj_set_style_bg_color(_edit_button,Theme::surfaceContainer(),0);lv_obj_set_style_bg_color(_edit_button,Theme::primaryPressed(),LV_STATE_FOCUSED);
@@ -65,7 +66,7 @@ NomadNetScreen::NomadNetScreen() {
 NomadNetScreen::~NomadNetScreen(){if(_screen)lv_obj_del(_screen);}
 void NomadNetScreen::set_address(const std::string& value){
     lv_textarea_set_text(_address,value.c_str());
-    const auto summary=NomadNet::compact_address(value);
+    const auto summary=NomadNet::display_text(NomadNet::compact_address(value));
     lv_label_set_text(_address_summary,summary.c_str());
 }
 std::string NomadNetScreen::address()const{return lv_textarea_get_text(_address);}
@@ -121,11 +122,13 @@ void NomadNetScreen::render_directory(View view){
         lv_obj_t* button=lv_btn_create(_directory);lv_obj_set_size(button,306,35);lv_obj_set_flex_grow(button,0);
         lv_obj_set_style_bg_color(button,Theme::surfaceContainer(),0);lv_obj_set_style_bg_color(button,Theme::primaryPressed(),LV_STATE_FOCUSED);
         lv_obj_set_style_border_width(button,0,0);lv_obj_set_style_radius(button,8,0);lv_obj_set_style_pad_all(button,4,0);
-        lv_obj_t* primary=lv_label_create(button);lv_label_set_text(primary,title.c_str());lv_label_set_long_mode(primary,LV_LABEL_LONG_DOT);
-        lv_obj_set_width(primary,286);lv_obj_set_style_text_font(primary,&lv_font_montserrat_12,0);lv_obj_align(primary,LV_ALIGN_TOP_LEFT,2,0);
+        const auto rendered_title=NomadNet::display_text(title);
+        lv_obj_t* primary=lv_label_create(button);lv_label_set_text(primary,rendered_title.c_str());lv_label_set_long_mode(primary,LV_LABEL_LONG_DOT);
+        lv_obj_set_width(primary,286);lv_obj_set_style_text_font(primary,&nomadnet_font_12,0);lv_obj_align(primary,LV_ALIGN_TOP_LEFT,2,0);
         if(!detail.empty()){
-            lv_obj_t* secondary=lv_label_create(button);lv_label_set_text(secondary,detail.c_str());lv_label_set_long_mode(secondary,LV_LABEL_LONG_DOT);
-            lv_obj_set_width(secondary,286);lv_obj_set_style_text_font(secondary,&lv_font_montserrat_12,0);lv_obj_set_style_text_color(secondary,Theme::textTertiary(),0);
+            const auto rendered_detail=NomadNet::display_text(detail);
+            lv_obj_t* secondary=lv_label_create(button);lv_label_set_text(secondary,rendered_detail.c_str());lv_label_set_long_mode(secondary,LV_LABEL_LONG_DOT);
+            lv_obj_set_width(secondary,286);lv_obj_set_style_text_font(secondary,&nomadnet_font_12,0);lv_obj_set_style_text_color(secondary,Theme::textTertiary(),0);
             lv_obj_align(secondary,LV_ALIGN_BOTTOM_LEFT,2,0);
         }
         lv_obj_set_user_data(button,reinterpret_cast<void*>(code));lv_obj_add_event_cb(button,clicked,LV_EVENT_CLICKED,this);
@@ -159,7 +162,7 @@ void NomadNetScreen::render_directory(View view){
     if(_directory_focusables.empty()){
         lv_obj_t* empty=lv_label_create(_directory);
         lv_label_set_text(empty,view==View::HEARD?"No NomadNet nodes heard yet":view==View::SAVED_NODES?"No saved nodes":view==View::SAVED_PAGES?"No saved pages":"No recent pages");
-        lv_obj_set_style_text_color(empty,Theme::textTertiary(),0);lv_obj_set_style_text_font(empty,&lv_font_montserrat_12,0);
+        lv_obj_set_style_text_color(empty,Theme::textTertiary(),0);lv_obj_set_style_text_font(empty,&nomadnet_font_12,0);
     }
     rebuild_focus();
 }
@@ -265,7 +268,8 @@ void NomadNetScreen::set_page(const NomadNet::Document& document) {
         for (const auto& run : block.runs) {
             if (spans >= MAX_UI_SPANS) { render_truncated = true; break; }
             lv_span_t* span = lv_spangroup_new_span(text);
-            lv_span_set_text(span, run.text.c_str());
+            const auto rendered_text = NomadNet::display_text(run.text);
+            lv_span_set_text(span, rendered_text.c_str());
             const bool is_link = run.link_index >= 0 &&
                 static_cast<std::size_t>(run.link_index) < document.links.size();
             lv_style_set_text_color(&span->style, is_link ? Theme::primaryLight() :
@@ -273,7 +277,7 @@ void NomadNetScreen::set_page(const NomadNet::Document& document) {
                 document.has_foreground ? lv_color_hex(document.foreground) : Theme::textPrimary());
             lv_style_set_text_font(&span->style,
                 (run.bold || block.type == NomadNet::BlockType::HEADING)
-                    ? &lv_font_montserrat_16 : &lv_font_montserrat_12);
+                    ? &nomadnet_font_16 : &nomadnet_font_12);
             lv_style_set_text_line_space(&span->style, 3);
             if (run.underline || is_link)
                 lv_style_set_text_decor(&span->style, LV_TEXT_DECOR_UNDERLINE);
@@ -292,8 +296,9 @@ void NomadNetScreen::set_page(const NomadNet::Document& document) {
             lv_obj_set_size(button, 304, 28);
             lv_obj_set_style_pad_all(button, 4, 0);
             lv_obj_t* label = lv_label_create(button);
-            const std::string caption = "Open: " + run.text;
+            const std::string caption = "Open: " + NomadNet::display_text(run.text);
             lv_label_set_text(label, caption.c_str());
+            lv_obj_set_style_text_font(label, &nomadnet_font_12, 0);
             lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
             lv_obj_set_width(label, 294);
             lv_obj_center(label);

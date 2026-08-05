@@ -10,6 +10,7 @@
 #include "NomadNetDocument.h"
 #include "NomadNetDisplay.h"
 #include "NomadNetHistory.h"
+#include "NomadNetGlyphs.h"
 #include "NomadNetLibrary.h"
 #include "NomadNetActionMailbox.h"
 #include "NomadNetMailbox.h"
@@ -24,6 +25,7 @@ using UI::LXMF::NomadNet::BlockType;
 using UI::LXMF::NomadNet::DocumentParser;
 using UI::LXMF::NomadNet::compact_address;
 using UI::LXMF::NomadNet::PageHistory;
+using UI::LXMF::NomadNet::display_text;
 using UI::LXMF::NomadNet::Library;
 using UI::LXMF::NomadNet::ActionMailbox;
 using UI::LXMF::NomadNet::UserAction;
@@ -169,6 +171,15 @@ int main(int argc, char** argv) {
     std::string invalid_utf8("ok\xF0\x28\x8C\x28", 6);
     auto utf8_doc = parser.parse(invalid_utf8);
     check("invalid UTF-8 is rejected before rendering", utf8_doc.malformed && utf8_doc.blocks.empty());
+
+    check("common NomadNet Unicode punctuation remains intact",
+          display_text(u8"release · stable — open → details • done") ==
+              u8"release · stable — open → details • done");
+    check("Latin accents remain intact", display_text(u8"café Ångström") == u8"café Ångström");
+    check("glyphs outside the bounded browser font degrade without rectangles",
+          display_text(u8"status 😀 ok") == "status ? ok");
+    check("contiguous cmap boundary codepoints degrade safely",
+          display_text(std::string("\x7f") + u8"ƀ↚") == "???");
 
     std::string huge(DocumentParser::MAX_DOCUMENT_BYTES, 'x');
     huge += "\n#!c=99\n";
