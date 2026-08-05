@@ -1,0 +1,442 @@
+#include <cstdint>
+#include <cstdio>
+#include <fstream>
+#include <iostream>
+#include <iterator>
+#include <string>
+#include <vector>
+
+#include "NavigationStack.h"
+#include "NomadNetDocument.h"
+#include "NomadNetDisplay.h"
+#include "NomadNetHistory.h"
+#include "NomadNetLibrary.h"
+#include "NomadNetActionMailbox.h"
+#include "NomadNetMailbox.h"
+#include "NomadNetProtocol.h"
+#include "NomadNetRequestPolicy.h"
+#include "NomadNetUrl.h"
+
+using UI::LXMF::NavigationStack;
+using UI::LXMF::Route;
+using UI::LXMF::NomadNet::Alignment;
+using UI::LXMF::NomadNet::BlockType;
+using UI::LXMF::NomadNet::DocumentParser;
+using UI::LXMF::NomadNet::compact_address;
+using UI::LXMF::NomadNet::PageHistory;
+using UI::LXMF::NomadNet::Library;
+using UI::LXMF::NomadNet::ActionMailbox;
+using UI::LXMF::NomadNet::UserAction;
+using UI::LXMF::NomadNet::UserActionKind;
+using UI::LXMF::NomadNet::sanitize_directory_name;
+using UI::LXMF::NomadNet::page_title;
+using UI::LXMF::NomadNet::AsyncMailbox;
+using UI::LXMF::NomadNet::ResponseBuffer;
+using UI::LXMF::NomadNet::RequestPolicy;
+using UI::LXMF::NomadNet::Url;
+
+int main(int argc, char** argv) {
+    int passed = 0;
+    int failed = 0;
+    auto check = [&](const char* name, bool condition) {
+        if (condition) ++passed;
+        else { ++failed; std::cerr << "FAIL: " << name << "\n"; }
+    };
+
+    NavigationStack nav;
+    check("launcher is navigation root", nav.current() == Route::HOME && nav.depth() == 0);
+    nav.navigate(Route::MESSAGES);
+    nav.navigate(Route::CHAT);
+    check("routes form a hierarchy", nav.current() == Route::CHAT && nav.depth() == 2);
+    check("back restores parent route exactly once", nav.back() && nav.current() == Route::MESSAGES && nav.depth() == 1);
+    nav.home();
+    check("home clears hierarchy", nav.current() == Route::HOME && nav.depth() == 0);
+    nav.navigate(Route::MESSAGES);
+    nav.navigate(Route::COMPOSE);
+    nav.replace(Route::CHAT);
+    check("compose send replaces route", nav.current() == Route::CHAT && nav.back() && nav.current() == Route::MESSAGES);
+    nav.navigate(Route::CHAT);
+    nav.navigate(Route::CALL);
+    check("call exit restores owner", nav.back() && nav.current() == Route::CHAT);
+    nav.home();
+    for (std::size_t i = 0; i < NavigationStack::MAX_DEPTH + 5; ++i)
+        nav.navigate((i & 1) ? Route::STATUS : Route::NETWORK);
+    check("navigation stack is bounded", nav.depth() == NavigationStack::MAX_DEPTH);
+    for (std::size_t i = 0; i < NavigationStack::MAX_DEPTH; ++i) nav.back();
+    check("bounded stack preserves root", nav.current() == Route::HOME && !nav.back());
+
+    PageHistory history;
+    history.open("a");
+    history.open("b");
+    history.reload();
+    check("reload does not add browser history", history.current() == "b" && history.depth() == 1);
+    check("browser back restores prior page", history.back() && history.current() == "a" && history.depth() == 0);
+    for (std::size_t i = 0; i < PageHistory::MAX_DEPTH + 4; ++i) history.open(std::to_string(i));
+    check("browser history is bounded", history.depth() == PageHistory::MAX_DEPTH);
+
+    AsyncMailbox mailbox;
+    const std::vector<uint8_t> old_link{1}, new_link{2};
+    mailbox.begin(new_link);
+    check("stale link callback is rejected", !mailbox.publish_link(old_link, true));
+    check("active link callback is accepted", mailbox.publish_link(new_link, true));
+    AsyncMailbox::Event event;
+    check("link event crosses mailbox", mailbox.take(event) && event.kind == AsyncMailbox::Kind::LINK_ESTABLISHED);
+    AsyncMailbox early_link;
+    check("link callback may arrive before token arming", early_link.publish_link(new_link, true));
+    early_link.begin(new_link);
+    check("matching early link callback is retained", early_link.take(event) && event.kind == AsyncMailbox::Kind::LINK_ESTABLISHED);
+    const std::vector<uint8_t> old_request{3}, new_request{4};
+    AsyncMailbox early_request;
+    early_request.begin(new_link);
+    const uint8_t early[] = {'o', 'k'};
+    check("response may arrive before receipt token arming",
+          early_request.publish_response(new_request, early, sizeof(early), sizeof(early)));
+    early_request.expect_request(new_request);
+    check("matching early response is retained",
+          early_request.take(event) && event.kind == AsyncMailbox::Kind::RESPONSE);
+    mailbox.expect_request(new_request);
+    const uint8_t tiny[] = {0xc4, 1, 'x'};
+    check("stale response callback is rejected", !mailbox.publish_response(old_request, tiny, sizeof(tiny), sizeof(tiny)));
+    check("active response callback is accepted", mailbox.publish_response(new_request, tiny, sizeof(tiny), sizeof(tiny)));
+    check("terminal response is not overwritten by a racing link-close callback",
+          !mailbox.publish_link(new_link, false));
+    check("response event crosses mailbox", mailbox.take(event) && event.kind == AsyncMailbox::Kind::RESPONSE && event.data.size() == sizeof(tiny));
+    mailbox.seal();
+    check("terminal cleanup rejects its synthetic failed callback",
+          !mailbox.publish_failed(new_request));
+    mailbox.prepare();
+    check("next operation still accepts an early link callback",
+          mailbox.publish_link(new_link, true));
+    check("prepared early link event crosses mailbox",
+          mailbox.take(event) && event.kind == AsyncMailbox::Kind::LINK_ESTABLISHED);
+    mailbox.expect_request(new_request);
+    check("oversized transfer is rejected before payload retention",
+          mailbox.publish_progress(new_request, AsyncMailbox::MAX_WIRE_BYTES + 1) && mailbox.take(event) &&
+          event.kind == AsyncMailbox::Kind::OVERSIZED && event.data.empty());
+
+    Url url;
+    std::string error;
+    check("32 hex destination with page path parses",
+          Url::parse("0123456789abcdef0123456789ABCDEF:/page/index.mu", url, error));
+    check("url normalizes destination hex and preserves path",
+          url.destination_hex == "0123456789abcdef0123456789abcdef" && url.path == "/page/index.mu");
+    check("bare destination gets default page",
+          Url::parse("0123456789abcdef0123456789abcdef", url, error) && url.path == "/page/index.mu");
+    check("relative same-node path parses with context",
+          Url::parse(":/page/about.mu", url, error, "fedcba9876543210fedcba9876543210") &&
+          url.destination_hex == "fedcba9876543210fedcba9876543210");
+    check("wrong destination length rejected", !Url::parse("abcd:/page/index.mu", url, error));
+    check("nonhex destination rejected", !Url::parse("zz23456789abcdef0123456789abcdef:/page/index.mu", url, error));
+    check("control characters rejected", !Url::parse("0123456789abcdef0123456789abcdef:/page/a\nb", url, error));
+    check("downloads explicitly unsupported", !Url::parse("0123456789abcdef0123456789abcdef:/file/x", url, error));
+
+    DocumentParser parser;
+    auto doc = parser.parse(
+        "#!c=60\n#!bg=123\n#!fg=abcdef\n>> Heading\n"
+        "ordinary `!bold`! `*italic`* `_under`_ `Ff00red`f `B0f0back`b `ccentre\n"
+        "`[Next`0123456789abcdef0123456789abcdef:/page/next.mu]\n-\n"
+        "`=\n`!literal\n\\`=\n`=\n`tabc\n");
+    check("cache metadata parsed from first line", doc.cache_seconds == 60);
+    check("page colors parsed", doc.has_background && doc.background == 0x112233 &&
+                                      doc.has_foreground && doc.foreground == 0xabcdef);
+    check("heading depth parsed", doc.blocks.size() >= 5 &&
+                                  doc.blocks[0].type == BlockType::HEADING && doc.blocks[0].depth == 2);
+    check("inline runs are styled", doc.blocks[1].runs.size() >= 6 &&
+                                      doc.blocks[1].runs[1].bold && doc.blocks[1].runs[3].italic);
+    bool saw_background = false;
+    for (const auto& run : doc.blocks[1].runs) saw_background = saw_background || run.has_background;
+    check("inline background style parsed", saw_background);
+    check("alignment modifier represented", doc.blocks[1].alignment == Alignment::CENTER);
+    check("links are model elements", doc.links.size() == 1 &&
+                                       doc.links[0].target.find("/page/next.mu") != std::string::npos);
+    auto link_fields = parser.parse("`[Search`:/page/search.mu`q=pyxis]\n");
+    check("link target excludes request fields", link_fields.links.size() == 1 &&
+          link_fields.links[0].target == ":/page/search.mu" && link_fields.links[0].fields == "q=pyxis");
+    check("divider parsed", doc.blocks[3].type == BlockType::DIVIDER);
+    check("literal mode suppresses formatting", doc.blocks[4].runs.size() == 1 &&
+                                                 doc.blocks[4].runs[0].text == "`!literal");
+    bool saw_unsupported = false;
+    for (const auto& block : doc.blocks) saw_unsupported = saw_unsupported || block.type == BlockType::UNSUPPORTED;
+    check("unsupported structured content has fallback", doc.unsupported && saw_unsupported);
+
+    auto later_cache = parser.parse("text\n#!c=99999999999999999999\nmore");
+    check("cache metadata is first-line-only", later_cache.cache_seconds == 0);
+    auto clamped_cache = parser.parse("#!c=99999999999999999999\ntext");
+    check("cache seconds clamps without overflow", clamped_cache.cache_seconds == DocumentParser::MAX_CACHE_SECONDS);
+    auto high_bit_digit = parser.parse(std::string("#!c=1") + char(0xff) + "\ntext");
+    check("cache digit validation is unsigned-char safe", high_bit_digit.cache_seconds == 0 && high_bit_digit.malformed);
+
+    std::string invalid_utf8("ok\xF0\x28\x8C\x28", 6);
+    auto utf8_doc = parser.parse(invalid_utf8);
+    check("invalid UTF-8 is rejected before rendering", utf8_doc.malformed && utf8_doc.blocks.empty());
+
+    std::string huge(DocumentParser::MAX_DOCUMENT_BYTES, 'x');
+    huge += "\n#!c=99\n";
+    auto huge_doc = parser.parse(huge);
+    check("document bytes capped and truncation propagated", huge_doc.truncated &&
+                                                             huge_doc.source_bytes == DocumentParser::MAX_DOCUMENT_BYTES);
+    check("parser never processes metadata beyond retained source", huge_doc.cache_seconds == 0);
+    std::string long_line(DocumentParser::MAX_SOURCE_LINE_BYTES + 20, 'q');
+    auto line_doc = parser.parse(long_line);
+    check("source line capped", line_doc.truncated && !line_doc.blocks.empty() &&
+                                line_doc.blocks[0].runs[0].text.size() == DocumentParser::MAX_SOURCE_LINE_BYTES);
+    auto utf8_boundary = parser.parse(std::string(DocumentParser::MAX_SOURCE_LINE_BYTES - 1, 'x') + "\xe2\x82\xac");
+    check("line truncation preserves UTF-8 boundaries", utf8_boundary.truncated && !utf8_boundary.malformed &&
+                                                        utf8_boundary.blocks[0].runs[0].text.size() ==
+                                                            DocumentParser::MAX_SOURCE_LINE_BYTES - 1);
+    auto blank_lines = parser.parse("one\n\nthree\n");
+    check("blank lines preserve vertical structure", blank_lines.blocks.size() == 4 &&
+                                                      blank_lines.blocks[1].runs[0].text == " ");
+    std::string many_lines;
+    for (std::size_t i = 0; i < DocumentParser::MAX_SOURCE_LINES + 50; ++i) many_lines += "x\n";
+    auto lines_doc = parser.parse(many_lines);
+    check("source line count capped", lines_doc.truncated &&
+                                      lines_doc.source_lines <= DocumentParser::MAX_SOURCE_LINES);
+    std::string many_runs;
+    for (std::size_t i = 0; i < DocumentParser::MAX_RUNS_PER_LINE + 20; ++i) many_runs += "x`!";
+    auto runs_doc = parser.parse(many_runs);
+    check("runs per line capped", runs_doc.truncated &&
+                                    runs_doc.blocks[0].runs.size() == DocumentParser::MAX_RUNS_PER_LINE);
+    std::string global_runs;
+    for (std::size_t i = 0; i < DocumentParser::MAX_TOTAL_RUNS; ++i) global_runs += "a`!b`!\n";
+    auto global_runs_doc = parser.parse(global_runs);
+    std::size_t retained_runs = 0;
+    for (const auto& block : global_runs_doc.blocks) retained_runs += block.runs.size();
+    check("runs are globally bounded", global_runs_doc.truncated && retained_runs <= DocumentParser::MAX_TOTAL_RUNS);
+    std::string many_links;
+    for (std::size_t i = 0; i < DocumentParser::MAX_LINKS + 10; ++i) many_links += "`[x`:/page/x]";
+    auto links_doc = parser.parse(many_links);
+    check("links are globally bounded", links_doc.truncated && links_doc.links.size() == DocumentParser::MAX_LINKS);
+
+    auto malformed = parser.parse("#!c=not-a-number\n#!bg=xyz\n`F1broken\n[label`target\n`=\ntext");
+    check("malformed micron remains bounded", malformed.blocks.size() <= DocumentParser::MAX_BLOCKS);
+    check("invalid metadata ignored", malformed.cache_seconds == 0 && !malformed.has_background);
+    check("unterminated literal is reported", malformed.malformed);
+
+    if (argc > 1) {
+        std::ifstream input(argv[1], std::ios::binary);
+        std::string fixture((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        auto real = parser.parse(fixture);
+        check("authoritative Aleph fixture is readable", input.good() || input.eof());
+        check("authoritative fixture yields headings", !real.blocks.empty() && real.blocks[0].type == BlockType::HEADING);
+        check("authoritative fixture yields links", !real.links.empty());
+        check("authoritative fixture remains within bounds", real.blocks.size() <= DocumentParser::MAX_BLOCKS &&
+                                                             real.links.size() <= DocumentParser::MAX_LINKS);
+    } else {
+        check("authoritative Aleph fixture is readable", false);
+        check("authoritative fixture yields headings", false);
+        check("authoritative fixture yields links", false);
+        check("authoritative fixture remains within bounds", false);
+    }
+
+    const auto nil = UI::LXMF::NomadNet::no_form_request_data();
+    check("no-form request is exact msgpack nil", nil.size() == 1 && nil[0] == 0xc0);
+    ResponseBuffer response;
+    const uint8_t bin8[] = {0xc4, 0x03, 'm', 'u', '!'};
+    check("msgpack bin8 response normalizes", UI::LXMF::NomadNet::normalize_response(bin8, sizeof(bin8), response) &&
+                                               response.size() == 3 && response.bytes()[0] == 'm');
+    const uint8_t bin16[] = {0xc5, 0x00, 0x03, 'm', 'u', '!'};
+    check("msgpack bin16 response normalizes", UI::LXMF::NomadNet::normalize_response(bin16, sizeof(bin16), response));
+    std::vector<uint8_t> exact(5 + ResponseBuffer::MAX_BYTES, 'x');
+    exact[0] = 0xc6; exact[1] = 0; exact[2] = 1; exact[3] = 0; exact[4] = 0;
+    check("exact 64KiB bin32 is accepted", UI::LXMF::NomadNet::normalize_response(exact.data(), exact.size(), response) &&
+                                             response.size() == ResponseBuffer::MAX_BYTES && !response.truncated());
+    const uint8_t raw[] = {'r', 'a', 'w'};
+    check("raw packet response normalizes", UI::LXMF::NomadNet::normalize_response(raw, sizeof(raw), response) &&
+                                             response.size() == sizeof(raw) && response.bytes()[0] == 'r');
+    const uint8_t trailing[] = {0xc4, 0x01, 'x', 'y'};
+    check("trailing bytes are rejected", !UI::LXMF::NomadNet::normalize_response(trailing, sizeof(trailing), response));
+    const uint8_t malformed8[] = {0xc4};
+    check("malformed bin8 is rejected", !UI::LXMF::NomadNet::normalize_response(malformed8, sizeof(malformed8), response));
+    const uint8_t malformed16[] = {0xc5, 0x00};
+    check("malformed bin16 is rejected", !UI::LXMF::NomadNet::normalize_response(malformed16, sizeof(malformed16), response));
+    const uint8_t malformed32[] = {0xc6, 0, 1, 0};
+    check("malformed bin32 is rejected", !UI::LXMF::NomadNet::normalize_response(malformed32, sizeof(malformed32), response));
+    const uint8_t oversize_advertised[] = {0xc6, 0, 1, 0, 1};
+    check("oversize advertised payload is rejected before retention",
+          !UI::LXMF::NomadNet::normalize_response(oversize_advertised, sizeof(oversize_advertised), response) && response.size() == 0);
+    check("null and empty responses are rejected", !UI::LXMF::NomadNet::normalize_response(nullptr, 0, response));
+
+    check("compact address preserves short values", compact_address("node:/page/a.mu", 32) == "node:/page/a.mu");
+    check("compact address abbreviates destination but preserves path",
+          compact_address("a8d24177d946de4f1f0a0fe1af9a1338:/page/index.mu", 30) ==
+              "a8d24177...1338 /page/index.mu");
+    check("compact address uses compiled-font-safe ASCII",
+          compact_address("a8d24177d946de4f1f0a0fe1af9a1338:/page/index.mu", 30).find_first_not_of(
+              "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789:/._- ") == std::string::npos);
+    check("compact address remains bounded for long paths",
+          compact_address("a8d24177d946de4f1f0a0fe1af9a1338:/page/a-very-long-page-name.mu", 24).size() <= 24);
+
+    Library library;
+    const std::string node_hash = "a8d24177d946de4f1f0a0fe1af9a1338";
+    const std::string page_url = node_hash + ":/page/index.mu";
+    check("heard NomadNet node is retained", library.hear_node(node_hash, "Example Node", 100, 2) &&
+          library.nodes().size() == 1 && library.nodes()[0].name == "Example Node");
+    check("heard node updates in place", library.hear_node(node_hash, "Renamed Node", 200, 1) &&
+          library.nodes().size() == 1 && library.nodes()[0].last_heard == 200);
+    check("page navigation records bounded recent page", library.record_page(page_url, "Home", 300) &&
+          library.pages().size() == 1 && library.pages()[0].title == "Home");
+    check("saving page also saves its node", library.set_page_saved(page_url, true) &&
+          library.pages()[0].saved && library.nodes()[0].saved);
+    Library removal_library;
+    removal_library.hear_node(node_hash, "Remove Me", 1, 0);
+    removal_library.record_page(page_url, "Remove Me", 1);
+    removal_library.set_page_saved(page_url, true);
+    check("removing the last saved page removes its derived saved node",
+          removal_library.set_page_saved(page_url, false) &&
+          !removal_library.page_saved(page_url) && !removal_library.node_saved(node_hash));
+    Library atomic_library;
+    char bounded_hash[33]{};
+    for (std::size_t i = 0; i < Library::MAX_NODES; ++i) {
+        std::snprintf(bounded_hash, sizeof(bounded_hash), "%032zx", i + 1);
+        atomic_library.set_node_saved(bounded_hash, true);
+    }
+    for (std::size_t i = 0; i < Library::MAX_PAGES; ++i) {
+        const std::string recent = std::string(32, '0').replace(31, 1, "1") +
+            ":/page/recent-" + std::to_string(i) + ".mu";
+        atomic_library.record_page(recent, "Recent", i + 1);
+    }
+    const auto before_failed_save = atomic_library.encode();
+    const std::string unretainable_page = std::string(32, 'f') + ":/page/new.mu";
+    check("failed unrecorded page save is atomic",
+          !atomic_library.set_page_saved(unretainable_page, true) &&
+          atomic_library.encode() == before_failed_save);
+    const auto encoded_library = library.encode();
+    Library restored_library;
+    check("NomadNet library round trips", restored_library.decode(encoded_library.data(), encoded_library.size()) &&
+          restored_library.nodes().size() == 1 && restored_library.pages().size() == 1 &&
+          restored_library.pages()[0].saved);
+    const uint8_t corrupt_library[] = {'P', 'X', 'N', 'N', '9', '\n'};
+    check("corrupt NomadNet library fails closed",
+          !restored_library.decode(corrupt_library, sizeof(corrupt_library)) && restored_library.nodes().size() == 1);
+    const std::string invalid_utf8_library = "PXNN1\nN\t" + node_hash + "\tff\t1\t0\t0\n";
+    Library invalid_utf8_decoded;
+    check("persisted invalid UTF-8 metadata is rejected",
+          !invalid_utf8_decoded.decode(reinterpret_cast<const uint8_t*>(invalid_utf8_library.data()),
+                                       invalid_utf8_library.size()));
+    std::string invalid_utf8_url = node_hash + ":/page/";
+    invalid_utf8_url.push_back(static_cast<char>(0xff));
+    invalid_utf8_url += ".mu";
+    Library invalid_url_library;
+    check("invalid UTF-8 page URL is rejected at admission",
+          !invalid_url_library.record_page(invalid_utf8_url, "Invalid", 1) &&
+          !invalid_url_library.set_page_saved(invalid_utf8_url, true));
+    std::string encoded_invalid_url;
+    static constexpr char HEX[] = "0123456789abcdef";
+    for (const unsigned char byte : invalid_utf8_url) {
+        encoded_invalid_url.push_back(HEX[byte >> 4]);
+        encoded_invalid_url.push_back(HEX[byte & 0x0f]);
+    }
+    const std::string invalid_utf8_url_record = "PXNN1\nP\t" + encoded_invalid_url + "\t\t1\t0\n";
+    check("persisted invalid UTF-8 page URL is rejected",
+          !invalid_url_library.decode(reinterpret_cast<const uint8_t*>(invalid_utf8_url_record.data()),
+                                      invalid_utf8_url_record.size()));
+    Library bounded_library;
+    for (std::size_t i = 0; i < Library::MAX_NODES + 8; ++i) {
+        char hash[33];
+        std::snprintf(hash, sizeof(hash), "%032zx", i + 1);
+        bounded_library.hear_node(hash, "node", i, 0);
+    }
+    check("heard-node library is bounded", bounded_library.nodes().size() == Library::MAX_NODES);
+    const std::string pinned_hash = bounded_library.nodes().back().destination_hex;
+    bounded_library.set_node_saved(pinned_hash, true);
+    for (std::size_t i = Library::MAX_NODES + 8; i < Library::MAX_NODES + 20; ++i) {
+        char hash[33];
+        std::snprintf(hash, sizeof(hash), "%032zx", i + 1);
+        bounded_library.hear_node(hash, "new", i, 0);
+    }
+    check("saved node survives heard-node eviction", bounded_library.node_saved(pinned_hash));
+    Library live_library;
+    live_library.hear_node("11111111111111111111111111111111", "Stale", 100, 1);
+    live_library.hear_node("22222222222222222222222222222222", "Saved", 100, 1);
+    live_library.set_node_saved("22222222222222222222222222222222", true);
+    check("unroutable heard node can be pruned without deleting saved nodes",
+          live_library.remove_heard_node("11111111111111111111111111111111") &&
+          !live_library.remove_heard_node("22222222222222222222222222222222") &&
+          live_library.nodes().size() == 1 && live_library.nodes()[0].saved);
+    Library sorted_library;
+    sorted_library.hear_node("11111111111111111111111111111111", "Older", 100, 1);
+    sorted_library.hear_node("22222222222222222222222222222222", "Newer", 200, 1);
+    sorted_library.hear_node("33333333333333333333333333333333", "Oldest arrival", 50, 1);
+    check("heard nodes are newest first", sorted_library.nodes().front().name == "Newer" &&
+          sorted_library.nodes().back().name == "Oldest arrival");
+    const uint8_t unsafe_name[] = {' ', 'N', 'o', 'd', 'e', '\n', 'X', 0xff};
+    check("announce name is bounded and sanitized",
+          sanitize_directory_name(unsafe_name, sizeof(unsafe_name)) == "Node X");
+    check("first heading supplies saved-page title",
+          page_title("/page/index.mu", {"Example ", "Node"}) == "Example Node");
+    check("control characters are rejected in saved URLs",
+          !sorted_library.record_page("11111111111111111111111111111111:/page/bad\n.mu", "bad", 1));
+    const std::string new_saved_url = "33333333333333333333333333333333:/page/saved.mu";
+    sorted_library.record_page("22222222222222222222222222222222:/page/recent.mu", "Recent", 500);
+    check("saving an unrecorded page marks the requested URL",
+          sorted_library.set_page_saved(new_saved_url, true) && sorted_library.page_saved(new_saved_url) &&
+          !sorted_library.page_saved("22222222222222222222222222222222:/page/recent.mu"));
+    Library saturated_library;
+    for (std::size_t i = 0; i < Library::MAX_NODES; ++i) {
+        char hash[33]; std::snprintf(hash, sizeof(hash), "%032zx", i + 1000);
+        saturated_library.hear_node(hash, "saved", i, 0);
+        saturated_library.set_node_saved(hash, true);
+    }
+    const std::string orphan_url = "ffffffffffffffffffffffffffffffff:/page/index.mu";
+    saturated_library.record_page(orphan_url, "Orphan", 10);
+    check("page save fails atomically when its node cannot be retained",
+          !saturated_library.set_page_saved(orphan_url, true) && !saturated_library.page_saved(orphan_url));
+    const uint8_t overlong_utf8[] = {0xe0, 0x80, 0x80};
+    check("overlong UTF-8 is rejected from announce names",
+          sanitize_directory_name(overlong_utf8, sizeof(overlong_utf8)).empty());
+
+    ActionMailbox actions;
+    check("NomadNet open action is accepted", actions.publish(UserActionKind::OPEN, page_url));
+    check("NomadNet save action preserves its own target", actions.publish(UserActionKind::SAVE, new_saved_url));
+    UserAction action;
+    check("NomadNet actions are FIFO", actions.pop(action) && action.kind == UserActionKind::OPEN &&
+          action.target() == page_url);
+    check("save target does not drift with current browser URL", actions.pop(action) &&
+          action.kind == UserActionKind::SAVE && action.target() == new_saved_url);
+    for (std::size_t i = 0; i < ActionMailbox::CAPACITY; ++i)
+        check("bounded NomadNet action queue accepts capacity", actions.publish(UserActionKind::OPEN, page_url));
+    check("bounded NomadNet action queue rejects ordinary overflow",
+          !actions.publish(UserActionKind::OPEN, page_url));
+    check("Home supersedes a full pending action queue",
+          actions.publish(UserActionKind::HOME, {}) && actions.pop(action) &&
+          action.kind == UserActionKind::HOME && !actions.pop(action));
+    actions.publish(UserActionKind::SAVE, new_saved_url);
+    actions.publish(UserActionKind::OPEN, page_url);
+    actions.publish(UserActionKind::BACK, {});
+    check("Back preserves an explicit save but cancels pending opens",
+          actions.pop(action) && action.kind == UserActionKind::SAVE &&
+          actions.pop(action) && action.kind == UserActionKind::BACK && !actions.pop(action));
+    actions.publish(UserActionKind::SAVE, new_saved_url);
+    actions.publish(UserActionKind::SAVE, new_saved_url);
+    actions.publish(UserActionKind::BACK, {});
+    check("duplicate queued save toggles are coalesced",
+          actions.pop(action) && action.kind == UserActionKind::SAVE &&
+          actions.pop(action) && action.kind == UserActionKind::BACK && !actions.pop(action));
+    for (std::size_t i = 0; i < ActionMailbox::CAPACITY; ++i)
+        actions.publish(UserActionKind::SAVE, new_saved_url + std::to_string(i));
+    actions.publish(UserActionKind::BACK, {});
+    std::size_t retained_saves = 0;
+    while (actions.pop(action) && action.kind == UserActionKind::SAVE) ++retained_saves;
+    check("terminal slot preserves every queued explicit save",
+          retained_saves == ActionMailbox::CAPACITY && action.kind == UserActionKind::BACK);
+
+    RequestPolicy request_policy;
+    check("path discovery deadline does not undercut transport timeout",
+          RequestPolicy::PATH_WAIT_MS >= 15000);
+    check("first Link timeout performs one bounded fresh-path retry",
+          request_policy.on_link_timeout() == RequestPolicy::LinkTimeoutAction::REFRESH_PATH &&
+          request_policy.path_refreshes() == 1);
+    check("second Link timeout terminates instead of looping forever",
+          request_policy.on_link_timeout() == RequestPolicy::LinkTimeoutAction::FAIL &&
+          request_policy.path_refreshes() == 1);
+    check("fresh-path retry rejects failed stale-route invalidation",
+          !RequestPolicy::path_invalidation_succeeded(true) &&
+          RequestPolicy::path_invalidation_succeeded(false));
+    request_policy.reset();
+    check("new page navigation resets the bounded retry budget",
+          request_policy.path_refreshes() == 0);
+
+    std::cout << passed << " passed, " << failed << " failed\n";
+    return failed == 0 ? 0 : 1;
+}

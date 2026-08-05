@@ -30,7 +30,7 @@ namespace LXMF {
 
 ConversationListScreen::ConversationListScreen(lv_obj_t* parent)
     : _screen(nullptr), _header(nullptr), _list(nullptr), _bottom_nav(nullptr),
-      _btn_new(nullptr), _btn_settings(nullptr), _label_wifi(nullptr), _label_lora(nullptr),
+      _btn_new(nullptr), _btn_home(nullptr), _btn_compose(nullptr), _btn_peers(nullptr), _label_wifi(nullptr), _label_lora(nullptr),
       _label_gps(nullptr), _label_ble(nullptr), _battery_container(nullptr),
       _label_battery_icon(nullptr), _label_battery_pct(nullptr),
       _lora_interface(nullptr), _ble_interface(nullptr), _gps(nullptr),
@@ -164,21 +164,25 @@ void ConversationListScreen::create_bottom_nav() {
     lv_obj_set_flex_flow(_bottom_nav, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(_bottom_nav, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    // Bottom navigation buttons: Messages, Announces, Status, Settings
-    const char* icons[] = {LV_SYMBOL_ENVELOPE, LV_SYMBOL_BELL, LV_SYMBOL_BARS, LV_SYMBOL_SETTINGS};
+    // Application-local actions: LXMF peers stay in Messages rather than the
+    // Network or NomadNet announce directories.
+    const char* labels[] = {LV_SYMBOL_HOME " Home", LV_SYMBOL_BELL " Peers", LV_SYMBOL_EDIT " Compose"};
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 3; i++) {
         lv_obj_t* btn = lv_btn_create(_bottom_nav);
-        lv_obj_set_size(btn, 65, 28);
+        lv_obj_set_size(btn, 98, 30);
         lv_obj_set_user_data(btn, (void*)(intptr_t)i);
         lv_obj_set_style_bg_color(btn, Theme::surfaceInput(), 0);
         lv_obj_set_style_bg_color(btn, lv_color_hex(0x3a3a3a), LV_STATE_PRESSED);
         lv_obj_add_event_cb(btn, on_bottom_nav_clicked, LV_EVENT_CLICKED, this);
 
         lv_obj_t* label = lv_label_create(btn);
-        lv_label_set_text(label, icons[i]);
+        lv_label_set_text(label, labels[i]);
         lv_obj_center(label);
         lv_obj_set_style_text_color(label, Theme::textTertiary(), 0);
+        if (i == 0) _btn_home = btn;
+        else if (i == 1) _btn_peers = btn;
+        else _btn_compose = btn;
     }
 }
 
@@ -279,6 +283,17 @@ void ConversationListScreen::refresh() {
 
         _conversations.push_back(item);
         create_conversation_item(item);
+    }
+
+    // refresh() may run while Messages remains active. Newly created rows are
+    // not automatically restored to the encoder group after lv_obj_clean().
+    if (_visible) {
+        lv_group_t* group = LVGL::LVGLInit::get_default_group();
+        if (group) {
+            for (lv_obj_t* container : _conversation_containers) {
+                lv_group_add_obj(group, container);
+            }
+        }
     }
 }
 
@@ -385,20 +400,13 @@ void ConversationListScreen::set_sync_callback(SyncCallback callback) {
     _sync_callback = callback;
 }
 
-void ConversationListScreen::set_settings_callback(SettingsCallback callback) {
-    _settings_callback = callback;
-}
-
-void ConversationListScreen::set_announces_callback(AnnouncesCallback callback) {
-    _announces_callback = callback;
-}
-
-void ConversationListScreen::set_status_callback(StatusCallback callback) {
-    _status_callback = callback;
+void ConversationListScreen::set_home_callback(HomeCallback callback) {
+    _home_callback = callback;
 }
 
 void ConversationListScreen::show() {
     LVGL_LOCK();
+    _visible = true;
     lv_obj_clear_flag(_screen, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(_screen);  // Bring to front for touch events
 
@@ -414,6 +422,9 @@ void ConversationListScreen::show() {
         if (_btn_new) {
             lv_group_add_obj(group, _btn_new);
         }
+        if (_btn_home) lv_group_add_obj(group, _btn_home);
+        if (_btn_peers) lv_group_add_obj(group, _btn_peers);
+        if (_btn_compose) lv_group_add_obj(group, _btn_compose);
 
         // Focus first conversation if available, otherwise New button
         if (!_conversation_containers.empty()) {
@@ -426,6 +437,7 @@ void ConversationListScreen::show() {
 
 void ConversationListScreen::hide() {
     LVGL_LOCK();
+    _visible = false;
     // Remove from focus group when hiding
     lv_group_t* group = LVGL::LVGLInit::get_default_group();
     if (group) {
@@ -437,6 +449,9 @@ void ConversationListScreen::hide() {
         if (_btn_new) {
             lv_group_remove_obj(_btn_new);
         }
+        if (_btn_home) lv_group_remove_obj(_btn_home);
+        if (_btn_peers) lv_group_remove_obj(_btn_peers);
+        if (_btn_compose) lv_group_remove_obj(_btn_compose);
     }
 
     lv_obj_add_flag(_screen, LV_OBJ_FLAG_HIDDEN);
@@ -652,38 +667,21 @@ void ConversationListScreen::on_sync_clicked(lv_event_t* event) {
     }
 }
 
-void ConversationListScreen::on_settings_clicked(lv_event_t* event) {
-    ConversationListScreen* screen = (ConversationListScreen*)lv_event_get_user_data(event);
-
-    if (screen->_settings_callback) {
-        screen->_settings_callback();
-    }
-}
-
 void ConversationListScreen::on_bottom_nav_clicked(lv_event_t* event) {
     ConversationListScreen* screen = (ConversationListScreen*)lv_event_get_user_data(event);
     lv_obj_t* target = lv_event_get_target(event);
     int btn_index = (int)(intptr_t)lv_obj_get_user_data(target);
 
     switch (btn_index) {
-        case 0: // Compose new message
+        case 0: // Launcher home
+            if (screen->_home_callback) screen->_home_callback();
+            break;
+        case 1: // Heard LXMF peers
+            if (screen->_peers_callback) screen->_peers_callback();
+            break;
+        case 2: // Compose new message
             if (screen->_compose_callback) {
                 screen->_compose_callback();
-            }
-            break;
-        case 1: // Announces
-            if (screen->_announces_callback) {
-                screen->_announces_callback();
-            }
-            break;
-        case 2: // Status
-            if (screen->_status_callback) {
-                screen->_status_callback();
-            }
-            break;
-        case 3: // Settings
-            if (screen->_settings_callback) {
-                screen->_settings_callback();
             }
             break;
         default:

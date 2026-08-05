@@ -46,8 +46,8 @@ def test_main_and_lvgl_tasks_feed_and_yield():
 
     assert loop.index("esp_task_wdt_reset();") < loop.index("ArduinoOTA.handle();")
     assert "RNS::Utilities::OS::set_loop_callback([]() { esp_task_wdt_reset(); });" in main
-    assert "persistence_elapsed_ms > 30000" in loop
-    assert "Reticulum persistence took %lu ms" in loop
+    assert "persistence_elapsed_ms > 1000" in loop
+    assert "Reticulum persistence stalled loopTask for %lu ms (TWDT limit is 60000 ms)" in loop
     assert "delay(5);" in loop
     assert "esp_task_wdt_add(nullptr);" in lvgl_task
     assert "esp_task_wdt_reset();" in lvgl_task

@@ -3,7 +3,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MICROSTORE_PIN = "https://github.com/attermann/microStore.git#c5fb69d68229e684c7fbd17692a67ae8193b84e2"
-MICRORETICULUM_PIN = "https://github.com/torlando-tech/microReticulum.git#1bbd422a3b25b4a710642fc5cd01039e5774a4a7"
+MICRORETICULUM_PIN = "https://github.com/torlando-tech/microReticulum.git#6ac0d3232cf705d538f9c556f0f82d2d2cc753bc"
 
 
 def test_microstore_pin_resolves_before_transitive_registry_requirement():

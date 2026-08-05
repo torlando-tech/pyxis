@@ -9,6 +9,18 @@
 #include <lvgl.h>
 #include <atomic>
 #include <functional>
+#include "HomeScreen.h"
+#include "NetworkScreen.h"
+#include "NomadNetScreen.h"
+#include "NavigationStack.h"
+#include "NomadNetUrl.h"
+#include "NomadNetDocument.h"
+#include "NomadNetProtocol.h"
+#include "NomadNetHistory.h"
+#include "NomadNetMailbox.h"
+#include "NomadNetRequestPolicy.h"
+#include "NomadNetActionMailbox.h"
+#include "NomadNetLibrary.h"
 #include "ConversationListScreen.h"
 #include "ChatScreen.h"
 #include "ComposeScreen.h"
@@ -96,6 +108,13 @@ public:
     void stop_loopback();
     bool is_loopback() const { return _call_loopback; }
 
+    void show_home();
+    void show_network();
+    void show_nomadnet();
+    void navigate(Route route);
+    void back();
+    void home();
+
     /**
      * Show conversation list screen
      */
@@ -126,7 +145,7 @@ public:
     void show_radio_activity();
 
     /** True only while sampling/rendering the dedicated activity screen. */
-    bool radio_activity_visible() const { return _current_screen == SCREEN_RADIO_ACTIVITY; }
+    bool radio_activity_visible() const { return _navigation.current() == Route::RADIO_ACTIVITY; }
 
     /** Install a copied snapshot provider and immutable active RF settings. */
     void set_radio_activity_source(
@@ -294,25 +313,12 @@ public:
 #endif
 
 private:
-    enum Screen {
-        SCREEN_CONVERSATION_LIST,
-        SCREEN_CHAT,
-        SCREEN_COMPOSE,
-        SCREEN_ANNOUNCES,
-        SCREEN_STATUS,
-        SCREEN_RADIO_ACTIVITY,
-        SCREEN_QR,
-        SCREEN_SETTINGS,
-        SCREEN_PROPAGATION_NODES,
-        SCREEN_CALL
-    };
-
     RNS::Reticulum& _reticulum;
     ::LXMF::LXMRouter& _router;
     ::LXMF::MessageStore& _store;
     RNS::Destination _lxst_destination;
 
-    Screen _current_screen;
+    NavigationStack _navigation;
     RNS::Bytes _current_peer_hash;
 
     // Conversation-list refresh debouncing. on_message_received() used
@@ -325,6 +331,9 @@ private:
     volatile bool _pending_conversation_refresh;
     uint32_t _last_conversation_refresh_ms;
 
+    HomeScreen* _home_screen;
+    NetworkScreen* _network_screen;
+    NomadNetScreen* _nomadnet_screen;
     ConversationListScreen* _conversation_list_screen;
     ChatScreen* _chat_screen;
     ComposeScreen* _compose_screen;
@@ -342,6 +351,49 @@ private:
     RNS::Interface* _ble_interface;
 
     bool _initialized;
+
+    NomadNet::Url _nomad_url;
+    NomadNet::DocumentParser _nomad_parser;
+    NomadNet::ResponseBuffer _nomad_response;
+    NomadNet::PageHistory _nomad_history;
+    NomadNet::AsyncMailbox _nomad_mailbox;
+    NomadNet::ActionMailbox _nomad_actions;
+    NomadNet::Library _nomad_library;
+    NomadNet::RequestPolicy _nomad_request_policy;
+
+    std::atomic<bool> _nomad_directory_refresh_pending{false};
+    bool _nomad_library_dirty = false;
+    uint32_t _nomad_last_library_save_ms = 0;
+    uint32_t _nomad_last_directory_refresh_ms = 0;
+    RNS::Bytes _nomad_destination_hash;
+    RNS::Link _nomad_link{RNS::Type::NONE};
+    RNS::RequestReceipt _nomad_request{RNS::Type::NONE};
+    enum class NomadState { IDLE, PATH, LINK, REQUEST };
+    NomadState _nomad_state = NomadState::IDLE;
+    uint32_t _nomad_deadline_ms = 0;
+    static UIManager* s_nomad_instance;
+
+    void render_route(Route route);
+    void replace_route(Route route);
+    void hide_all_screens();
+    void nomad_open(const std::string& address, bool add_history = true);
+    void nomad_reload();
+    void nomad_update();
+    void nomad_start_link();
+    void nomad_send_request();
+    void nomad_release_request();
+    void nomad_stop_transport();
+    bool nomad_refresh_path_after_link_failure();
+    void nomad_refresh_nodes();
+    bool nomad_load_library();
+    bool nomad_save_library();
+    void nomad_update_library();
+    void nomad_update_user_actions();
+    static void on_nomad_link_established(RNS::Link& link);
+    static void on_nomad_link_closed(RNS::Link& link);
+    static void on_nomad_response(const RNS::RequestReceipt& receipt);
+    static void on_nomad_failed(const RNS::RequestReceipt& receipt);
+    static void on_nomad_progress(const RNS::RequestReceipt& receipt);
 
     // Screen navigation handlers
     void on_conversation_selected(const RNS::Bytes& peer_hash);
