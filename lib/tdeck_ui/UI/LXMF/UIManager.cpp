@@ -476,12 +476,6 @@ void UIManager::update() {
         }
     }
 
-    // Process outbound LXMF messages
-    _router.process_outbound();
-
-    // Process inbound LXMF messages
-    _router.process_inbound();
-
     // Consume UI commands unconditionally. LVGL callbacks only publish into
     // the mailbox; loopTask remains the sole owner of the audio pipeline.
     const uint32_t generation = call_current_generation();
