@@ -53,7 +53,7 @@ inline bool normalize_response(const uint8_t* data, std::size_t size, ResponseBu
                   (static_cast<uint64_t>(data[2]) << 16) |
                   (static_cast<uint64_t>(data[3]) << 8) | data[4];
     } else {
-        // Pinned microReticulum 1bbd422 exposes packet responses as decoded
+        // Pinned microReticulum 6ac0d32 exposes packet responses as decoded
         // raw bytes, while Resource responses retain the encoded MessagePack
         // value. Valid UTF-8 Micron cannot begin with the bin markers above,
         // so the representations are unambiguous here.

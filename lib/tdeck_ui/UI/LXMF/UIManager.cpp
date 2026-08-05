@@ -1394,7 +1394,7 @@ void UIManager::nomad_release_request() {
     if (!_nomad_request) return;
     RequestReceipt receipt = _nomad_request;
     _nomad_request = RequestReceipt(Type::NONE);
-    // Pinned 1bbd422 does not erase successful packet receipts or pending
+    // Pinned 6ac0d32 does not erase successful packet receipts or pending
     // receipts on Link close. request_timed_out() is the only public erasure
     // path. The sealed mailbox rejects the synthetic failed callback generated
     // by this compatibility cleanup.
@@ -1503,7 +1503,7 @@ void UIManager::nomad_send_request() {
     _nomad_request = _nomad_link.request(
         Bytes(reinterpret_cast<const uint8_t*>(_nomad_url.path.data()), _nomad_url.path.size()),
         Bytes(nil.data(), nil.size()), on_nomad_response, on_nomad_failed,
-        on_nomad_progress, 30.0);
+        on_nomad_progress, 30.0, NomadNet::AsyncMailbox::MAX_WIRE_BYTES);
     if (!_nomad_request) {
         _nomad_state = NomadState::IDLE;
         _nomad_mailbox.seal();
@@ -1646,15 +1646,19 @@ void UIManager::on_nomad_response(const RequestReceipt& receipt) {
 }
 
 void UIManager::on_nomad_failed(const RequestReceipt& receipt) {
-    if (s_nomad_instance) s_nomad_instance->_nomad_mailbox.publish_failed(token(receipt.request_id()));
+    if (!s_nomad_instance) return;
+    if (receipt.response_size() > NomadNet::AsyncMailbox::MAX_WIRE_BYTES) {
+        s_nomad_instance->_nomad_mailbox.publish_progress(
+            token(receipt.request_id()), NomadNet::AsyncMailbox::MAX_WIRE_BYTES + 1);
+        return;
+    }
+    s_nomad_instance->_nomad_mailbox.publish_failed(token(receipt.request_id()));
 }
 
 void UIManager::on_nomad_progress(const RequestReceipt& receipt) {
     if (!s_nomad_instance) return;
-    // DEPENDENCY HARDENING GAP: pinned microReticulum accepts/accumulates a
-    // Resource before this application progress callback. We reject as soon as
-    // response_transfer_size() is exposed, but true pre-allocation admission
-    // control remains dependency-level; physical large-Resource validation is pending.
+    // Retain an aggregate transfer guard for split responses in addition to
+    // microReticulum's pre-allocation advertised decompressed-size limit.
     const std::size_t transfer = receipt.response_transfer_size();
     s_nomad_instance->_nomad_mailbox.publish_progress(token(receipt.request_id()), transfer);
     if (transfer > NomadNet::AsyncMailbox::MAX_WIRE_BYTES) {

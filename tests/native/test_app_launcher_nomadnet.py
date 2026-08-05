@@ -74,8 +74,16 @@ def test_ui_wiring_contract():
     assert "Identity::recall" in manager_cpp
     assert "Transport::request_path" in manager_cpp
     assert "no_form_request_data" in manager_cpp
+    request_start = manager_cpp.index("void UIManager::nomad_send_request()")
+    request = manager_cpp[request_start:manager_cpp.index("void UIManager::nomad_update()", request_start)]
+    assert "30.0, NomadNet::AsyncMailbox::MAX_WIRE_BYTES" in request
+    failed = manager_cpp[manager_cpp.index("void UIManager::on_nomad_failed"):
+                         manager_cpp.index("void UIManager::on_nomad_progress")]
+    assert "receipt.response_size()" in failed
+    assert "NomadNet::AsyncMailbox::MAX_WIRE_BYTES + 1" in failed
+    assert "publish_progress" in failed
     assert "response_transfer_size()" in manager_cpp
-    assert "DEPENDENCY HARDENING GAP" in manager_cpp
+    assert "DEPENDENCY HARDENING GAP" not in manager_cpp
     assert "lv_obj_set_scroll_dir" in browser_cpp
     assert "lv_textarea_set_max_length" in browser_cpp
     assert "set_link_callback" in manager_cpp
