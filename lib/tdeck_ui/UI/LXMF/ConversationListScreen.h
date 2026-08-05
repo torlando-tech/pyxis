@@ -71,9 +71,7 @@ public:
     using ConversationSelectedCallback = std::function<void(const RNS::Bytes& peer_hash)>;
     using ComposeCallback = std::function<void()>;
     using SyncCallback = std::function<void()>;
-    using SettingsCallback = std::function<void()>;
-    using AnnouncesCallback = std::function<void()>;
-    using StatusCallback = std::function<void()>;
+    using HomeCallback = std::function<void()>;
 
     /**
      * Create conversation list screen
@@ -131,19 +129,7 @@ public:
      * Set callback for settings button
      * @param callback Function to call when settings button is pressed
      */
-    void set_settings_callback(SettingsCallback callback);
-
-    /**
-     * Set callback for announces button
-     * @param callback Function to call when announces button is pressed
-     */
-    void set_announces_callback(AnnouncesCallback callback);
-
-    /**
-     * Set callback for status button
-     * @param callback Function to call when status button is pressed
-     */
-    void set_status_callback(StatusCallback callback);
+    void set_home_callback(HomeCallback callback);
 
     /**
      * Show the screen
@@ -205,7 +191,9 @@ private:
     lv_obj_t* _list;
     lv_obj_t* _bottom_nav;
     lv_obj_t* _btn_new;
-    lv_obj_t* _btn_settings;
+    lv_obj_t* _btn_home;
+    lv_obj_t* _btn_compose;
+    bool _visible = false;
     lv_obj_t* _label_wifi;
     lv_obj_t* _label_lora;
     lv_obj_t* _label_gps;
@@ -234,9 +222,7 @@ private:
     ConversationSelectedCallback _conversation_selected_callback;
     ComposeCallback _compose_callback;
     SyncCallback _sync_callback;
-    SettingsCallback _settings_callback;
-    AnnouncesCallback _announces_callback;
-    StatusCallback _status_callback;
+    HomeCallback _home_callback;
 
     // UI construction
     void create_header();
@@ -249,7 +235,6 @@ private:
     static void on_conversation_long_pressed(lv_event_t* event);
     static void on_delete_confirmed(lv_event_t* event);
     static void on_sync_clicked(lv_event_t* event);
-    static void on_settings_clicked(lv_event_t* event);
     static void on_bottom_nav_clicked(lv_event_t* event);
     static void msgbox_close_cb(lv_event_t* event);
 

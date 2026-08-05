@@ -60,10 +60,16 @@ void show_storage_error(const char* message) {
     lv_obj_add_event_cb(storage_error_dialog, close_storage_error, LV_EVENT_VALUE_CHANGED, nullptr);
 }
 
+std::vector<uint8_t> token(const RNS::Bytes& bytes) {
+    if (!bytes || bytes.size() == 0) return {};
+    return std::vector<uint8_t>(bytes.data(), bytes.data() + bytes.size());
+}
+
 }  // namespace
 
-// Static singleton for Link callbacks
+// Static singletons for Link callbacks
 UIManager* UIManager::s_call_instance = nullptr;
+UIManager* UIManager::s_nomad_instance = nullptr;
 
 // LXST announce handler — tracks peers that support voice calls
 class LXSTAnnounceHandler : public AnnounceHandler {
@@ -90,7 +96,9 @@ UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::Me
       // a Type::NONE state, then assign a real Destination later. (The fork
       // had a default ctor that pyxis was implicitly relying on.)
       _lxst_destination(RNS::Type::NONE),
-      _current_screen(SCREEN_CONVERSATION_LIST),
+      _home_screen(nullptr),
+      _network_screen(nullptr),
+      _nomadnet_screen(nullptr),
       _conversation_list_screen(nullptr),
       _chat_screen(nullptr),
       _compose_screen(nullptr),
@@ -131,7 +139,14 @@ UIManager::~UIManager() {
     // This pointer owns the long-lived incoming-destination callback, not only
     // the current call. Clear it only when the manager itself is destroyed.
     if (s_call_instance == this) s_call_instance = nullptr;
+    if (s_nomad_instance == this) s_nomad_instance = nullptr;
+    _nomad_mailbox.clear();
+    nomad_release_request();
+    if (_nomad_link && _nomad_link.status() != RNS::Type::Link::CLOSED) _nomad_link.teardown();
 
+    if (_home_screen) delete _home_screen;
+    if (_network_screen) delete _network_screen;
+    if (_nomadnet_screen) delete _nomadnet_screen;
     if (_conversation_list_screen) delete _conversation_list_screen;
     if (_chat_screen) delete _chat_screen;
     if (_compose_screen) delete _compose_screen;
@@ -153,6 +168,9 @@ bool UIManager::init() {
     INFO("Initializing UIManager");
 
     // Create all screens
+    _home_screen = new HomeScreen();
+    _network_screen = new NetworkScreen();
+    _nomadnet_screen = new NomadNetScreen();
     _conversation_list_screen = new ConversationListScreen();
     _chat_screen = new ChatScreen();
     _compose_screen = new ComposeScreen();
@@ -163,6 +181,22 @@ bool UIManager::init() {
     _settings_screen = new SettingsScreen();
     _propagation_nodes_screen = new PropagationNodesScreen();
     _call_screen = new CallScreen();
+
+    _home_screen->set_messages_callback([this]() { show_conversation_list(); });
+    _home_screen->set_nomadnet_callback([this]() { show_nomadnet(); });
+    _home_screen->set_network_callback([this]() { show_network(); });
+    _home_screen->set_settings_callback([this]() { show_settings(); });
+    _network_screen->set_back_callback([this]() { back(); });
+    _network_screen->set_home_callback([this]() { home(); });
+    _network_screen->set_announces_callback([this]() { show_announces(); });
+    _network_screen->set_status_callback([this]() { show_status(); });
+    _network_screen->set_radio_activity_callback([this]() { show_radio_activity(); });
+    _network_screen->set_propagation_nodes_callback([this]() { show_propagation_nodes(); });
+    _nomadnet_screen->set_back_callback([this]() { back(); });
+    _nomadnet_screen->set_home_callback([this]() { home(); });
+    _nomadnet_screen->set_reload_callback([this]() { nomad_reload(); });
+    _nomadnet_screen->set_open_callback([this](const std::string& address) { nomad_open(address); });
+    _nomadnet_screen->set_link_callback([this](const std::string& target) { nomad_open(target); });
 
     // Set up callbacks for conversation list screen
     _conversation_list_screen->set_conversation_selected_callback(
@@ -176,14 +210,7 @@ bool UIManager::init() {
     _conversation_list_screen->set_sync_callback(
         [this]() { on_propagation_sync(); }
     );
-
-    _conversation_list_screen->set_settings_callback(
-        [this]() { show_settings(); }
-    );
-
-    _conversation_list_screen->set_announces_callback(
-        [this]() { show_announces(); }
-    );
+    _conversation_list_screen->set_home_callback([this]() { home(); });
 
     // Set up callbacks for chat screen
     _chat_screen->set_back_callback(
@@ -258,9 +285,6 @@ bool UIManager::init() {
         [this]() { on_back_from_settings(); }
     );
 
-    _settings_screen->set_propagation_nodes_callback(
-        [this]() { show_propagation_nodes(); }
-    );
 
     // Set up callbacks for propagation nodes screen
     _propagation_nodes_screen->set_back_callback(
@@ -317,10 +341,6 @@ bool UIManager::init() {
     _settings_screen->set_identity_hash(_router.identity().hash());
     _settings_screen->set_lxmf_address(_router.delivery_destination().hash());
 
-    // Set up callback for status button in conversation list
-    _conversation_list_screen->set_status_callback(
-        [this]() { show_status(); }
-    );
 
     // Set identity hash and LXMF address on status screen
     _status_screen->set_identity_hash(_router.identity().hash());
@@ -342,9 +362,9 @@ bool UIManager::init() {
         }
     );
 
-    // Load conversations and show conversation list
+    // Load conversations; outer launcher is the application root.
     _conversation_list_screen->load_conversations(_store);
-    show_conversation_list();
+    show_home();
 
     // Create LXST IN destination for incoming voice calls
     _lxst_destination = Destination(_router.identity(), Type::Destination::IN,
@@ -352,6 +372,7 @@ bool UIManager::init() {
     _lxst_destination.set_proof_strategy(Type::Destination::PROVE_NONE);
     _lxst_destination.set_link_established_callback(on_lxst_link_established);
     s_call_instance = this;
+    s_nomad_instance = this;
 
     // Register LXST announce handler
     s_lxst_announce_handler = std::make_shared<LXSTAnnounceHandler>();
@@ -377,23 +398,24 @@ void UIManager::update() {
     // (the newest were rendered synchronously on open). Done here, on the main
     // loop, so each small batch only briefly holds the LVGL lock instead of the
     // whole page blocking it past LVGLLock's 5s timeout.
-    if (_current_screen == SCREEN_CHAT && _chat_screen) {
+    if (_navigation.current() == Route::CHAT && _chat_screen) {
         _chat_screen->tick_background_fill();
     }
     // Gather + render the announce list off the LVGL lock on the main loop (its
     // refresh() just arms a flag). Iterating the path table on the LVGL task raced
     // the main-loop path-table writes and blocked past the lock timeout once the
     // table was non-empty — this serializes the gather with the writes instead.
-    if (_current_screen == SCREEN_ANNOUNCES && _announce_list_screen) {
+    if (_navigation.current() == Route::ANNOUNCES && _announce_list_screen) {
         _announce_list_screen->tick();
     }
-    if (_current_screen == SCREEN_SETTINGS && _settings_screen) {
+    if (_navigation.current() == Route::SETTINGS && _settings_screen) {
         _settings_screen->tick();  // keep the live clock / GPS / system readouts ticking
     }
     const uint32_t now = millis();
+    nomad_update();
     // Snapshot acquisition is deliberately before LVGL_LOCK and is coalesced
     // to the screen's render cadence. The provider never touches radio or SPI.
-    if (_current_screen == SCREEN_RADIO_ACTIVITY &&
+    if (_navigation.current() == Route::RADIO_ACTIVITY &&
         _radio_activity_screen && _radio_activity_snapshot_provider &&
         _radio_activity_screen->render_due(now)) {
         const RadioActivity::Snapshot snapshot = _radio_activity_snapshot_provider();
@@ -448,7 +470,7 @@ void UIManager::update() {
             _conversation_list_screen->update_status();
         }
         // Update status screen if visible
-        if (_current_screen == SCREEN_STATUS && _status_screen) {
+        if (_navigation.current() == Route::STATUS && _status_screen) {
             _status_screen->refresh();
         }
     }
@@ -461,7 +483,7 @@ void UIManager::update() {
     // the SPI flush isn't saturated by sustained inbound traffic.
     static constexpr uint32_t COALESCE_MS = 750;
     if (_pending_conversation_refresh
-        && _current_screen == SCREEN_CONVERSATION_LIST
+        && _navigation.current() == Route::MESSAGES
         && (now - _last_conversation_refresh_ms) >= COALESCE_MS) {
         _pending_conversation_refresh = false;
         _last_conversation_refresh_ms = now;
@@ -471,80 +493,141 @@ void UIManager::update() {
     }
 }
 
-void UIManager::show_conversation_list() {
-    LVGL_LOCK();
-    INFO("Showing conversation list");
-
-    _conversation_list_screen->refresh();
-    _pending_conversation_refresh = false;
-    _last_conversation_refresh_ms = millis();
-    _conversation_list_screen->show();
-    _chat_screen->hide();
-    _compose_screen->hide();
-    _announce_list_screen->hide();
-    _status_screen->hide();
+void UIManager::hide_all_screens() {
+    if (_home_screen) _home_screen->hide();
+    if (_network_screen) _network_screen->hide();
+    if (_nomadnet_screen) _nomadnet_screen->hide();
+    if (_conversation_list_screen) _conversation_list_screen->hide();
+    if (_chat_screen) _chat_screen->hide();
+    if (_compose_screen) _compose_screen->hide();
+    if (_announce_list_screen) _announce_list_screen->hide();
+    if (_status_screen) _status_screen->hide();
     if (_radio_activity_screen) _radio_activity_screen->hide();
-    _settings_screen->hide();
-    _propagation_nodes_screen->hide();
+    if (_qr_screen) _qr_screen->hide();
+    if (_settings_screen) _settings_screen->hide();
+    if (_propagation_nodes_screen) _propagation_nodes_screen->hide();
     if (_call_screen) _call_screen->hide();
+}
 
-    _current_screen = SCREEN_CONVERSATION_LIST;
+void UIManager::show_home() {
+    home();
+}
+
+void UIManager::show_network() {
+    navigate(Route::NETWORK);
+}
+
+void UIManager::show_nomadnet() {
+    navigate(Route::NOMADNET);
+}
+
+void UIManager::navigate(Route route) {
+    if (_navigation.current() == Route::NOMADNET && route != Route::NOMADNET)
+        nomad_stop_transport();
+    LVGL_LOCK();
+    _navigation.navigate(route);
+    render_route(route);
+}
+
+void UIManager::replace_route(Route route) {
+    LVGL_LOCK();
+    _navigation.replace(route);
+    render_route(route);
+}
+
+void UIManager::back() {
+    if (_navigation.current() == Route::NOMADNET && _nomad_history.back()) {
+        nomad_open(_nomad_history.current(), false);
+        return;
+    }
+    if (_navigation.current() == Route::NOMADNET) nomad_stop_transport();
+    LVGL_LOCK();
+    if (!_navigation.back()) return;
+    render_route(_navigation.current());
+}
+
+void UIManager::home() {
+    if (_navigation.current() == Route::NOMADNET) nomad_stop_transport();
+    LVGL_LOCK();
+    _navigation.home();
+    render_route(Route::HOME);
+}
+
+void UIManager::render_route(Route route) {
+    // This is the only place that changes screen visibility. Every hide()
+    // removes its focus objects before the selected screen adds its own.
+    hide_all_screens();
+    switch (route) {
+        case Route::HOME:
+            _home_screen->show();
+            break;
+        case Route::MESSAGES:
+            _conversation_list_screen->refresh();
+            _pending_conversation_refresh = false;
+            _last_conversation_refresh_ms = millis();
+            _conversation_list_screen->show();
+            break;
+        case Route::CHAT:
+            _chat_screen->load_conversation(_current_peer_hash, _store);
+            _chat_screen->show();
+            break;
+        case Route::COMPOSE:
+            _compose_screen->clear();
+            _compose_screen->show();
+            break;
+        case Route::NETWORK:
+            _network_screen->show();
+            break;
+        case Route::ANNOUNCES:
+            _announce_list_screen->refresh();
+            _announce_list_screen->show();
+            break;
+        case Route::STATUS:
+            _status_screen->refresh();
+            _status_screen->show();
+            break;
+        case Route::RADIO_ACTIVITY:
+            _radio_activity_screen->show();
+            break;
+        case Route::QR:
+            _qr_screen->show();
+            break;
+        case Route::PROPAGATION_NODES:
+            _propagation_nodes_screen->show();
+            break;
+        case Route::NOMADNET:
+            _nomadnet_screen->show();
+            break;
+        case Route::SETTINGS:
+            _settings_screen->refresh();
+            _settings_screen->show();
+            break;
+        case Route::CALL: if (_call_screen) _call_screen->show(); break;
+    }
+}
+
+void UIManager::show_conversation_list() {
+    INFO("Showing conversation list");
+    navigate(Route::MESSAGES);
 }
 
 void UIManager::show_chat(const Bytes& peer_hash) {
-    LVGL_LOCK();
     std::string hash_hex = peer_hash.toHex().substr(0, 8);
     std::string msg = "Showing chat with peer " + hash_hex + "...";
     INFO(msg.c_str());
 
     _current_peer_hash = peer_hash;
-
-    _chat_screen->load_conversation(peer_hash, _store);
-    _chat_screen->show();
-    _conversation_list_screen->hide();
-    _compose_screen->hide();
-    _announce_list_screen->hide();
-    _status_screen->hide();
-    if (_radio_activity_screen) _radio_activity_screen->hide();
-    _settings_screen->hide();
-    _propagation_nodes_screen->hide();
-    if (_call_screen) _call_screen->hide();
-
-    _current_screen = SCREEN_CHAT;
+    navigate(Route::CHAT);
 }
 
 void UIManager::show_compose() {
-    LVGL_LOCK();
     INFO("Showing compose screen");
-
-    _compose_screen->clear();
-    _compose_screen->show();
-    _conversation_list_screen->hide();
-    _chat_screen->hide();
-    _announce_list_screen->hide();
-    _status_screen->hide();
-    if (_radio_activity_screen) _radio_activity_screen->hide();
-    _settings_screen->hide();
-    _propagation_nodes_screen->hide();
-
-    _current_screen = SCREEN_COMPOSE;
+    navigate(Route::COMPOSE);
 }
 
 void UIManager::show_announces() {
-    LVGL_LOCK();
     INFO("Showing announces screen");
-
-    _announce_list_screen->refresh();
-    _announce_list_screen->show();
-    _conversation_list_screen->hide();
-    _chat_screen->hide();
-    _compose_screen->hide();
-    _status_screen->hide();
-    if (_radio_activity_screen) _radio_activity_screen->hide();
-    _settings_screen->hide();
-    _propagation_nodes_screen->hide();
-
-    _current_screen = SCREEN_ANNOUNCES;
+    navigate(Route::ANNOUNCES);
 }
 
 void UIManager::show_status() {
@@ -595,33 +678,12 @@ void UIManager::show_status() {
         _status_screen->set_propagation_node(display);
     }
 
-    _status_screen->refresh();
-    _status_screen->show();
-    _conversation_list_screen->hide();
-    _chat_screen->hide();
-    _compose_screen->hide();
-    _announce_list_screen->hide();
-    _settings_screen->hide();
-    _propagation_nodes_screen->hide();
-    if (_radio_activity_screen) _radio_activity_screen->hide();
-
-    _current_screen = SCREEN_STATUS;
+    navigate(Route::STATUS);
 }
 
 void UIManager::show_radio_activity() {
-    LVGL_LOCK();
     INFO("Showing Radio Activity screen");
-
-    _conversation_list_screen->hide();
-    _chat_screen->hide();
-    _compose_screen->hide();
-    _announce_list_screen->hide();
-    _status_screen->hide();
-    _settings_screen->hide();
-    _propagation_nodes_screen->hide();
-    if (_call_screen) _call_screen->hide();
-    _radio_activity_screen->show();
-    _current_screen = SCREEN_RADIO_ACTIVITY;
+    navigate(Route::RADIO_ACTIVITY);
 }
 
 void UIManager::set_radio_activity_source(
@@ -640,20 +702,8 @@ void UIManager::on_new_message() {
 }
 
 void UIManager::show_settings() {
-    LVGL_LOCK();
     INFO("Showing settings screen");
-
-    _settings_screen->refresh();
-    _settings_screen->show();
-    _conversation_list_screen->hide();
-    _chat_screen->hide();
-    _compose_screen->hide();
-    _announce_list_screen->hide();
-    _status_screen->hide();
-    if (_radio_activity_screen) _radio_activity_screen->hide();
-    _propagation_nodes_screen->hide();
-
-    _current_screen = SCREEN_SETTINGS;
+    navigate(Route::SETTINGS);
 }
 
 void UIManager::show_propagation_nodes() {
@@ -683,16 +733,7 @@ void UIManager::show_propagation_nodes() {
         _propagation_nodes_screen->load_nodes(*_propagation_manager, selected_hash, auto_select);
     }
 
-    _propagation_nodes_screen->show();
-    _conversation_list_screen->hide();
-    _chat_screen->hide();
-    _compose_screen->hide();
-    _announce_list_screen->hide();
-    _status_screen->hide();
-    if (_radio_activity_screen) _radio_activity_screen->hide();
-    _settings_screen->hide();
-
-    _current_screen = SCREEN_PROPAGATION_NODES;
+    navigate(Route::PROPAGATION_NODES);
 }
 
 void UIManager::set_propagation_node_manager(::LXMF::PropagationNodeManager* manager) {
@@ -719,7 +760,7 @@ void UIManager::set_gps(TinyGPSPlus* gps) {
 }
 
 void UIManager::on_back_to_conversation_list() {
-    show_conversation_list();
+    back();
 }
 
 bool UIManager::on_send_message_from_chat(const String& content) {
@@ -745,13 +786,15 @@ void UIManager::on_call_from_chat() {
 bool UIManager::on_send_message_from_compose(const Bytes& dest_hash, const String& message) {
     if (!send_message(dest_hash, message)) return false;
 
-    // Switch to chat screen only after the message is durably accepted.
-    show_chat(dest_hash);
+    // Replace Compose with Chat so Back returns to Messages instead of
+    // reopening a cleared compose form.
+    _current_peer_hash = dest_hash;
+    replace_route(Route::CHAT);
     return true;
 }
 
 void UIManager::on_cancel_compose() {
-    show_conversation_list();
+    back();
 }
 
 void UIManager::on_announce_selected(const Bytes& dest_hash) {
@@ -764,38 +807,31 @@ void UIManager::on_announce_selected(const Bytes& dest_hash) {
 }
 
 void UIManager::on_back_from_announces() {
-    show_conversation_list();
+    back();
 }
 
 void UIManager::on_back_from_status() {
-    show_conversation_list();
+    back();
 }
 
 void UIManager::on_back_from_radio_activity() {
-    show_status();
+    back();
 }
 
 void UIManager::on_share_from_status() {
-    LVGL_LOCK();
-    _status_screen->hide();
-    if (_radio_activity_screen) _radio_activity_screen->hide();
-    _qr_screen->show();
-    _current_screen = SCREEN_QR;
+    navigate(Route::QR);
 }
 
 void UIManager::on_back_from_qr() {
-    LVGL_LOCK();
-    _qr_screen->hide();
-    _status_screen->show();
-    _current_screen = SCREEN_STATUS;
+    back();
 }
 
 void UIManager::on_back_from_settings() {
-    show_conversation_list();
+    back();
 }
 
 void UIManager::on_back_from_propagation_nodes() {
-    show_settings();
+    back();
 }
 
 void UIManager::on_propagation_node_selected(const Bytes& node_hash) {
@@ -930,7 +966,7 @@ bool UIManager::send_message(const Bytes& dest_hash, const String& content) {
         return false;
     }
 
-    if (_current_screen == SCREEN_CHAT && _current_peer_hash == dest_hash) {
+    if (_navigation.current() == Route::CHAT && _current_peer_hash == dest_hash) {
         _chat_screen->add_message(message, true);
     }
 
@@ -973,7 +1009,7 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
     LVGL_LOCK();
 
     // Update UI if we're viewing this conversation
-    bool viewing_this_chat = (_current_screen == SCREEN_CHAT && _current_peer_hash == message.source_hash());
+    bool viewing_this_chat = (_navigation.current() == Route::CHAT && _current_peer_hash == message.source_hash());
     if (viewing_this_chat) {
         _chat_screen->add_message(message, false);
     }
@@ -1003,7 +1039,7 @@ void UIManager::on_message_delivered(::LXMF::LXMessage& message) {
 
     LVGL_LOCK();
     // Update UI if we're viewing this conversation
-    if (_current_screen == SCREEN_CHAT && _current_peer_hash == message.destination_hash()) {
+    if (_navigation.current() == Route::CHAT && _current_peer_hash == message.destination_hash()) {
         _chat_screen->update_message_status(message.hash(), true);
     }
 }
@@ -1023,39 +1059,278 @@ void UIManager::on_message_failed(::LXMF::LXMessage& message) {
 
     LVGL_LOCK();
     // Update UI if we're viewing this conversation
-    if (_current_screen == SCREEN_CHAT && _current_peer_hash == message.destination_hash()) {
+    if (_navigation.current() == Route::CHAT && _current_peer_hash == message.destination_hash()) {
         _chat_screen->update_message_status(message.hash(), false);
     }
 }
 
 void UIManager::refresh_current_screen() {
     LVGL_LOCK();
-    switch (_current_screen) {
-        case SCREEN_CONVERSATION_LIST:
+    switch (_navigation.current()) {
+        case Route::MESSAGES:
             _conversation_list_screen->refresh();
             break;
-        case SCREEN_CHAT:
+        case Route::CHAT:
             _chat_screen->refresh();
             break;
-        case SCREEN_COMPOSE:
+        case Route::COMPOSE:
             // No refresh needed
             break;
-        case SCREEN_ANNOUNCES:
+        case Route::ANNOUNCES:
             _announce_list_screen->refresh();
             break;
-        case SCREEN_STATUS:
+        case Route::STATUS:
             _status_screen->refresh();
             break;
-        case SCREEN_SETTINGS:
+        case Route::SETTINGS:
             _settings_screen->refresh();
             break;
-        case SCREEN_PROPAGATION_NODES:
+        case Route::PROPAGATION_NODES:
             _propagation_nodes_screen->refresh();
             break;
-        case SCREEN_CALL:
+        case Route::CALL:
             break;
-        case SCREEN_QR:
+        case Route::QR:
             break;
+    }
+}
+
+// ── NomadNet browser transport ──
+
+void UIManager::nomad_release_request() {
+    if (!_nomad_request) return;
+    RequestReceipt receipt = _nomad_request;
+    _nomad_request = RequestReceipt(Type::NONE);
+    // Pinned 1bbd422 does not erase successful packet receipts or pending
+    // receipts on Link close. request_timed_out() is the only public erasure
+    // path; mailbox tokens are cleared by callers before this compatibility
+    // cleanup so its failed callback cannot replace the terminal UI event.
+    if (receipt.get_status() != Type::RequestReceipt::FAILED) {
+        receipt.request_timed_out(PacketReceipt(Type::NONE));
+    }
+}
+
+void UIManager::nomad_stop_transport() {
+    _nomad_state = NomadState::IDLE;
+    _nomad_deadline_ms = 0;
+    _nomad_mailbox.clear();
+    nomad_release_request();
+    if (_nomad_link && _nomad_link.status() != Type::Link::CLOSED) _nomad_link.teardown();
+    _nomad_link = Link(Type::NONE);
+}
+
+void UIManager::nomad_open(const std::string& address, bool add_history) {
+    NomadNet::Url parsed;
+    std::string error;
+    if (!NomadNet::Url::parse(address, parsed, error, _nomad_url.destination_hex)) {
+        LVGL_LOCK();
+        _nomadnet_screen->set_status(error.c_str());
+        return;
+    }
+
+    _nomad_mailbox.clear();
+    nomad_release_request();
+    if (_nomad_link && _nomad_link.status() != Type::Link::CLOSED) _nomad_link.teardown();
+    _nomad_link = Link(Type::NONE);
+    _nomad_request = RequestReceipt(Type::NONE);
+    _nomad_response.clear();
+    _nomad_url = parsed;
+    _nomad_history.open(parsed.str(), add_history);
+    _nomad_destination_hash = Bytes();
+    _nomad_destination_hash.assignHex(parsed.destination_hex.c_str());
+    {
+        LVGL_LOCK();
+        _nomadnet_screen->set_address(parsed.str());
+        _nomadnet_screen->set_status("Discovering path...");
+    }
+    if (Transport::has_path(_nomad_destination_hash)) nomad_start_link();
+    else {
+        Transport::request_path(_nomad_destination_hash);
+        _nomad_state = NomadState::PATH;
+        _nomad_deadline_ms = millis() + 10000;
+    }
+}
+
+void UIManager::nomad_reload() {
+    if (_nomad_history.current().empty()) {
+        LVGL_LOCK();
+        _nomadnet_screen->set_status("Enter a NomadNet address");
+        return;
+    }
+    nomad_open(_nomad_history.current(), false);
+}
+
+void UIManager::nomad_start_link() {
+    Identity identity = Identity::recall(_nomad_destination_hash);
+    if (!identity) {
+        _nomad_state = NomadState::IDLE;
+        LVGL_LOCK();
+        _nomadnet_screen->set_status("Node identity is not known");
+        return;
+    }
+    Destination destination(identity, Type::Destination::OUT,
+                            Type::Destination::SINGLE, "nomadnetwork", "node");
+    if (destination.hash() != _nomad_destination_hash) {
+        _nomad_state = NomadState::IDLE;
+        LVGL_LOCK();
+        _nomadnet_screen->set_status("Identity does not match node address");
+        return;
+    }
+    _nomad_link = Link(destination, on_nomad_link_established, on_nomad_link_closed);
+    _nomad_mailbox.begin(token(_nomad_link.link_id()));
+    _nomad_state = NomadState::LINK;
+    _nomad_deadline_ms = millis() + 30000;
+    LVGL_LOCK();
+    _nomadnet_screen->set_status("Establishing encrypted link...");
+}
+
+void UIManager::nomad_send_request() {
+    if (!_nomad_link || _nomad_link.status() != Type::Link::ACTIVE) return;
+    const auto nil = NomadNet::no_form_request_data();
+    _nomad_request = _nomad_link.request(
+        Bytes(reinterpret_cast<const uint8_t*>(_nomad_url.path.data()), _nomad_url.path.size()),
+        Bytes(nil.data(), nil.size()), on_nomad_response, on_nomad_failed,
+        on_nomad_progress, 30.0);
+    if (!_nomad_request) {
+        _nomad_state = NomadState::IDLE;
+        _nomad_mailbox.clear();
+        if (_nomad_link) _nomad_link.teardown();
+        _nomad_link = Link(Type::NONE);
+        _nomad_request = RequestReceipt(Type::NONE);
+        LVGL_LOCK();
+        _nomadnet_screen->set_status("Request could not be sent");
+        return;
+    }
+    _nomad_mailbox.expect_request(token(_nomad_request.request_id()));
+    _nomad_state = NomadState::REQUEST;
+    _nomad_deadline_ms = millis() + 30000;
+    LVGL_LOCK();
+    _nomadnet_screen->set_status("Requesting page...");
+}
+
+void UIManager::nomad_update() {
+    const uint32_t now = millis();
+    if (_nomad_state == NomadState::PATH && Transport::has_path(_nomad_destination_hash)) {
+        nomad_start_link();
+    } else if (_nomad_state != NomadState::IDLE && _nomad_deadline_ms != 0 &&
+               static_cast<int32_t>(now - _nomad_deadline_ms) >= 0) {
+        _nomad_state = NomadState::IDLE;
+        _nomad_mailbox.clear();
+        nomad_release_request();
+        if (_nomad_link) _nomad_link.teardown();
+        _nomad_link = Link(Type::NONE);
+        _nomad_request = RequestReceipt(Type::NONE);
+        LVGL_LOCK();
+        _nomadnet_screen->set_status("NomadNet operation timed out");
+        return;
+    }
+
+    NomadNet::AsyncMailbox::Event event;
+    if (!_nomad_mailbox.take(event)) return;
+    switch (event.kind) {
+        case NomadNet::AsyncMailbox::Kind::LINK_ESTABLISHED:
+            if (_nomad_state == NomadState::LINK) {
+                _nomad_link.identify(_router.identity());
+                nomad_send_request();
+            }
+            break;
+        case NomadNet::AsyncMailbox::Kind::LINK_CLOSED:
+            _nomad_state = NomadState::IDLE;
+            _nomad_mailbox.clear();
+            nomad_release_request();
+            _nomad_link = Link(Type::NONE);
+            _nomad_request = RequestReceipt(Type::NONE);
+            { LVGL_LOCK(); _nomadnet_screen->set_status("NomadNet link closed"); }
+            break;
+        case NomadNet::AsyncMailbox::Kind::FAILED:
+            _nomad_state = NomadState::IDLE;
+            _nomad_mailbox.clear();
+            nomad_release_request();
+            if (_nomad_link) _nomad_link.teardown();
+            _nomad_link = Link(Type::NONE);
+            _nomad_request = RequestReceipt(Type::NONE);
+            { LVGL_LOCK(); _nomadnet_screen->set_status("Page request failed"); }
+            break;
+        case NomadNet::AsyncMailbox::Kind::OVERSIZED:
+            _nomad_state = NomadState::IDLE;
+            _nomad_response.clear();
+            _nomad_mailbox.clear();
+            nomad_release_request();
+            if (_nomad_link) _nomad_link.teardown();
+            _nomad_link = Link(Type::NONE);
+            _nomad_request = RequestReceipt(Type::NONE);
+            { LVGL_LOCK(); _nomadnet_screen->set_status("Page exceeds 64 KiB limit"); }
+            break;
+        case NomadNet::AsyncMailbox::Kind::RESPONSE: {
+            _nomad_state = NomadState::IDLE;
+            // The callback payload has been moved into this local event. Each
+            // browser request uses a fresh Link, so release session state now;
+            // this also covers malformed responses. Clear callback tokens
+            // first so teardown cannot replace the terminal page status.
+            _nomad_mailbox.clear();
+            nomad_release_request();
+            if (_nomad_link) _nomad_link.teardown();
+            _nomad_link = Link(Type::NONE);
+            _nomad_request = RequestReceipt(Type::NONE);
+            if (!NomadNet::normalize_response(event.data.data(), event.data.size(), _nomad_response)) {
+                LVGL_LOCK();
+                _nomadnet_screen->set_status("Malformed NomadNet response");
+                break;
+            }
+            const auto& bytes = _nomad_response.bytes();
+            const NomadNet::Document document = _nomad_parser.parse(
+                reinterpret_cast<const char*>(bytes.data()), bytes.size());
+            LVGL_LOCK();
+            if (document.malformed && document.blocks.empty())
+                _nomadnet_screen->set_status("Page is not valid UTF-8/Micron");
+            else {
+                _nomadnet_screen->set_page(document);
+                _nomadnet_screen->set_status(document.truncated ? "Page loaded (truncated)" : "Page loaded");
+            }
+            break;
+        }
+        case NomadNet::AsyncMailbox::Kind::NONE:
+            break;
+    }
+}
+
+void UIManager::on_nomad_link_established(Link& link) {
+    if (s_nomad_instance) s_nomad_instance->_nomad_mailbox.publish_link(token(link.link_id()), true);
+}
+
+void UIManager::on_nomad_link_closed(Link& link) {
+    if (s_nomad_instance) s_nomad_instance->_nomad_mailbox.publish_link(token(link.link_id()), false);
+}
+
+void UIManager::on_nomad_response(const RequestReceipt& receipt) {
+    if (!s_nomad_instance) return;
+    const std::size_t transfer = receipt.response_transfer_size();
+    if (transfer > NomadNet::AsyncMailbox::MAX_WIRE_BYTES) {
+        s_nomad_instance->_nomad_mailbox.publish_progress(token(receipt.request_id()), transfer);
+        return;
+    }
+    const Bytes response = receipt.get_response();
+    s_nomad_instance->_nomad_mailbox.publish_response(
+        token(receipt.request_id()), response ? response.data() : nullptr,
+        response ? response.size() : 0, transfer);
+}
+
+void UIManager::on_nomad_failed(const RequestReceipt& receipt) {
+    if (s_nomad_instance) s_nomad_instance->_nomad_mailbox.publish_failed(token(receipt.request_id()));
+}
+
+void UIManager::on_nomad_progress(const RequestReceipt& receipt) {
+    if (!s_nomad_instance) return;
+    // DEPENDENCY HARDENING GAP: pinned microReticulum accepts/accumulates a
+    // Resource before this application progress callback. We reject as soon as
+    // response_transfer_size() is exposed, but true pre-allocation admission
+    // control remains dependency-level; physical large-Resource validation is pending.
+    const std::size_t transfer = receipt.response_transfer_size();
+    s_nomad_instance->_nomad_mailbox.publish_progress(token(receipt.request_id()), transfer);
+    if (transfer > NomadNet::AsyncMailbox::MAX_WIRE_BYTES) {
+        // Marking the receipt failed makes the pinned Resource progress path
+        // cancel on its next callback and erases it from the Link pending set.
+        const_cast<RequestReceipt&>(receipt).request_timed_out(PacketReceipt(Type::NONE));
     }
 }
 
@@ -1130,9 +1405,7 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
     _call_screen->set_peer(peer_dest.hash());
     _call_screen->set_state(CallScreen::CallState::CONNECTING);
     _call_screen->set_muted(false);
-    _call_screen->show();
-    _chat_screen->hide();
-    _current_screen = SCREEN_CALL;
+    navigate(Route::CALL);
 
     lxst_breadcrumb(5, ESP.getFreeHeap());
 
@@ -1283,8 +1556,10 @@ void UIManager::call_hangup() {
         _call_screen->set_state(CallScreen::CallState::ENDED);
     }
 
-    // Brief delay then return to conversation list
-    show_conversation_list();
+    // Restore the screen that owned the call rather than pushing CALL behind a
+    // new Messages route. If teardown happened before the call UI appeared,
+    // leave the current route untouched.
+    if (_navigation.current() == Route::CALL) back();
 }
 
 void UIManager::call_set_mute(bool muted) {
@@ -1868,8 +2143,7 @@ void UIManager::call_ended() {
 
     _call_screen->set_state(CallScreen::CallState::ENDED);
 
-    // Return to conversation list after brief display
-    show_conversation_list();
+    if (_navigation.current() == Route::CALL) back();
 }
 
 void UIManager::pump_call_tx() {
@@ -1982,12 +2256,11 @@ void UIManager::call_update() {
     }
 
     // Show incoming call UI (deferred from link callback to LVGL-safe context)
-    if (_call_state == CallState::INCOMING_RINGING && _current_screen != SCREEN_CALL) {
+    if (_call_state == CallState::INCOMING_RINGING && _navigation.current() != Route::CALL) {
         _call_screen->set_peer(_call_peer_hash);
         _call_screen->set_state(CallScreen::CallState::INCOMING_RINGING);
         _call_screen->set_muted(false);
-        _call_screen->show();
-        _current_screen = SCREEN_CALL;
+        navigate(Route::CALL);
 
         // Play notification tone
         if (_settings_screen) {

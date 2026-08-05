@@ -2411,7 +2411,9 @@ static void handle_test_hook_command(const String& line) {
         // additional state (peer hash / identity / active call) and
         // are not exposed here.
         if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
-        if (args == "conversation_list" || args == "home") {
+        if (args == "home") {
+            ui_manager->show_home();
+        } else if (args == "conversation_list") {
             ui_manager->show_conversation_list();
         } else if (args == "compose") {
             ui_manager->show_compose();

@@ -113,7 +113,7 @@ def test_ui_contract_uses_dedicated_status_child_and_snapshot_only_rendering():
     screen_cpp = SCREEN_CPP.read_text()
     status_cpp = STATUS_CPP.read_text()
 
-    assert "SCREEN_RADIO_ACTIVITY" in manager_h
+    assert "Route::RADIO_ACTIVITY" in manager_h
     assert "set_radio_activity_callback" in status_cpp
     assert "show_radio_activity" in manager_cpp
     assert "on_back_from_radio_activity" in manager_cpp

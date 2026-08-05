@@ -145,7 +145,7 @@
 #define LV_USE_MENU 0
 #define LV_USE_METER 0
 #define LV_USE_MSGBOX 1
-#define LV_USE_SPAN 0
+#define LV_USE_SPAN 1
 #define LV_USE_SPINBOX 0
 #define LV_USE_SPINNER 1
 #define LV_USE_TABVIEW 0
