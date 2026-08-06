@@ -1,9 +1,11 @@
 /*******************************************************************************
  * Bounded NomadNet font, 16 px, 4 bpp.
- * Source: LVGL 8.4.0 scripts/built_in_font/Montserrat-Medium.ttf
- * (Montserrat, SIL Open Font License 1.1).
- * Generated with lv_font_conv 1.5.2 for ranges 0x20-0x7E, 0xA0-0x17F,
- * 0x2000-0x206F, 0x20A0-0x20CF, and 0x2190-0x21FF; kerning omitted.
+ * Primary source: LVGL 8.4.0 Montserrat-Medium.ttf (SIL OFL 1.1).
+ * Box/block glyph source: DejaVu Sans Mono 2.37 (Bitstream Vera license;
+ * see LICENSE-DejaVu.txt).
+ * Generated with lv_font_conv 1.5.2; kerning omitted, RLE compressed.
+ * Coverage: printable ASCII, Latin U+00A0-U+017F, selected punctuation,
+ * currency and arrows, plus exact live-site box/block glyphs.
  ******************************************************************************/
 
 #ifdef LV_LVGL_H_INCLUDE_SIMPLE
@@ -2905,7 +2907,52 @@ static LV_ATTRIBUTE_LARGE_CONST const uint8_t glyph_bitmap[] = {
     /* U+2199 "↙" */
     0x0, 0xe2, 0x30, 0x80, 0x1, 0x64, 0x93, 0x81,
     0x62, 0xd1, 0xa, 0xe2, 0xd8, 0x1, 0x69, 0x6c,
-    0x2, 0x30, 0x5a, 0x70, 0x4, 0x75, 0x68, 0x80
+    0x2, 0x30, 0x5a, 0x70, 0x4, 0x75, 0x68, 0x80,
+
+    /* U+2500 "─" */
+    0x2, 0x2f, 0xf0, 0xee, 0xff, 0x60, 0xee, 0xff,
+    0x60,
+
+    /* U+2550 "═" */
+    0x6, 0x6f, 0xe5, 0x19, 0x9f, 0xe8, 0x1f, 0xff,
+    0xed, 0x1f, 0xff, 0xed, 0x19, 0x9f, 0xe8,
+
+    /* U+2551 "║" */
+    0x0, 0xe1, 0xf3, 0x5e, 0x0, 0xff, 0xff, 0x80,
+    0x7f, 0xf0, 0xc0,
+
+    /* U+2554 "╔" */
+    0x6, 0x6f, 0x80, 0x66, 0x7e, 0x0, 0xb3, 0xff,
+    0x80, 0x32, 0xff, 0xe0, 0xf, 0x4c, 0xc0, 0x1c,
+    0x2c, 0xd0, 0x7, 0xff, 0x88, 0x47, 0x10, 0x6,
+
+    /* U+2557 "╗" */
+    0x6, 0x6f, 0x29, 0x4c, 0xfa, 0xcb, 0xff, 0xa8,
+    0xb, 0xff, 0x10, 0x0, 0xa6, 0x60, 0x10, 0x9,
+    0x98, 0xe0, 0x1f, 0xfe, 0x31, 0x1c, 0x40,
+
+    /* U+255A "╚" */
+    0xe, 0x24, 0xc0, 0xc, 0x23, 0x88, 0x3, 0xff,
+    0xd2, 0x2c, 0xd0, 0x7, 0xa6, 0x60, 0xc, 0xbf,
+    0xf8, 0x2, 0xcf, 0xfe, 0x1, 0x99, 0xf8, 0x0,
+
+    /* U+255D "╝" */
+    0x0, 0xdc, 0x49, 0x80, 0x10, 0x8e, 0x20, 0xf,
+    0xfe, 0xeb, 0x31, 0xc0, 0x31, 0x4c, 0xc0, 0x20,
+    0x2, 0xff, 0xc4, 0x0, 0x2f, 0xfe, 0xa0, 0x29,
+    0x9f, 0x58,
+
+    /* U+2588 "█" */
+    0x0, 0xff, 0x87, 0xff, 0xfb, 0x80, 0x3f, 0xff,
+    0xe0, 0x1f, 0xff, 0xf0, 0xf, 0xff, 0x20,
+
+    /* U+2594 "▔" */
+    0x0, 0xff, 0x87, 0xff, 0xfb, 0x80, 0x3f, 0xe1,
+    0x88, 0xff, 0x0,
+
+    /* U+25A0 "■" */
+    0xef, 0xff, 0xd2, 0x20, 0x1f, 0xff, 0xf0, 0xc,
+    0xec, 0xdf, 0xb0
 };
 
 
@@ -3289,7 +3336,17 @@ static const lv_font_fmt_txt_glyph_dsc_t glyph_dsc[] = {
     {.bitmap_index = 15692, .adv_w = 154, .box_w = 7, .box_h = 7, .ofs_x = 1, .ofs_y = 1},
     {.bitmap_index = 15718, .adv_w = 154, .box_w = 8, .box_h = 7, .ofs_x = 1, .ofs_y = 1},
     {.bitmap_index = 15747, .adv_w = 154, .box_w = 8, .box_h = 7, .ofs_x = 1, .ofs_y = 1},
-    {.bitmap_index = 15774, .adv_w = 154, .box_w = 7, .box_h = 7, .ofs_x = 1, .ofs_y = 1}
+    {.bitmap_index = 15774, .adv_w = 154, .box_w = 7, .box_h = 7, .ofs_x = 1, .ofs_y = 1},
+    {.bitmap_index = 15798, .adv_w = 154, .box_w = 11, .box_h = 3, .ofs_x = -1, .ofs_y = 4},
+    {.bitmap_index = 15807, .adv_w = 154, .box_w = 11, .box_h = 5, .ofs_x = -1, .ofs_y = 3},
+    {.bitmap_index = 15822, .adv_w = 154, .box_w = 5, .box_h = 20, .ofs_x = 2, .ofs_y = -4},
+    {.bitmap_index = 15833, .adv_w = 154, .box_w = 9, .box_h = 12, .ofs_x = 2, .ofs_y = -4},
+    {.bitmap_index = 15857, .adv_w = 154, .box_w = 8, .box_h = 12, .ofs_x = -1, .ofs_y = -4},
+    {.bitmap_index = 15880, .adv_w = 154, .box_w = 9, .box_h = 12, .ofs_x = 2, .ofs_y = 3},
+    {.bitmap_index = 15904, .adv_w = 154, .box_w = 8, .box_h = 12, .ofs_x = -1, .ofs_y = 3},
+    {.bitmap_index = 15930, .adv_w = 154, .box_w = 11, .box_h = 20, .ofs_x = -1, .ofs_y = -4},
+    {.bitmap_index = 15945, .adv_w = 154, .box_w = 11, .box_h = 4, .ofs_x = -1, .ofs_y = 12},
+    {.bitmap_index = 15956, .adv_w = 154, .box_w = 10, .box_h = 10, .ofs_x = 0, .ofs_y = -1}
 };
 
 /*---------------------
@@ -3302,7 +3359,10 @@ static const uint16_t unicode_list_2[] = {
     0x19, 0x1a, 0x1b, 0x1f, 0x29, 0x2b, 0x2c, 0x32,
     0x33, 0x3d, 0x4b, 0x9a, 0x9c, 0x9d, 0x9f, 0xa0,
     0xa2, 0xa4, 0xa5, 0xa6, 0xa7, 0xaa, 0xab, 0xad,
-    0xae, 0xb1, 0xb2, 0xb3, 0xb5, 0xb6
+    0xae, 0xb1, 0xb2, 0xb3, 0xb5, 0xb6, 0x189, 0x18a,
+    0x18b, 0x18c, 0x18d, 0x18e, 0x18f, 0x190, 0x191, 0x192,
+    0x4f9, 0x549, 0x54a, 0x54d, 0x550, 0x553, 0x556, 0x581,
+    0x58d, 0x599
 };
 
 /*Collect the unicode lists and glyph_id offsets*/
@@ -3317,12 +3377,8 @@ static const lv_font_fmt_txt_cmap_t cmaps[] =
         .unicode_list = NULL, .glyph_id_ofs_list = NULL, .list_length = 0, .type = LV_FONT_FMT_TXT_CMAP_FORMAT0_TINY
     },
     {
-        .range_start = 8199, .range_length = 183, .glyph_id_start = 320,
-        .unicode_list = unicode_list_2, .glyph_id_ofs_list = NULL, .list_length = 46, .type = LV_FONT_FMT_TXT_CMAP_SPARSE_TINY
-    },
-    {
-        .range_start = 8592, .range_length = 10, .glyph_id_start = 366,
-        .unicode_list = NULL, .glyph_id_ofs_list = NULL, .list_length = 0, .type = LV_FONT_FMT_TXT_CMAP_FORMAT0_TINY
+        .range_start = 8199, .range_length = 1434, .glyph_id_start = 320,
+        .unicode_list = unicode_list_2, .glyph_id_ofs_list = NULL, .list_length = 66, .type = LV_FONT_FMT_TXT_CMAP_SPARSE_TINY
     }
 };
 
@@ -3344,7 +3400,7 @@ static lv_font_fmt_txt_dsc_t font_dsc = {
     .cmaps = cmaps,
     .kern_dsc = NULL,
     .kern_scale = 0,
-    .cmap_num = 4,
+    .cmap_num = 3,
     .bpp = 4,
     .kern_classes = 0,
     .bitmap_format = 1,
@@ -3358,8 +3414,8 @@ static lv_font_fmt_txt_dsc_t font_dsc = {
  *  PUBLIC FONT
  *----------------*/
 
-/* Preserve the original UTF-8 text while rendering any codepoint outside this
- * bounded font as an ASCII question mark instead of LVGL's rectangle. */
+/* Preserve original UTF-8 while mapping unsupported codepoints to ASCII
+ * question mark instead of LVGL's missing-glyph rectangle. */
 static bool nomadnet_font_16_get_glyph_dsc(const lv_font_t * font,
         lv_font_glyph_dsc_t * dsc, uint32_t letter, uint32_t letter_next)
 {
@@ -3396,5 +3452,7 @@ lv_font_t nomadnet_font_16 = {
 #endif
     .dsc = &font_dsc           /*The custom font data. Will be accessed by `get_glyph_bitmap/dsc` */
 };
+
+
 
 #endif /*#if NOMADNET_FONT_16*/

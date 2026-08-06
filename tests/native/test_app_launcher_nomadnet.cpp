@@ -176,6 +176,8 @@ int main(int argc, char** argv) {
           display_text(u8"release · stable — open → details • done") ==
               u8"release · stable — open → details • done");
     check("Latin accents remain intact", display_text(u8"café Ångström") == u8"café Ångström");
+    check("live NomadNet box and block drawing glyphs remain intact",
+          display_text(u8"─═║╔╗╚╝█▔■") == u8"─═║╔╗╚╝█▔■");
     check("glyphs outside the bounded browser font degrade without rectangles",
           display_text(u8"status 😀 ok") == "status ? ok");
     check("contiguous cmap boundary codepoints degrade safely",

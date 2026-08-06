@@ -23,6 +23,8 @@ static inline bool nomadnet_font_has_codepoint(uint32_t codepoint) {
         case 0x20a9: case 0x20ab: case 0x20ac: case 0x20ad: case 0x20ae:
         case 0x20b1: case 0x20b2: case 0x20b4: case 0x20b5: case 0x20b8:
         case 0x20b9: case 0x20ba: case 0x20bc: case 0x20bd:
+        case 0x2500: case 0x2550: case 0x2551: case 0x2554: case 0x2557:
+        case 0x255a: case 0x255d: case 0x2588: case 0x2594: case 0x25a0:
             return true;
         default:
             return false;
