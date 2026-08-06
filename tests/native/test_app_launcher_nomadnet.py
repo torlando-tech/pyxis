@@ -1,6 +1,7 @@
 import shutil
 import subprocess
 import hashlib
+import re
 from pathlib import Path
 
 import pytest
@@ -36,6 +37,7 @@ def test_app_launcher_nomadnet_native(tmp_path):
         _cxx(), "-std=c++17", "-Wall", "-Wextra", "-Werror",
         f"-I{INCLUDE}", str(SOURCE),
         str(INCLUDE / "NomadNetDocument.cpp"),
+        str(INCLUDE / "NomadNetGlyphs.cpp"),
         str(INCLUDE / "NomadNetLibrary.cpp"),
         str(INCLUDE / "NomadNetUrl.cpp"),
         "-o", str(binary),
@@ -49,11 +51,13 @@ def test_app_launcher_nomadnet_native(tmp_path):
 
 
 def test_ui_wiring_contract():
+    library_json = (ROOT / "lib" / "tdeck_ui" / "library.json").read_text()
     manager_h = (INCLUDE / "UIManager.h").read_text()
     manager_cpp = (INCLUDE / "UIManager.cpp").read_text()
     launcher_cpp = (INCLUDE / "HomeScreen.cpp").read_text()
     network_cpp = (INCLUDE / "NetworkScreen.cpp").read_text()
     browser_cpp = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    glyphs_h = (INCLUDE / "NomadNetGlyphs.h").read_text()
 
     for tile in ("Messages", "NomadNet", "Network", "Settings"):
         assert tile in launcher_cpp
@@ -92,6 +96,13 @@ def test_ui_wiring_contract():
     assert "lv_group_focus_obj(_focusables.front())" not in browser_cpp
     assert "LV_SYMBOL_HOME" in browser_cpp
     assert "lv_font_" in browser_cpp
+    assert "nomadnet_font_12" in browser_cpp
+    assert "nomadnet_font_16" in browser_cpp
+    assert "display_text" in browser_cpp
+    assert "U+00A0-U+017F" in glyphs_h
+    assert "U+2000-U+206F" in glyphs_h
+    assert "U+2190-U+21FF" in glyphs_h
+    assert "+<UI/Fonts/*.c>" in library_json
     for detail in ("Inbox & calls", "Browse Micron", "Links & radio", "Device options"):
         assert detail in launcher_cpp
     for detail in ("Interfaces & storage", "Signal history", "Delivery relays"):
@@ -104,6 +115,52 @@ def test_ui_wiring_contract():
     assert "handle_library_back" in browser_cpp
     assert "set_library" in browser_cpp
     assert "set_save_callback" in manager_cpp
+
+
+def test_bounded_nomadnet_fonts_match_display_allowlist():
+    expected = set(range(0x20, 0x7F)) | set(range(0xA0, 0x180))
+    expected |= set(range(0x2190, 0x219A))
+    expected |= {
+        0x2007, 0x2008, 0x2009, 0x200A, 0x200B,
+        0x2010, 0x2012, 0x2013, 0x2014, 0x2015,
+        0x2018, 0x2019, 0x201A, 0x201C, 0x201D, 0x201E,
+        0x2020, 0x2021, 0x2022, 0x2026, 0x2030, 0x2032,
+        0x2033, 0x2039, 0x203A, 0x2044, 0x2052,
+        0x20A1, 0x20A3, 0x20A4, 0x20A6, 0x20A7, 0x20A9,
+        0x20AB, 0x20AC, 0x20AD, 0x20AE, 0x20B1, 0x20B2,
+        0x20B4, 0x20B5, 0x20B8, 0x20B9, 0x20BA, 0x20BC, 0x20BD,
+        0x2500, 0x2550, 0x2551, 0x2554, 0x2557,
+        0x255A, 0x255D, 0x2588, 0x2594, 0x25A0,
+    }
+    for size in (12, 16):
+        source = (ROOT / "lib" / "tdeck_ui" / "UI" / "Fonts" /
+                  f"nomadnet_font_{size}.c").read_text()
+        encoded = {int(value, 16) for value in re.findall(r"/\* U\+([0-9A-F]+)", source)}
+        assert encoded == expected
+        assert f".get_glyph_dsc = nomadnet_font_{size}_get_glyph_dsc" in source
+        assert f".get_glyph_bitmap = nomadnet_font_{size}_get_glyph_bitmap" in source
+        assert "nomadnet_font_has_codepoint(letter)" in source
+
+
+def test_generated_font_compression_is_enabled_in_lvgl():
+    config = (ROOT / "lib" / "lv_conf.h").read_text()
+    for size in (12, 16):
+        source = (ROOT / "lib" / "tdeck_ui" / "UI" / "Fonts" /
+                  f"nomadnet_font_{size}.c").read_text()
+        assert ".bitmap_format = 1" in source
+        assert "#if !LV_USE_FONT_COMPRESSED" in source
+        assert "#error \"NomadNet fonts require LV_USE_FONT_COMPRESSED=1\"" in source
+    assert "#define LV_USE_FONT_COMPRESSED 1" in config
+
+
+def test_directory_icons_use_lvgl_symbol_font_separately_from_remote_text():
+    screen = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    assert "add_row(LV_SYMBOL" not in screen
+    assert "const char* symbol=nullptr" in screen
+    assert "lv_label_set_text(icon,symbol)" in screen
+    assert "lv_obj_set_style_text_font(icon,&lv_font_montserrat_12,0)" in screen
+    for symbol in ("LV_SYMBOL_DIRECTORY", "LV_SYMBOL_SAVE", "LV_SYMBOL_LIST", "LV_SYMBOL_EDIT"):
+        assert f",{symbol});" in screen
 
 
 def test_nomadnet_latency_and_path_lifecycle_contracts():

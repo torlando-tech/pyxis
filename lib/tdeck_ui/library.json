@@ -19,6 +19,7 @@
             "+<Hardware/TDeck/*.cpp>",
             "+<UI/*.cpp>",
             "+<UI/LVGL/*.cpp>",
+            "+<UI/Fonts/*.c>",
             "+<UI/LXMF/*.cpp>"
         ],
         "includeDir": "."
