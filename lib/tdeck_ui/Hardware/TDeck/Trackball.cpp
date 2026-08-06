@@ -71,6 +71,17 @@ lv_obj_t* group_navigation_root(lv_group_t* group, lv_obj_t* focused) {
     return root;
 }
 
+void normalize_group_focus_state(lv_group_t* group) {
+    lv_obj_t* focused = lv_group_get_focused(group);
+    lv_obj_t** node = static_cast<lv_obj_t**>(_lv_ll_get_head(&group->obj_ll));
+    while (node) {
+        if (*node != focused) {
+            lv_obj_clear_state(*node, LV_STATE_FOCUSED | LV_STATE_FOCUS_KEY);
+        }
+        node = static_cast<lv_obj_t**>(_lv_ll_get_next(&group->obj_ll, node));
+    }
+}
+
 bool can_scroll(lv_obj_t* object, NavigationDirection direction) {
     if (!object || !object_is_visible(object) ||
         !lv_obj_has_flag(object, LV_OBJ_FLAG_SCROLLABLE)) return false;
@@ -138,6 +149,7 @@ void scroll_one_step(lv_obj_t* object, NavigationDirection direction) {
 bool navigate_or_scroll(lv_group_t* group, NavigationDirection direction) {
     if (!group) return false;
     if (group->frozen) return false;
+    normalize_group_focus_state(group);
     lv_obj_t* focused = lv_group_get_focused(group);
     // A clipped focus target remains the spatial anchor while its container
     // scrolls. Only a truly hidden/stale target needs insertion-order refocus.
@@ -146,6 +158,7 @@ bool navigate_or_scroll(lv_group_t* group, NavigationDirection direction) {
         while (node) {
             if (object_is_focus_candidate(*node)) {
                 lv_group_focus_obj(*node);
+                normalize_group_focus_state(group);
                 return true;
             }
             node = static_cast<lv_obj_t**>(_lv_ll_get_next(&group->obj_ll, node));
@@ -179,6 +192,7 @@ bool navigate_or_scroll(lv_group_t* group, NavigationDirection direction) {
             scroll_one_step(ancestor, direction);
         } else {
             lv_group_focus_obj(target);
+            normalize_group_focus_state(group);
         }
         return true;
     }

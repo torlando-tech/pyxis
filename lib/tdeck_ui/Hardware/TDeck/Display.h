@@ -5,7 +5,6 @@
 #define HARDWARE_TDECK_DISPLAY_H
 
 #include "Config.h"
-#include "DisplayRefreshRetry.h"
 
 #ifdef ARDUINO
 #include <Arduino.h>
@@ -87,9 +86,6 @@ public:
      */
     static void lvgl_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p);
 
-    /** Consume a redraw requested by a flush that lost the shared SPI bus. */
-    static bool consume_refresh_retry();
-
 private:
     // Show boot splash image, called from init_hardware_only()
     static void show_splash();
@@ -158,7 +154,6 @@ private:
     static volatile uint32_t _flush_count;
     static volatile uint32_t _last_flush_ms;
     static uint32_t _last_health_log_ms;
-    static DisplayRefreshRetry _refresh_retry;
 
 public:
     // Check display health (call from main loop periodically)

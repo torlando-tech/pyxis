@@ -70,6 +70,11 @@ def test_trackball_and_nomadnet_directional_integration_contract():
     assert "accum_y > 0 ? NavigationDirection::UP : NavigationDirection::DOWN" in trackball
     assert "accum_x > 0 ? NavigationDirection::RIGHT : NavigationDirection::LEFT" in trackball
     assert trackball.count("last_key_time = now;\n            accum_x = 0;\n            accum_y = 0;") == 2
+    # One LVGL group has exactly one focus owner. Normalize stale focus states
+    # observed physically so two buttons cannot remain highlighted together.
+    assert "normalize_group_focus_state(group);" in trackball
+    assert "LV_STATE_FOCUSED | LV_STATE_FOCUS_KEY" in trackball
+    assert "LV_STATE_FOCUSED | LV_STATE_FOCUS_KEY | LV_STATE_EDITED" not in trackball
 
     # NomadNet's document viewport must remain a bounded vertical scroll target;
     # trackball movement reaches it through the generic LVGL navigation helper.
