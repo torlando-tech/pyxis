@@ -113,11 +113,18 @@ void NomadNetScreen::show_browser(bool editing){
 }
 void NomadNetScreen::render_directory(View view){
     auto* group=LVGL::LVGLInit::get_default_group();
-    if(group)for(auto* object:_directory_focusables)lv_group_remove_obj(object);
+    if(group)detach_focusables(group);
     _directory_focusables.clear();_directory_targets.clear();lv_obj_clean(_directory);_view=view;
     _directory_visible.store(true,std::memory_order_release);
     lv_obj_clear_flag(_directory,LV_OBJ_FLAG_HIDDEN);
     for(auto* object:{_address_row,_status,_content,_reload_button,_save_button})lv_obj_add_flag(object,LV_OBJ_FLAG_HIDDEN);
+
+    // LVGL automatically enrols newly constructed group-capable widgets in the
+    // default group and focuses the first member of an empty group. Keep the
+    // replacement rows detached until rebuild_focus() can install the complete
+    // membership and choose one final owner.
+    auto* previous_default_group=lv_group_get_default();
+    lv_group_set_default(nullptr);
 
     auto add_row=[&](const std::string& title,const std::string& detail,std::size_t code,const char* symbol=nullptr){
         lv_obj_t* button=lv_btn_create(_directory);lv_obj_set_size(button,306,35);lv_obj_set_flex_grow(button,0);
@@ -172,18 +179,41 @@ void NomadNetScreen::render_directory(View view){
         lv_label_set_text(empty,view==View::HEARD?"No NomadNet nodes heard yet":view==View::SAVED_NODES?"No saved nodes":view==View::SAVED_PAGES?"No saved pages":"No recent pages");
         lv_obj_set_style_text_color(empty,Theme::textTertiary(),0);lv_obj_set_style_text_font(empty,&nomadnet_font_12,0);
     }
+    lv_group_set_default(previous_default_group);
     rebuild_focus();
+}
+void NomadNetScreen::detach_focusables(lv_group_t* group){
+    if(!group)return;
+    auto* focused=lv_group_get_focused(group);
+    auto owned_focusable=[&](lv_obj_t* candidate){
+        if(!candidate)return false;
+        for(auto* object:{_back_button,_home_button,_reload_button,_save_button,_address,_go_button,_edit_button})
+            if(candidate==object)return true;
+        for(auto* object:_focusables)if(candidate==object)return true;
+        for(auto* object:_directory_focusables)if(candidate==object)return true;
+        return false;
+    };
+    auto detach_non_owner=[&](lv_obj_t* object){
+        if(object&&object!=focused)lv_group_remove_obj(object);
+    };
+    for(auto* object:{_back_button,_home_button,_reload_button,_save_button,_address,_go_button,_edit_button})detach_non_owner(object);
+    for(auto* object:_focusables)detach_non_owner(object);
+    for(auto* object:_directory_focusables)detach_non_owner(object);
+    if(focused&&owned_focusable(focused))lv_group_remove_obj(focused);
 }
 void NomadNetScreen::rebuild_focus(){
     if(!_visible)return;
     auto* group=LVGL::LVGLInit::get_default_group();if(!group)return;
-    for(auto* object:{_back_button,_home_button,_reload_button,_save_button,_address,_go_button,_edit_button})lv_group_remove_obj(object);
-    for(auto* object:_focusables)lv_group_remove_obj(object);
-    for(auto* object:_directory_focusables)lv_group_remove_obj(object);
+    detach_focusables(group);
+    // Adding the first member to an empty LVGL group normally focuses it. Freeze
+    // while restoring navigation order, then assign the intended owner once.
+    lv_group_focus_freeze(group,true);
     lv_group_add_obj(group,_back_button);lv_group_add_obj(group,_home_button);
     if(_view!=View::BROWSER){
         for(auto* object:_directory_focusables)lv_group_add_obj(group,object);
-        if(!_directory_focusables.empty())lv_group_focus_obj(_directory_focusables.front());else lv_group_focus_obj(_back_button);
+        auto* final_focus=!_directory_focusables.empty()?_directory_focusables.front():_back_button;
+        lv_group_focus_freeze(group,false);
+        lv_group_focus_obj(final_focus);
         return;
     }
     lv_group_add_obj(group,_reload_button);
@@ -193,6 +223,7 @@ void NomadNetScreen::rebuild_focus(){
     for(auto* object:_focusables)lv_group_add_obj(group,object);
     // Keep a newly loaded document at its beginning. Focusing the first link
     // makes LVGL auto-scroll that link into view, which can hide the heading.
+    lv_group_focus_freeze(group,false);
     lv_group_focus_obj(_editing?_address:_edit_button);
 }
 void NomadNetScreen::apply_browser_layout(bool show_status){

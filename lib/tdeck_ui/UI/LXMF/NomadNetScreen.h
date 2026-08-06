@@ -58,6 +58,7 @@ private:
     void render_directory(View view);
     void show_browser(bool editing);
     void clear_document();
+    void detach_focusables(lv_group_t* group);
     void rebuild_focus();
     static void clicked(lv_event_t* event);
 };

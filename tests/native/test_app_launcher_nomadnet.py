@@ -117,6 +117,43 @@ def test_ui_wiring_contract():
     assert "set_save_callback" in manager_cpp
 
 
+def test_directory_rebuild_has_one_final_focus_owner():
+    """Returning from Heard Nodes must not focus every surviving/start row."""
+    screen = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    render_start = screen.index("void NomadNetScreen::render_directory(View view)")
+    detach_start = screen.index("void NomadNetScreen::detach_focusables(", render_start)
+    rebuild_start = screen.index("void NomadNetScreen::rebuild_focus()", detach_start)
+    render = screen[render_start:detach_start]
+    detach = screen[detach_start:rebuild_start]
+    rebuild_end = screen.index("void NomadNetScreen::apply_browser_layout", rebuild_start)
+    rebuild = screen[rebuild_start:rebuild_end]
+
+    # Creating replacement buttons must not auto-enrol/focus the first object
+    # through LVGL's default-group constructor hook.
+    assert "detach_focusables(group);" in render
+    assert "lv_group_set_default(nullptr);" in render
+    assert "lv_group_set_default(previous_default_group);" in render
+    assert render.index("detach_focusables(group);") < render.index("lv_group_set_default(nullptr);")
+    assert render.index("lv_group_set_default(nullptr);") < render.index("auto add_row=")
+    assert render.index("lv_group_set_default(previous_default_group);") > render.index("if(_directory_focusables.empty())")
+
+    # Detach every non-owner first and the current owner last. LVGL 8.4
+    # otherwise refocuses each remaining member synchronously during removal.
+    assert "auto* focused=lv_group_get_focused(group);" in detach
+    assert "if(object&&object!=focused)lv_group_remove_obj(object);" in detach
+    assert "if(focused&&owned_focusable(focused))lv_group_remove_obj(focused);" in detach
+    assert detach.index("if(object&&object!=focused)lv_group_remove_obj(object);") < detach.index(
+        "if(focused&&owned_focusable(focused))lv_group_remove_obj(focused);"
+    )
+
+    # Repopulate while frozen, then emit exactly one intentional final focus.
+    assert "detach_focusables(group);" in rebuild
+    assert "lv_group_focus_freeze(group,true);" in rebuild
+    assert "lv_group_focus_freeze(group,false);" in rebuild
+    assert rebuild.index("lv_group_focus_freeze(group,true);") < rebuild.index("lv_group_add_obj")
+    assert rebuild.index("lv_group_focus_freeze(group,false);") < rebuild.rindex("lv_group_focus_obj")
+
+
 def test_bounded_nomadnet_fonts_match_display_allowlist():
     expected = set(range(0x20, 0x7F)) | set(range(0xA0, 0x180))
     expected |= set(range(0x2190, 0x219A))
