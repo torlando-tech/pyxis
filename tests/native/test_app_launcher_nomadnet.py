@@ -185,6 +185,20 @@ def test_launcher_transition_has_one_final_focus_owner():
     )
 
 
+def test_nomadnet_directory_uses_one_coherent_focus_style():
+    """The focused row must not gain the default blue keypad outline later."""
+    screen = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    add_row_start = screen.index("auto add_row=")
+    add_row_end = screen.index("if(view==View::START)", add_row_start)
+    add_row = screen[add_row_start:add_row_end]
+
+    assert "Theme::primaryPressed(),LV_STATE_FOCUSED" in add_row
+    assert "lv_obj_set_style_outline_width(button,0,LV_STATE_FOCUS_KEY);" in add_row
+    assert add_row.index("Theme::primaryPressed(),LV_STATE_FOCUSED") < add_row.index(
+        "lv_obj_set_style_outline_width(button,0,LV_STATE_FOCUS_KEY);"
+    )
+
+
 def test_bounded_nomadnet_fonts_match_display_allowlist():
     expected = set(range(0x20, 0x7F)) | set(range(0xA0, 0x180))
     expected |= set(range(0x2190, 0x219A))

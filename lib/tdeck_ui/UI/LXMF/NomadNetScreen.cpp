@@ -129,6 +129,9 @@ void NomadNetScreen::render_directory(View view){
     auto add_row=[&](const std::string& title,const std::string& detail,std::size_t code,const char* symbol=nullptr){
         lv_obj_t* button=lv_btn_create(_directory);lv_obj_set_size(button,306,35);lv_obj_set_flex_grow(button,0);
         lv_obj_set_style_bg_color(button,Theme::surfaceContainer(),0);lv_obj_set_style_bg_color(button,Theme::primaryPressed(),LV_STATE_FOCUSED);
+        // The default theme adds a blue outline for keypad focus on top of this
+        // purple focused background. Keep one stable visual focus treatment.
+        lv_obj_set_style_outline_width(button,0,LV_STATE_FOCUS_KEY);
         lv_obj_set_style_border_width(button,0,0);lv_obj_set_style_radius(button,8,0);lv_obj_set_style_pad_all(button,4,0);
         lv_coord_t title_x=2;
         lv_coord_t title_width=286;
