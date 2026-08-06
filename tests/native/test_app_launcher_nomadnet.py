@@ -154,6 +154,37 @@ def test_directory_rebuild_has_one_final_focus_owner():
     assert rebuild.index("lv_group_focus_freeze(group,false);") < rebuild.rindex("lv_group_focus_obj")
 
 
+def test_launcher_transition_has_one_final_focus_owner():
+    """Leaving and restoring Home must not transiently focus later tiles."""
+    home = (INCLUDE / "HomeScreen.cpp").read_text()
+    show_start = home.index("void HomeScreen::show()")
+    hide_start = home.index("void HomeScreen::hide()", show_start)
+    show = home[show_start:hide_start]
+    hide_end = home.index("void HomeScreen::clicked", hide_start)
+    hide = home[hide_start:hide_end]
+
+    # Adding the first tile to an empty LVGL group auto-focuses it. Freeze the
+    # complete ordered rebuild and make Messages the sole explicit owner.
+    assert "lv_group_focus_freeze(group, true);" in show
+    assert "lv_group_focus_freeze(group, false);" in show
+    assert show.index("lv_group_focus_freeze(group, true);") < show.index("lv_group_add_obj")
+    assert show.index("lv_group_focus_freeze(group, false);") < show.index("lv_group_focus_obj(_buttons[0])")
+
+    # Hide must detach every non-owner before the current owner; removing an
+    # owner early makes LVGL focus each surviving launcher tile synchronously.
+    assert "lv_obj_t* focused = lv_group_get_focused(group);" in hide
+    non_owner_remove = re.search(
+        r"if \(button == focused\)\s*\{.*?\}\s*else\s*\{\s*lv_group_remove_obj\(button\);",
+        hide,
+        re.S,
+    )
+    assert non_owner_remove
+    assert "if (focused_is_launcher) lv_group_remove_obj(focused);" in hide
+    assert non_owner_remove.start() < hide.index(
+        "if (focused_is_launcher) lv_group_remove_obj(focused);"
+    )
+
+
 def test_bounded_nomadnet_fonts_match_display_allowlist():
     expected = set(range(0x20, 0x7F)) | set(range(0xA0, 0x180))
     expected |= set(range(0x2190, 0x219A))

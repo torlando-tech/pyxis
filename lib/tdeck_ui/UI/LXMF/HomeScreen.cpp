@@ -61,13 +61,35 @@ HomeScreen::HomeScreen() {
 }
 HomeScreen::~HomeScreen() { if (_screen) lv_obj_del(_screen); }
 void HomeScreen::show() {
-    lv_obj_clear_flag(_screen, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(_screen);
+    lv_obj_clear_flag(_screen, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(_screen);
     auto* group = LVGL::LVGLInit::get_default_group();
-    if (group) { for (auto* button : _buttons) lv_group_add_obj(group, button); lv_group_focus_obj(_buttons[0]); }
+    if (group) {
+        // Rebuild the ordered launcher group without letting the first add emit
+        // an automatic focus event. Messages becomes the sole final owner.
+        lv_group_focus_freeze(group, true);
+        for (auto* button : _buttons) lv_group_add_obj(group, button);
+        lv_group_focus_freeze(group, false);
+        lv_group_focus_obj(_buttons[0]);
+    }
 }
 void HomeScreen::hide() {
     auto* group = LVGL::LVGLInit::get_default_group();
-    if (group) for (auto* button : _buttons) lv_group_remove_obj(button);
+    if (group) {
+        // Removing the current owner makes LVGL synchronously focus another
+        // member. Detach every other launcher tile first and the owner last so
+        // no later tile becomes a transient focus owner during navigation.
+        lv_obj_t* focused = lv_group_get_focused(group);
+        bool focused_is_launcher = false;
+        for (auto* button : _buttons) {
+            if (button == focused) {
+                focused_is_launcher = true;
+            } else {
+                lv_group_remove_obj(button);
+            }
+        }
+        if (focused_is_launcher) lv_group_remove_obj(focused);
+    }
     lv_obj_add_flag(_screen, LV_OBJ_FLAG_HIDDEN);
 }
 void HomeScreen::clicked(lv_event_t* event) {
