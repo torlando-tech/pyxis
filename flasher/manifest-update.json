@@ -1,6 +1,6 @@
 {
   "name": "Pyxis T-Deck",
-  "version": "dev-e2daefd",
+  "version": "dev-0b9ae36",
   "new_install_prompt_erase": false,
   "builds": [
     {
