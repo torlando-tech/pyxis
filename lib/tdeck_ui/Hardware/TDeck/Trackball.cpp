@@ -443,7 +443,7 @@ void Trackball::lvgl_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
     bool has_direction = false;
     if (abs(accum_y) >= Trk::NAV_THRESHOLD && abs(accum_y) >= abs(accum_x)) {
         if (now - last_key_time >= Trk::KEY_REPEAT_MS) {
-            direction = accum_y > 0 ? NavigationDirection::DOWN : NavigationDirection::UP;
+            direction = accum_y > 0 ? NavigationDirection::UP : NavigationDirection::DOWN;
             has_direction = true;
             last_key_time = now;
         }

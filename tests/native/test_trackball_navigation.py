@@ -61,6 +61,10 @@ def test_trackball_and_nomadnet_directional_integration_contract():
     assert "find_scroll_target(lv_scr_act()" not in trackball
     assert "if (group->frozen) return false;" in trackball
     assert "!lv_obj_has_state(object, LV_STATE_DISABLED)" in trackball
+    # Physical T-Deck evidence establishes that positive Y pulses are upward;
+    # keep horizontal polarity unchanged.
+    assert "accum_y > 0 ? NavigationDirection::UP : NavigationDirection::DOWN" in trackball
+    assert "accum_x > 0 ? NavigationDirection::RIGHT : NavigationDirection::LEFT" in trackball
 
     # NomadNet's document viewport must remain a bounded vertical scroll target;
     # trackball movement reaches it through the generic LVGL navigation helper.
