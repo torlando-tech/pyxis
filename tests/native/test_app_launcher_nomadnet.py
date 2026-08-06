@@ -117,6 +117,112 @@ def test_ui_wiring_contract():
     assert "set_save_callback" in manager_cpp
 
 
+def test_directory_rebuild_has_one_final_focus_owner():
+    """Returning from Heard Nodes must not focus every surviving/start row."""
+    screen = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    render_start = screen.index("void NomadNetScreen::render_directory(View view)")
+    detach_start = screen.index("void NomadNetScreen::detach_focusables(", render_start)
+    rebuild_start = screen.index("void NomadNetScreen::rebuild_focus()", detach_start)
+    render = screen[render_start:detach_start]
+    detach = screen[detach_start:rebuild_start]
+    rebuild_end = screen.index("void NomadNetScreen::apply_browser_layout", rebuild_start)
+    rebuild = screen[rebuild_start:rebuild_end]
+
+    # Creating replacement buttons must not auto-enrol/focus the first object
+    # through LVGL's default-group constructor hook.
+    assert "detach_focusables(group);" in render
+    assert "lv_group_set_default(nullptr);" in render
+    assert "lv_group_set_default(previous_default_group);" in render
+    assert render.index("detach_focusables(group);") < render.index("lv_group_set_default(nullptr);")
+    assert render.index("lv_group_set_default(nullptr);") < render.index("auto add_row=")
+    assert render.index("lv_group_set_default(previous_default_group);") > render.index("if(_directory_focusables.empty())")
+
+    # Detach every non-owner first and the current owner last. LVGL 8.4
+    # otherwise refocuses each remaining member synchronously during removal.
+    assert "auto* focused=lv_group_get_focused(group);" in detach
+    assert "if(object&&object!=focused)lv_group_remove_obj(object);" in detach
+    assert "if(focused&&owned_focusable(focused))lv_group_remove_obj(focused);" in detach
+    assert detach.index("if(object&&object!=focused)lv_group_remove_obj(object);") < detach.index(
+        "if(focused&&owned_focusable(focused))lv_group_remove_obj(focused);"
+    )
+
+    # Repopulate while frozen, then emit exactly one intentional final focus.
+    assert "detach_focusables(group);" in rebuild
+    assert "lv_group_focus_freeze(group,true);" in rebuild
+    assert "lv_group_focus_freeze(group,false);" in rebuild
+    assert rebuild.index("lv_group_focus_freeze(group,true);") < rebuild.index("lv_group_add_obj")
+    assert rebuild.index("lv_group_focus_freeze(group,false);") < rebuild.rindex("lv_group_focus_obj")
+
+
+def test_launcher_transition_has_one_final_focus_owner():
+    """Leaving and restoring Home must not transiently focus later tiles."""
+    home = (INCLUDE / "HomeScreen.cpp").read_text()
+    show_start = home.index("void HomeScreen::show()")
+    hide_start = home.index("void HomeScreen::hide()", show_start)
+    show = home[show_start:hide_start]
+    hide_end = home.index("void HomeScreen::clicked", hide_start)
+    hide = home[hide_start:hide_end]
+
+    # Adding the first tile to an empty LVGL group auto-focuses it. Freeze the
+    # complete ordered rebuild and make Messages the sole explicit owner.
+    assert "lv_group_focus_freeze(group, true);" in show
+    assert "lv_group_focus_freeze(group, false);" in show
+    assert show.index("lv_group_focus_freeze(group, true);") < show.index("lv_group_add_obj")
+    assert show.index("lv_group_focus_freeze(group, false);") < show.index("lv_group_focus_obj(_buttons[0])")
+
+    # Hide must detach every non-owner before the current owner; removing an
+    # owner early makes LVGL focus each surviving launcher tile synchronously.
+    assert "lv_obj_t* focused = lv_group_get_focused(group);" in hide
+    non_owner_remove = re.search(
+        r"if \(button == focused\)\s*\{.*?\}\s*else\s*\{\s*lv_group_remove_obj\(button\);",
+        hide,
+        re.S,
+    )
+    assert non_owner_remove
+    assert "if (focused_is_launcher) lv_group_remove_obj(focused);" in hide
+    assert non_owner_remove.start() < hide.index(
+        "if (focused_is_launcher) lv_group_remove_obj(focused);"
+    )
+
+
+def test_nomadnet_directory_uses_one_coherent_focus_style():
+    """The focused row must not gain the default blue keypad outline later."""
+    screen = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    add_row_start = screen.index("auto add_row=")
+    add_row_end = screen.index("if(view==View::START)", add_row_start)
+    add_row = screen[add_row_start:add_row_end]
+
+    assert "Theme::primaryPressed(),LV_STATE_FOCUSED" in add_row
+    assert "lv_obj_set_style_outline_width(button,0,LV_STATE_FOCUS_KEY);" in add_row
+    assert add_row.index("Theme::primaryPressed(),LV_STATE_FOCUSED") < add_row.index(
+        "lv_obj_set_style_outline_width(button,0,LV_STATE_FOCUS_KEY);"
+    )
+
+
+def test_network_transition_has_one_final_focus_owner():
+    """Network hide/show must not transiently leave the last row focused."""
+    screen = (INCLUDE / "NetworkScreen.cpp").read_text()
+    show_start = screen.index("void NetworkScreen::show()")
+    hide_start = screen.index("void NetworkScreen::hide()", show_start)
+    clicked_start = screen.index("void NetworkScreen::clicked", hide_start)
+    show = screen[show_start:hide_start]
+    hide = screen[hide_start:clicked_start]
+
+    assert "lv_group_focus_freeze(g, true);" in show
+    assert "lv_group_focus_freeze(g, false);" in show
+    assert show.index("lv_group_focus_freeze(g, true);") < show.index("lv_group_add_obj")
+    assert show.index("lv_group_focus_freeze(g, false);") < show.index(
+        "lv_group_focus_obj(_buttons[0]);"
+    )
+    assert show.count("lv_group_focus_obj") == 1
+
+    assert "lv_obj_t* focused = lv_group_get_focused(g);" in hide
+    assert "if (focused_is_network) lv_group_remove_obj(focused);" in hide
+    assert hide.index("if (object == focused)") < hide.index(
+        "if (focused_is_network) lv_group_remove_obj(focused);"
+    )
+
+
 def test_bounded_nomadnet_fonts_match_display_allowlist():
     expected = set(range(0x20, 0x7F)) | set(range(0xA0, 0x180))
     expected |= set(range(0x2190, 0x219A))

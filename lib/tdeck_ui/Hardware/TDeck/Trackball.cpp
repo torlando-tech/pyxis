@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: MIT
 
 #include "Trackball.h"
+#include "TrackballNavigation.h"
 
 #ifdef ARDUINO
 
 #include <microReticulum/Log.h>
 #include <driver/gpio.h>
+#include <limits>
 
 // Defined in main.cpp; mirrors input diagnostics to Serial and UDP logging.
 extern "C" void pyxis_log(const char* msg);
@@ -15,6 +17,215 @@ using namespace RNS;
 
 namespace Hardware {
 namespace TDeck {
+
+namespace {
+
+constexpr lv_coord_t TRACKBALL_SCROLL_STEP = 40;
+
+bool object_is_visible(lv_obj_t* object) {
+    return object && lv_obj_is_visible(object);
+}
+
+bool object_is_focus_candidate(lv_obj_t* object) {
+    return object_is_visible(object) &&
+           !lv_obj_has_state(object, LV_STATE_DISABLED);
+}
+
+bool object_is_hidden(lv_obj_t* object) {
+    for (lv_obj_t* current = object; current; current = lv_obj_get_parent(current)) {
+        if (lv_obj_has_flag(current, LV_OBJ_FLAG_HIDDEN)) return true;
+    }
+    return false;
+}
+
+NavigationRect object_rect(lv_obj_t* object) {
+    lv_area_t area;
+    lv_obj_get_coords(object, &area);
+    return {area.x1, area.y1, lv_area_get_width(&area), lv_area_get_height(&area)};
+}
+
+bool is_descendant_of(lv_obj_t* object, lv_obj_t* ancestor) {
+    for (lv_obj_t* current = object; current; current = lv_obj_get_parent(current)) {
+        if (current == ancestor) return true;
+    }
+    return false;
+}
+
+lv_obj_t* common_ancestor(lv_obj_t* first, lv_obj_t* second) {
+    if (!first) return second;
+    if (!second) return first;
+    for (lv_obj_t* candidate = first; candidate; candidate = lv_obj_get_parent(candidate)) {
+        if (is_descendant_of(second, candidate)) return candidate;
+    }
+    return nullptr;
+}
+
+lv_obj_t* group_navigation_root(lv_group_t* group, lv_obj_t* focused) {
+    lv_obj_t* root = focused;
+    lv_obj_t** node = static_cast<lv_obj_t**>(_lv_ll_get_head(&group->obj_ll));
+    while (node) {
+        lv_obj_t* object = *node;
+        if (object_is_visible(object)) root = common_ancestor(root, object);
+        node = static_cast<lv_obj_t**>(_lv_ll_get_next(&group->obj_ll, node));
+    }
+    return root;
+}
+
+void normalize_group_focus_state(lv_group_t* group) {
+    lv_obj_t* focused = lv_group_get_focused(group);
+    lv_obj_t** node = static_cast<lv_obj_t**>(_lv_ll_get_head(&group->obj_ll));
+    while (node) {
+        if (*node != focused) {
+            lv_obj_clear_state(*node, LV_STATE_FOCUSED | LV_STATE_FOCUS_KEY);
+        }
+        node = static_cast<lv_obj_t**>(_lv_ll_get_next(&group->obj_ll, node));
+    }
+}
+
+bool can_scroll(lv_obj_t* object, NavigationDirection direction) {
+    if (!object || !object_is_visible(object) ||
+        !lv_obj_has_flag(object, LV_OBJ_FLAG_SCROLLABLE)) return false;
+    const lv_dir_t scroll_dir = lv_obj_get_scroll_dir(object);
+    switch (direction) {
+        case NavigationDirection::UP:
+            return (scroll_dir & LV_DIR_VER) && lv_obj_get_scroll_top(object) > 0;
+        case NavigationDirection::DOWN:
+            return (scroll_dir & LV_DIR_VER) && lv_obj_get_scroll_bottom(object) > 0;
+        case NavigationDirection::LEFT:
+            return (scroll_dir & LV_DIR_HOR) && lv_obj_get_scroll_left(object) > 0;
+        case NavigationDirection::RIGHT:
+            return (scroll_dir & LV_DIR_HOR) && lv_obj_get_scroll_right(object) > 0;
+    }
+    return false;
+}
+
+lv_obj_t* scrollable_ancestor(lv_obj_t* object, NavigationDirection direction) {
+    for (lv_obj_t* current = object; current; current = lv_obj_get_parent(current)) {
+        if (can_scroll(current, direction)) return current;
+    }
+    return nullptr;
+}
+
+void find_scroll_target(lv_obj_t* root, NavigationDirection direction,
+                        lv_coord_t perpendicular_position,
+                        lv_obj_t*& best, int32_t& best_area) {
+    if (!root || !object_is_visible(root)) return;
+    if (can_scroll(root, direction)) {
+        const NavigationRect rect = object_rect(root);
+        const bool intersects = direction == NavigationDirection::UP ||
+                                direction == NavigationDirection::DOWN
+            ? perpendicular_position >= rect.x && perpendicular_position < rect.x + rect.width
+            : perpendicular_position >= rect.y && perpendicular_position < rect.y + rect.height;
+        const int32_t area = rect.width * rect.height;
+        if (intersects && area < best_area) {
+            best = root;
+            best_area = area;
+        }
+    }
+    const uint32_t child_count = lv_obj_get_child_cnt(root);
+    for (uint32_t i = 0; i < child_count; ++i) {
+        find_scroll_target(lv_obj_get_child(root, i), direction,
+                           perpendicular_position, best, best_area);
+    }
+}
+
+void scroll_one_step(lv_obj_t* object, NavigationDirection direction) {
+    switch (direction) {
+        case NavigationDirection::UP:
+            lv_obj_scroll_to_y(object, lv_obj_get_scroll_y(object) - TRACKBALL_SCROLL_STEP, LV_ANIM_ON);
+            break;
+        case NavigationDirection::DOWN:
+            lv_obj_scroll_to_y(object, lv_obj_get_scroll_y(object) + TRACKBALL_SCROLL_STEP, LV_ANIM_ON);
+            break;
+        case NavigationDirection::LEFT:
+            lv_obj_scroll_to_x(object, lv_obj_get_scroll_x(object) - TRACKBALL_SCROLL_STEP, LV_ANIM_ON);
+            break;
+        case NavigationDirection::RIGHT:
+            lv_obj_scroll_to_x(object, lv_obj_get_scroll_x(object) + TRACKBALL_SCROLL_STEP, LV_ANIM_ON);
+            break;
+    }
+}
+
+bool navigate_or_scroll(lv_group_t* group, NavigationDirection direction) {
+    if (!group) return false;
+    if (group->frozen) return false;
+    normalize_group_focus_state(group);
+    lv_obj_t* focused = lv_group_get_focused(group);
+    // A clipped focus target remains the spatial anchor while its container
+    // scrolls. Only a truly hidden/stale target needs insertion-order refocus.
+    if (!focused || object_is_hidden(focused)) {
+        lv_obj_t** node = static_cast<lv_obj_t**>(_lv_ll_get_head(&group->obj_ll));
+        while (node) {
+            if (object_is_focus_candidate(*node)) {
+                lv_group_focus_obj(*node);
+                normalize_group_focus_state(group);
+                return true;
+            }
+            node = static_cast<lv_obj_t**>(_lv_ll_get_next(&group->obj_ll, node));
+        }
+        return false;
+    }
+
+    const NavigationRect focused_rect = object_rect(focused);
+    lv_obj_t* navigation_root = group_navigation_root(group, focused);
+    lv_obj_t* target = nullptr;
+    int64_t best_score = std::numeric_limits<int64_t>::max();
+    lv_obj_t** node = static_cast<lv_obj_t**>(_lv_ll_get_head(&group->obj_ll));
+    while (node) {
+        lv_obj_t* object = *node;
+        if (object != focused) {
+            const NavigationCandidate candidate{0, object_rect(object), object_is_focus_candidate(object)};
+            const int64_t score = directional_candidate_score(focused_rect, candidate, direction);
+            if (score < best_score) {
+                best_score = score;
+                target = object;
+            }
+        }
+        node = static_cast<lv_obj_t**>(_lv_ll_get_next(&group->obj_ll, node));
+    }
+
+    lv_obj_t* ancestor = scrollable_ancestor(focused, direction);
+    if (target) {
+        // Finish scrolling the current list/document before leaving it for a
+        // control outside that viewport. Targets inside it still navigate.
+        if (ancestor && !is_descendant_of(target, ancestor)) {
+            scroll_one_step(ancestor, direction);
+        } else {
+            lv_group_focus_obj(target);
+            normalize_group_focus_state(group);
+        }
+        return true;
+    }
+    if (ancestor) {
+        scroll_one_step(ancestor, direction);
+        return true;
+    }
+
+    lv_obj_t* scroll_target = nullptr;
+    int32_t best_area = INT32_MAX;
+    const lv_coord_t perpendicular = direction == NavigationDirection::UP ||
+                                     direction == NavigationDirection::DOWN
+        ? focused_rect.x + focused_rect.width / 2
+        : focused_rect.y + focused_rect.height / 2;
+    find_scroll_target(navigation_root, direction, perpendicular, scroll_target, best_area);
+    if (scroll_target) {
+        scroll_one_step(scroll_target, direction);
+        return true;
+    }
+    return false;
+}
+
+uint32_t direction_key(NavigationDirection direction) {
+    switch (direction) {
+        case NavigationDirection::UP: return LV_KEY_UP;
+        case NavigationDirection::DOWN: return LV_KEY_DOWN;
+        case NavigationDirection::LEFT: return LV_KEY_LEFT;
+        case NavigationDirection::RIGHT: return LV_KEY_RIGHT;
+    }
+    return 0;
+}
+
+} // namespace
 
 // Static member initialization
 lv_indev_t* Trackball::_indev = nullptr;
@@ -239,26 +450,42 @@ void Trackball::lvgl_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
 
     uint32_t now = millis();
 
-    // Check thresholds - use NEXT/PREV for group focus navigation
-    // LVGL groups only support linear navigation with NEXT/PREV
+    // Resolve physical direction independently on both axes. In navigation
+    // mode this uses object geometry instead of the group's insertion order;
+    // in edit mode real arrow keys are delivered to the focused widget.
+    NavigationDirection direction = NavigationDirection::UP;
+    bool has_direction = false;
     if (abs(accum_y) >= Trk::NAV_THRESHOLD && abs(accum_y) >= abs(accum_x)) {
         if (now - last_key_time >= Trk::KEY_REPEAT_MS) {
-            pending_key = (accum_y > 0) ? LV_KEY_NEXT : LV_KEY_PREV;
+            direction = accum_y > 0 ? NavigationDirection::UP : NavigationDirection::DOWN;
+            has_direction = true;
             last_key_time = now;
+            accum_x = 0;
+            accum_y = 0;
         }
-        accum_y = 0;
     } else if (abs(accum_x) >= Trk::NAV_THRESHOLD) {
         if (now - last_key_time >= Trk::KEY_REPEAT_MS) {
-            pending_key = (accum_x > 0) ? LV_KEY_NEXT : LV_KEY_PREV;
+            direction = accum_x > 0 ? NavigationDirection::RIGHT : NavigationDirection::LEFT;
+            has_direction = true;
             last_key_time = now;
+            accum_x = 0;
+            accum_y = 0;
         }
-        accum_x = 0;
+    }
+
+    if (has_direction) {
+        lv_group_t* group = _indev ? _indev->group : nullptr;
+        if (group && lv_group_get_editing(group)) {
+            pending_key = direction_key(direction);
+        } else {
+            navigate_or_scroll(group, direction);
+        }
     }
 
     // If we have a pending key, check if anything visible is focused
     // If nothing is focused or focused object is hidden, find a visible object
     if (pending_key != 0) {
-        lv_group_t* group = lv_group_get_default();
+        lv_group_t* group = _indev ? _indev->group : nullptr;
         if (group) {
             lv_obj_t* focused = lv_group_get_focused(group);
             bool need_refocus = !focused;

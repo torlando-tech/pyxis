@@ -56,8 +56,35 @@ NetworkScreen::NetworkScreen() {
     hide();
 }
 NetworkScreen::~NetworkScreen() { if (_screen) lv_obj_del(_screen); }
-void NetworkScreen::show() { lv_obj_clear_flag(_screen, LV_OBJ_FLAG_HIDDEN); lv_obj_move_foreground(_screen); auto* g=LVGL::LVGLInit::get_default_group(); if(g){lv_group_add_obj(g,_back_button);lv_group_add_obj(g,_home_button);for(auto* b:_buttons)lv_group_add_obj(g,b);lv_group_focus_obj(_buttons[0]);}}
-void NetworkScreen::hide() { auto* g=LVGL::LVGLInit::get_default_group(); if(g){lv_group_remove_obj(_back_button);lv_group_remove_obj(_home_button);for(auto* b:_buttons)lv_group_remove_obj(b);} lv_obj_add_flag(_screen, LV_OBJ_FLAG_HIDDEN); }
+void NetworkScreen::show() {
+    lv_obj_clear_flag(_screen, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(_screen);
+    auto* g = LVGL::LVGLInit::get_default_group();
+    if (g) {
+        lv_obj_t* objects[] = {_back_button, _home_button, _buttons[0], _buttons[1], _buttons[2]};
+        lv_group_focus_freeze(g, true);
+        for (auto* object : objects) lv_group_add_obj(g, object);
+        lv_group_focus_freeze(g, false);
+        lv_group_focus_obj(_buttons[0]);
+    }
+}
+void NetworkScreen::hide() {
+    auto* g = LVGL::LVGLInit::get_default_group();
+    if (g) {
+        lv_obj_t* objects[] = {_back_button, _home_button, _buttons[0], _buttons[1], _buttons[2]};
+        lv_obj_t* focused = lv_group_get_focused(g);
+        bool focused_is_network = false;
+        for (auto* object : objects) {
+            if (object == focused) {
+                focused_is_network = true;
+            } else {
+                lv_group_remove_obj(object);
+            }
+        }
+        if (focused_is_network) lv_group_remove_obj(focused);
+    }
+    lv_obj_add_flag(_screen, LV_OBJ_FLAG_HIDDEN);
+}
 void NetworkScreen::clicked(lv_event_t* e) { auto* s=static_cast<NetworkScreen*>(lv_event_get_user_data(e)); auto* t=lv_event_get_target(e); if(t==s->_back_button&&s->_back)s->_back(); else if(t==s->_home_button&&s->_home)s->_home(); else for(int i=0;i<3;++i)if(t==s->_buttons[i]&&s->_callbacks[i])s->_callbacks[i](); }
 }
 #endif

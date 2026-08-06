@@ -131,7 +131,7 @@ namespace Trk {
 
     // Focus navigation (KEYPAD mode)
     constexpr uint8_t NAV_THRESHOLD = 1;      // Pulses needed to trigger focus move
-    constexpr uint32_t KEY_REPEAT_MS = 100;   // Min time between repeated key events
+    constexpr uint32_t KEY_REPEAT_MS = 60;    // Min time between repeated key events
 }
 
 namespace Power {
