@@ -199,6 +199,30 @@ def test_nomadnet_directory_uses_one_coherent_focus_style():
     )
 
 
+def test_network_transition_has_one_final_focus_owner():
+    """Network hide/show must not transiently leave the last row focused."""
+    screen = (INCLUDE / "NetworkScreen.cpp").read_text()
+    show_start = screen.index("void NetworkScreen::show()")
+    hide_start = screen.index("void NetworkScreen::hide()", show_start)
+    clicked_start = screen.index("void NetworkScreen::clicked", hide_start)
+    show = screen[show_start:hide_start]
+    hide = screen[hide_start:clicked_start]
+
+    assert "lv_group_focus_freeze(g, true);" in show
+    assert "lv_group_focus_freeze(g, false);" in show
+    assert show.index("lv_group_focus_freeze(g, true);") < show.index("lv_group_add_obj")
+    assert show.index("lv_group_focus_freeze(g, false);") < show.index(
+        "lv_group_focus_obj(_buttons[0]);"
+    )
+    assert show.count("lv_group_focus_obj") == 1
+
+    assert "lv_obj_t* focused = lv_group_get_focused(g);" in hide
+    assert "if (focused_is_network) lv_group_remove_obj(focused);" in hide
+    assert hide.index("if (object == focused)") < hide.index(
+        "if (focused_is_network) lv_group_remove_obj(focused);"
+    )
+
+
 def test_bounded_nomadnet_fonts_match_display_allowlist():
     expected = set(range(0x20, 0x7F)) | set(range(0xA0, 0x180))
     expected |= set(range(0x2190, 0x219A))
