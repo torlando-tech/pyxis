@@ -19,6 +19,19 @@ using namespace Hardware::TDeck;
 namespace UI {
 namespace LVGL {
 
+namespace {
+
+void retry_failed_display_flush() {
+    lv_obj_t* screen = lv_scr_act();
+    if (screen && Display::consume_refresh_retry()) {
+        // The previous refresh cycle has completed, so invalidation is safe
+        // here and guarantees that an acknowledged-but-unwritten area is redrawn.
+        lv_obj_invalidate(screen);
+    }
+}
+
+} // namespace
+
 bool LVGLInit::_initialized = false;
 lv_disp_t* LVGLInit::_display = nullptr;
 lv_indev_t* LVGLInit::_keyboard = nullptr;
@@ -149,6 +162,7 @@ void LVGLInit::task_handler() {
     }
 
     lv_task_handler();
+    retry_failed_display_flush();
 }
 
 void LVGLInit::lvgl_task(void* param) {
@@ -171,6 +185,7 @@ void LVGLInit::lvgl_task(void* param) {
         xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
 #endif
         lv_task_handler();
+        retry_failed_display_flush();
         xSemaphoreGiveRecursive(_mutex);
 
         // Feed watchdog and yield to other tasks

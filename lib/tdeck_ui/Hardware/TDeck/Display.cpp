@@ -26,9 +26,14 @@ bool Display::_hw_initialized = false;
 volatile uint32_t Display::_flush_count = 0;
 volatile uint32_t Display::_last_flush_ms = 0;
 uint32_t Display::_last_health_log_ms = 0;
+DisplayRefreshRetry Display::_refresh_retry;
 
 void Display::set_spi_mutex(SemaphoreHandle_t mutex) {
     _spi_mutex = mutex;
+}
+
+bool Display::consume_refresh_retry() {
+    return _refresh_retry.consume();
 }
 
 bool Display::init() {
@@ -271,7 +276,10 @@ void Display::draw_rect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t col
 
 void Display::lvgl_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {
     if (_spi_mutex && xSemaphoreTake(_spi_mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-        // Skip this frame — LVGL will retry next tick
+        // LVGL clears the invalidated area after flush_ready(), so explicitly
+        // request a redraw after the current refresh cycle. Otherwise stale
+        // pixels remain indefinitely when SD/LoRa owns the shared SPI bus.
+        _refresh_retry.mark_failed();
         lv_disp_flush_ready(drv);
         return;
     }
