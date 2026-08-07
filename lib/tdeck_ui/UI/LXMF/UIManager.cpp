@@ -94,6 +94,16 @@ std::vector<uint8_t> token(const RNS::Bytes& bytes) {
     return std::vector<uint8_t>(bytes.data(), bytes.data() + bytes.size());
 }
 
+struct OutboundPersistenceContext {
+    ::LXMF::MessageStore* store;
+    ::LXMF::LXMessage* message;
+};
+
+bool persistOutgoingMessage(void* raw_context) {
+    auto& context = *static_cast<OutboundPersistenceContext*>(raw_context);
+    return context.store->save_message(*context.message);
+}
+
 }  // namespace
 
 // Static singletons for Link callbacks
@@ -1437,32 +1447,40 @@ bool UIManager::send_message(const Bytes& dest_hash, const String& content) {
     // Pack the message to generate hash and signature before saving
     message.pack();
 
-    // Do not transmit or display an outgoing message unless both its payload
-    // and conversation index were committed. Otherwise a reboot makes an
-    // apparently-sent message disappear from history.
-    //
-    // This callback runs on LVGL's 8 KiB task. microLXMF must keep its
-    // transactional ConversationInfo rollback snapshot object-owned rather
-    // than local to save_message(); the snapshot itself is larger than 8 KiB.
-    if (!_store.save_message(message)) {
+    // Reject router contention or queue exhaustion before persistence. The
+    // admission guard commits the final packed/stamped message immediately
+    // before queue ownership transfer while RouterLock prevents a concurrent
+    // producer from consuming the checked capacity. This callback runs on
+    // LVGL's 8 KiB task, so MessageStore keeps its rollback snapshot
+    // object-owned rather than local to save_message().
+    RouterLock router_lock(0);
+    if (!router_lock.acquired()) {
+        WARNING("Router busy; outgoing message retained for retry");
+        return false;
+    }
+
+    OutboundPersistenceContext persistence_context{&_store, &message};
+    ::LXMF::OutboundAdmissionResult admission;
+    try {
+        admission = _router.try_handle_outbound(
+            message, persistOutgoingMessage, &persistence_context);
+    } catch (const std::exception& error) {
+        WARNINGF("Outgoing message preparation failed: %s", error.what());
+        return false;
+    }
+
+    if (admission == ::LXMF::OutboundAdmissionResult::GUARD_REJECTED) {
         ERROR("Outgoing message persistence failed; message not queued");
         show_storage_error("Storage is unavailable. The message was not sent.");
+        return false;
+    }
+    if (admission != ::LXMF::OutboundAdmissionResult::ACCEPTED) {
+        WARNING("Outbound queue full; outgoing message retained for retry");
         return false;
     }
 
     if (_navigation.current() == Route::CHAT && _current_peer_hash == dest_hash) {
         _chat_screen->add_message(message, true);
-    }
-
-    // Queue for sending (pack already called, will use cached packed data).
-    // Router queues are shared with loopTask; serialize the ownership copy.
-    {
-        RouterLock router_lock(0);
-        if (!router_lock.acquired()) {
-            WARNING("Router busy; message saved but user retry is required");
-            return false;
-        }
-        _router.handle_outbound(message);
     }
 
     INFO("  Message queued for delivery");
