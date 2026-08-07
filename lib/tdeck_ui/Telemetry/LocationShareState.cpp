@@ -105,8 +105,12 @@ bool PeerLocationStore::visible(
         now_millis >= record.expires_at_millis) {
         return false;
     }
-    if (now_millis >= record.source_timestamp_millis &&
-        now_millis - record.source_timestamp_millis > maximum_age_millis) {
+    const uint64_t freshness_timestamp_millis =
+        record.source_timestamp_millis < record.received_at_millis
+            ? record.source_timestamp_millis
+            : record.received_at_millis;
+    if (now_millis >= freshness_timestamp_millis &&
+        now_millis - freshness_timestamp_millis > maximum_age_millis) {
         return false;
     }
     return true;
