@@ -24,11 +24,18 @@ def test_outgoing_message_is_committed_before_display_and_send():
         "void UIManager::on_message_received(",
     )
 
-    save = body.index("if (!_store.save_message(message))")
     display = body.index("_chat_screen->add_message(message, true)")
-    send = body.index("_router.handle_outbound(message)")
-
-    assert save < display < send
+    if "_router.try_handle_outbound(" in body:
+        lock = body.index("RouterLock router_lock(0)")
+        admission = body.index("_router.try_handle_outbound(")
+        assert lock < admission < display
+        assert "persistOutgoingMessage" in body
+        assert "_store.save_message(message)" not in body
+        assert "return context.store->save_message(*context.message);" in source
+    else:
+        save = body.index("if (!_store.save_message(message))")
+        send = body.index("_router.handle_outbound(message)")
+        assert save < display < send
     assert "Outgoing message persistence failed; message not queued" in body
     assert "The message was not sent" in body
 
@@ -41,9 +48,12 @@ def test_ui_messages_prefer_lora_safe_opportunistic_delivery():
         "void UIManager::on_message_received(",
     )
     assert "::LXMF::Type::Message::OPPORTUNISTIC" in body
-    assert body.index("::LXMF::Type::Message::OPPORTUNISTIC") < body.index(
-        "_router.handle_outbound(message)"
+    admission = (
+        "_router.try_handle_outbound("
+        if "_router.try_handle_outbound(" in body
+        else "_router.handle_outbound(message)"
     )
+    assert body.index("::LXMF::Type::Message::OPPORTUNISTIC") < body.index(admission)
 
 
 def test_incoming_message_is_committed_before_display():
