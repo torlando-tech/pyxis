@@ -1,0 +1,577 @@
+# Copyright (c) 2026 Pyxis contributors
+# SPDX-License-Identifier: MIT
+
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import os
+from pathlib import Path
+import struct
+import subprocess
+import sys
+import zlib
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+TOOL = ROOT / "tools/maps/build_map_pack.py"
+
+
+def load_tool():
+    spec = importlib.util.spec_from_file_location("build_map_pack", TOOL)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def png(width: int = 256, height: int = 256) -> bytes:
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    raw = b"".join(b"\x00" + b"\x00\x00\x00" * width for _ in range(height))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
+
+
+def png_chunks(chunks: list[tuple[bytes, bytes]]) -> bytes:
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    return b"\x89PNG\r\n\x1a\n" + b"".join(chunk(kind, data) for kind, data in chunks)
+
+
+def ihdr(*, bit_depth: int = 8, color_type: int = 2, interlace: int = 0) -> bytes:
+    return struct.pack(">IIBBBBB", 256, 256, bit_depth, color_type, 0, 0, interlace)
+
+
+def raw_rgb() -> bytes:
+    return b"".join(b"\x00" + b"\x00\x00\x00" * 256 for _ in range(256))
+
+
+def rewrite_crc(data: bytearray) -> bytes:
+    data[-4:] = struct.pack("<I", zlib.crc32(data[:-4]))
+    return bytes(data)
+
+
+def put_tile(source: Path, z: int | str, x: int | str, y: int | str, data: bytes | None = None) -> Path:
+    path = source / str(z) / str(x) / f"{y}.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(png() if data is None else data)
+    return path
+
+
+def metadata(**changes: str) -> dict[str, str]:
+    values = {
+        "pack_id": "local-pack",
+        "name": "Local Pack",
+        "attribution": "Example Maps contributors",
+        "source": "user-supplied XYZ export",
+        "license": "CC-BY-4.0",
+    }
+    values.update(changes)
+    return values
+
+
+def make_rectangle(source: Path) -> None:
+    for z, xs, ys in ((1, range(2), range(2)), (2, range(1, 3), range(1, 3))):
+        for x in xs:
+            for y in ys:
+                put_tile(source, z, x, y)
+
+
+def digest_tree(path: Path) -> str:
+    digest = hashlib.sha256()
+    for item in sorted(path.rglob("*"), key=lambda value: value.as_posix()):
+        digest.update(item.relative_to(path).as_posix().encode("ascii"))
+        if item.is_file():
+            digest.update(item.read_bytes())
+    return digest.hexdigest()
+
+
+def test_valid_pack_is_deterministic_and_independently_validated(tmp_path: Path) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    make_rectangle(source)
+
+    first = tool.build_map_pack(source, tmp_path / "sd-a", **metadata())
+    second = tool.build_map_pack(source, tmp_path / "sd-b", **metadata())
+
+    assert first == tmp_path / "sd-a/pyxis-map/packs/local-pack"
+    assert (first / "manifest.pmp").read_bytes() == (second / "manifest.pmp").read_bytes()
+    assert digest_tree(first) == digest_tree(second)
+    parsed = tool.validate_pack(first)
+    assert parsed["tile_count"] == 8
+    assert parsed["min_zoom"] == 1
+    assert parsed["max_zoom"] == 2
+    assert (first / "tiles/2/2/2.png").read_bytes() == png()
+
+
+def test_manifest_matches_committed_153_byte_cpp_fixture() -> None:
+    tool = load_tool()
+    fixture = bytes.fromhex(
+        "504d504b0100100099000000000000000c776573742d636f6173745f310a576573"
+        "7420436f617374194578616d706c65204d61707320636f6e7472696275746f7273"
+        "0d6c6f63616c2d6578616d706c650943432d42592d342e300203020c0000000201"
+        "010000000200000001000000020000000000000000000000030204000000050000"
+        "0000000000010000000600000007000000d55ffd67"
+    )
+    extents = [
+        tool.ZoomExtent(2, ((1, 2),), 1, 2),
+        tool.ZoomExtent(3, ((0, 1), (6, 7)), 4, 5),
+    ]
+    actual = tool.serialize_manifest(
+        pack_id="west-coast_1",
+        name="West Coast",
+        attribution="Example Maps contributors",
+        source="local-example",
+        license="CC-BY-4.0",
+        extents=extents,
+        tile_count=12,
+    )
+    assert len(fixture) == 153
+    assert actual == fixture
+
+
+def test_incomplete_rectangle_is_rejected(tmp_path: Path) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    for x, y in ((1, 1), (1, 2), (2, 1)):
+        put_tile(source, 2, x, y)
+    with pytest.raises(tool.PackError, match="incomplete rectangle"):
+        tool.build_map_pack(source, tmp_path / "sd", **metadata())
+
+
+def test_antimeridian_split_requires_explicit_zoom(tmp_path: Path) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    for x in (0, 1, 6, 7):
+        for y in (3, 4):
+            put_tile(source, 3, x, y)
+    with pytest.raises(tool.PackError, match="incomplete rectangle"):
+        tool.build_map_pack(source, tmp_path / "sd-a", **metadata())
+    built = tool.build_map_pack(source, tmp_path / "sd-b", antimeridian_zooms={3}, **metadata())
+    assert tool.validate_pack(built)["extents"][0].intervals == ((0, 1), (6, 7))
+
+
+@pytest.mark.parametrize("bad_id", ["../escape", "Bad", "has/slash", "", "a" * 32])
+def test_pack_id_grammar_rejects_traversal_and_noncanonical_ids(tmp_path: Path, bad_id: str) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 0, 0, 0)
+    with pytest.raises(tool.PackError, match="pack ID"):
+        tool.build_map_pack(source, tmp_path / "sd", **metadata(pack_id=bad_id))
+
+
+@pytest.mark.parametrize(
+    ("parts", "message"),
+    [(('01', '0', '0'), "noncanonical"), (('1', '+0', '0'), "noncanonical"), (('1', '0', '00'), "noncanonical")],
+)
+def test_noncanonical_xyz_names_are_rejected(tmp_path: Path, parts: tuple[str, str, str], message: str) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, *parts)
+    with pytest.raises(tool.PackError, match=message):
+        tool.build_map_pack(source, tmp_path / "sd", **metadata())
+
+
+def test_unexpected_files_and_duplicate_colliding_keys_are_rejected(tmp_path: Path) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 1, 0, 0)
+    put_tile(source, "1", "0", "00")
+    with pytest.raises(tool.PackError, match="noncanonical|duplicate"):
+        tool.build_map_pack(source, tmp_path / "sd", **metadata())
+
+
+def test_symlinks_are_rejected_without_following_them(tmp_path: Path) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(png())
+    (source / "0/0").mkdir(parents=True)
+    (source / "0/0/0.png").symlink_to(outside)
+    with pytest.raises(tool.PackError, match="symlink"):
+        tool.build_map_pack(source, tmp_path / "sd", **metadata())
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    [
+        (b"not png", "PNG"),
+        (b"\x89PNG\r\n\x1a\n" + b"\0" * 40, "IHDR"),
+        (png()[:33], "PNG structure"),
+        (png(255, 256), "256x256"),
+    ],
+)
+def test_invalid_png_signature_ihdr_and_dimensions_are_rejected(tmp_path: Path, data: bytes, message: str) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 0, 0, 0, data)
+    with pytest.raises(tool.PackError, match=message):
+        tool.build_map_pack(source, tmp_path / "sd", **metadata())
+
+
+@pytest.mark.parametrize("z,x,y", [(23, 0, 0), (1, 2, 0), (1, 0, 2)])
+def test_xyz_bounds_are_enforced(tmp_path: Path, z: int, x: int, y: int) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, z, x, y)
+    with pytest.raises(tool.PackError, match="range"):
+        tool.build_map_pack(source, tmp_path / "sd", **metadata())
+
+
+def test_tile_count_and_total_byte_quotas_are_enforced(tmp_path: Path) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 0, 0, 0)
+    with pytest.raises(tool.PackError, match="tile count"):
+        tool.build_map_pack(source, tmp_path / "count", max_tiles=0, **metadata())
+    with pytest.raises(tool.PackError, match="total bytes"):
+        tool.build_map_pack(source, tmp_path / "bytes", max_bytes=len(png()) - 1, **metadata())
+    with pytest.raises(tool.PackError, match="hard limit"):
+        tool.build_map_pack(source, tmp_path / "count-hard", max_tiles=tool.DEFAULT_MAX_TILES + 1, **metadata())
+    with pytest.raises(tool.PackError, match="hard limit"):
+        tool.build_map_pack(source, tmp_path / "bytes-hard", max_bytes=tool.DEFAULT_MAX_BYTES + 1, **metadata())
+
+
+@pytest.mark.parametrize("field", ["name", "attribution", "source", "license"])
+def test_required_legal_and_name_metadata(field: str, tmp_path: Path) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 0, 0, 0)
+    with pytest.raises(tool.PackError, match=field):
+        tool.build_map_pack(source, tmp_path / "sd", **metadata(**{field: ""}))
+
+
+def test_existing_output_is_refused_without_modification(tmp_path: Path) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 0, 0, 0)
+    target = tmp_path / "sd/pyxis-map/packs/local-pack"
+    target.mkdir(parents=True)
+    marker = target / "keep"
+    marker.write_text("unchanged")
+    with pytest.raises(tool.PackError, match="already exists"):
+        tool.build_map_pack(source, tmp_path / "sd", **metadata())
+    assert marker.read_text() == "unchanged"
+
+
+def test_temporary_output_is_cleaned_after_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 0, 0, 0)
+
+    def fail_copy(*_args, **_kwargs):
+        raise OSError("injected copy failure")
+
+    monkeypatch.setattr(tool, "copy_tile", fail_copy)
+    with pytest.raises(OSError, match="injected"):
+        tool.build_map_pack(source, tmp_path / "sd", **metadata())
+    packs = tmp_path / "sd/pyxis-map/packs"
+    assert not (packs / "local-pack").exists()
+    assert not list(packs.glob(".local-pack.tmp-*"))
+
+
+def test_cli_builds_local_tree_and_has_no_network_fetch_code(tmp_path: Path) -> None:
+    source = tmp_path / "xyz"
+    put_tile(source, 0, 0, 0)
+    result = subprocess.run(
+        [sys.executable, os.fspath(TOOL), os.fspath(source), os.fspath(tmp_path / "sd"),
+         "--pack-id", "cli-pack", "--name", "CLI Pack", "--attribution", "Example contributors",
+         "--source", "local export", "--license", "CC-BY-4.0"],
+        check=False, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "sd/pyxis-map/packs/cli-pack/manifest.pmp").is_file()
+    source_text = TOOL.read_text(encoding="utf-8").lower()
+    forbidden = ("urllib", "requests", "httpx", "aiohttp", "socket", "http://", "https://")
+    assert not [token for token in forbidden if token in source_text]
+
+
+@pytest.mark.parametrize("level", ["zoom", "x"])
+def test_intermediate_source_symlink_swap_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                      level: str) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 0, 0, 0)
+    outside = tmp_path / "outside"
+    put_tile(outside, 0, 0, 0)
+
+    real_discover = tool._discover_tiles_fd
+    def swapped_discover(*args, **kwargs):
+        result = real_discover(*args, **kwargs)
+        victim = source / "0" if level == "zoom" else source / "0/0"
+        victim.rename(victim.with_name(victim.name + "-saved"))
+        target = outside / "0" if level == "zoom" else outside / "0/0"
+        victim.symlink_to(target, target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(tool, "_discover_tiles_fd", swapped_discover)
+    with pytest.raises(tool.PackError, match="changed|symlink"):
+        tool.build_map_pack(source, tmp_path / "sd", **metadata())
+    assert not (tmp_path / "sd/pyxis-map/packs/local-pack").exists()
+
+
+@pytest.mark.parametrize("component", ["pyxis-map", "packs"])
+def test_intermediate_output_symlink_swap_never_publishes_outside(tmp_path: Path,
+                                                                 monkeypatch: pytest.MonkeyPatch,
+                                                                 component: str) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 0, 0, 0)
+    output = tmp_path / "sd"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    real_verify = tool._verify_output_chain
+    def swapped_verify(*args, **kwargs):
+        victim = output / component if component == "pyxis-map" else output / "pyxis-map/packs"
+        victim.rename(victim.with_name(victim.name + "-saved"))
+        victim.symlink_to(outside, target_is_directory=True)
+        return real_verify(*args, **kwargs)
+
+    monkeypatch.setattr(tool, "_verify_output_chain", swapped_verify)
+    with pytest.raises(tool.PackError, match="output directory changed"):
+        tool.build_map_pack(source, output, **metadata())
+    assert not (outside / "local-pack").exists()
+
+
+@pytest.mark.parametrize("race", ["replace", "grow", "truncate", "mutate", "fifo", "symlink"])
+def test_validation_to_copy_races_fail_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                              race: str) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    tile = put_tile(source, 0, 0, 0)
+    original_size = tile.stat().st_size
+
+    real_discover = tool._discover_tiles_fd
+    def raced_discover(*args, **kwargs):
+        result = real_discover(*args, **kwargs)
+        if race == "replace":
+            replacement = tile.with_suffix(".replacement")
+            replacement.write_bytes(png())
+            os.replace(replacement, tile)
+        elif race == "grow":
+            with tile.open("ab") as stream:
+                stream.write(b"x" * 4096)
+        elif race == "truncate":
+            tile.write_bytes(png()[:-12])
+        elif race == "mutate":
+            data = bytearray(tile.read_bytes())
+            data[-1] ^= 1
+            tile.write_bytes(data)
+        elif race == "fifo":
+            tile.unlink()
+            os.mkfifo(tile)
+        else:
+            outside = tmp_path / "outside.png"
+            outside.write_bytes(png())
+            tile.unlink()
+            tile.symlink_to(outside)
+        return result
+
+    monkeypatch.setattr(tool, "_discover_tiles_fd", raced_discover)
+    with pytest.raises(tool.PackError, match="changed|regular file|symlink|quota|PNG"):
+        tool.build_map_pack(source, tmp_path / "sd", max_bytes=original_size, **metadata())
+
+
+def test_quota_is_checked_before_any_tile_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    tile = put_tile(source, 0, 0, 0)
+    with tile.open("ab") as stream:
+        stream.truncate(32 * 1024 * 1024)
+    reads = 0
+    real_read = os.read
+
+    def tracked_read(fd: int, size: int) -> bytes:
+        nonlocal reads
+        reads += 1
+        return real_read(fd, size)
+
+    monkeypatch.setattr(tool.os, "read", tracked_read)
+    with pytest.raises(tool.PackError, match="total bytes"):
+        tool.build_map_pack(source, tmp_path / "sd", max_bytes=1024, **metadata())
+    assert reads == 0
+
+
+def test_entry_visit_cap_rejects_before_unbounded_enumeration(tmp_path: Path) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    source.mkdir()
+    for index in range(tool.MAX_VISITED_ENTRIES_BASE + 1):
+        (source / f"junk-{index}").mkdir()
+    with pytest.raises(tool.PackError, match="visited-entry quota|noncanonical"):
+        tool.discover_tiles(source, max_tiles=0, max_bytes=0)
+
+
+def test_atomic_noreplace_unsupported_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 0, 0, 0)
+    monkeypatch.setattr(tool, "_renameat2", None)
+    with pytest.raises(tool.PackError, match="atomic no-replace unsupported"):
+        tool.build_map_pack(source, tmp_path / "sd", **metadata())
+    assert not (tmp_path / "sd/pyxis-map/packs/local-pack").exists()
+
+
+def test_post_rename_fsync_reports_published_durability_uncertain(tmp_path: Path,
+                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 0, 0, 0)
+
+    real_rename = tool._rename_noreplace
+    def rename_then_break_fsync(*args, **kwargs):
+        real_rename(*args, **kwargs)
+        monkeypatch.setattr(tool.os, "fsync", lambda _fd: (_ for _ in ()).throw(OSError("fsync fault")))
+
+    monkeypatch.setattr(tool, "_rename_noreplace", rename_then_break_fsync)
+    with pytest.raises(tool.PublishedDurabilityError) as caught:
+        tool.build_map_pack(source, tmp_path / "sd", **metadata())
+    assert caught.value.published is True
+    assert caught.value.target == tmp_path / "sd/pyxis-map/packs/local-pack"
+    assert caught.value.target.is_dir()
+
+
+@pytest.mark.parametrize("data", [
+    png_chunks([(b"IHDR", ihdr()), (b"ABCD", b""), (b"IDAT", zlib.compress(raw_rgb())), (b"IEND", b"")]),
+    png_chunks([(b"IHDR", ihdr()), (b"abcd", b""), (b"IDAT", zlib.compress(raw_rgb())), (b"IEND", b"")]),
+    png_chunks([(b"IHDR", ihdr()), (b"PLTE", b"\x00\x00\x00" * 257),
+                (b"IDAT", zlib.compress(raw_rgb())), (b"IEND", b"")]),
+    png_chunks([(b"IHDR", ihdr()), (b"IDAT", b"invalid-deflate"), (b"IEND", b"")]),
+    png_chunks([(b"IHDR", ihdr()), (b"IDAT", zlib.compress(raw_rgb())[:-2]), (b"IEND", b"")]),
+    png_chunks([(b"IHDR", ihdr()), (b"IDAT", zlib.compress(raw_rgb()) + b"trailing"), (b"IEND", b"")]),
+    png_chunks([(b"IHDR", ihdr()), (b"IDAT", zlib.compress(raw_rgb())[:10]), (b"tEXt", b"x"),
+                (b"IDAT", zlib.compress(raw_rgb())[10:]), (b"IEND", b"")]),
+    png_chunks([(b"IHDR", ihdr(color_type=3)), (b"IDAT", zlib.compress(b"\x00" * (257 * 256))),
+                (b"IEND", b"")]),
+    png_chunks([(b"IHDR", ihdr(color_type=3)), (b"PLTE", b"\x00\x00\x00"),
+                (b"IDAT", zlib.compress(b"".join(b"\x00" + b"\xff" * 256 for _ in range(256)))),
+                (b"IEND", b"")]),
+    png_chunks([(b"IHDR", ihdr(color_type=2)), (b"PLTE", b"\x00\x00\x00"),
+                (b"PLTE", b"\x00\x00\x00"), (b"IDAT", zlib.compress(raw_rgb())), (b"IEND", b"")]),
+    png_chunks([(b"IHDR", ihdr(color_type=3)), (b"IDAT", zlib.compress(b"\x00" * (257 * 256))),
+                (b"PLTE", b"\x00\x00\x00"), (b"IEND", b"")]),
+    png_chunks([(b"IHDR", ihdr()), (b"IDAT", zlib.compress(b"\x05" + raw_rgb()[1:])), (b"IEND", b"")]),
+    png_chunks([(b"IHDR", ihdr(interlace=1)), (b"IDAT", zlib.compress(raw_rgb())), (b"IEND", b"")]),
+])
+def test_malformed_png_critical_state_and_deflate_are_rejected(tmp_path: Path, data: bytes) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 0, 0, 0, data)
+    with pytest.raises(tool.PackError, match="PNG"):
+        tool.build_map_pack(source, tmp_path / "sd", **metadata())
+
+
+def test_python_manifest_mutations_match_cpp_validation_rules() -> None:
+    tool = load_tool()
+    valid = bytearray(tool.serialize_manifest(
+        **metadata(), extents=[tool.ZoomExtent(0, ((0, 0),), 0, 0)], tile_count=1,
+    ))
+    values = metadata()
+    strings_end = 16 + sum(1 + len(values[field]) for field in
+                           ("pack_id", "name", "attribution", "source", "license"))
+    extent = strings_end + 7
+    mutations = []
+    bad = bytearray(valid); bad[extent + 1] = 3; mutations.append(bad)
+    bad = bytearray(valid); struct.pack_into("<I", bad, extent + 18, 1); mutations.append(bad)
+    bad = bytearray(valid); bad[strings_end] = 1; mutations.append(bad)
+    bad = bytearray(valid); struct.pack_into("<I", bad, strings_end + 3, 2); mutations.append(bad)
+    for mutation in mutations:
+        with pytest.raises(tool.PackError):
+            tool.parse_manifest(rewrite_crc(mutation))
+    with pytest.raises(tool.PackError):
+        tool.serialize_manifest(**metadata(), extents=[tool.ZoomExtent(1, ((1, 0),), 0, 0)], tile_count=999)
+
+
+def test_documented_cli_uses_supported_ascii_metadata(tmp_path: Path) -> None:
+    tool = load_tool()
+    docs = (ROOT / "docs/offline-map-packs.md").read_text(encoding="utf-8")
+    assert 'Map data (c) Example contributors' in docs
+    source = tmp_path / "my-xyz"
+    put_tile(source, 0, 0, 0)
+    assert tool.main([
+        os.fspath(source), os.fspath(tmp_path / "sd"), "--pack-id", "regional-map",
+        "--name", "Regional Map", "--attribution", "Map data (c) Example contributors",
+        "--source", "Local export supplied by the user", "--license", "CC-BY-4.0",
+    ]) == 0
+
+
+def test_write_all_handles_partial_write_and_rejects_zero_progress(tmp_path: Path,
+                                                                   monkeypatch: pytest.MonkeyPatch) -> None:
+    tool = load_tool()
+    destination = tmp_path / "output"
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    real_write = os.write
+    try:
+        monkeypatch.setattr(tool.os, "write", lambda fd, data: real_write(fd, data[:max(1, len(data) // 2)]))
+        tool._write_all(descriptor, b"complete payload", "test")
+    finally:
+        os.close(descriptor)
+    assert destination.read_bytes() == b"complete payload"
+
+    monkeypatch.setattr(tool.os, "write", lambda _fd, _data: 0)
+    with pytest.raises(OSError, match="short write"):
+        tool._write_all(-1, b"x", "test")
+
+
+def test_output_relocation_between_verify_and_rename_is_rolled_back(tmp_path: Path,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 0, 0, 0)
+    output = tmp_path / "sd"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real_rename = tool._rename_noreplace
+
+    def relocate_then_rename(*args, **kwargs):
+        packs = output / "pyxis-map/packs"
+        moved = outside / "moved-packs"
+        packs.rename(moved)
+        real_rename(*args, **kwargs)
+
+    monkeypatch.setattr(tool, "_rename_noreplace", relocate_then_rename)
+    with pytest.raises(tool.PackError, match="changed during publication"):
+        tool.build_map_pack(source, output, **metadata())
+    assert not (outside / "moved-packs/local-pack").exists()
+    assert not (output / "pyxis-map/packs/local-pack").exists()
+
+
+def test_post_commit_close_failure_is_typed_as_published(tmp_path: Path,
+                                                          monkeypatch: pytest.MonkeyPatch) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 0, 0, 0)
+    output = tmp_path / "sd"
+    real_verify = tool._verify_output_chain
+    real_close = tool.os.close
+    calls = 0
+
+    def arm_after_second_verify(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        result = real_verify(*args, **kwargs)
+        if calls == 2:
+            failed = False
+            def fail_once(fd: int):
+                nonlocal failed
+                if not failed:
+                    failed = True
+                    raise OSError("close fault")
+                return real_close(fd)
+            monkeypatch.setattr(tool.os, "close", fail_once)
+        return result
+
+    monkeypatch.setattr(tool, "_verify_output_chain", arm_after_second_verify)
+    with pytest.raises(tool.PublishedDurabilityError) as caught:
+        tool.build_map_pack(source, output, **metadata())
+    assert caught.value.published is True
+    assert (output / "pyxis-map/packs/local-pack").is_dir()

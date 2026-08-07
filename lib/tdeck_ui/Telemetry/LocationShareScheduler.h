@@ -8,6 +8,8 @@
 
 namespace Telemetry {
 
+class LocationPersistenceController;
+
 constexpr std::size_t MAX_SHARE_SESSIONS = 32;
 constexpr uint32_t MIN_SHARE_CADENCE_MILLIS = 1000;
 constexpr uint32_t MAX_SHARE_CADENCE_MILLIS = 24U * 60U * 60U * 1000U;
@@ -174,8 +176,10 @@ public:
         std::size_t capacity,
         std::size_t& written_or_required) const;
     std::size_t size() const { return size_; }
+    uint64_t revision() const { return revision_; }
 
 private:
+    friend class LocationPersistenceController;
     struct Slot {
         bool occupied = false;
         ShareSession session{};
@@ -185,7 +189,7 @@ private:
     static bool validCadence(uint32_t cadence_millis);
     static uint64_t boundedAdd(uint64_t value, uint64_t delta);
     static uint64_t retryDelay(uint8_t failure_count);
-    static void scheduleRejectedWork(
+    static bool scheduleRejectedWork(
         ShareSession& session,
         ShareWorkType type,
         uint64_t now_millis);
@@ -202,6 +206,7 @@ private:
     uint64_t last_observed_millis_ = 0;
     uint64_t last_monotonic_millis_ = 0;
     bool has_monotonic_observation_ = false;
+    uint64_t revision_ = 0;
 };
 
 }  // namespace Telemetry

@@ -80,6 +80,7 @@
 #include <UI/LVGL/LVGLInit.h>
 #include <UI/LVGL/LVGLLock.h>
 #include <UI/LXMF/UIManager.h>
+#include <UI/LXMF/RouterLock.h>
 #include <UI/LXMF/SettingsScreen.h>
 
 // Audio notifications
@@ -126,8 +127,10 @@ LXMRouter* router = nullptr;
 MessageStore* message_store = nullptr;
 PropagationNodeManager* propagation_manager = nullptr;
 UI::LXMF::UIManager* ui_manager = nullptr;
+bool location_filesystem_available = false;
 TCPClientInterface* tcp_interface_impl = nullptr;
 Interface* tcp_interface = nullptr;
+bool tcp_interface_registered = false;
 SX1262Interface* lora_interface_impl = nullptr;
 Interface* lora_interface = nullptr;
 AutoInterface* auto_interface_impl = nullptr;
@@ -169,9 +172,11 @@ String pending_wifi_password;
 // UDP log broadcasting (POSIX socket — no per-packet heap allocation)
 // WiFiUDP::beginPacket() does new char[1460] on every call, causing severe
 // heap fragmentation over time. A raw POSIX socket with sendto() avoids this.
+#ifdef PYXIS_TEST_HOOKS
 static int udp_log_sock = -1;
 static struct sockaddr_in udp_log_dest;
 static bool udp_log_ready = false;
+#endif
 
 // Crash-phase evidence that survives panic/watchdog resets without writing
 // flash from the real-time audio task.
@@ -188,6 +193,7 @@ extern "C" void pyxis_audio_phase(uint32_t phase) {
     g_audio_phase_magic = AUDIO_PHASE_MAGIC;
 }
 
+#ifdef PYXIS_TEST_HOOKS
 static void udp_log_init() {
     if (udp_log_sock >= 0) close(udp_log_sock);  // Re-init safe
     udp_log_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -229,19 +235,27 @@ static void udp_log_init() {
 // lwIP's internal TCPIP core lock serializes concurrent calls.  Worst case
 // on contention: EAGAIN/ENOMEM and the packet is dropped (acceptable for logs).
 static void udp_send(const char* msg, size_t len) {
-    if (udp_log_sock < 0 || !udp_log_ready || WiFi.status() != WL_CONNECTED) return;
+    // udp_log_ready is cleared before managed disconnects and the socket is
+    // non-blocking. Do not query the WiFi status accessor from the log callback:
+    // the just-connected path can still own the WiFi mutex and deadlock loopTask.
+    if (udp_log_sock < 0 || !udp_log_ready) return;
     sendto(udp_log_sock, msg, len, 0,
            (struct sockaddr*)&udp_log_dest, sizeof(udp_log_dest));
 }
+#endif
 
-// Global log function callable from any module (sends to UDP + Serial)
+// Global log function callable from any module. Production is wired-only;
+// diagnostic firmware may additionally use its UDP harness transport.
 extern "C" void pyxis_log(const char* msg) {
     Serial.println(msg);
+#ifdef PYXIS_TEST_HOOKS
     if (udp_log_ready) {
         udp_send(msg, strlen(msg));
     }
+#endif
 }
 
+#ifdef PYXIS_TEST_HOOKS
 // --- Audio loopback PCM dump (test harness) ---------------------------------
 // In LOOPBACK test mode the decoded PCM is streamed over a SECOND multicast
 // destination (239.0.99.99:9998) so the Mac harness can score voice quality.
@@ -311,7 +325,7 @@ static void udp_audio_dest_init() {
 // Same guards as udp_send(): WiFi connected + socket valid + logging ready
 // (logging-ready implies the socket was bound to a live WiFi iface).
 static void udp_audio_send(const void* data, size_t len) {
-    if (udp_log_sock < 0 || !udp_log_ready || WiFi.status() != WL_CONNECTED) return;
+    if (udp_log_sock < 0 || !udp_log_ready) return;
     if (!udp_audio_dest_ready) udp_audio_dest_init();
     sendto(udp_log_sock, data, len, 0,
            (struct sockaddr*)&udp_audio_dest, sizeof(udp_audio_dest));
@@ -349,6 +363,17 @@ extern "C" void pyxis_audio_dump(const void* pcm, size_t bytes) {
         g_audio_dump_offset += (uint32_t)chunk;
     }
 }
+#else
+// Production keeps only ABI-compatible constant-time stubs used by the audio
+// pipeline. Diagnostic state, buffers, multicast output, register access and
+// recorder synchronization are absent from the image.
+extern "C" bool pyxis_rawmic_mode() { return false; }
+extern "C" int pyxis_rawmic_stage() { return 0; }
+extern "C" bool pyxis_record_active() { return false; }
+extern "C" void pyxis_record_write_ch0(const int16_t*, int) {}
+extern "C" void pyxis_audio_dump_arm(bool) {}
+extern "C" void pyxis_audio_dump(const void*, size_t) {}
+#endif
 
 // Forward declarations
 void start_tcp_interface();
@@ -751,10 +776,10 @@ void setup_wifi() {
     BOOT_PROFILE_WAIT_END("wifi_connect");
 
     if (WiFi.status() == WL_CONNECTED) {
-        on_wifi_connected();
+        INFO("WiFi associated during boot; post-connect services deferred until runtime initialization completes");
     } else {
         INFO("WiFi association deferred — main-loop event handler will "
-             "do NTP/OTA/UDP setup when the connect lands");
+             "do NTP/OTA setup when the connect lands");
     }
 }
 
@@ -844,7 +869,9 @@ void on_wifi_connected() {
         // state -- log the target instead of claiming readiness we can't confirm.
         INFO((String("OTA: wireless flash service started (") + OTA_HOSTNAME + ":3232)").c_str());
 
-        // Initialize UDP log broadcasting (multicast group 239.0.99.99:9999)
+        // UDP log broadcasting is a diagnostic transport. Keeping it out of
+        // production avoids network calls from the synchronous logger path.
+#ifdef PYXIS_TEST_HOOKS
         udp_log_init();
         udp_log_ready = true;
         // Renamed upstream (microReticulum @ 0.3.0): setLogCallback -> set_log_callback.
@@ -886,6 +913,7 @@ void on_wifi_connected() {
             }
         });
         INFO("UDP log broadcasting on port 9999");
+#endif
         if (g_boot_reset_reason != ESP_RST_POWERON || g_boot_lxst_step > 0 ||
                 g_audio_phase_magic == AUDIO_PHASE_MAGIC) {
             WARNINGF("BOOT CRASH EVIDENCE: reset=%d lxst_step=%u heap=%u stack=%u audio_phase=%u",
@@ -954,6 +982,7 @@ void setup_hardware() {
     // can be deleted once the graft lands.
     static microStore::Adapters::LittleFSFileSystem fs("/littlefs");
     persistent_storage_ready = fs.init(false);
+    location_filesystem_available = persistent_storage_ready;
     if (!persistent_storage_ready) {
         ERROR("FileSystem mount failed; preserving persistent data");
     } else {
@@ -1333,7 +1362,7 @@ void setup_ui_manager() {
     INFO("\n=== UI Manager Initialization ===");
 
     // Create UI manager
-    ui_manager = new UI::LXMF::UIManager(*reticulum, *router, *message_store);
+    ui_manager = new UI::LXMF::UIManager(*reticulum, *router, *message_store, location_filesystem_available);
 
     if (!ui_manager->init()) {
         ERROR("UI manager initialization failed!");
@@ -1411,7 +1440,12 @@ void setup_ui_manager() {
         });
 
         // Set save callback (update app_settings and apply)
-        settings->set_save_callback([](const UI::LXMF::AppSettings& new_settings) {
+        settings->set_save_callback([](const UI::LXMF::AppSettings& new_settings) -> bool {
+            UI::LXMF::RouterLock router_lock(0);
+            if (!router_lock.acquired()) {
+                WARNING("Router busy; settings application retained for retry");
+                return false;
+            }
             // Check what changed
             bool wifi_settings_changed = (new_settings.wifi_ssid != app_settings.wifi_ssid) ||
                                         (new_settings.wifi_password != app_settings.wifi_password);
@@ -1427,40 +1461,25 @@ void setup_ui_manager() {
             bool auto_settings_changed = (new_settings.auto_enabled != app_settings.auto_enabled);
             bool ble_settings_changed = (new_settings.ble_enabled != app_settings.ble_enabled);
             bool transport_settings_changed = (new_settings.transport_enabled != app_settings.transport_enabled);
+            bool display_name_changed = (new_settings.display_name != app_settings.display_name);
 
-            app_settings = new_settings;
-
-            if (transport_settings_changed) {
-                WARNING("Transport mode setting changed; reboot required before it takes effect");
-            }
-
-            // Handle WiFi credential changes - auto reconnect
+            // Reconnect is serviced by the main loop's existing bounded,
+            // watchdog-fed reconnect path after this settings application
+            // releases the router lock.
             if (wifi_settings_changed && new_settings.wifi_ssid.length() > 0) {
-                INFO(("WiFi credentials changed, reconnecting to: " + new_settings.wifi_ssid).c_str());
-                udp_log_ready = false;  // Suspend UDP logging during WiFi transition
-                WiFi.disconnect();
-                delay(100);
-                WiFi.begin(new_settings.wifi_ssid.c_str(), new_settings.wifi_password.c_str());
-
-                // Wait for connection (with timeout)
-                uint32_t start = millis();
-                while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
-                    delay(100);
-                }
-
-                if (WiFi.status() == WL_CONNECTED) {
-                    udp_log_init();  // Rebind to new WiFi interface IP
-                    udp_log_ready = true;  // Resume UDP logging
-                    INFO(("WiFi connected! IP: " + WiFi.localIP().toString()).c_str());
-                } else {
-                    WARNING("WiFi connection failed");
-                }
+                pending_wifi_ssid = new_settings.wifi_ssid;
+                pending_wifi_password = new_settings.wifi_password;
+                wifi_reconnect_pending = true;
+                INFO(("WiFi reconnect queued for: " + new_settings.wifi_ssid).c_str());
             }
+            app_settings.wifi_ssid = new_settings.wifi_ssid;
+            app_settings.wifi_password = new_settings.wifi_password;
 
-            // Update router display name
-            if (router && !new_settings.display_name.isEmpty()) {
+            // Update router display name while the callback's outer RouterLock is held.
+            if (display_name_changed && router && !new_settings.display_name.isEmpty()) {
                 router->set_display_name(new_settings.display_name.c_str());
             }
+            app_settings.display_name = new_settings.display_name;
 
             // Handle TCP interface changes at runtime
             if (tcp_settings_changed) {
@@ -1470,10 +1489,28 @@ void setup_ui_manager() {
                 }
 
                 if (new_settings.tcp_enabled) {
-                    start_tcp_interface();
+                    if (!tcp_interface_impl) {
+                        tcp_interface_impl = new TCPClientInterface("tcp0");
+                        tcp_interface = new Interface(tcp_interface_impl);
+                    }
+                    tcp_interface_impl->set_target_host(new_settings.tcp_host.c_str());
+                    tcp_interface_impl->set_target_port(new_settings.tcp_port);
+                    // A failed initial connection is transient; TCPClientInterface
+                    // owns its background retry state once configured.
+                    if (!tcp_interface_impl->start()) {
+                        ERROR("Failed to start TCP connect worker");
+                        return false;
+                    }
+                    if (!tcp_interface_registered) {
+                        Transport::register_interface(*tcp_interface);
+                        tcp_interface_registered = true;
+                    }
                 } else {
                     INFO("TCP interface disabled");
                 }
+                app_settings.tcp_enabled = new_settings.tcp_enabled;
+                app_settings.tcp_host = new_settings.tcp_host;
+                app_settings.tcp_port = new_settings.tcp_port;
             }
 
             // Handle LoRa interface changes at runtime
@@ -1507,11 +1544,18 @@ void setup_ui_manager() {
                         Transport::register_interface(*lora_interface);
                     } else {
                         ERROR("Failed to start LoRa interface!");
+                        return false;
                     }
                 } else {
                     INFO("LoRa interface disabled");
                 }
                 update_radio_activity_source();
+                app_settings.lora_enabled = new_settings.lora_enabled;
+                app_settings.lora_frequency = new_settings.lora_frequency;
+                app_settings.lora_bandwidth = new_settings.lora_bandwidth;
+                app_settings.lora_sf = new_settings.lora_sf;
+                app_settings.lora_cr = new_settings.lora_cr;
+                app_settings.lora_power = new_settings.lora_power;
             }
 
             // Handle Auto interface changes at runtime
@@ -1537,12 +1581,14 @@ void setup_ui_manager() {
                         Transport::register_interface(*auto_interface);
                     } else {
                         ERROR("Failed to start AutoInterface!");
+                        return false;
                     }
                 } else if (new_settings.auto_enabled) {
                     WARNING("AutoInterface enabled but WiFi not connected");
                 } else {
                     INFO("AutoInterface disabled");
                 }
+                app_settings.auto_enabled = new_settings.auto_enabled;
             }
 
             // Handle BLE interface changes at runtime
@@ -1559,6 +1605,10 @@ void setup_ui_manager() {
                     if (!ble_interface_impl) {
                         INFO("Creating new BLE interface...");
                         void* ble_mem = heap_caps_calloc(1, sizeof(BLEInterface), MALLOC_CAP_SPIRAM);
+                        if (!ble_mem) {
+                            ERROR("Failed to allocate BLE interface in PSRAM");
+                            return false;
+                        }
                         ble_interface_impl = new (ble_mem) BLEInterface("BLE");
                         // Testing: DUAL mode with WiFi radio completely disabled
                         ble_interface_impl->setRole(RNS::BLE::Role::DUAL);
@@ -1583,11 +1633,21 @@ void setup_ui_manager() {
                         }
                     } else {
                         ERROR("Failed to start BLE interface!");
+                        return false;
                     }
                 } else {
                     INFO("BLE interface disabled");
                 }
+                app_settings.ble_enabled = new_settings.ble_enabled;
             }
+
+            // Commit the runtime snapshot only after every fallible transition
+            // above has succeeded. A false return leaves comparisons intact so
+            // SettingsScreen can retry the persisted desired snapshot.
+            if (transport_settings_changed) {
+                WARNING("Transport mode setting changed; reboot required before it takes effect");
+            }
+            app_settings = new_settings;
 
             // Apply propagation settings to router
             if (router) {
@@ -1610,6 +1670,7 @@ void setup_ui_manager() {
             }
 
             INFO("Settings saved");
+            return true;
         });
     }
 
@@ -1660,29 +1721,29 @@ void start_tcp_interface() {
     if (!tcp_interface_impl) {
         String server_addr = app_settings.tcp_host + ":" + String(app_settings.tcp_port);
         INFO(("Creating TCP interface to " + std::string(server_addr.c_str())).c_str());
-
         tcp_interface_impl = new TCPClientInterface("tcp0");
-        tcp_interface_impl->set_target_host(app_settings.tcp_host.c_str());
-        tcp_interface_impl->set_target_port(app_settings.tcp_port);
         tcp_interface = new Interface(tcp_interface_impl);
-
-        if (!tcp_interface->start()) {
-            INFO("TCP initial connection failed, will retry in background");
-        }
-        Transport::register_interface(*tcp_interface);
-    } else {
-        // Interface exists, just update settings and restart
-        INFO("Starting TCP interface...");
-        tcp_interface_impl->set_target_host(app_settings.tcp_host.c_str());
-        tcp_interface_impl->set_target_port(app_settings.tcp_port);
-        tcp_interface_impl->start();
     }
+    if (tcp_interface_registered) return;
+    INFO("Starting TCP interface...");
+    tcp_interface_impl->set_target_host(app_settings.tcp_host.c_str());
+    tcp_interface_impl->set_target_port(app_settings.tcp_port);
+    if (!tcp_interface_impl->start()) {
+        ERROR("TCP connect worker start failed; retry remains armed");
+        return;
+    }
+    Transport::register_interface(*tcp_interface);
+    tcp_interface_registered = true;
 }
 
 void setup() {
     // Initialize serial
     Serial.begin(115200);
     delay(100);
+    if (!UI::LXMF::RouterLock::initialize()) {
+        ERROR("Failed to initialize router mutex");
+        while (true) delay(1000);
+    }
 
     // Apply the production TWDT policy before any application worker task is
     // created. Arduino-ESP32 starts with a baked 5s policy; BLE/LVGL workers
@@ -1690,11 +1751,13 @@ void setup() {
     // GATT operations. Task subscriptions are added at their creation sites.
     ESP_ERROR_CHECK(esp_task_wdt_init(60, true));
 
+#ifdef PYXIS_TEST_HOOKS
     // Create diagnostic recorder synchronization before any audio task starts.
     g_rec_mutex = xSemaphoreCreateMutex();
     if (!g_rec_mutex) {
         ERROR("Failed to create recorder mutex; T:RECORD will be unavailable");
     }
+#endif
 
     INFO("\n");
     INFO("╔══════════════════════════════════════╗");
@@ -1898,45 +1961,24 @@ void setup() {
 
     // Register delivered callback to update message status in storage and UI
     router->register_delivered_callback([](LXMF::LXMessage& msg) {
-        INFO(">>> APP DELIVERED CALLBACK ENTRY");
-        Serial.flush();
-
-        INFO(">>> Getting message hash");
-        Serial.flush();
         RNS::Bytes msg_hash = msg.hash();
         INFO("Delivery confirmed for message: " + msg_hash.toHex().substr(0, 16) + "...");
-        Serial.flush();
+        if (!message_store) return;
 
-        // Update message state in storage
-        if (message_store) {
-            INFO(">>> Updating message state in store");
-            Serial.flush();
-            if (!message_store->update_message_state(msg_hash, LXMF::Type::Message::DELIVERED)) {
-				ERROR("Delivered message state persistence failed; UI status not advanced");
-				return;
-            }
-            INFO(">>> State updated, loading full message");
-            Serial.flush();
-
-            // Load full message for UI update (need destination_hash)
-            LXMF::LXMessage full_msg = message_store->load_message(msg_hash);
-            INFO(">>> Message loaded, checking hash");
-            Serial.flush();
-            if (full_msg.hash()) {
-                INFO(">>> Setting state on full message");
-                Serial.flush();
-                full_msg.state(LXMF::Type::Message::DELIVERED);
-                if (ui_manager) {
-                    INFO(">>> Calling UI manager on_message_delivered");
-                    Serial.flush();
-                    ui_manager->on_message_delivered(full_msg);
-                    INFO(">>> UI manager returned");
-                    Serial.flush();
-                }
-            }
+        // Transient telemetry is deliberately not stored as chat. Check for a
+        // durable message before attempting a state write so its delivery
+        // callback remains silent and does not report a false storage error.
+        LXMF::LXMessage full_msg = message_store->load_message(msg_hash);
+        if (!full_msg.hash()) return;
+        if (!message_store->update_message_state(
+                msg_hash, LXMF::Type::Message::DELIVERED)) {
+            ERROR("Delivered message state persistence failed; UI status not advanced");
+            return;
         }
-        INFO(">>> APP DELIVERED CALLBACK EXIT");
-        Serial.flush();
+        full_msg.state(LXMF::Type::Message::DELIVERED);
+        if (ui_manager) {
+            ui_manager->on_message_delivered(full_msg);
+        }
     });
 
     // Boot profiling complete
@@ -2754,7 +2796,9 @@ void loop() {
     if (wifi_reconnect_pending) {
         wifi_reconnect_pending = false;
         INFO(("Reconnecting WiFi to: " + pending_wifi_ssid).c_str());
+#ifdef PYXIS_TEST_HOOKS
         udp_log_ready = false;  // Suspend UDP logging during WiFi transition
+#endif
         WiFi.disconnect();
         delay(100);
         WiFi.begin(pending_wifi_ssid.c_str(), pending_wifi_password.c_str());
@@ -2766,8 +2810,10 @@ void loop() {
         }
 
         if (WiFi.status() == WL_CONNECTED) {
+#ifdef PYXIS_TEST_HOOKS
             udp_log_init();  // Rebind to new WiFi interface IP
             udp_log_ready = true;  // Resume UDP logging
+#endif
             INFO(("WiFi connected! IP: " + WiFi.localIP().toString()).c_str());
         } else {
             WARNING("WiFi reconnection failed");
@@ -2778,7 +2824,10 @@ void loop() {
 
     // Process Reticulum
     LOOP_STEP(4);  // reticulum->loop()
-    reticulum->loop();
+    {
+        UI::LXMF::RouterLock router_lock;
+        if (router_lock.acquired()) reticulum->loop();
+    }
 
     // Best-effort instantaneous RSSI sampling is main-loop owned and enabled
     // only for the dedicated view. The interface skips TX and SPI contention.
@@ -2829,12 +2878,17 @@ void loop() {
     // Do not poll TCP/LoRa/BLE again here; BLE additionally enforces dedicated
     // task ownership when its worker is running.
 
-    // Process LXMF router queues
+    // Process LXMF router queues under the same serialization domain used by
+    // Reticulum and location-message admission.
     LOOP_STEP(7);  // Router processing
-    if (router) {
-        router->process_outbound();
-        router->process_inbound();
-        router->process_sync();
+    {
+        UI::LXMF::RouterLock router_lock;
+        if (router_lock.acquired() && router) {
+            if (ble_interface_impl) ble_interface_impl->drain_inbound(4);
+            router->process_outbound();
+            router->process_inbound();
+            router->process_sync();
+        }
     }
 
     LOOP_STEP(8);  // Memory monitor
@@ -2851,8 +2905,11 @@ void loop() {
                                         (lora_interface && lora_interface->online()) ||
                                         (ble_interface && ble_interface->online());
             if (router && has_online_interface) {
-                announce_reachable_destinations();
-                INFO("Periodic announce sent (interval: " + std::to_string(app_settings.announce_interval) + "s)");
+                UI::LXMF::RouterLock router_lock;
+                if (router_lock.acquired()) {
+                    announce_reachable_destinations();
+                    INFO("Periodic announce sent (interval: " + std::to_string(app_settings.announce_interval) + "s)");
+                }
             }
         }
     }
@@ -2880,9 +2937,12 @@ void loop() {
             // Only sync if TCP is online (propagation nodes need network)
             bool tcp_online = tcp_interface && tcp_interface->online();
             if (tcp_online) {
-                router->request_messages_from_propagation_node();
-                last_sync = now;
-                INFO("Periodic propagation sync (interval: " + std::to_string(app_settings.sync_interval / 3600) + " hours)");
+                UI::LXMF::RouterLock router_lock;
+                if (router_lock.acquired()) {
+                    router->request_messages_from_propagation_node();
+                    last_sync = now;
+                    INFO("Periodic propagation sync (interval: " + std::to_string(app_settings.sync_interval / 3600) + " hours)");
+                }
             }
         }
     }
@@ -2892,7 +2952,10 @@ void loop() {
         INFO("TCP interface reconnected - sending announce");
         if (router) {
             delay(500);  // Brief stabilization delay
-            announce_reachable_destinations();
+            UI::LXMF::RouterLock router_lock;
+            if (router_lock.acquired()) {
+                announce_reachable_destinations();
+            }
         }
         last_tcp_online = true;
     }
@@ -2914,9 +2977,6 @@ void loop() {
         if (wifi_connected && !last_wifi_connected) {
             INFO("WiFi connected (post-boot) — running on_wifi_connected");
             on_wifi_connected();
-            if (!tcp_interface_impl && app_settings.tcp_enabled) {
-                start_tcp_interface();
-            }
             // AutoInterface init at boot fails its WiFi-connected gate
             // because WiFi typically associates 2-5s after the boot
             // block runs. Retry here once WiFi actually lands. Also handles
@@ -2928,6 +2988,11 @@ void loop() {
             if (app_settings.auto_enabled) {
                 start_auto_interface();
             }
+        }
+        // A failed worker allocation leaves the interface unregistered. Retry
+        // at the bounded status cadence instead of accepting a dead setting.
+        if (wifi_connected && app_settings.tcp_enabled && !tcp_interface_registered) {
+            start_tcp_interface();
         }
         // Backstop auto-reconnect: WiFi.setAutoReconnect() handles most drops in
         // the background, but not every disconnect reason — without an explicit
@@ -3075,7 +3140,8 @@ void loop() {
         }
     }
 
-    // Periodic heap monitoring (every 5 seconds)
+    // Periodic heap/UDP diagnostics are restricted to test firmware.
+#ifdef PYXIS_TEST_HOOKS
     static uint32_t last_heap_check = 0;
     static uint32_t last_free_heap = 0;
     static uint32_t last_table_check = 0;
@@ -3161,6 +3227,7 @@ void loop() {
 
         last_free_heap = free_heap;
     }
+#endif
 
     // Small delay to prevent tight loop
     delay(5);

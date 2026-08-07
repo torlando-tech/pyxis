@@ -29,6 +29,8 @@ EXCLUDED_STRINGS = (
     b"Memory monitor started",
     b"Firmware: v1.0.0",
     b"SPIFFS FileSystem mount failed",
+    b"tile.openstreetmap.org",
+    b"Download map tiles:",
 )
 REQUIRED_STRINGS = (
     b"FileSystem mount failed; preserving persistent data",
@@ -38,10 +40,12 @@ EXCLUDED_SYMBOLS = (
     "process_test_serial_command",
     "MemoryMonitor::",
     "BootProfiler::",
+    "MapTileDownloader::",
+    "MapTileHttpArduino::",
 )
 PINNED_DEPENDENCIES = {
     "microReticulum": "6ac0d3232cf705d538f9c556f0f82d2d2cc753bc",
-    "microLXMF": "4c812978a5e2435a6b4320a2990e8e295949ac04",
+    "microLXMF": "60fb7d6951bd17275da83fdd9581900d55b0a2ab",
     "microStore": "c5fb69d68229e684c7fbd17692a67ae8193b84e2",
 }
 

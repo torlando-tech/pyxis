@@ -684,6 +684,7 @@ void ConversationListScreen::on_bottom_nav_clicked(lv_event_t* event) {
                 screen->_compose_callback();
             }
             break;
+
         default:
             break;
     }

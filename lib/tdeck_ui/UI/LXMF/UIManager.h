@@ -37,12 +37,17 @@
 #include "CallLinkOwnership.h"
 #include "CallLivenessWatchdog.h"
 #include "LXSTSignalParser.h"
+#include "MapScreen.h"
+#include "LocationShareScreen.h"
+#include "LocationShareCommandMailbox.h"
 #include "LXMF/LXMRouter.h"
 #include "LXMF/PropagationNodeManager.h"
 #include "LXMF/MessageStore.h"
 #include "Telemetry/LocationMessagePolicy.h"
 #include "Telemetry/LocationFixAdapter.h"
 #include "Telemetry/LocationLxmfAdapter.h"
+#include "Telemetry/LocationPersistenceController.h"
+#include "Telemetry/LocationPersistenceLittleFS.h"
 #include <microReticulum/Reticulum.h>
 #include <microReticulum/Link.h>
 
@@ -76,7 +81,9 @@ public:
      * @param router LXMF router instance
      * @param store Message store instance
      */
-    UIManager(RNS::Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::MessageStore& store);
+    UIManager(RNS::Reticulum& reticulum, ::LXMF::LXMRouter& router,
+              ::LXMF::MessageStore& store,
+              bool location_filesystem_available);
 
     /**
      * Destructor
@@ -128,11 +135,13 @@ public:
      * @param peer_hash Peer destination hash
      */
     void show_chat(const RNS::Bytes& peer_hash);
+    void show_location_sharing(const RNS::Bytes& peer_hash);
 
     /**
      * Show compose new message screen
      */
     void show_compose();
+    void show_map();
 
     /**
      * Show announce list screen
@@ -191,10 +200,10 @@ public:
 
     // Location sharing is always explicit and peer-scoped. No session exists
     // until the UI calls start_location_sharing().
-    Telemetry::ShareSessionResult start_location_sharing(
+    Telemetry::LocationConsentResult start_location_sharing(
         const RNS::Bytes& peer_hash,
         const Telemetry::ShareStartOptions& options);
-    Telemetry::ShareSessionResult stop_location_sharing(
+    Telemetry::LocationConsentResult stop_location_sharing(
         const RNS::Bytes& peer_hash);
     bool get_location_share_session(
         const RNS::Bytes& peer_hash,
@@ -332,6 +341,9 @@ private:
     ::LXMF::MessageStore& _store;
     Telemetry::PeerLocationStore _peer_locations;
     Telemetry::LocationShareScheduler _location_shares;
+    Telemetry::LocationPersistenceLittleFS* _location_storage;
+    Telemetry::TransactionalLocationPersistence* _location_transaction;
+    Telemetry::LocationPersistenceController* _location_persistence_controller;
     TinyGPSPlus* _gps;
     RNS::Destination _lxst_destination;
 
@@ -360,9 +372,12 @@ private:
     QRScreen* _qr_screen;
     SettingsScreen* _settings_screen;
     PropagationNodesScreen* _propagation_nodes_screen;
+    LocationShareScreen* _location_share_screen;
     CallScreen* _call_screen;
     std::function<RadioActivity::Snapshot()> _radio_activity_snapshot_provider;
     RadioActivityScreen::RadioConfig _radio_activity_config;
+    MapScreen* _map_screen;
+    LocationShareCommandMailbox _location_share_commands;
 
     ::LXMF::PropagationNodeManager* _propagation_manager;
     RNS::Interface* _ble_interface;
@@ -418,8 +433,11 @@ private:
     void on_back_to_conversation_list();
     bool on_send_message_from_chat(const String& content);
     void on_call_from_chat();
+    void on_location_from_chat();
+    void on_back_from_location_sharing();
     bool on_send_message_from_compose(const RNS::Bytes& dest_hash, const String& message);
     void on_cancel_compose();
+    void on_back_from_map();
     void on_announce_selected(const RNS::Bytes& dest_hash);
     void on_back_from_announces();
     void on_back_from_status();

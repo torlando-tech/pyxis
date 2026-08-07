@@ -140,6 +140,15 @@ void BLEInterface::stop() {
     }
     _pending_handshake_count = 0;
     _pending_data_count = 0;
+    {
+        std::lock_guard<std::recursive_mutex> lock(_mutex);
+        for (size_t index = 0; index < MAX_PENDING_PACKETS; ++index) {
+            _pending_packet_pool[index].clear();
+        }
+        _pending_packet_read = 0;
+        _pending_packet_write = 0;
+        _pending_packet_count = 0;
+    }
     _online = false;
 
     INFO("BLEInterface: Stopped");
@@ -889,9 +898,37 @@ void BLEInterface::onMacRotation(const Bytes& old_mac, const Bytes& new_mac, con
 //=============================================================================
 
 void BLEInterface::onPacketReassembled(const Bytes& peer_identity, const Bytes& packet) {
-    // Packet reassembly complete - pass to transport
+    // Packet reassembly complete. Queue for the single Transport owner task;
+    // never enter Transport from the dedicated BLE task.
     _peer_manager.recordPacketReceived(peer_identity);
-    handle_incoming(packet);
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (_pending_packet_count >= MAX_PENDING_PACKETS) {
+        WARNING("BLEInterface: inbound packet queue full; dropping new packet");
+        return;
+    }
+    _pending_packet_pool[_pending_packet_write] = packet;
+    _pending_packet_write =
+        (_pending_packet_write + 1) % MAX_PENDING_PACKETS;
+    ++_pending_packet_count;
+}
+
+size_t BLEInterface::drain_inbound(size_t maximum_packets) {
+    size_t drained = 0;
+    while (drained < maximum_packets) {
+        Bytes packet;
+        {
+            std::lock_guard<std::recursive_mutex> lock(_mutex);
+            if (_pending_packet_count == 0) break;
+            packet = _pending_packet_pool[_pending_packet_read];
+            _pending_packet_pool[_pending_packet_read].clear();
+            _pending_packet_read =
+                (_pending_packet_read + 1) % MAX_PENDING_PACKETS;
+            --_pending_packet_count;
+        }
+        handle_incoming(packet);
+        ++drained;
+    }
+    return drained;
 }
 
 void BLEInterface::onReassemblyTimeout(const Bytes& peer_identity, const std::string& reason) {

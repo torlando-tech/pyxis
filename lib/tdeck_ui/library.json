@@ -17,6 +17,8 @@
         "flags": "-std=gnu++11 -I../../../../deps/microReticulum/src",
         "srcFilter": [
             "+<Hardware/TDeck/*.cpp>",
+            "-<Hardware/TDeck/MapTileDownloader.cpp>",
+            "-<Hardware/TDeck/MapTileHttpArduino.cpp>",
             "+<Telemetry/*.cpp>",
             "+<UI/*.cpp>",
             "+<UI/LVGL/*.cpp>",

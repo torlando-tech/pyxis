@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "UIManager.h"
+#include "RouterLock.h"
 
 #ifdef ARDUINO
 
@@ -25,6 +26,8 @@
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <cstring>
+#include <new>
+#include <utility>
 
 using namespace RNS;
 
@@ -91,6 +94,16 @@ std::vector<uint8_t> token(const RNS::Bytes& bytes) {
     return std::vector<uint8_t>(bytes.data(), bytes.data() + bytes.size());
 }
 
+struct OutboundPersistenceContext {
+    ::LXMF::MessageStore* store;
+    ::LXMF::LXMessage* message;
+};
+
+bool persistOutgoingMessage(void* raw_context) {
+    auto& context = *static_cast<OutboundPersistenceContext*>(raw_context);
+    return context.store->save_message(*context.message);
+}
+
 }  // namespace
 
 // Static singletons for Link callbacks
@@ -118,6 +131,21 @@ bool peerIdFromHash(const Bytes& hash, Telemetry::PeerId& output) {
     return true;
 }
 
+template <typename T, typename... Args>
+T* allocateLocationObject(Args&&... args) {
+    void* memory = heap_caps_calloc(
+        1, sizeof(T), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return memory ? new (memory) T(std::forward<Args>(args)...) : nullptr;
+}
+
+template <typename T>
+void releaseLocationObject(T*& object) {
+    if (!object) return;
+    object->~T();
+    heap_caps_free(object);
+    object = nullptr;
+}
+
 class LiveLocationEnvelopeRouter : public Telemetry::LocationEnvelopeRouter {
 public:
     explicit LiveLocationEnvelopeRouter(::LXMF::LXMRouter& router)
@@ -127,43 +155,45 @@ public:
         const Telemetry::OutboundLocationEnvelope& envelope,
         uint64_t exclusive_deadline_monotonic_millis,
         uint64_t& ownership_monotonic_millis) override {
-        Bytes destination_hash(envelope.destination.bytes, Telemetry::PEER_ID_SIZE);
-        Identity destination_identity = Identity::recall(destination_hash);
-        Destination destination(Type::NONE);
-        if (destination_identity) {
-            destination = Destination(
-                destination_identity, Type::Destination::OUT,
-                Type::Destination::SINGLE, "lxmf", "delivery");
-        }
-
-        ::LXMF::LXMessage message(
-            destination,
-            router_.delivery_destination(),
-            Bytes(),
-            Bytes(),
-            ::LXMF::Type::Message::OPPORTUNISTIC);
-        if (!destination_identity) {
-            message.destination_hash(destination_hash);
-        }
-        for (std::size_t index = 0; index < envelope.field_count; ++index) {
-            const auto& field = envelope.fields[index];
-            if (!message.fields_set(
-                    Bytes(field.key, field.key_size),
-                    Bytes(field.value, field.value_size))) {
-                return false;
-            }
-        }
-
-        GuardContext guard_context{
-            exclusive_deadline_monotonic_millis,
-            &ownership_monotonic_millis};
+        RouterLock router_lock;
+        if (!router_lock.acquired()) return false;
         try {
+            Bytes destination_hash(
+                envelope.destination.bytes, Telemetry::PEER_ID_SIZE);
+            Identity destination_identity = Identity::recall(destination_hash);
+            Destination destination(Type::NONE);
+            if (destination_identity) {
+                destination = Destination(
+                    destination_identity, Type::Destination::OUT,
+                    Type::Destination::SINGLE, "lxmf", "delivery");
+            }
+
+            ::LXMF::LXMessage message(
+                destination,
+                router_.delivery_destination(),
+                Bytes(),
+                Bytes(),
+                ::LXMF::Type::Message::OPPORTUNISTIC);
+            if (!destination_identity) {
+                message.destination_hash(destination_hash);
+            }
+            for (std::size_t index = 0; index < envelope.field_count; ++index) {
+                const auto& field = envelope.fields[index];
+                if (!message.fields_set(
+                        Bytes(field.key, field.key_size),
+                        Bytes(field.value, field.value_size))) {
+                    return false;
+                }
+            }
+
+            GuardContext guard_context{
+                exclusive_deadline_monotonic_millis,
+                &ownership_monotonic_millis};
             return router_.try_handle_outbound(
                        message, claimOwnership, &guard_context) ==
                    ::LXMF::OutboundAdmissionResult::ACCEPTED;
         } catch (const std::exception& error) {
-            WARNING((std::string("Location outbound preparation failed: ") +
-                     error.what()).c_str());
+            WARNINGF("Location outbound preparation failed: %s", error.what());
             return false;
         }
     }
@@ -193,8 +223,13 @@ int UIManager::profile_to_codec2_mode(int profile) {
     return ULBWVoiceProfilePolicy::codecModeForProfile(profile);
 }
 
-UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::MessageStore& store)
+UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router,
+                     ::LXMF::MessageStore& store,
+                     bool location_filesystem_available)
     : _reticulum(reticulum), _router(router), _store(store),
+      _location_storage(nullptr),
+      _location_transaction(nullptr),
+      _location_persistence_controller(nullptr),
       _gps(nullptr),
       // Vanilla upstream RNS::Destination has no default ctor; construct in
       // a Type::NONE state, then assign a real Destination later. (The fork
@@ -212,7 +247,9 @@ UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::Me
       _qr_screen(nullptr),
       _settings_screen(nullptr),
       _propagation_nodes_screen(nullptr),
+      _location_share_screen(nullptr),
       _call_screen(nullptr),
+      _map_screen(nullptr),
       _propagation_manager(nullptr),
       _ble_interface(nullptr),
       _initialized(false),
@@ -230,9 +267,29 @@ UIManager::UIManager(Reticulum& reticulum, ::LXMF::LXMRouter& router, ::LXMF::Me
       _pending_conversation_refresh(false),
       _last_conversation_refresh_ms(0) {
     memset((void*)_call_signal_queue, 0, sizeof(_call_signal_queue));
+    _location_storage = allocateLocationObject<
+        Telemetry::LocationPersistenceLittleFS>(location_filesystem_available);
+    if (_location_storage) {
+        _location_transaction = allocateLocationObject<
+            Telemetry::TransactionalLocationPersistence>(*_location_storage);
+    }
+    if (_location_transaction) {
+        _location_persistence_controller = allocateLocationObject<
+            Telemetry::LocationPersistenceController>(
+                _location_shares, _peer_locations, *_location_transaction);
+    }
+    if (!_location_persistence_controller) {
+        ERROR("Location persistence allocation failed; sharing remains disabled");
+    }
 }
 
 UIManager::~UIManager() {
+    // Joins the sole SD/decoder worker before any map buffers are released.
+    if (_map_screen) delete _map_screen;
+    _map_screen = nullptr;
+    releaseLocationObject(_location_persistence_controller);
+    releaseLocationObject(_location_transaction);
+    releaseLocationObject(_location_storage);
     // Clean up call state
     if (_call_state != CallState::IDLE ||
         call_current_generation() != 0) {
@@ -260,6 +317,7 @@ UIManager::~UIManager() {
     if (_qr_screen) delete _qr_screen;
     if (_settings_screen) delete _settings_screen;
     if (_propagation_nodes_screen) delete _propagation_nodes_screen;
+    if (_location_share_screen) delete _location_share_screen;
     if (_call_screen) delete _call_screen;
 }
 
@@ -287,12 +345,15 @@ bool UIManager::init() {
     _qr_screen = new QRScreen();
     _settings_screen = new SettingsScreen();
     _propagation_nodes_screen = new PropagationNodesScreen();
+    _location_share_screen = new LocationShareScreen();
     _call_screen = new CallScreen();
+    _map_screen = new MapScreen();
 
     _home_screen->set_messages_callback([this]() { show_conversation_list(); });
     _home_screen->set_nomadnet_callback([this]() { show_nomadnet(); });
     _home_screen->set_network_callback([this]() { show_network(); });
     _home_screen->set_settings_callback([this]() { show_settings(); });
+    _home_screen->set_map_callback([this]() { show_map(); });
     _network_screen->set_back_callback([this]() { back(); });
     _network_screen->set_home_callback([this]() { home(); });
     _network_screen->set_status_callback([this]() { show_status(); });
@@ -323,6 +384,10 @@ bool UIManager::init() {
         [this]() { on_new_message(); }
     );
 
+    _map_screen->set_back_callback(
+        [this]() { on_back_from_map(); }
+    );
+
     _conversation_list_screen->set_sync_callback(
         [this]() { on_propagation_sync(); }
     );
@@ -340,6 +405,25 @@ bool UIManager::init() {
 
     _chat_screen->set_call_callback(
         [this]() { on_call_from_chat(); }
+    );
+    _chat_screen->set_location_callback(
+        [this]() { on_location_from_chat(); }
+    );
+
+    _location_share_screen->set_back_callback(
+        [this]() { on_back_from_location_sharing(); }
+    );
+    _location_share_screen->set_start_callback(
+        [this](const uint8_t* peer, std::size_t peer_size, uint8_t duration,
+               uint32_t cadence, bool approximate, int32_t radius) {
+            return _location_share_commands.requestStart(
+                peer, peer_size, duration, cadence, approximate, radius);
+        }
+    );
+    _location_share_screen->set_stop_callback(
+        [this](const uint8_t* peer, std::size_t peer_size) {
+            return _location_share_commands.requestStop(peer, peer_size);
+        }
     );
 
     // Set up callbacks for compose screen
@@ -365,6 +449,11 @@ bool UIManager::init() {
     _announce_list_screen->set_send_announce_callback(
         [this]() {
             INFO("Sending LXMF announce...");
+            RouterLock router_lock(0);
+            if (!router_lock.acquired()) {
+                WARNING("Router busy; announce deferred by user retry");
+                return;
+            }
             try {
                 _router.announce();
                 announce_lxst();
@@ -505,11 +594,78 @@ bool UIManager::init() {
 }
 
 void UIManager::update() {
+    // Settings Save only publishes a snapshot from the LVGL event. Persistence
+    // and interface changes execute here on the main owner loop, before LVGL.
+    if (_settings_screen) _settings_screen->service_pending_save();
     // Flush display-name write-throughs the last conversation-list refresh
     // deferred. Done here, BEFORE LVGL_LOCK, so the microStore/LittleFS I/O
     // never runs under the render lock (same reason as on_message_received).
     if (_conversation_list_screen) {
         _conversation_list_screen->flush_pending_name_writes();
+    }
+
+    // SERVICE ORDER CONTRACT: consume peer consent commands and complete the
+    // existing controller-owned durable start/stop transaction before location
+    // service/dispatch and before LVGL_LOCK. LVGL callbacks perform no I/O.
+    const LocationShareCommandMailbox::Command location_command =
+        _location_share_commands.take();
+    bool has_location_ui_result = false;
+    Telemetry::LocationConsentResult location_ui_result =
+        Telemetry::LocationConsentResult::INVALID_ARGUMENT;
+    Telemetry::ShareSession location_ui_session{};
+    bool has_location_ui_session = false;
+    if (location_command.action != LocationShareCommandMailbox::Action::NONE) {
+        Bytes command_peer(location_command.peer, Telemetry::PEER_ID_SIZE);
+        if (location_command.action == LocationShareCommandMailbox::Action::QUERY) {
+            const Telemetry::LocationControllerState query_state =
+                _location_persistence_controller
+                    ? _location_persistence_controller->service(
+                          static_cast<uint64_t>(RNS::Utilities::OS::ltime()),
+                          monotonicMillis())
+                    : Telemetry::LocationControllerState::BLOCKED;
+            if (query_state == Telemetry::LocationControllerState::READY) {
+                has_location_ui_session = get_location_share_session(
+                    command_peer, location_ui_session);
+                location_ui_result = has_location_ui_session
+                    ? Telemetry::LocationConsentResult::UPDATED
+                    : Telemetry::LocationConsentResult::NOT_FOUND;
+            } else {
+                location_ui_result =
+                    query_state == Telemetry::LocationControllerState::WAITING_FOR_CLOCK
+                        ? Telemetry::LocationConsentResult::CLOCK_UNAVAILABLE
+                        : Telemetry::LocationConsentResult::STORAGE_FAILURE;
+            }
+        } else if (location_command.action == LocationShareCommandMailbox::Action::STOP) {
+            location_ui_result = stop_location_sharing(command_peer);
+        } else {
+            Telemetry::ShareStartOptions options{};
+            bool valid = true;
+            switch (location_command.duration) {
+                case 0: options.duration = Telemetry::ShareDuration::MINUTES_15; break;
+                case 1: options.duration = Telemetry::ShareDuration::HOUR_1; break;
+                case 2: options.duration = Telemetry::ShareDuration::HOURS_4; break;
+                default: valid = false; break;
+            }
+            if (location_command.cadenceMillis != 60000U &&
+                location_command.cadenceMillis != 300000U &&
+                location_command.cadenceMillis != 900000U) valid = false;
+            if ((!location_command.hasApproximation && location_command.approximationMeters != 0) ||
+                (location_command.hasApproximation &&
+                 location_command.approximationMeters != 100 &&
+                 location_command.approximationMeters != 1000 &&
+                 location_command.approximationMeters != 10000)) valid = false;
+            options.cadence_millis = location_command.cadenceMillis;
+            options.has_approx_radius = location_command.hasApproximation;
+            options.approx_radius_meters = location_command.approximationMeters;
+            location_ui_result = valid
+                ? start_location_sharing(command_peer, options)
+                : Telemetry::LocationConsentResult::INVALID_ARGUMENT;
+        }
+        has_location_ui_result = true;
+        if (location_command.action != LocationShareCommandMailbox::Action::QUERY) {
+            has_location_ui_session = get_location_share_session(
+                command_peer, location_ui_session);
+        }
     }
     // Stream the rest of the open conversation's first page in a few at a time
     // (the newest were rendered synchronously on open). Done here, on the main
@@ -546,6 +702,12 @@ void UIManager::update() {
     // a rendering operation. With no explicit sessions this remains a no-op.
     const uint64_t wall_now_millis =
         static_cast<uint64_t>(RNS::Utilities::OS::ltime());
+    const uint64_t monotonic_now_millis = monotonicMillis();
+    const Telemetry::LocationControllerState location_state =
+        _location_persistence_controller
+            ? _location_persistence_controller->service(
+                  wall_now_millis, monotonic_now_millis)
+            : Telemetry::LocationControllerState::BLOCKED;
     Telemetry::GpsFixSample gps_sample{};
     if (_gps) {
         gps_sample.location_valid = _gps->location.isValid();
@@ -558,25 +720,51 @@ void UIManager::update() {
         gps_sample.speed_kilometers_per_hour = _gps->speed.kmph();
         gps_sample.bearing_valid = _gps->course.isValid();
         gps_sample.bearing_degrees = _gps->course.deg();
-        gps_sample.hdop_valid = _gps->hdop.isValid();
-        gps_sample.hdop = _gps->hdop.hdop();
+
     }
     Telemetry::LocationTelemetry current_location{};
     const bool current_location_valid = Telemetry::locationTelemetryFromGpsFix(
         gps_sample, wall_now_millis, current_location);
-    LiveLocationEnvelopeRouter location_router(_router);
-    const Telemetry::DispatchResult location_result =
-        Telemetry::dispatchLocationShare(
+    Telemetry::DispatchResult location_result = Telemetry::DispatchResult::NO_WORK;
+    if (location_state == Telemetry::LocationControllerState::READY) {
+        LiveLocationEnvelopeRouter location_router(_router);
+        location_result = Telemetry::dispatchLocationShare(
             _location_shares,
             wall_now_millis,
-            monotonicMillis(),
+            monotonic_now_millis,
             current_location_valid,
             current_location,
             location_router);
+    }
     if (location_result == Telemetry::DispatchResult::QUEUED) {
         INFO("Location telemetry queued");
     } else if (location_result == Telemetry::DispatchResult::CEASE_QUEUED) {
         INFO("Location cease queued");
+    }
+
+    // Build the fixed map model and service its worker before LVGL_LOCK. All
+    // authenticated ingress drains on this router-owner loop, so this fixed
+    // peer snapshot cannot race PeerLocationStore::apply().
+    if (_navigation.current() == Route::MAP && _map_screen) {
+        Telemetry::PeerLocationRecord peers[Telemetry::MAX_PEER_LOCATIONS]{};
+        static constexpr uint64_t MAP_PEER_MAX_AGE_MS =
+            24ULL * 60ULL * 60ULL * 1000ULL;
+        const std::size_t peer_count = _peer_locations.snapshot(
+            wall_now_millis, MAP_PEER_MAX_AGE_MS, peers,
+            Telemetry::MAX_PEER_LOCATIONS);
+        Pyxis::MapView::Request map_request{};
+        map_request.center = {0.0, 0.0};
+        map_request.zoom = 2U;
+        map_request.width = Pyxis::MapScreenPresenter::VIEWPORT_WIDTH;
+        map_request.height = Pyxis::MapScreenPresenter::VIEWPORT_HEIGHT;
+        map_request.include_tile_border = false;
+        map_request.has_local_location = current_location_valid;
+        map_request.local_location = current_location;
+        map_request.peers = peers;
+        map_request.peer_count = peer_count;
+        map_request.wall_now_millis = wall_now_millis;
+        _map_screen->updateModel(map_request);
+        _map_screen->serviceIo();
     }
     LVGL_LOCK();
 
@@ -595,6 +783,18 @@ void UIManager::update() {
         }
     }
 
+    if (_navigation.current() == Route::MAP && _map_screen) {
+        // One predecoded completion at most per tick, then fixed-pool positions.
+        (void)_map_screen->applyOneCompletion();
+        _map_screen->applyFrame();
+    }
+    if (has_location_ui_result && _location_share_screen &&
+        _location_share_screen->matches_peer(
+            location_command.peer, Telemetry::PEER_ID_SIZE)) {
+        _location_share_screen->apply_result(
+            location_ui_result,
+            has_location_ui_session ? &location_ui_session : nullptr);
+    }
     // Consume UI commands unconditionally. LVGL callbacks only publish into
     // the mailbox; loopTask remains the sole owner of the audio pipeline.
     const uint32_t generation = call_current_generation();
@@ -657,7 +857,9 @@ void UIManager::hide_all_screens() {
     if (_qr_screen) _qr_screen->hide();
     if (_settings_screen) _settings_screen->hide();
     if (_propagation_nodes_screen) _propagation_nodes_screen->hide();
+    _location_share_screen->hide();
     if (_call_screen) _call_screen->hide();
+    if (_map_screen) _map_screen->hide();
 }
 
 void UIManager::show_home() {
@@ -755,6 +957,12 @@ void UIManager::render_route(Route route) {
             _last_conversation_refresh_ms = millis();
             _conversation_list_screen->show();
             break;
+        case Route::MAP:
+            _map_screen->show();
+            break;
+        case Route::LOCATION_SHARING:
+            _location_share_screen->show();
+            break;
         case Route::CHAT:
             _chat_screen->load_conversation(_current_peer_hash, _store);
             _chat_screen->show();
@@ -806,6 +1014,29 @@ void UIManager::show_chat(const Bytes& peer_hash) {
 
     _current_peer_hash = peer_hash;
     navigate(Route::CHAT);
+}
+
+void UIManager::show_location_sharing(const Bytes& peer_hash) {
+    if (peer_hash.size() != Telemetry::PEER_ID_SIZE ||
+        !_current_peer_hash || peer_hash != _current_peer_hash) {
+        WARNING("Refusing location controls for invalid or non-current peer");
+        return;
+    }
+    if (!_location_share_screen->open_for_peer(
+            peer_hash.data(), peer_hash.size(), nullptr)) {
+        WARNING("Refusing location controls: peer must be exactly 16 bytes");
+        return;
+    }
+    if (!_location_share_commands.requestQuery(peer_hash.data(), peer_hash.size())) {
+        WARNING("Location controls busy; current status will refresh on retry");
+    }
+    navigate(Route::LOCATION_SHARING);
+}
+
+void UIManager::on_back_from_location_sharing() {
+    // _current_peer_hash is retained while controls are open, so Back always
+    // returns to the exact chat that opened this peer-scoped screen.
+    back();
 }
 
 void UIManager::show_compose() {
@@ -889,6 +1120,15 @@ void UIManager::on_new_message() {
     show_compose();
 }
 
+void UIManager::show_map() {
+    INFO("Showing offline map");
+    navigate(Route::MAP);
+}
+
+void UIManager::on_back_from_map() {
+    back();
+}
+
 void UIManager::show_settings() {
     INFO("Showing settings screen");
     navigate(Route::SETTINGS);
@@ -948,26 +1188,39 @@ void UIManager::set_gps(TinyGPSPlus* gps) {
     }
 }
 
-Telemetry::ShareSessionResult UIManager::start_location_sharing(
+Telemetry::LocationConsentResult UIManager::start_location_sharing(
     const Bytes& peer_hash,
     const Telemetry::ShareStartOptions& options) {
     Telemetry::PeerId peer{};
     if (!peerIdFromHash(peer_hash, peer)) {
-        return Telemetry::ShareSessionResult::INVALID_ARGUMENT;
+        return Telemetry::LocationConsentResult::INVALID_ARGUMENT;
     }
-    return _location_shares.start(
-        peer, options,
-        static_cast<uint64_t>(RNS::Utilities::OS::ltime()));
+    if (!_location_persistence_controller) {
+        return Telemetry::LocationConsentResult::NOT_READY;
+    }
+    const uint64_t wall_now =
+        static_cast<uint64_t>(RNS::Utilities::OS::ltime());
+    const uint64_t monotonic_now = monotonicMillis();
+    _location_persistence_controller->service(wall_now, monotonic_now);
+    return _location_persistence_controller->startSharing(
+        peer, options, wall_now, monotonic_now);
 }
 
-Telemetry::ShareSessionResult UIManager::stop_location_sharing(
+Telemetry::LocationConsentResult UIManager::stop_location_sharing(
     const Bytes& peer_hash) {
     Telemetry::PeerId peer{};
     if (!peerIdFromHash(peer_hash, peer)) {
-        return Telemetry::ShareSessionResult::INVALID_ARGUMENT;
+        return Telemetry::LocationConsentResult::INVALID_ARGUMENT;
     }
-    return _location_shares.stop(
-        peer, static_cast<uint64_t>(RNS::Utilities::OS::ltime()));
+    if (!_location_persistence_controller) {
+        return Telemetry::LocationConsentResult::NOT_READY;
+    }
+    const uint64_t wall_now =
+        static_cast<uint64_t>(RNS::Utilities::OS::ltime());
+    const uint64_t monotonic_now = monotonicMillis();
+    _location_persistence_controller->service(wall_now, monotonic_now);
+    return _location_persistence_controller->stopSharing(
+        peer, wall_now, monotonic_now);
 }
 
 bool UIManager::get_location_share_session(
@@ -999,6 +1252,14 @@ void UIManager::on_call_from_chat() {
     if (!_call_starts.request(peerHash)) {
         WARNING("LXST: Call start already pending");
     }
+}
+
+void UIManager::on_location_from_chat() {
+    if (_current_peer_hash.size() != Telemetry::PEER_ID_SIZE) {
+        WARNING("Location controls require an exact 16-byte current peer");
+        return;
+    }
+    show_location_sharing(_current_peer_hash);
 }
 
 bool UIManager::on_send_message_from_compose(const Bytes& dest_hash, const String& message) {
@@ -1053,6 +1314,11 @@ void UIManager::on_back_from_propagation_nodes() {
 }
 
 void UIManager::on_propagation_node_selected(const Bytes& node_hash) {
+    RouterLock router_lock(0);
+    if (!router_lock.acquired()) {
+        WARNING("Router busy; propagation selection not applied");
+        return;
+    }
     std::string hash_hex = node_hash.toHex().substr(0, 16);
     std::string msg = "Propagation node selected: " + hash_hex + "...";
     INFO(msg.c_str());
@@ -1087,6 +1353,11 @@ void UIManager::on_propagation_node_selected(const Bytes& node_hash) {
 }
 
 void UIManager::on_propagation_auto_select_changed(bool enabled) {
+    RouterLock router_lock(0);
+    if (!router_lock.acquired()) {
+        WARNING("Router busy; propagation mode not applied");
+        return;
+    }
     std::string msg = "Propagation auto-select changed: ";
     msg += enabled ? "enabled" : "disabled";
     INFO(msg.c_str());
@@ -1109,6 +1380,11 @@ void UIManager::on_propagation_auto_select_changed(bool enabled) {
 }
 
 void UIManager::on_propagation_sync() {
+    RouterLock router_lock(0);
+    if (!router_lock.acquired()) {
+        WARNING("Router busy; sync request not queued");
+        return;
+    }
     INFO("Requesting messages from propagation node");
     _router.request_messages_from_propagation_node();
 }
@@ -1171,25 +1447,41 @@ bool UIManager::send_message(const Bytes& dest_hash, const String& content) {
     // Pack the message to generate hash and signature before saving
     message.pack();
 
-    // Do not transmit or display an outgoing message unless both its payload
-    // and conversation index were committed. Otherwise a reboot makes an
-    // apparently-sent message disappear from history.
-    //
-    // This callback runs on LVGL's 8 KiB task. microLXMF must keep its
-    // transactional ConversationInfo rollback snapshot object-owned rather
-    // than local to save_message(); the snapshot itself is larger than 8 KiB.
-    if (!_store.save_message(message)) {
+    // Reject router contention or queue exhaustion before persistence. The
+    // admission guard commits the final packed/stamped message immediately
+    // before queue ownership transfer while RouterLock prevents a concurrent
+    // producer from consuming the checked capacity. This callback runs on
+    // LVGL's 8 KiB task, so MessageStore keeps its rollback snapshot
+    // object-owned rather than local to save_message().
+    RouterLock router_lock(0);
+    if (!router_lock.acquired()) {
+        WARNING("Router busy; outgoing message retained for retry");
+        return false;
+    }
+
+    OutboundPersistenceContext persistence_context{&_store, &message};
+    ::LXMF::OutboundAdmissionResult admission;
+    try {
+        admission = _router.try_handle_outbound(
+            message, persistOutgoingMessage, &persistence_context);
+    } catch (const std::exception& error) {
+        WARNINGF("Outgoing message preparation failed: %s", error.what());
+        return false;
+    }
+
+    if (admission == ::LXMF::OutboundAdmissionResult::GUARD_REJECTED) {
         ERROR("Outgoing message persistence failed; message not queued");
         show_storage_error("Storage is unavailable. The message was not sent.");
+        return false;
+    }
+    if (admission != ::LXMF::OutboundAdmissionResult::ACCEPTED) {
+        WARNING("Outbound queue full; outgoing message retained for retry");
         return false;
     }
 
     if (_navigation.current() == Route::CHAT && _current_peer_hash == dest_hash) {
         _chat_screen->add_message(message, true);
     }
-
-    // Queue for sending (pack already called, will use cached packed data)
-    _router.handle_outbound(message);
 
     INFO("  Message queued for delivery");
     return true;
@@ -1253,11 +1545,30 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
             WARNING("Malformed inbound location field ignored");
         }
         if (location_decision.apply_location) {
-            (void)_peer_locations.apply(
-                location_decision.authenticated_sender,
-                location_decision.location,
-                location_decision.meta,
-                location_decision.received_at_millis);
+            const uint64_t location_wall_now =
+                static_cast<uint64_t>(RNS::Utilities::OS::ltime());
+            const uint64_t location_monotonic_now = monotonicMillis();
+            const Telemetry::LocationControllerState location_state =
+                _location_persistence_controller
+                    ? _location_persistence_controller->service(
+                          location_wall_now, location_monotonic_now)
+                    : Telemetry::LocationControllerState::BLOCKED;
+            if (location_state == Telemetry::LocationControllerState::READY) {
+                const Telemetry::PeerLocationResult location_result =
+                    _peer_locations.apply(
+                        location_decision.authenticated_sender,
+                        location_decision.location,
+                        location_decision.meta,
+                        location_decision.received_at_millis);
+                if (location_result != Telemetry::PeerLocationResult::STALE &&
+                    location_result != Telemetry::PeerLocationResult::NOT_FOUND &&
+                    location_result != Telemetry::PeerLocationResult::INVALID_ARGUMENT) {
+                    _location_persistence_controller->service(
+                        location_wall_now, location_monotonic_now);
+                }
+            } else {
+                WARNING("Location state not restored; inbound update ignored");
+            }
         }
         if (!location_decision.persist) {
             INFO("  Location telemetry processed without chat persistence");

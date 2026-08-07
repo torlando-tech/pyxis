@@ -83,7 +83,10 @@ LocationPersistenceResult TransactionalLocationPersistence::save(
     const CandidateResult promoted =
         readCandidate(LocationPersistenceSlot::LIVE, candidate_size);
     if (promoted == CandidateResult::IO_ERROR) {
-        return LocationPersistenceResult::IO_ERROR;
+        // TEMP was fully read-back validated before the atomic promotion.
+        // Once rename succeeds, the new generation is committed even if an
+        // immediate second observation is unavailable.
+        return LocationPersistenceResult::SAVED;
     }
     if (promoted != CandidateResult::VALID) {
         return LocationPersistenceResult::INVALID_STATE;

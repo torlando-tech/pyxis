@@ -156,6 +156,7 @@
    3RD PARTY LIBRARIES
  *====================*/
 #define LV_USE_QRCODE 1
+#define LV_USE_PNG 1  /* Worker-only lodepng decode; never file-source rendering. */
 
 /* lv_snapshot_take() — used by the T:SCREENSHOT serial command for
  * docs and automated UI testing. Pulls a full-screen RGB565 buffer

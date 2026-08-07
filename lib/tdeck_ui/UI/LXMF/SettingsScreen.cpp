@@ -72,7 +72,7 @@ SettingsScreen::SettingsScreen(lv_obj_t* parent)
       _switch_transport_enabled(nullptr), _transport_warning_modal(nullptr),
       _transport_modal_group(nullptr), _transport_enable_confirmed(false),
       _btn_propagation_nodes(nullptr), _switch_prop_fallback(nullptr), _switch_prop_only(nullptr),
-      _gps(nullptr) {
+      _save_state(0U), _apply_retry_at_ms(0U), _gps(nullptr) {
     LVGL_LOCK();
 
     // Create screen object
@@ -867,6 +867,7 @@ void SettingsScreen::create_advanced_section(lv_obj_t* parent) {
     lv_obj_align(_switch_gps_sync, LV_ALIGN_RIGHT_MID, 0, 0);
     lv_obj_set_style_bg_color(_switch_gps_sync, Theme::border(), LV_PART_MAIN);
     lv_obj_set_style_bg_color(_switch_gps_sync, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+
 }
 
 void SettingsScreen::create_transport_mode_section(lv_obj_t* parent) {
@@ -1064,51 +1065,64 @@ void SettingsScreen::load_settings() {
 
 void SettingsScreen::save_settings() {
     update_settings_from_ui();
-
-    Preferences prefs;
-    prefs.begin(NVS_NAMESPACE, false);  // read-write
-
-    prefs.putString(KEY_WIFI_SSID, _settings.wifi_ssid);
-    prefs.putString(KEY_WIFI_PASS, _settings.wifi_password);
-    prefs.putString(KEY_TCP_HOST, _settings.tcp_host);
-    prefs.putUShort(KEY_TCP_PORT, _settings.tcp_port);
-    prefs.putString(KEY_DISPLAY_NAME, _settings.display_name);
-    prefs.putUChar(KEY_BRIGHTNESS, _settings.brightness);
-    prefs.putBool(KEY_KB_LIGHT, _settings.keyboard_light);
-    prefs.putUShort(KEY_TIMEOUT, _settings.screen_timeout);
-    prefs.putUInt(KEY_ANNOUNCE_INT, _settings.announce_interval);
-    prefs.putUInt(KEY_SYNC_INT, _settings.sync_interval);
-    prefs.putBool(KEY_GPS_SYNC, _settings.gps_time_sync);
-    prefs.putBool(KEY_TRANSPORT_ENABLED, _settings.transport_enabled);
-
-    // Notification settings
-    prefs.putBool(KEY_NOTIF_SND, _settings.notification_sound);
-    prefs.putUChar(KEY_NOTIF_VOL, _settings.notification_volume);
-
-    // Interface settings
-    prefs.putBool(KEY_TCP_ENABLED, _settings.tcp_enabled);
-    prefs.putBool(KEY_LORA_ENABLED, _settings.lora_enabled);
-    prefs.putFloat(KEY_LORA_FREQ, _settings.lora_frequency);
-    prefs.putFloat(KEY_LORA_BW, _settings.lora_bandwidth);
-    prefs.putUChar(KEY_LORA_SF, _settings.lora_sf);
-    prefs.putUChar(KEY_LORA_CR, _settings.lora_cr);
-    prefs.putChar(KEY_LORA_POWER, _settings.lora_power);
-    prefs.putBool(KEY_AUTO_ENABLED, _settings.auto_enabled);
-    prefs.putBool(KEY_BLE_ENABLED, _settings.ble_enabled);
-
-    // Propagation settings
-    prefs.putBool(KEY_PROP_AUTO, _settings.prop_auto_select);
-    prefs.putString(KEY_PROP_NODE, _settings.prop_selected_node);
-    prefs.putBool(KEY_PROP_FALLBACK, _settings.prop_fallback_enabled);
-    prefs.putBool(KEY_PROP_ONLY, _settings.prop_only);
-
-    prefs.end();
-
-    INFO("Settings saved to NVS");
-
-    if (_save_callback) {
-        _save_callback(_settings);
+    std::uint8_t expected = SAVE_IDLE;
+    if (!_save_state.compare_exchange_strong(
+            expected, SAVE_PROCESSING, std::memory_order_acq_rel)) {
+        WARNING("Settings save already pending");
+        return;
     }
+    _pending_save_settings = _settings;
+    _save_state.store(SAVE_PENDING, std::memory_order_release);
+}
+
+void SettingsScreen::service_pending_save() {
+    std::uint8_t expected = _save_state.load(std::memory_order_acquire);
+    if (expected != SAVE_PENDING && expected != SAVE_APPLY_RETRY) return;
+    if (expected == SAVE_APPLY_RETRY &&
+        static_cast<std::int32_t>(millis() - _apply_retry_at_ms) < 0) return;
+    const bool needs_persistence = expected == SAVE_PENDING;
+    if (!_save_state.compare_exchange_strong(
+            expected, SAVE_PROCESSING, std::memory_order_acq_rel)) return;
+    const AppSettings settings = _pending_save_settings;
+
+    if (needs_persistence) {
+        Preferences prefs;
+        prefs.begin(NVS_NAMESPACE, false);
+        prefs.putString(KEY_WIFI_SSID, settings.wifi_ssid);
+        prefs.putString(KEY_WIFI_PASS, settings.wifi_password);
+        prefs.putString(KEY_TCP_HOST, settings.tcp_host);
+        prefs.putUShort(KEY_TCP_PORT, settings.tcp_port);
+        prefs.putString(KEY_DISPLAY_NAME, settings.display_name);
+        prefs.putUChar(KEY_BRIGHTNESS, settings.brightness);
+        prefs.putBool(KEY_KB_LIGHT, settings.keyboard_light);
+        prefs.putUShort(KEY_TIMEOUT, settings.screen_timeout);
+        prefs.putUInt(KEY_ANNOUNCE_INT, settings.announce_interval);
+        prefs.putUInt(KEY_SYNC_INT, settings.sync_interval);
+        prefs.putBool(KEY_GPS_SYNC, settings.gps_time_sync);
+        prefs.putBool(KEY_TRANSPORT_ENABLED, settings.transport_enabled);
+        prefs.putBool(KEY_NOTIF_SND, settings.notification_sound);
+        prefs.putUChar(KEY_NOTIF_VOL, settings.notification_volume);
+        prefs.putBool(KEY_TCP_ENABLED, settings.tcp_enabled);
+        prefs.putBool(KEY_LORA_ENABLED, settings.lora_enabled);
+        prefs.putFloat(KEY_LORA_FREQ, settings.lora_frequency);
+        prefs.putFloat(KEY_LORA_BW, settings.lora_bandwidth);
+        prefs.putUChar(KEY_LORA_SF, settings.lora_sf);
+        prefs.putUChar(KEY_LORA_CR, settings.lora_cr);
+        prefs.putChar(KEY_LORA_POWER, settings.lora_power);
+        prefs.putBool(KEY_AUTO_ENABLED, settings.auto_enabled);
+        prefs.putBool(KEY_BLE_ENABLED, settings.ble_enabled);
+        prefs.putBool(KEY_PROP_AUTO, settings.prop_auto_select);
+        prefs.putString(KEY_PROP_NODE, settings.prop_selected_node);
+        prefs.putBool(KEY_PROP_FALLBACK, settings.prop_fallback_enabled);
+        prefs.putBool(KEY_PROP_ONLY, settings.prop_only);
+        prefs.end();
+        INFO("Settings saved to NVS");
+    }
+
+    const bool applied = !_save_callback || _save_callback(settings);
+    if (!applied) _apply_retry_at_ms = millis() + 1000U;
+    _save_state.store(applied ? SAVE_IDLE : SAVE_APPLY_RETRY,
+                      std::memory_order_release);
 }
 
 void SettingsScreen::update_ui_from_settings() {

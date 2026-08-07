@@ -165,6 +165,10 @@ public:
      */
     bool is_task_running() const { return _task_handle != nullptr; }
 
+    // Drain fully reassembled packets on the Reticulum/router owner task.
+    // BLE callbacks only enqueue, preventing concurrent Transport mutation.
+    size_t drain_inbound(size_t maximum_packets = 4);
+
 protected:
     virtual bool send_outgoing(const RNS::Bytes& data) override;
 
@@ -280,6 +284,12 @@ private:
     };
     PendingData _pending_data_pool[MAX_PENDING_DATA];
     size_t _pending_data_count = 0;
+
+    static constexpr size_t MAX_PENDING_PACKETS = 8;
+    RNS::Bytes _pending_packet_pool[MAX_PENDING_PACKETS];
+    size_t _pending_packet_read = 0;
+    size_t _pending_packet_write = 0;
+    size_t _pending_packet_count = 0;
 
     // Diagnostic counters — included in the periodic BLE heartbeat
     // log so we can see "did fragments actually flow over a peer

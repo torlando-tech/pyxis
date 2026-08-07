@@ -9,6 +9,7 @@
 #include <lvgl.h>
 #include <Preferences.h>
 #include <functional>
+#include <atomic>
 #include <microReticulum/Bytes.h>
 #include <microReticulum/Identity.h>
 
@@ -137,7 +138,8 @@ class SettingsScreen {
 public:
     // Callback types
     using BackCallback = std::function<void()>;
-    using SaveCallback = std::function<void(const AppSettings&)>;
+    /** Return true only after the runtime snapshot was fully applied. */
+    using SaveCallback = std::function<bool(const AppSettings&)>;
     using WifiReconnectCallback = std::function<void(const String&, const String&)>;
     using BrightnessChangeCallback = std::function<void(uint8_t)>;
     using PropagationNodesCallback = std::function<void()>;
@@ -158,10 +160,11 @@ public:
      */
     void load_settings();
 
-    /**
-     * Save settings to NVS
-     */
+    /** Capture a save request from LVGL without persistence or network I/O. */
     void save_settings();
+
+    /** Persist and apply one pending snapshot from the main owner loop. */
+    void service_pending_save();
 
     /**
      * Get current settings
@@ -233,6 +236,12 @@ public:
     lv_obj_t* get_object();
 
 private:
+    enum SaveState : std::uint8_t {
+        SAVE_IDLE = 0U,
+        SAVE_PENDING = 1U,
+        SAVE_PROCESSING = 2U,
+        SAVE_APPLY_RETRY = 3U
+    };
     // Main UI components
     lv_obj_t* _screen;
     lv_obj_t* _header;
@@ -307,6 +316,9 @@ private:
 
     // Data
     AppSettings _settings;
+    AppSettings _pending_save_settings;
+    std::atomic<std::uint8_t> _save_state; // 0 idle, 1 pending, 2 processing
+    std::uint32_t _apply_retry_at_ms;
     RNS::Bytes _identity_hash;
     RNS::Bytes _lxmf_address;
     TinyGPSPlus* _gps;
