@@ -2,6 +2,15 @@
 // Complete LXMF messaging application with LVGL UI
 
 #include <Arduino.h>
+
+#ifdef PYXIS_TEST_HOOKS
+#ifndef PYXIS_TEST_TCP_HOST
+#define PYXIS_TEST_TCP_HOST ""
+#endif
+#ifndef PYXIS_TEST_TCP_PORT
+#define PYXIS_TEST_TCP_PORT ""
+#endif
+#endif
 #include <Wire.h>
 #include <SD.h>
 #include <FS.h>
@@ -943,7 +952,7 @@ void setup_hardware() {
     //
     // Pyxis's lib/universal_filesystem/ is now dead code on this build path and
     // can be deleted once the graft lands.
-    static microStore::Adapters::LittleFSFileSystem fs;
+    static microStore::Adapters::LittleFSFileSystem fs("/littlefs");
     persistent_storage_ready = fs.init(false);
     if (!persistent_storage_ready) {
         ERROR("FileSystem mount failed; preserving persistent data");

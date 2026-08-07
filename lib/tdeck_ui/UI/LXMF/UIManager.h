@@ -40,6 +40,9 @@
 #include "LXMF/LXMRouter.h"
 #include "LXMF/PropagationNodeManager.h"
 #include "LXMF/MessageStore.h"
+#include "Telemetry/LocationMessagePolicy.h"
+#include "Telemetry/LocationFixAdapter.h"
+#include "Telemetry/LocationLxmfAdapter.h"
 #include <microReticulum/Reticulum.h>
 #include <microReticulum/Link.h>
 
@@ -186,6 +189,17 @@ public:
      */
     void set_gps(TinyGPSPlus* gps);
 
+    // Location sharing is always explicit and peer-scoped. No session exists
+    // until the UI calls start_location_sharing().
+    Telemetry::ShareSessionResult start_location_sharing(
+        const RNS::Bytes& peer_hash,
+        const Telemetry::ShareStartOptions& options);
+    Telemetry::ShareSessionResult stop_location_sharing(
+        const RNS::Bytes& peer_hash);
+    bool get_location_share_session(
+        const RNS::Bytes& peer_hash,
+        Telemetry::ShareSession& output) const;
+
     /**
      * Get settings screen for external configuration
      */
@@ -316,6 +330,9 @@ private:
     RNS::Reticulum& _reticulum;
     ::LXMF::LXMRouter& _router;
     ::LXMF::MessageStore& _store;
+    Telemetry::PeerLocationStore _peer_locations;
+    Telemetry::LocationShareScheduler _location_shares;
+    TinyGPSPlus* _gps;
     RNS::Destination _lxst_destination;
 
     NavigationStack _navigation;

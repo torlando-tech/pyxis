@@ -17,6 +17,7 @@
         "flags": "-std=gnu++11 -I../../../../deps/microReticulum/src",
         "srcFilter": [
             "+<Hardware/TDeck/*.cpp>",
+            "+<Telemetry/*.cpp>",
             "+<UI/*.cpp>",
             "+<UI/LVGL/*.cpp>",
             "+<UI/Fonts/*.c>",
