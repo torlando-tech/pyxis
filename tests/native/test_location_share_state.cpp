@@ -228,6 +228,20 @@ void basesFreshnessOnSenderCaptureTimeNotReceiptTime() {
     CHECK(!hasPeer(store, id));
 }
 
+void boundsFutureSenderTimestampsByReceiptTime() {
+    Telemetry::PeerLocationStore store;
+    const auto id = peer(35);
+    const auto future = metaTimestamp(100000);
+    CHECK(store.apply(id, location(1), future, 1000) ==
+          Telemetry::PeerLocationResult::INSERTED);
+
+    Telemetry::PeerLocationRecord snapshot[1]{};
+    CHECK(store.snapshot(1100, 100, snapshot, 1) == 1);
+    CHECK(store.snapshot(1101, 100, snapshot, 1) == 0);
+    CHECK(store.prune(1101, 100) == 1);
+    CHECK(!hasPeer(store, id));
+}
+
 void treatsPresentEpochZeroExpiryAsExpired() {
     Telemetry::PeerLocationStore store;
     auto meta = metaTimestamp(10000);
@@ -373,6 +387,7 @@ int main() {
     reusesVacanciesBeforeDeterministicEviction();
     enforcesExpiryAndStaleDisplayBoundaries();
     basesFreshnessOnSenderCaptureTimeNotReceiptTime();
+    boundsFutureSenderTimestampsByReceiptTime();
     treatsPresentEpochZeroExpiryAsExpired();
     reusesExpiredSlotsBeforeEvictingLiveRecords();
     rejectsDirectMetadataOutsideColumbaDomains();
