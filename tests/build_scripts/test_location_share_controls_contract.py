@@ -7,7 +7,7 @@ SCREEN = ROOT / "lib/tdeck_ui/UI/LXMF/LocationShareScreen.cpp"
 
 def test_location_controls_are_peer_scoped_and_reachable_only_from_chat():
     h, cpp, chat = UIH.read_text(), UIC.read_text(), CHAT.read_text()
-    assert "SCREEN_LOCATION_SHARING" in h
+    assert "Route::LOCATION_SHARING" in cpp
     assert "set_location_callback" in cpp
     assert "LV_SYMBOL_GPS" in chat
     show = cpp[cpp.index("void UIManager::show_location_sharing") : cpp.index("void UIManager::on_back_from_location_sharing")]

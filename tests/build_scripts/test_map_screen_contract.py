@@ -42,7 +42,9 @@ def test_fixed_pool_and_cache_contracts():
     assert "std::vector" not in presenter + screen_h + screen_cpp
     assert "std::map" not in presenter + screen_h + screen_cpp
     assert "static_assert(MapTileStore::HARD_MAX_ENTRIES == 128" in screen_cpp
-    assert "© OpenStreetMap contributors" in screen_cpp
+    assert "pack_.metadata().attribution" in screen_cpp
+    assert '"No active map pack"' in screen_cpp
+    assert "© OpenStreetMap contributors" not in screen_cpp
     assert "worker_exited_" in screen_h
     assert "if (!center_initialized_ && request.has_local_location" in screen_cpp
 
@@ -54,9 +56,9 @@ def test_worker_predecodes_and_render_path_has_no_io():
     assert "lodepng_inspect" in source
     assert "max_output_size" in source
     assert "store_.removeTile(request.key)" in source
-    assert "decode_failed_keys_[TILE_COUNT]" in header
-    assert "decodeFailedFor(request)" in source
-    assert "markDecodeFailed(request)" in source
+    assert "decode_failed_keys_" not in header
+    assert "decodeFailedFor" not in source
+    assert "markDecodeFailed" not in source
     assert "beginGet" in source and "readGetChunk" in source
     assert 'lv_img_set_src(tile_images_[index], &tile_descriptors_[index])' in source
     assert 'lv_img_set_src(tile_images_[index], "' not in source
@@ -118,12 +120,14 @@ def test_selected_pack_is_worker_owned_read_only_and_precedes_live_cache():
         assert "source == CompressedTileSource::LIVE_STORE" in remove_block
 
     # Covered-missing, uncovered, and corrupt immutable-pack tiles all continue
-    # to the mutable live cache before optional online acquisition.
+    # to the mutable legacy cache, but production never starts online acquisition.
     assert "MapTilePackResult::UNCOVERED" in pack_adapter
     assert "MapTilePackResult::TILE_MISSING" in pack_adapter
     assert "MapTileLookupPolicy::readLocal" in read_tile
     assert "static MapTileLoadResult resolveLocal" in text(UI / "MapTileLookupPolicy.h")
-    assert "MapTileLookupPolicy::shouldStartOnline" in source
+    assert "MapTileLookupPolicy::shouldStartOnline" not in source
+    load_tile = function_body(source, "Pyxis::MapTileLoadResult MapScreen::loadTile(")
+    assert "return readTile(request);" in load_tile
 
     # Every activation publishes a durable pack refresh edge. The worker owns
     # reinitialization and clears decoded tiles only when selection identity
@@ -139,22 +143,10 @@ def test_selected_pack_is_worker_owned_read_only_and_precedes_live_cache():
     assert "decoded_tile_cache_.clear()" in worker
     assert "std::strcmp(previous_pack_id, pack_.metadata().pack_id)" in worker
 
-    download = function_body(source, "Pyxis::MapTileLoadResult MapScreen::downloadTile(")
-    assert "willStartTransportOnNextPump()" in download
-    assert "xSemaphoreTake(transport_start_mutex_, portMAX_DELAY)" in download
-    guarded_start = download[download.index("willStartTransportOnNextPump()"):
-                             download.index("xSemaphoreGive(transport_start_mutex_)")]
-    assert "downloads_enabled_.load" in guarded_start
-    assert "screen_visible_.load" in guarded_start
-    assert "transport_close_epoch_.load" in guarded_start
-    assert "downloader_.pump()" in guarded_start
-    disable = function_body(source, "void MapScreen::setDownloadEnabled(")
-    hide = function_body(source, "void MapScreen::hide()")
-    assert "synchronizeTransportStart()" in disable
-    assert "synchronizeTransportStart()" in hide
-
     library = text(ROOT / "lib/tdeck_ui/library.json")
     assert '"+<Hardware/TDeck/*.cpp>"' in library
+    assert '"-<Hardware/TDeck/MapTileDownloader.cpp>"' in library
+    assert '"-<Hardware/TDeck/MapTileHttpArduino.cpp>"' in library
 
 
 def test_sd_adapter_never_mounts_or_formats():
@@ -169,27 +161,31 @@ def test_ui_manager_services_before_lock_and_hides_map_everywhere():
     assert update.index("_map_screen->serviceIo()") < update.index("LVGL_LOCK();")
     assert update.index("_map_screen->updateModel") < update.index("LVGL_LOCK();")
     assert update.index("_map_screen->applyOneCompletion()") > update.index("LVGL_LOCK();")
-    assert "SCREEN_MAP" in text(UI / "UIManager.h")
+    assert "MAP" in text(UI / "NavigationStack.h")
     assert "void UIManager::show_map()" in source
-    navigation = [
-        "show_conversation_list", "show_chat", "show_compose", "show_announces",
-        "show_status", "show_settings", "show_propagation_nodes",
-    ]
-    for name in navigation:
-        body = function_body(source, f"void UIManager::{name}(")
-        assert "_map_screen->hide()" in body
+    hide_all = function_body(source, "void UIManager::hide_all_screens()")
+    assert "_map_screen->hide()" in hide_all
+    render = function_body(source, "void UIManager::render_route(")
+    assert "hide_all_screens();" in render
+    assert "case Route::MAP:" in render
+    assert "_map_screen->show();" in render
     map_body = function_body(source, "void UIManager::show_map()")
-    for screen in ("_conversation_list_screen", "_chat_screen", "_compose_screen",
-                   "_announce_list_screen", "_status_screen", "_qr_screen",
-                   "_settings_screen", "_propagation_nodes_screen", "_call_screen"):
-        assert screen in map_body
+    assert "navigate(Route::MAP);" in map_body
 
 
-def test_conversation_navigation_has_five_buttons():
-    header = text(UI / "ConversationListScreen.h")
-    source = text(UI / "ConversationListScreen.cpp")
-    assert "using MapCallback = std::function<void()>;" in header
-    assert "set_map_callback" in header and "_map_callback" in header
-    assert "LV_SYMBOL_GPS" in function_body(source, "void ConversationListScreen::create_bottom_nav()")
-    assert "i < 5" in source
-    assert "52, 28" in source
+def test_launcher_exposes_map_as_a_fifth_application():
+    header = text(UI / "HomeScreen.h")
+    source = text(UI / "HomeScreen.cpp")
+    manager = text(UI / "UIManager.cpp")
+    assert "APP_COUNT = 5" in header
+    assert "set_map_callback" in header and "_map" in header
+    assert '"Maps"' in source
+    assert '"Offline SD packs"' in source
+    assert "LV_SYMBOL_GPS" in source
+    assert "LV_ALIGN_LEFT_MID, 0, 0" in source
+    assert "LV_ALIGN_TOP_LEFT, 24, 3" in source
+    assert "LV_ALIGN_BOTTOM_LEFT, 24, -3" in source
+    assert "LV_ALIGN_TOP_LEFT, 0, 44" not in source
+    assert "self->_map" in function_body(source, "void HomeScreen::clicked(")
+    assert "_home_screen->set_map_callback" in manager
+    assert "_conversation_list_screen->set_map_callback" not in manager

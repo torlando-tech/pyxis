@@ -70,7 +70,6 @@ public:
      */
     using ConversationSelectedCallback = std::function<void(const RNS::Bytes& peer_hash)>;
     using ComposeCallback = std::function<void()>;
-    using MapCallback = std::function<void()>;
     using SyncCallback = std::function<void()>;
     using HomeCallback = std::function<void()>;
     using PeersCallback = std::function<void()>;
@@ -120,7 +119,6 @@ public:
      * @param callback Function to call when compose is requested
      */
     void set_compose_callback(ComposeCallback callback);
-    void set_map_callback(MapCallback callback) { _map_callback = callback; }
 
     /**
      * Set callback for sync button
@@ -226,7 +224,6 @@ private:
 
     ConversationSelectedCallback _conversation_selected_callback;
     ComposeCallback _compose_callback;
-    MapCallback _map_callback;
     SyncCallback _sync_callback;
     HomeCallback _home_callback;
     PeersCallback _peers_callback;

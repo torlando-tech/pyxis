@@ -343,6 +343,7 @@ bool UIManager::init() {
     _home_screen->set_nomadnet_callback([this]() { show_nomadnet(); });
     _home_screen->set_network_callback([this]() { show_network(); });
     _home_screen->set_settings_callback([this]() { show_settings(); });
+    _home_screen->set_map_callback([this]() { show_map(); });
     _network_screen->set_back_callback([this]() { back(); });
     _network_screen->set_home_callback([this]() { home(); });
     _network_screen->set_status_callback([this]() { show_status(); });
@@ -371,10 +372,6 @@ bool UIManager::init() {
 
     _conversation_list_screen->set_compose_callback(
         [this]() { on_new_message(); }
-    );
-
-    _conversation_list_screen->set_map_callback(
-        [this]() { show_map(); }
     );
 
     _map_screen->set_back_callback(
@@ -1179,10 +1176,6 @@ void UIManager::set_gps(TinyGPSPlus* gps) {
     if (_conversation_list_screen) {
         _conversation_list_screen->set_gps(gps);
     }
-}
-
-void UIManager::set_map_download_enabled(bool enabled) {
-    if (_map_screen) _map_screen->setDownloadEnabled(enabled);
 }
 
 Telemetry::LocationConsentResult UIManager::start_location_sharing(

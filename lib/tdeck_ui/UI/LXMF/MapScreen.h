@@ -20,8 +20,6 @@
 #include "Hardware/TDeck/MapTileStore.h"
 #include "Hardware/TDeck/MapTileStoreSD.h"
 #include "Hardware/TDeck/MapTilePack.h"
-#include "Hardware/TDeck/MapTileDownloader.h"
-#include "Hardware/TDeck/MapTileHttpArduino.h"
 
 namespace UI {
 namespace LXMF {
@@ -50,7 +48,6 @@ public:
     // These methods never call LVGL and are invoked before LVGL_LOCK.
     void serviceIo();
     void updateModel(const Pyxis::MapView::Request& request);
-    void setDownloadEnabled(bool enabled);
 
     // These methods only mutate the pre-created object pool and are invoked
     // while UIManager owns LVGL_LOCK.
@@ -83,22 +80,11 @@ private:
     Hardware::TDeck::TileStoreConfig store_config_;
     Hardware::TDeck::MapTileStore store_;
     Hardware::TDeck::MapTilePack pack_;
-    Hardware::TDeck::MapTileStoreDownloadAdapter download_store_;
-    Hardware::TDeck::MapTileHttpArduino download_transport_;
-    Hardware::TDeck::MapTileMillisClock download_clock_;
-    Hardware::TDeck::MapTileDownloadPolicy download_policy_;
-    Hardware::TDeck::MapTileDownloadConfig download_config_;
-    Hardware::TDeck::MapTileDownloader downloader_;
-    std::atomic<bool> downloads_enabled_;
+    char pack_attribution_[Pyxis::MapPackManifest::ATTRIBUTION_CAPACITY];
     std::atomic<bool> screen_visible_;
     std::atomic<std::uint32_t> pack_refresh_epoch_;
-    std::atomic<std::uint32_t> transport_close_epoch_;
-    std::uint32_t download_failed_frame_epoch_;
-    Hardware::TDeck::TileKey decode_failed_keys_[TILE_COUNT];
-    std::uint32_t decode_failed_generations_[TILE_COUNT];
     std::uint8_t* compressed_staging_;
     SemaphoreHandle_t state_mutex_;
-    SemaphoreHandle_t transport_start_mutex_;
     TaskHandle_t worker_task_;
     std::atomic<bool> stop_requested_;
     std::atomic<bool> worker_exited_;
@@ -118,20 +104,15 @@ private:
         LIVE_STORE
     };
     void workerLoop();
-    Pyxis::MapTileLoadResult loadTile(const Pyxis::MapTileRequest& request,
-                                      std::uint32_t transport_epoch);
+    void publishPackAttribution();
+    Pyxis::MapTileLoadResult loadTile(const Pyxis::MapTileRequest& request);
     Pyxis::MapTileLoadResult readTile(const Pyxis::MapTileRequest& request);
     Pyxis::MapTileLoadResult readCompressedTile(
         const Pyxis::MapTileRequest& request, CompressedTileSource source);
-    Pyxis::MapTileLoadResult downloadTile(const Pyxis::MapTileRequest& request,
-                                          std::uint32_t transport_epoch);
-    bool decodeFailedFor(const Pyxis::MapTileRequest& request) const;
-    void markDecodeFailed(const Pyxis::MapTileRequest& request);
     bool startWorker();
     void stopWorker();
     bool lockState(TickType_t ticks = portMAX_DELAY);
     void unlockState();
-    void synchronizeTransportStart();
     void setPlaceholder(std::size_t index);
     void setStatusFor(Pyxis::MapTileLoadResult result);
     void pan(double dx, double dy);

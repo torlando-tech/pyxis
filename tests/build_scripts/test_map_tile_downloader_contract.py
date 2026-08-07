@@ -13,6 +13,7 @@ SETTINGS = ROOT / "lib/tdeck_ui/UI/LXMF/SettingsScreen.cpp"
 SETTINGS_H = ROOT / "lib/tdeck_ui/UI/LXMF/SettingsScreen.h"
 UI_MANAGER = ROOT / "lib/tdeck_ui/UI/LXMF/UIManager.cpp"
 MAIN = ROOT / "src/main.cpp"
+TDECK_LIBRARY = ROOT / "lib/tdeck_ui/library.json"
 
 
 def test_portable_core_is_bounded_and_allocation_free():
@@ -52,7 +53,7 @@ def test_https_adapter_verifies_peer_with_explicit_ca_and_has_no_credentials():
         assert forbidden not in source
 
 
-def test_default_endpoint_uses_current_chain_with_known_fallback_available():
+def test_dormant_downloader_chain_remains_verified_but_is_not_map_screen_wired():
     ca = MAP_CA.read_text()
     screen = MAP_SCREEN.read_text()
     assert "MAP_TILE_GLOBALSIGN_ROOT_R3" in ca
@@ -60,7 +61,8 @@ def test_default_endpoint_uses_current_chain_with_known_fallback_available():
     assert "GlobalSign Root CA - R3" in ca
     assert "ISRG Root X1" in ca
     assert ca.count("-----BEGIN CERTIFICATE-----") == 2
-    assert "MAP_TILE_GLOBALSIGN_ROOT_R3" in screen
+    assert "MAP_TILE_GLOBALSIGN_ROOT_R3" not in screen
+    assert "MapTileCa.h" not in screen
     assert "MAP_TILE_CA_BUNDLE" not in screen
     certificates = re.findall(
         r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", ca, re.S)
@@ -76,38 +78,44 @@ def test_default_endpoint_uses_current_chain_with_known_fallback_available():
                for value in fingerprints)
 
 
-def test_downloader_is_explicitly_opt_in_and_wired_only_for_visible_misses():
+def test_production_map_screen_is_strictly_sd_pack_first_without_network_acquisition():
     screen = MAP_SCREEN.read_text()
+    header = (ROOT / "lib/tdeck_ui/UI/LXMF/MapScreen.h").read_text()
     settings = SETTINGS.read_text()
-    assert "downloadTile(request, transport_epoch)" in screen
-    assert "downloader_.enqueue(request.key, request.frame_epoch)" in screen
-    assert "presenter_.frameEpoch() != request.frame_epoch" in screen
-    assert "download_failed_frame_epoch_ == request.frame_epoch" in screen
+    ui_manager = UI_MANAGER.read_text()
+    main = MAIN.read_text()
+    for forbidden in (
+        "MapTileHttpArduino", "MapTileDownloader", "downloadTile(",
+        "downloads_enabled_", "download_transport_", "transport_close_epoch_",
+        "setDownloadEnabled", "MAP_TILE_GLOBALSIGN_ROOT_R3",
+    ):
+        assert forbidden not in screen
+        assert forbidden not in header
+    assert "return readTile(request);" in screen
+    assert "MapTileLookupPolicy::readLocal" in screen
+    assert "MapTilePack pack_" in header
+    assert "pack_.initialize()" in screen
+    assert "pack_refresh_epoch_.fetch_add" in screen
+    assert "pack_.metadata().attribution" in screen
+    assert '"No active map pack"' in screen
     worker = screen[screen.index("void MapScreen::workerLoop()"):
                     screen.index("Pyxis::MapTileLoadResult MapScreen::loadTile")]
-    assert "frame_drained" not in worker
     assert "screen_visible_.load(std::memory_order_acquire)" in worker
-    assert "transport_close_epoch_.load(std::memory_order_acquire)" in worker
     assert "requests_released_ && screen_visible" in worker
-    take_request = worker[worker.index("presenter_.takeRequest") - 160:
-                          worker.index("presenter_.takeRequest") + 80]
-    assert "downloads_enabled" not in take_request
-    assert "should_retain_download_transport" not in take_request
-    assert "download_transport_.disconnectIdle()" in worker
     assert "screen_visible_.store(true, std::memory_order_release)" in screen
-    assert "screen_visible_.exchange(false, std::memory_order_acq_rel)" in screen
-    assert "transport_close_epoch_.fetch_add(1U, std::memory_order_acq_rel)" in screen
-    download = screen[screen.index("Pyxis::MapTileLoadResult MapScreen::downloadTile"):
-                      screen.index("Pyxis::MapTileLoadResult MapScreen::readTile")]
-    assert "!screen_visible_.load(std::memory_order_acquire)" in download
-    assert "transport_close_epoch_.load(std::memory_order_acquire) !=" in download
-    assert 'KEY_MAP_DOWNLOAD = "map_dl"' in settings
-    assert "prefs.getBool(KEY_MAP_DOWNLOAD, false)" in settings
-    assert "Download map tiles:" in settings
+    assert "screen_visible_.store(false, std::memory_order_release)" in screen
+    assert "KEY_MAP_DOWNLOAD" not in settings
+    assert "Download map tiles:" not in settings
+    assert "map_download_enabled" not in SETTINGS_H.read_text()
+    assert "set_map_download_enabled" not in ui_manager
+    assert "map_download_enabled" not in main
+    library = TDECK_LIBRARY.read_text()
+    assert '"-<Hardware/TDeck/MapTileDownloader.cpp>"' in library
+    assert '"-<Hardware/TDeck/MapTileHttpArduino.cpp>"' in library
     status = screen[screen.index("void MapScreen::setStatusFor"):
                     screen.index("bool MapScreen::applyOneCompletion")]
     assert '"Tile ready"' in status
-    assert '"Offline"' not in status
+    assert '"Download failed"' not in status
 
 
 def test_recent_decoded_tiles_use_a_fixed_psram_lru_before_sd_decode():

@@ -57,7 +57,6 @@ struct AppSettings {
     uint32_t sync_interval;      // seconds (0 = disabled; UI shows hours; default 14400 = 4h)
     bool gps_time_sync;
     bool transport_enabled;     // Route traffic for other nodes; default off, requires reboot
-    bool map_download_enabled;  // Explicit opt-in; visible tiles only
 
     // Propagation
     bool prop_auto_select;          // Auto-select best propagation node
@@ -87,7 +86,6 @@ struct AppSettings {
         sync_interval(14400),
         gps_time_sync(true),
         transport_enabled(false),
-        map_download_enabled(false),
         prop_auto_select(true),
         prop_selected_node(""),
         prop_fallback_enabled(true),
@@ -304,7 +302,6 @@ private:
     lv_obj_t* _ta_announce_interval;
     lv_obj_t* _ta_sync_interval;
     lv_obj_t* _switch_gps_sync;
-    lv_obj_t* _switch_map_download;
 
     // Dangerous transport-mode section (must remain last in Settings)
     lv_obj_t* _switch_transport_enabled;

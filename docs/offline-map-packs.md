@@ -47,6 +47,22 @@ The pack ID must match `[a-z0-9_-]{1,31}`. The destination is:
 
 The output root is normally the mounted SD-card root. The importer refuses to replace an existing pack.
 
+## Select the active pack
+
+With the SD card still mounted on the host and not in use by Pyxis, write the
+pack ID to the bounded selection marker without a trailing newline:
+
+```sh
+printf '%s' 'regional-map' > /media/$USER/SDCARD/pyxis-map/active-pack
+sync /media/$USER/SDCARD
+```
+
+Safely unmount the card before inserting it into the T-Deck. Pyxis validates
+the marker, manifest, declared coverage, and canonical tile path before use.
+Opening the map refreshes the selection. A missing or malformed pack is shown
+as unavailable; firmware never formats, repairs, deletes, or writes an
+immutable pack.
+
 ## Resource limits and safe publication
 
 Defaults bound an import to 100,000 tiles and 8 GiB of tile bytes. Set stricter limits when appropriate:
@@ -62,3 +78,7 @@ The manifest is the firmware's `PMPK` version 1 wire format: a 16-byte little-en
 ## Network policy
 
 Pack creation is deliberately local-files-only. The importer contains no network client, URL support, provider endpoint, or tile-fetch mode. Obtain tiles separately under terms that explicitly allow offline use; do not use this tool to bulk-fetch from a live tile service.
+
+The production map screen is also SD-only. It does not initiate DNS, HTTP, or
+TLS and has no online-download setting. Its lookup order is the decoded PSRAM
+cache, the selected immutable pack, and then the bounded legacy SD tile cache.

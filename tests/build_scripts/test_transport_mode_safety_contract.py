@@ -18,7 +18,7 @@ def test_transport_mode_defaults_off_and_controls_reticulum_startup():
 def test_transport_mode_setting_is_persisted():
     assert 'KEY_TRANSPORT_ENABLED = "transport"' in SETTINGS_CPP
     assert "prefs.getBool(KEY_TRANSPORT_ENABLED, false)" in SETTINGS_CPP
-    assert "prefs.putBool(KEY_TRANSPORT_ENABLED, _settings.transport_enabled)" in SETTINGS_CPP
+    assert "prefs.putBool(KEY_TRANSPORT_ENABLED, settings.transport_enabled)" in SETTINGS_CPP
 
 
 def test_transport_toggle_is_last_and_requires_explicit_warning_confirmation():

@@ -87,7 +87,7 @@ def test_live_and_chat_outbound_share_a_router_mutex():
     assert "RouterLock" in send
     network_pump = main[
         main.index("// Process Reticulum") :
-        main.index("// Update UI manager")
+        main.index("LOOP_STEP(8);  // Memory monitor")
     ]
     assert "RouterLock" in network_pump
     assert "RouterLock router_lock(0)" in send

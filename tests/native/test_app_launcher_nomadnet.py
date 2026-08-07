@@ -59,7 +59,7 @@ def test_ui_wiring_contract():
     browser_cpp = (INCLUDE / "NomadNetScreen.cpp").read_text()
     glyphs_h = (INCLUDE / "NomadNetGlyphs.h").read_text()
 
-    for tile in ("Messages", "NomadNet", "Network", "Settings"):
+    for tile in ("Messages", "NomadNet", "Network", "Settings", "Maps"):
         assert tile in launcher_cpp
     for child in ("Status", "Radio Activity", "Propagation Nodes"):
         assert child in network_cpp
@@ -103,7 +103,8 @@ def test_ui_wiring_contract():
     assert "U+2000-U+206F" in glyphs_h
     assert "U+2190-U+21FF" in glyphs_h
     assert "+<UI/Fonts/*.c>" in library_json
-    for detail in ("Inbox & calls", "Browse Micron", "Links & radio", "Device options"):
+    for detail in ("Inbox & calls", "Browse Micron", "Links & radio", "Device options",
+                   "Offline SD packs"):
         assert detail in launcher_cpp
     for detail in ("Interfaces & storage", "Signal history", "Delivery relays"):
         assert detail in network_cpp

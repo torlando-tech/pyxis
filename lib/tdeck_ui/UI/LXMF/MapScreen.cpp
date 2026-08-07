@@ -4,7 +4,6 @@
 #include "MapScreen.h"
 #include "MapTileLookupPolicy.h"
 #include "MapTileStreamReader.h"
-#include "Hardware/TDeck/MapTileCa.h"
 
 #ifdef ARDUINO
 
@@ -29,17 +28,6 @@ namespace {
 constexpr std::size_t TILE_PIXEL_COUNT = 256U * 256U;
 constexpr std::uint32_t STORE_BYTE_QUOTA = 64U * 1024U * 1024U;
 constexpr std::uint16_t STORE_ENTRY_CAPACITY = 128U;
-
-#ifndef FIRMWARE_VERSION
-#define FIRMWARE_VERSION "dev"
-#endif
-
-Hardware::TDeck::MapTileDownloadConfig makeDownloadConfig() {
-    Hardware::TDeck::MapTileDownloadConfig config;
-    config.ca_certificate = Hardware::TDeck::MAP_TILE_GLOBALSIGN_ROOT_R3;
-    config.firmware_version = FIRMWARE_VERSION;
-    return config;
-}
 
 class PackReadStream final : public Pyxis::MapTileReadStream {
 public:
@@ -146,24 +134,16 @@ MapScreen::MapScreen(lv_obj_t* parent)
       presenter_(), storage_(),
       store_config_{STORE_ENTRY_CAPACITY, STORE_BYTE_QUOTA,
                     MAX_COMPRESSED_TILE_BYTES},
-      store_(storage_, store_config_), pack_(storage_), download_store_(store_),
-      download_transport_(), download_clock_(), download_policy_(),
-      download_config_(makeDownloadConfig()),
-      downloader_(download_store_, download_transport_, download_clock_,
-                  download_policy_, download_config_),
-      downloads_enabled_(false), screen_visible_(false), pack_refresh_epoch_(0U),
-      transport_close_epoch_(0U),
-      download_failed_frame_epoch_(0U),
-      decode_failed_keys_{}, decode_failed_generations_{},
+      store_(storage_, store_config_), pack_(storage_), pack_attribution_{},
+      screen_visible_(false), pack_refresh_epoch_(0U),
       compressed_staging_(nullptr),
-      state_mutex_(nullptr), transport_start_mutex_(nullptr), worker_task_(nullptr),
+      state_mutex_(nullptr), worker_task_(nullptr),
       worker_exited_(true), worker_started_(false), store_initialized_(false),
       requests_released_(false),
       has_location_fix_(false), center_initialized_(false), current_location_{}, dragging_(false),
       last_drag_point_{0, 0}, back_callback_() {
     LVGL_LOCK();
     state_mutex_ = xSemaphoreCreateMutex();
-    transport_start_mutex_ = xSemaphoreCreateMutex();
     // Reserve the mandatory SD/PNG staging buffer before optional decoded
     // cache entries. A partial cache must never prevent the worker starting.
     compressed_staging_ = static_cast<std::uint8_t*>(heap_caps_malloc(
@@ -304,7 +284,7 @@ MapScreen::MapScreen(lv_obj_t* parent)
     lv_obj_align(status_label_, LV_ALIGN_BOTTOM_LEFT, 4, -4);
 
     attribution_label_ = lv_label_create(viewport_);
-    lv_label_set_text(attribution_label_, "© OpenStreetMap contributors");
+    lv_label_set_text(attribution_label_, "No active map pack");
     lv_obj_set_style_text_color(attribution_label_, Theme::textTertiary(), 0);
     lv_obj_set_style_text_font(attribution_label_, &lv_font_montserrat_12, 0);
     lv_obj_set_style_bg_color(attribution_label_, Theme::surfaceElevated(), 0);
@@ -332,8 +312,6 @@ MapScreen::~MapScreen() {
     compressed_staging_ = nullptr;
     if (state_mutex_) vSemaphoreDelete(state_mutex_);
     state_mutex_ = nullptr;
-    if (transport_start_mutex_) vSemaphoreDelete(transport_start_mutex_);
-    transport_start_mutex_ = nullptr;
 }
 
 bool MapScreen::lockState(TickType_t ticks) {
@@ -344,26 +322,9 @@ void MapScreen::unlockState() {
     xSemaphoreGive(state_mutex_);
 }
 
-void MapScreen::synchronizeTransportStart() {
-    if (transport_start_mutex_ &&
-        xSemaphoreTake(transport_start_mutex_, portMAX_DELAY) == pdTRUE) {
-        xSemaphoreGive(transport_start_mutex_);
-    }
-}
-
-void MapScreen::setDownloadEnabled(bool enabled) {
-    const bool was_enabled =
-        downloads_enabled_.exchange(enabled, std::memory_order_acq_rel);
-    if (was_enabled && !enabled) {
-        transport_close_epoch_.fetch_add(1U, std::memory_order_acq_rel);
-    }
-    if (worker_task_) xTaskNotifyGive(worker_task_);
-    if (!enabled) synchronizeTransportStart();
-}
-
 bool MapScreen::startWorker() {
     if (worker_started_) return true;
-    if (!state_mutex_ || !transport_start_mutex_ || !compressed_staging_) return false;
+    if (!state_mutex_ || !compressed_staging_) return false;
     stop_requested_.store(false, std::memory_order_release);
     worker_exited_.store(false, std::memory_order_release);
     const BaseType_t created = xTaskCreatePinnedToCore(
@@ -385,7 +346,7 @@ void MapScreen::stopWorker() {
     const TickType_t shutdown_limit = pdMS_TO_TICKS(20000);
     while (!worker_exited_.load(std::memory_order_acquire)) {
         if ((xTaskGetTickCount() - started) >= shutdown_limit) {
-            // Do not destroy storage/decoder/transport state while the worker
+            // Do not destroy storage or decoder state while the worker
             // may still own it. A controlled restart is safer than UAF or an
             // unbounded UI teardown after a wedged hardware operation.
             esp_restart();
@@ -401,25 +362,23 @@ void MapScreen::workerEntry(void* context) {
     static_cast<MapScreen*>(context)->workerLoop();
 }
 
+void MapScreen::publishPackAttribution() {
+    const char* attribution = pack_.hasSelection()
+        ? pack_.metadata().attribution : "No active map pack";
+    if (!lockState(portMAX_DELAY)) return;
+    std::strncpy(pack_attribution_, attribution, sizeof(pack_attribution_) - 1U);
+    pack_attribution_[sizeof(pack_attribution_) - 1U] = '\0';
+    unlockState();
+}
+
 void MapScreen::workerLoop() {
     Hardware::TDeck::TileStoreResult initialized = store_.initialize();
     store_initialized_ = initialized == Hardware::TDeck::TileStoreResult::OK;
     std::uint32_t handled_pack_refresh_epoch =
         pack_refresh_epoch_.load(std::memory_order_acquire);
     (void)pack_.initialize();
-    std::uint32_t handled_close_epoch =
-        transport_close_epoch_.load(std::memory_order_acquire);
+    publishPackAttribution();
     while (!stop_requested_.load(std::memory_order_acquire)) {
-        // The worker exclusively owns HTTP/TLS teardown. Keep a successful
-        // session across frame/zoom boundaries only while the map is visible
-        // and online acquisition remains explicitly enabled.
-        const std::uint32_t close_epoch =
-            transport_close_epoch_.load(std::memory_order_acquire);
-        if (close_epoch != handled_close_epoch) {
-            downloader_.setEnabled(false);
-            download_transport_.disconnectIdle();
-            handled_close_epoch = close_epoch;
-        }
         const bool screen_visible =
             screen_visible_.load(std::memory_order_acquire);
         const std::uint32_t pack_refresh_epoch =
@@ -438,6 +397,7 @@ void MapScreen::workerLoop() {
                  std::strcmp(previous_pack_id, pack_.metadata().pack_id) != 0)) {
                 decoded_tile_cache_.clear();
             }
+            publishPackAttribution();
             handled_pack_refresh_epoch = pack_refresh_epoch;
         }
 
@@ -459,136 +419,19 @@ void MapScreen::workerLoop() {
         completion.slot_token = request.slot_token;
         completion.slot_index = request.slot_index;
         completion.key = request.key;
-        completion.result = loadTile(request, handled_close_epoch);
+        completion.result = loadTile(request);
         if (lockState(portMAX_DELAY)) {
             (void)presenter_.publishCompletion(completion);
             unlockState();
         }
     }
-    download_transport_.disconnectIdle();
     worker_exited_.store(true, std::memory_order_release);
     vTaskDelete(nullptr);
 }
 
 Pyxis::MapTileLoadResult MapScreen::loadTile(
-    const Pyxis::MapTileRequest& request, std::uint32_t transport_epoch) {
-    const Pyxis::MapTileLoadResult cached = readTile(request);
-    const bool decode_failed = decodeFailedFor(request);
-    if (!Pyxis::MapTileLookupPolicy::shouldStartOnline(
-            cached, downloads_enabled_.load(std::memory_order_acquire),
-            screen_visible_.load(std::memory_order_acquire), decode_failed,
-            transport_epoch,
-            transport_close_epoch_.load(std::memory_order_acquire))) {
-        return decode_failed ? Pyxis::MapTileLoadResult::DOWNLOAD_FAILED : cached;
-    }
-    const Pyxis::MapTileLoadResult downloaded =
-        downloadTile(request, transport_epoch);
-    if (downloaded != Pyxis::MapTileLoadResult::READY) return downloaded;
-    const Pyxis::MapTileLoadResult decoded = readTile(request);
-    if (decoded == Pyxis::MapTileLoadResult::INVALID_PNG) {
-        markDecodeFailed(request);
-        return Pyxis::MapTileLoadResult::DOWNLOAD_FAILED;
-    }
-    return decoded;
-}
-
-bool MapScreen::decodeFailedFor(const Pyxis::MapTileRequest& request) const {
-    for (std::size_t index = 0U; index < TILE_COUNT; ++index) {
-        const Hardware::TDeck::TileKey& key = decode_failed_keys_[index];
-        if (decode_failed_generations_[index] == request.generation &&
-            key.zoom == request.key.zoom && key.x == request.key.x &&
-            key.y == request.key.y) return true;
-    }
-    return false;
-}
-
-void MapScreen::markDecodeFailed(const Pyxis::MapTileRequest& request) {
-    const std::size_t index =
-        static_cast<std::size_t>(request.slot_index) % TILE_COUNT;
-    decode_failed_keys_[index] = request.key;
-    decode_failed_generations_[index] = request.generation;
-}
-
-Pyxis::MapTileLoadResult MapScreen::downloadTile(
-    const Pyxis::MapTileRequest& request, std::uint32_t transport_epoch) {
-    const bool enabled = downloads_enabled_.load(std::memory_order_acquire);
-    downloader_.setEnabled(enabled);
-    if (!enabled || !screen_visible_.load(std::memory_order_acquire) ||
-        transport_close_epoch_.load(std::memory_order_acquire) != transport_epoch) {
-        downloader_.setEnabled(false);
-        download_transport_.disconnectIdle();
-        return Pyxis::MapTileLoadResult::MISS;
-    }
-    if (download_failed_frame_epoch_ == request.frame_epoch) {
-        return Pyxis::MapTileLoadResult::DOWNLOAD_FAILED;
-    }
-
-    Hardware::TDeck::MapTileDownloadResult ignored{};
-    while (downloader_.takeResult(ignored)) {}
-    const Hardware::TDeck::MapTileEnqueueResult queued =
-        downloader_.enqueue(request.key, request.frame_epoch);
-    if (queued != Hardware::TDeck::MapTileEnqueueResult::ACCEPTED) {
-        return Pyxis::MapTileLoadResult::DOWNLOAD_FAILED;
-    }
-
-    while (downloader_.isBusy()) {
-        if (stop_requested_.load(std::memory_order_acquire) ||
-            !downloads_enabled_.load(std::memory_order_acquire) ||
-            !screen_visible_.load(std::memory_order_acquire) ||
-            transport_close_epoch_.load(std::memory_order_acquire) !=
-                transport_epoch) {
-            downloader_.setEnabled(false);
-            download_transport_.disconnectIdle();
-            return Pyxis::MapTileLoadResult::DOWNLOAD_FAILED;
-        }
-        bool stale = false;
-        if (lockState(pdMS_TO_TICKS(20))) {
-            stale = presenter_.generation() != request.generation ||
-                presenter_.frameEpoch() != request.frame_epoch;
-            unlockState();
-        }
-        if (stale) {
-            (void)downloader_.cancelGeneration(request.frame_epoch);
-            download_transport_.disconnectIdle();
-        }
-        if (downloader_.willStartTransportOnNextPump()) {
-            if (xSemaphoreTake(transport_start_mutex_, portMAX_DELAY) == pdTRUE) {
-                const bool start_allowed =
-                    !stop_requested_.load(std::memory_order_acquire) &&
-                    downloads_enabled_.load(std::memory_order_acquire) &&
-                    screen_visible_.load(std::memory_order_acquire) &&
-                    transport_close_epoch_.load(std::memory_order_acquire) ==
-                        transport_epoch;
-                if (start_allowed) {
-                    (void)downloader_.pump();
-                } else {
-                    downloader_.setEnabled(false);
-                    download_transport_.disconnectIdle();
-                }
-                xSemaphoreGive(transport_start_mutex_);
-            }
-        } else {
-            (void)downloader_.pump();
-        }
-        if (downloader_.isBusy()) vTaskDelay(pdMS_TO_TICKS(1));
-    }
-
-    Hardware::TDeck::MapTileDownloadResult result{};
-    while (downloader_.takeResult(result)) {
-        if (result.generation == request.frame_epoch &&
-            result.key.zoom == request.key.zoom && result.key.x == request.key.x &&
-            result.key.y == request.key.y) {
-            if (result.code == Hardware::TDeck::MapTileResultCode::SUCCESS) {
-                return Pyxis::MapTileLoadResult::READY;
-            }
-            download_failed_frame_epoch_ = request.frame_epoch;
-            download_transport_.disconnectIdle();
-            return Pyxis::MapTileLoadResult::DOWNLOAD_FAILED;
-        }
-    }
-    download_failed_frame_epoch_ = request.frame_epoch;
-    download_transport_.disconnectIdle();
-    return Pyxis::MapTileLoadResult::DOWNLOAD_FAILED;
+    const Pyxis::MapTileRequest& request) {
+    return readTile(request);
 }
 
 Pyxis::MapTileLoadResult MapScreen::readTile(
@@ -782,6 +625,8 @@ void MapScreen::applyFrame() {
     std::snprintf(zoom_text, sizeof(zoom_text), "z%lu",
                   static_cast<unsigned long>(presenter_.zoom()));
     lv_label_set_text(zoom_label_, zoom_text);
+    lv_label_set_text(attribution_label_, pack_attribution_[0] != '\0'
+        ? pack_attribution_ : "No active map pack");
     // Non-ready images are now detached under LVGL_LOCK, so the worker may
     // safely decode into their permanent buffers without a draw race.
     requests_released_ = true;
@@ -807,7 +652,7 @@ void MapScreen::setStatusFor(Pyxis::MapTileLoadResult result) {
             lv_label_set_text(status_label_, "Tile too large");
             break;
         case Pyxis::MapTileLoadResult::DOWNLOAD_FAILED:
-            lv_label_set_text(status_label_, "Download failed");
+            lv_label_set_text(status_label_, "Tile unavailable");
             break;
         case Pyxis::MapTileLoadResult::IO_ERROR:
             lv_label_set_text(status_label_, "Tile I/O error");
@@ -858,11 +703,8 @@ void MapScreen::show() {
 }
 
 void MapScreen::hide() {
-    if (screen_visible_.exchange(false, std::memory_order_acq_rel)) {
-        transport_close_epoch_.fetch_add(1U, std::memory_order_acq_rel);
-    }
+    screen_visible_.store(false, std::memory_order_release);
     if (worker_task_) xTaskNotifyGive(worker_task_);
-    synchronizeTransportStart();
     if (lockState(pdMS_TO_TICKS(100))) {
         presenter_.hide();
         unlockState();

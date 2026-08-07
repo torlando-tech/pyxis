@@ -197,7 +197,6 @@ public:
      * @param gps TinyGPSPlus instance
      */
     void set_gps(TinyGPSPlus* gps);
-    void set_map_download_enabled(bool enabled);
 
     // Location sharing is always explicit and peer-scoped. No session exists
     // until the UI calls start_location_sharing().
