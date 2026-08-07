@@ -32,4 +32,4 @@ def test_map_tile_pack(tmp_path: Path, sanitize: bool) -> None:
         env["UBSAN_OPTIONS"] = "halt_on_error=1:print_stacktrace=1"
     ran = subprocess.run([str(binary)], capture_output=True, text=True, timeout=60, env=env)
     assert ran.returncode == 0, ran.stdout + ran.stderr
-    assert ran.stdout == "map tile pack: 18 tests passed\n"
+    assert ran.stdout == "map tile pack: 20 tests passed\n"

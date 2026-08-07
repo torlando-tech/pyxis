@@ -385,6 +385,7 @@ void MapScreen::workerLoop() {
             pack_refresh_epoch_.load(std::memory_order_acquire);
         if (pack_refresh_epoch != handled_pack_refresh_epoch) {
             const bool had_selection = pack_.hasSelection();
+            const std::uint32_t previous_generation = pack_.selectionGeneration();
             char previous_pack_id[Pyxis::MapPackManifest::PACK_ID_CAPACITY] = {};
             if (had_selection) {
                 std::memcpy(previous_pack_id, pack_.metadata().pack_id,
@@ -394,7 +395,8 @@ void MapScreen::workerLoop() {
             const bool has_selection = pack_.hasSelection();
             if (had_selection != has_selection ||
                 (had_selection && has_selection &&
-                 std::strcmp(previous_pack_id, pack_.metadata().pack_id) != 0)) {
+                 (std::strcmp(previous_pack_id, pack_.metadata().pack_id) != 0 ||
+                  previous_generation != pack_.selectionGeneration()))) {
                 decoded_tile_cache_.clear();
             }
             publishPackAttribution();

@@ -38,6 +38,13 @@ struct ZoomExtent {
     std::uint32_t y_maximum;
 };
 
+struct RowSpan {
+    std::uint8_t zoom;
+    std::uint32_t y;
+    std::uint32_t x_minimum;
+    std::uint32_t x_maximum;
+};
+
 /**
  * Portable, allocation-free description of one complete rectangular extent at
  * every declared XYZ zoom. Two canonical X intervals describe a rectangle that
@@ -49,7 +56,8 @@ struct ZoomExtent {
  * padding or native enum representations.
  */
 struct MapPackManifest {
-    static const std::uint8_t FORMAT_VERSION = 1U;
+    static const std::uint8_t LEGACY_FORMAT_VERSION = 1U;
+    static const std::uint8_t FORMAT_VERSION = 2U;
     static const std::uint8_t MAX_ZOOM = 22U;
     static const std::size_t MAX_ZOOM_LEVELS = 23U;
     static const std::size_t PACK_ID_CAPACITY = 32U;
@@ -57,7 +65,8 @@ struct MapPackManifest {
     static const std::size_t ATTRIBUTION_CAPACITY = 128U;
     static const std::size_t SOURCE_CAPACITY = 128U;
     static const std::size_t LICENSE_CAPACITY = 64U;
-    static const std::size_t MAX_SERIALIZED_SIZE = 1041U;
+    static const std::size_t MAX_ROW_SPANS = 512U;
+    static const std::size_t MAX_SERIALIZED_SIZE = 7100U;
 
     char pack_id[PACK_ID_CAPACITY];
     char name[NAME_CAPACITY];
@@ -69,11 +78,22 @@ struct MapPackManifest {
     std::uint8_t extent_count;
     std::uint32_t tile_count;
     ZoomExtent extents[MAX_ZOOM_LEVELS];
+    std::uint8_t format_version;
+    std::uint16_t row_span_count;
+    // Version-two manifests keep a validated view into the parse input. The
+    // input buffer must outlive this object (MapTilePack owns that buffer).
+    const std::uint8_t* row_span_bytes;
 
     static ManifestResult serialize(const MapPackManifest& manifest,
                                     std::uint8_t* output,
                                     std::size_t capacity,
                                     std::size_t& written);
+    static ManifestResult serializeSparse(const MapPackManifest& manifest,
+                                          const RowSpan* spans,
+                                          std::size_t span_count,
+                                          std::uint8_t* output,
+                                          std::size_t capacity,
+                                          std::size_t& written);
     static ManifestResult parse(const std::uint8_t* input,
                                 std::size_t length,
                                 MapPackManifest& output);

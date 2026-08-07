@@ -10,6 +10,7 @@
 using Hardware::TDeck::TileKey;
 using Pyxis::MapPackManifest;
 using Pyxis::ManifestResult;
+using Pyxis::RowSpan;
 using Pyxis::ZoomExtent;
 
 namespace {
@@ -135,7 +136,7 @@ void testMagicVersionHeaderAndLengthRejected() {
         std::vector<std::uint8_t> bad = valid; bad[index] ^= 1U;
         CHECK(MapPackManifest::parse(&bad[0], bad.size(), output) == ManifestResult::BAD_MAGIC);
     }
-    std::vector<std::uint8_t> bad = valid; bad[4] = 2U; refreshCrc(bad);
+    std::vector<std::uint8_t> bad = valid; bad[4] = 3U; refreshCrc(bad);
     CHECK(MapPackManifest::parse(&bad[0], bad.size(), output) == ManifestResult::UNSUPPORTED_VERSION);
     bad = valid; bad[6] = 15U; refreshCrc(bad);
     CHECK(MapPackManifest::parse(&bad[0], bad.size(), output) == ManifestResult::BAD_HEADER);
@@ -296,10 +297,71 @@ void testMaximumSerializedSizeRoundTrip() {
         extent.y_maximum = 0U;
     }
     const std::vector<std::uint8_t> bytes = encode(manifest);
-    CHECK(bytes.size() == MapPackManifest::MAX_SERIALIZED_SIZE);
+    CHECK(bytes.size() <= MapPackManifest::MAX_SERIALIZED_SIZE);
     MapPackManifest parsed = {};
     CHECK(MapPackManifest::parse(&bytes[0], bytes.size(), parsed) == ManifestResult::OK);
     CHECK(parsed.tile_count == MapPackManifest::MAX_ZOOM_LEVELS);
+
+    RowSpan spans[MapPackManifest::MAX_ROW_SPANS];
+    manifest.min_zoom = 22U; manifest.max_zoom = 22U; manifest.extent_count = 0U;
+    manifest.tile_count = static_cast<std::uint32_t>(MapPackManifest::MAX_ROW_SPANS);
+    for (std::size_t index = 0U; index < MapPackManifest::MAX_ROW_SPANS; ++index) {
+        spans[index].zoom = 22U;
+        spans[index].y = static_cast<std::uint32_t>(index);
+        spans[index].x_minimum = 0U;
+        spans[index].x_maximum = 0U;
+    }
+    std::uint8_t sparse[MapPackManifest::MAX_SERIALIZED_SIZE];
+    std::size_t sparse_size = 0U;
+    CHECK(MapPackManifest::serializeSparse(manifest, spans, MapPackManifest::MAX_ROW_SPANS,
+                                           sparse, sizeof(sparse), sparse_size) == ManifestResult::OK);
+    CHECK(sparse_size == MapPackManifest::MAX_SERIALIZED_SIZE);
+    CHECK(MapPackManifest::parse(sparse, sparse_size, parsed) == ManifestResult::OK);
+    CHECK(parsed.row_span_count == MapPackManifest::MAX_ROW_SPANS);
+}
+
+void testSparseRowSpanRoundTripAndExactCoverage() {
+    beginTest();
+    MapPackManifest manifest = sample();
+    manifest.min_zoom = 7U;
+    manifest.max_zoom = 7U;
+    manifest.extent_count = 0U;
+    manifest.tile_count = 5U;
+    const RowSpan spans[] = {
+        {7U, 48U, 35U, 36U},
+        {7U, 49U, 34U, 36U},
+    };
+    std::uint8_t storage[MapPackManifest::MAX_SERIALIZED_SIZE] = {};
+    std::size_t written = 0U;
+    CHECK(MapPackManifest::serializeSparse(manifest, spans, 2U, storage,
+                                           sizeof(storage), written) == ManifestResult::OK);
+    MapPackManifest parsed = {};
+    CHECK(MapPackManifest::parse(storage, written, parsed) == ManifestResult::OK);
+    CHECK(parsed.format_version == 2U);
+    CHECK(parsed.row_span_count == 2U);
+    CHECK(parsed.tile_count == 5U);
+    CHECK(parsed.covers(TileKey{7U, 35U, 48U}));
+    CHECK(parsed.covers(TileKey{7U, 34U, 49U}));
+    CHECK(parsed.covers(TileKey{7U, 36U, 49U}));
+    CHECK(!parsed.covers(TileKey{7U, 34U, 48U}));
+    CHECK(!parsed.covers(TileKey{7U, 37U, 49U}));
+}
+
+void testSparseRowSpansMustBeCanonicalAndBounded() {
+    beginTest();
+    MapPackManifest manifest = sample();
+    manifest.min_zoom = 7U;
+    manifest.max_zoom = 7U;
+    manifest.extent_count = 0U;
+    manifest.tile_count = 2U;
+    std::uint8_t storage[MapPackManifest::MAX_SERIALIZED_SIZE] = {};
+    std::size_t written = 0U;
+    const RowSpan adjacent[] = {{7U, 48U, 35U, 35U}, {7U, 48U, 36U, 36U}};
+    CHECK(MapPackManifest::serializeSparse(manifest, adjacent, 2U, storage,
+                                           sizeof(storage), written) == ManifestResult::INVALID_EXTENT);
+    const RowSpan reversed[] = {{7U, 49U, 35U, 35U}, {7U, 48U, 35U, 35U}};
+    CHECK(MapPackManifest::serializeSparse(manifest, reversed, 2U, storage,
+                                           sizeof(storage), written) == ManifestResult::INVALID_EXTENT);
 }
 }  // namespace
 
@@ -317,6 +379,8 @@ int main() {
     testMalformedPayloadWithValidCrcRejected();
     testDeterministicStressRoundTrips();
     testMaximumSerializedSizeRoundTrip();
+    testSparseRowSpanRoundTripAndExactCoverage();
+    testSparseRowSpansMustBeCanonicalAndBounded();
     std::cout << "map pack manifest: " << tests_run << " tests passed\n";
     return 0;
 }
