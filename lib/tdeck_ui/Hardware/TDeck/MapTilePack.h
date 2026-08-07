@@ -18,6 +18,7 @@ enum class MapTilePackResult : std::uint8_t {
     NO_SELECTION,
     INVALID_PACK_ID,
     STORAGE_UNAVAILABLE,
+    INSUFFICIENT_MEMORY,
     MANIFEST_MISSING,
     MANIFEST_TOO_LARGE,
     INVALID_MANIFEST,
@@ -38,11 +39,13 @@ enum class MapTilePackStatus : std::uint8_t {
     NO_SELECTION,
     READY,
     INVALID_SELECTION,
-    STORAGE_UNAVAILABLE
+    STORAGE_UNAVAILABLE,
+    INSUFFICIENT_MEMORY
 };
 
 /**
- * Allocation-free, read-only access to one SD-selected map pack.
+ * Bounded, read-only access to an enabled map set. Production selection
+ * buffers are allocated once in PSRAM; tile lookup itself is allocation-free.
  *
  * initialize() reads the bounded active marker and manifest transactionally:
  * an already usable selection remains active if a replacement is malformed or
@@ -52,6 +55,12 @@ enum class MapTilePackStatus : std::uint8_t {
 class MapTilePack {
 public:
     static const char ACTIVE_PACK_PATH[];
+    static const char ACTIVE_PACK_SLOT_0_PATH[];
+    static const char ACTIVE_PACK_SLOT_1_PATH[];
+    static const std::size_t LEGACY_ACTIVE_SELECTION_SIZE = 48U;
+    static const std::size_t ACTIVE_SELECTION_SIZE = 7105U;
+    static const std::size_t MAX_ACTIVE_PACKS = 8U;
+    static const std::size_t MAX_ACTIVE_ROW_SPANS = 512U;
     static const std::size_t PATH_CAPACITY = 80U;
     static const std::size_t MANIFEST_BUFFER_CAPACITY = Pyxis::MapPackManifest::MAX_SERIALIZED_SIZE;
 
@@ -63,6 +72,7 @@ public:
     MapTilePackStatus status() const { return status_; }
     bool hasSelection() const { return status_ == MapTilePackStatus::READY; }
     const Pyxis::MapPackManifest& metadata() const { return manifest_; }
+    std::uint32_t selectionGeneration() const { return selection_generation_; }
 
     static bool isValidPackId(const char* pack_id);
     static MapTilePackResult manifestPath(const char* pack_id, char* output, std::size_t capacity);
@@ -74,15 +84,44 @@ public:
                                    std::size_t& count);
     void endGet();
 
-    static std::size_t ramBytes() { return sizeof(MapTilePack); }
+    static std::size_t ramBytes() {
+#if defined(ARDUINO_ARCH_ESP32)
+        return sizeof(MapTilePack) + 2U * ACTIVE_SELECTION_SIZE;
+#else
+        return sizeof(MapTilePack);
+#endif
+    }
+    static std::size_t internalRamBytes() { return sizeof(MapTilePack); }
+    static std::size_t psramBytes() {
+#if defined(ARDUINO_ARCH_ESP32)
+        return 2U * ACTIVE_SELECTION_SIZE;
+#else
+        return 0U;
+#endif
+    }
 
 private:
+    struct ActivePackView {
+        char pack_id[Pyxis::MapPackManifest::PACK_ID_CAPACITY];
+        std::uint16_t span_count;
+        const std::uint8_t* span_bytes;
+    };
+
     MapTileStorage& storage_;
     Pyxis::MapPackManifest manifest_;
+    ActivePackView active_packs_[MAX_ACTIVE_PACKS];
+    std::uint8_t active_pack_count_;
+    bool map_set_active_;
+    std::uint32_t selection_generation_;
     MapTilePackStatus status_;
     bool stream_open_;
     std::uint32_t stream_remaining_;
-    std::uint8_t manifest_buffer_[MANIFEST_BUFFER_CAPACITY];
+#if defined(ARDUINO_ARCH_ESP32)
+    std::uint8_t* selection_buffers_;
+#else
+    std::uint8_t selection_buffers_[2][ACTIVE_SELECTION_SIZE];
+#endif
+    std::uint8_t active_selection_buffer_;
 
     MapTilePack(const MapTilePack&);
     MapTilePack& operator=(const MapTilePack&);
@@ -93,6 +132,12 @@ private:
                                std::size_t& length, MapTilePackResult missing_result,
                                MapTilePackResult oversized_result);
     static bool isValidKey(const TileKey& key);
+    std::uint8_t* selectionBuffer(std::uint8_t index);
+    static bool parseMapSetSelection(const std::uint8_t* input, std::size_t length,
+                                     std::uint32_t& generation,
+                                     Pyxis::MapPackManifest& metadata,
+                                     ActivePackView* packs, std::uint8_t& pack_count);
+    static bool spanCovers(const ActivePackView& pack, const TileKey& key);
     static MapTilePackResult makePath(const char* pack_id, const TileKey* key,
                                       bool manifest, char* output, std::size_t capacity);
 };

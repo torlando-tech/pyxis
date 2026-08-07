@@ -235,6 +235,19 @@
         .custom-firmware-status.success { color: var(--success); }
         .custom-firmware-status.error { color: var(--error); }
 
+        .map-installer-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 1rem;
+            margin: 1rem 0;
+        }
+        .map-field label { display: block; color: var(--muted); font-size: 0.875rem; margin-bottom: 0.4rem; }
+        .map-field input { width: 100%; box-sizing: border-box; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 0.65rem; }
+        .map-status { margin: 0.8rem 0; color: var(--muted); overflow-wrap: anywhere; }
+        .map-status.success { color: var(--success); }
+        .map-status.error { color: var(--error); }
+        .map-note { color: var(--muted); font-size: 0.875rem; line-height: 1.5; }
+
         footer {
             text-align: center;
             margin-top: 2rem;
@@ -297,6 +310,37 @@
             <p class="version">Firmware version: <span id="firmware-version">loading...</span></p>
         </div>
 
+        <div class="card map-section">
+            <h2>Install Offline Maps</h2>
+            <p class="map-note">
+                Select a Coalition/MUI XYZ ZIP already downloaded to this computer, then choose the mounted SD-card root.
+                Turn the T-Deck off and remove its SD card before installation. Existing unrelated SD-card files are preserved.
+            </p>
+            <div class="map-installer-grid">
+                <div class="map-field">
+                    <label for="map-archive">Map tile ZIP</label>
+                    <input id="map-archive" type="file" accept=".zip,application/zip">
+                </div>
+                <div class="map-field">
+                    <label for="map-pack-name">Map name</label>
+                    <input id="map-pack-name" type="text" maxlength="63" placeholder="Offline map">
+                </div>
+                <div class="map-field">
+                    <label for="map-pack-id">Pack ID</label>
+                    <input id="map-pack-id" type="text" maxlength="31" pattern="[a-z0-9_-]+" placeholder="offline-map">
+                </div>
+            </div>
+            <p class="map-note">
+                Source profile: Coalition MUI OSM Bright user download.<br>
+                Attribution: Map data (c) OpenStreetMap contributors — ODbL-1.0.<br>
+                Compatible OSM Bright packs are enabled together. The newest pack takes priority where coverage overlaps.
+            </p>
+            <div id="map-install-status" class="map-status">Choose a ZIP to validate it locally. No tiles are uploaded.</div>
+            <div class="button-group">
+                <button id="map-install-btn" class="btn-primary" disabled>Install and Enable</button>
+            </div>
+        </div>
+
         <div class="card requirements">
             <h2>Requirements</h2>
             <ul>
@@ -332,6 +376,7 @@
 
     <script type="module">
         import { ESPLoader, Transport } from './js/esptool.js';
+        import { inspectMuiZip, installMuiZip } from './js/map-installer.js';
 
         const flashBtn = document.getElementById('flash-btn');
         const eraseCheckbox = document.getElementById('erase-checkbox');
@@ -344,6 +389,11 @@
         const versionNote = document.getElementById('version-note');
         const customFirmwareInput = document.getElementById('custom-firmware');
         const customFirmwareStatus = document.getElementById('custom-firmware-status');
+        const mapArchiveInput = document.getElementById('map-archive');
+        const mapPackNameInput = document.getElementById('map-pack-name');
+        const mapPackIdInput = document.getElementById('map-pack-id');
+        const mapInstallStatus = document.getElementById('map-install-status');
+        const mapInstallBtn = document.getElementById('map-install-btn');
 
         const REQUIRED_FULL_ASSETS = ['bootloader.bin', 'partitions.bin', 'boot_app0.bin', 'firmware.bin'];
         const RELEASE_METADATA_ASSET = 'pyxis-release.json';
@@ -357,6 +407,89 @@
         let customFirmwareSelectionToken = 0;
         // Track whether the selected release has all assets for full install
         let releaseHasFullAssets = false;
+        let validatedMapArchive = null;
+        let mapSelectionToken = 0;
+
+        function setMapStatus(text, state = '') {
+            mapInstallStatus.textContent = text;
+            mapInstallStatus.className = `map-status ${state}`.trim();
+        }
+
+        function slugifyMapName(value) {
+            return value.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 31);
+        }
+
+        mapPackNameInput.addEventListener('input', () => {
+            if (!mapPackIdInput.dataset.edited) mapPackIdInput.value = slugifyMapName(mapPackNameInput.value);
+        });
+        mapPackIdInput.addEventListener('input', () => { mapPackIdInput.dataset.edited = 'true'; });
+
+        mapArchiveInput.addEventListener('change', async function() {
+            const token = ++mapSelectionToken;
+            validatedMapArchive = null;
+            mapInstallBtn.disabled = true;
+            const file = this.files?.[0];
+            if (!file) { setMapStatus('Choose a ZIP to validate it locally. No tiles are uploaded.'); return; }
+            if (!mapPackNameInput.value) mapPackNameInput.value = file.name.replace(/\.zip$/i, '') || 'Offline map';
+            if (!mapPackIdInput.value) mapPackIdInput.value = slugifyMapName(mapPackNameInput.value);
+            setMapStatus(`Validating ${file.name} locally...`);
+            try {
+                const report = await inspectMuiZip(file, {onProgress(progress) {
+                    if (token === mapSelectionToken && progress.completed % 25 === 0) {
+                        setMapStatus(`Validating tiles: ${progress.completed}/${progress.total}`);
+                    }
+                }});
+                if (token !== mapSelectionToken) return;
+                validatedMapArchive = {file, report};
+                mapInstallBtn.disabled = false;
+                setMapStatus(`Ready: ${report.tileCount} tiles, zoom ${report.minZoom}-${report.maxZoom}, ${report.rowSpans.length} sparse row spans, ${report.totalBytes.toLocaleString()} bytes.`, 'success');
+            } catch (error) {
+                if (token !== mapSelectionToken) return;
+                this.value = '';
+                setMapStatus(error.message, 'error');
+            }
+        });
+
+        mapInstallBtn.addEventListener('click', async () => {
+            if (!validatedMapArchive) return;
+            const name = mapPackNameInput.value.trim();
+            const packId = mapPackIdInput.value.trim();
+            if (!name || !/^[a-z0-9_-]{1,31}$/.test(packId)) {
+                setMapStatus('Enter a map name and a lowercase pack ID using letters, numbers, _ or -.', 'error');
+                return;
+            }
+            if (typeof window.showDirectoryPicker !== 'function') {
+                setMapStatus('This browser does not provide writable directory access. Use Chrome, Chromium, or Edge; Brave currently disables this API.', 'error');
+                return;
+            }
+            mapInstallBtn.disabled = true;
+            try {
+                const rootDirectory = await window.showDirectoryPicker({mode: 'readwrite'});
+                setMapStatus('Installing validated tiles to the selected SD card...');
+                const result = await installMuiZip({
+                    archive: validatedMapArchive.file,
+                    rootDirectory,
+                    metadata: {
+                        packId,
+                        mapSetId: 'osm-bright',
+                        name,
+                        attribution: 'Map data (c) OpenStreetMap contributors',
+                        source: 'Coalition MUI OSM Bright user download',
+                        license: 'ODbL-1.0',
+                    },
+                    onProgress(progress) {
+                        if (progress.phase === 'write' && (progress.completed % 25 === 0 || progress.completed === progress.total)) {
+                            setMapStatus(`Writing tiles: ${progress.completed}/${progress.total}`);
+                        }
+                    },
+                });
+                setMapStatus(`Installed and enabled ${name} in OSM Bright: ${result.tileCount} tiles; ${result.enabledPacks.length} compatible pack(s) active. Safely eject the SD card before returning it to the T-Deck.`, 'success');
+            } catch (error) {
+                if (error?.name !== 'AbortError') setMapStatus(`Installation failed: ${error.message}`, 'error');
+            } finally {
+                mapInstallBtn.disabled = validatedMapArchive === null;
+            }
+        });
 
         function makeFirmwareFiles(prefix) {
             return {

@@ -14,6 +14,7 @@ using Hardware::TDeck::MapTileStorage;
 using Hardware::TDeck::TileKey;
 using Hardware::TDeck::TileStoreResult;
 using Pyxis::MapPackManifest;
+using Pyxis::RowSpan;
 
 namespace {
 std::size_t allocations = 0U;
@@ -44,7 +45,7 @@ void operator delete[](void* memory) noexcept { std::free(memory); }
 namespace {
 struct File {
     char path[MapTilePack::PATH_CAPACITY];
-    std::uint8_t bytes[MapPackManifest::MAX_SERIALIZED_SIZE];
+    std::uint8_t bytes[MapTilePack::ACTIVE_SELECTION_SIZE];
     std::size_t size;
     std::uint32_t declared_size;
 };
@@ -146,6 +147,91 @@ void addSelection(FakeStorage& storage, const char* marker_id, const MapPackMani
     char path[MapTilePack::PATH_CAPACITY];
     CHECK(MapTilePack::manifestPath(marker_id, path, sizeof(path)) == MapTilePackResult::OK);
     storage.add(path, bytes, written);
+}
+
+std::uint32_t testCrc32(const std::uint8_t* input, std::size_t length) {
+    std::uint32_t crc = UINT32_C(0xffffffff);
+    for (std::size_t index = 0U; index < length; ++index) {
+        crc ^= input[index];
+        for (std::uint8_t bit = 0U; bit < 8U; ++bit) {
+            crc = (crc >> 1U) ^ ((crc & 1U) != 0U ? UINT32_C(0xedb88320) : 0U);
+        }
+    }
+    return ~crc;
+}
+
+void testPutU32(std::uint8_t* output, std::uint32_t value) {
+    output[0] = static_cast<std::uint8_t>(value);
+    output[1] = static_cast<std::uint8_t>(value >> 8U);
+    output[2] = static_cast<std::uint8_t>(value >> 16U);
+    output[3] = static_cast<std::uint8_t>(value >> 24U);
+}
+
+void testPutU16(std::uint8_t* output, std::uint16_t value) {
+    output[0] = static_cast<std::uint8_t>(value);
+    output[1] = static_cast<std::uint8_t>(value >> 8U);
+}
+
+std::uint8_t hexValue(char value) {
+    if (value >= '0' && value <= '9') return static_cast<std::uint8_t>(value - '0');
+    return static_cast<std::uint8_t>(10 + value - 'a');
+}
+
+void addManifest(FakeStorage& storage, const char* id) {
+    std::uint8_t bytes[MapPackManifest::MAX_SERIALIZED_SIZE];
+    std::size_t written = 0U;
+    CHECK(MapPackManifest::serialize(manifestFor(id), bytes, sizeof(bytes), written) == Pyxis::ManifestResult::OK);
+    char path[MapTilePack::PATH_CAPACITY];
+    CHECK(MapTilePack::manifestPath(id, path, sizeof(path)) == MapTilePackResult::OK);
+    storage.add(path, bytes, written);
+}
+
+void addSlot(FakeStorage& storage, const char* path, const char* id, std::uint32_t generation,
+             bool corrupt = false) {
+    std::uint8_t record[MapTilePack::LEGACY_ACTIVE_SELECTION_SIZE] = {};
+    record[0] = 'P'; record[1] = 'M'; record[2] = 'A'; record[3] = 'S'; record[4] = 1U;
+    record[6] = static_cast<std::uint8_t>(MapTilePack::LEGACY_ACTIVE_SELECTION_SIZE);
+    testPutU32(record + 8U, generation);
+    const std::size_t length = std::strlen(id); CHECK(length > 0U && length < 32U);
+    record[12] = static_cast<std::uint8_t>(length); std::memcpy(record + 13U, id, length);
+    testPutU32(record + 44U, testCrc32(record, 44U));
+    if (corrupt) record[47] ^= 1U;
+    storage.add(path, record, sizeof(record));
+}
+
+void addMapSetSlot(FakeStorage& storage, const char* path, std::uint32_t generation) {
+    std::uint8_t record[256] = {};
+    record[0] = 'P'; record[1] = 'M'; record[2] = 'A'; record[3] = 'S'; record[4] = 2U;
+    testPutU32(record + 8U, generation);
+    std::size_t position = 12U;
+    const char* map_set = "osm-bright";
+    const char* attribution = "Map data attribution";
+    record[position++] = static_cast<std::uint8_t>(std::strlen(map_set));
+    std::memcpy(record + position, map_set, std::strlen(map_set)); position += std::strlen(map_set);
+    record[position++] = static_cast<std::uint8_t>(std::strlen(attribution));
+    std::memcpy(record + position, attribution, std::strlen(attribution)); position += std::strlen(attribution);
+    record[position++] = 2U;
+    const char* ids[2] = {"detail", "state"};
+    const RowSpan detail[] = {{2U, 1U, 1U, 1U}, {4U, 5U, 5U, 5U}};
+    const RowSpan state[] = {{2U, 1U, 1U, 2U}};
+    const RowSpan* spans[2] = {detail, state};
+    const std::uint16_t counts[2] = {2U, 1U};
+    for (std::size_t pack = 0U; pack < 2U; ++pack) {
+        const std::size_t id_length = std::strlen(ids[pack]);
+        record[position++] = static_cast<std::uint8_t>(id_length);
+        std::memcpy(record + position, ids[pack], id_length); position += id_length;
+        testPutU16(record + position, counts[pack]); position += 2U;
+        for (std::uint16_t index = 0U; index < counts[pack]; ++index) {
+            record[position++] = spans[pack][index].zoom;
+            testPutU32(record + position, spans[pack][index].y); position += 4U;
+            testPutU32(record + position, spans[pack][index].x_minimum); position += 4U;
+            testPutU32(record + position, spans[pack][index].x_maximum); position += 4U;
+        }
+    }
+    const std::size_t total_length = position + 4U;
+    testPutU16(record + 6U, static_cast<std::uint16_t>(total_length));
+    testPutU32(record + position, testCrc32(record, position));
+    storage.add(path, record, total_length);
 }
 
 void testNoSelection() {
@@ -300,6 +386,67 @@ void testTileDeclaredLengthCapsWritesAndProbesEof() {
     count = 99U; CHECK(empty_pack.readGetChunk(output, sizeof(output), count) == MapTilePackResult::OK);
     CHECK(count == 0U); CHECK(empty_storage.open_file == NULL);
 }
+void testActiveSelectionSlotsPreferNewestValidAndRejectConflict() {
+    beginTest();
+    FakeStorage storage;
+    addSlot(storage, MapTilePack::ACTIVE_PACK_SLOT_0_PATH, "one", 1U);
+    addSlot(storage, MapTilePack::ACTIVE_PACK_SLOT_1_PATH, "two", 2U);
+    addManifest(storage, "one"); addManifest(storage, "two");
+    MapTilePack pack(storage); CHECK(pack.initialize() == MapTilePackResult::OK);
+    CHECK(std::strcmp(pack.metadata().pack_id, "two") == 0);
+    CHECK(pack.selectionGeneration() == 2U);
+
+    FakeStorage fallback;
+    addSlot(fallback, MapTilePack::ACTIVE_PACK_SLOT_0_PATH, "one", 1U);
+    addSlot(fallback, MapTilePack::ACTIVE_PACK_SLOT_1_PATH, "two", 2U, true);
+    addManifest(fallback, "one");
+    MapTilePack fallback_pack(fallback); CHECK(fallback_pack.initialize() == MapTilePackResult::OK);
+    CHECK(std::strcmp(fallback_pack.metadata().pack_id, "one") == 0);
+
+    FakeStorage conflict;
+    addSlot(conflict, MapTilePack::ACTIVE_PACK_SLOT_0_PATH, "one", 7U);
+    addSlot(conflict, MapTilePack::ACTIVE_PACK_SLOT_1_PATH, "two", 7U);
+    MapTilePack conflict_pack(conflict);
+    CHECK(conflict_pack.initialize() == MapTilePackResult::INVALID_PACK_ID);
+}
+void testActiveMapSetComposesPacksByPriorityAndCoverage() {
+    beginTest();
+    FakeStorage storage;
+    addMapSetSlot(storage, MapTilePack::ACTIVE_PACK_SLOT_0_PATH, 1U);
+    const char* golden = "504d415302006900010000000a6f736d2d627269676874144d61702064617461206174747269627574696f6e020664657461696c020002010000000100000001000000040500000005000000050000000573746174650100020100000001000000020000009de230d6";
+    File* selection = storage.find(MapTilePack::ACTIVE_PACK_SLOT_0_PATH); CHECK(selection != NULL);
+    CHECK(selection->size * 2U == std::strlen(golden));
+    for (std::size_t index = 0U; index < selection->size; ++index) {
+        CHECK(selection->bytes[index] == static_cast<std::uint8_t>((hexValue(golden[index * 2U]) << 4U) | hexValue(golden[index * 2U + 1U])));
+    }
+    const std::uint8_t detail = 1U, state_overlap = 2U, state_wide = 3U, detail_high = 4U;
+    storage.add("/pyxis-map/packs/detail/tiles/2/1/1.png", &detail, 1U);
+    storage.add("/pyxis-map/packs/detail/tiles/4/5/5.png", &detail_high, 1U);
+    storage.add("/pyxis-map/packs/state/tiles/2/1/1.png", &state_overlap, 1U);
+    storage.add("/pyxis-map/packs/state/tiles/2/2/1.png", &state_wide, 1U);
+    MapTilePack pack(storage); CHECK(pack.initialize() == MapTilePackResult::OK);
+    CHECK(std::strcmp(pack.metadata().pack_id, "osm-bright") == 0);
+    CHECK(pack.selectionGeneration() == 1U);
+    CHECK(std::strcmp(pack.metadata().attribution, "Map data attribution") == 0);
+    const TileKey keys[] = {{2U,1U,1U},{2U,2U,1U},{4U,5U,5U}};
+    const std::uint8_t expected[] = {detail,state_wide,detail_high};
+    for (std::size_t index = 0U; index < 3U; ++index) {
+        std::uint32_t size = 0U; CHECK(pack.beginGet(keys[index], size) == MapTilePackResult::OK); CHECK(size == 1U);
+        std::uint8_t output = 0U; std::size_t count = 0U;
+        CHECK(pack.readGetChunk(&output, 1U, count) == MapTilePackResult::OK); CHECK(count == 1U); CHECK(output == expected[index]);
+    }
+    std::uint32_t size = 0U;
+    CHECK(pack.beginGet(TileKey{3U,1U,1U}, size) == MapTilePackResult::UNCOVERED);
+
+    FakeStorage fallback;
+    addMapSetSlot(fallback, MapTilePack::ACTIVE_PACK_SLOT_0_PATH, 1U);
+    fallback.add("/pyxis-map/packs/state/tiles/2/1/1.png", &state_overlap, 1U);
+    MapTilePack fallback_pack(fallback); CHECK(fallback_pack.initialize() == MapTilePackResult::OK);
+    CHECK(fallback_pack.beginGet(TileKey{2U,1U,1U}, size) == MapTilePackResult::OK);
+    std::uint8_t output = 0U; std::size_t count = 0U;
+    CHECK(fallback_pack.readGetChunk(&output, 1U, count) == MapTilePackResult::OK);
+    CHECK(output == state_overlap);
+}
 void testCoreDoesNotAllocate() {
     beginTest(); FakeStorage storage; addSelection(storage, "one", manifestFor("one")); const std::uint8_t tile[] = {7U};
     storage.add("/pyxis-map/packs/one/tiles/2/1/1.png", tile, sizeof(tile)); const std::size_t before = allocations;
@@ -315,7 +462,9 @@ int main() {
     testStorageUnavailable(); testChunkReadAndAutomaticEnd(); testReadErrorClosesAndArgumentsAreBounded();
     testPrematureEndCloses(); testReinitializeSelectionChange(); testFailedReinitializeIsTransactional();
     testReinitializeAndDestructorCloseStreams(); testDeclaredLengthsAndEmbeddedNulFailClosed();
-    testTileDeclaredLengthCapsWritesAndProbesEof(); testCoreDoesNotAllocate();
+    testTileDeclaredLengthCapsWritesAndProbesEof(); testActiveSelectionSlotsPreferNewestValidAndRejectConflict();
+    testActiveMapSetComposesPacksByPriorityAndCoverage();
+    testCoreDoesNotAllocate();
     std::cout << "map tile pack: " << tests_run << " tests passed\n";
     return 0;
 }

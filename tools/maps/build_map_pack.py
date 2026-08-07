@@ -24,8 +24,11 @@ import zlib
 
 MAGIC = b"PMPK"
 FORMAT_VERSION = 1
+SPARSE_FORMAT_VERSION = 2
 HEADER_SIZE = 16
 EXTENT_SIZE = 26
+ROW_SPAN_SIZE = 13
+MAX_ROW_SPANS = 512
 MAX_ZOOM = 22
 DEFAULT_MAX_TILES = 100_000
 DEFAULT_MAX_BYTES = 8 * 1024 * 1024 * 1024
@@ -33,7 +36,7 @@ MAX_VISITED_ENTRIES_BASE = 64
 PACK_ID_RE = re.compile(r"[a-z0-9_-]{1,31}\Z")
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _STRING_LIMITS = {"pack_id": 31, "name": 63, "attribution": 127, "source": 127, "license": 63}
-MAX_MANIFEST_BYTES = HEADER_SIZE + 4 + 7 + sum(1 + size for size in _STRING_LIMITS.values()) + 23 * EXTENT_SIZE
+MAX_MANIFEST_BYTES = 7100
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
@@ -68,6 +71,14 @@ class ZoomExtent:
     intervals: tuple[tuple[int, int], ...]
     y_minimum: int
     y_maximum: int
+
+
+@dataclass(frozen=True)
+class RowSpan:
+    zoom: int
+    y: int
+    x_minimum: int
+    x_maximum: int
 
 
 @dataclass(frozen=True)
@@ -470,6 +481,74 @@ def calculate_extents(tiles: Iterable[Tile], antimeridian_zooms: set[int]) -> li
     return extents
 
 
+def calculate_row_spans(tiles: Iterable[Tile]) -> list[RowSpan]:
+    by_row: dict[tuple[int, int], set[int]] = {}
+    zooms: set[int] = set()
+    for tile in tiles:
+        by_row.setdefault((tile.zoom, tile.y), set()).add(tile.x)
+        zooms.add(tile.zoom)
+    ordered_zooms = sorted(zooms)
+    if not ordered_zooms or ordered_zooms != list(range(ordered_zooms[0], ordered_zooms[-1] + 1)):
+        raise PackError("zoom levels must be contiguous")
+    spans: list[RowSpan] = []
+    for (zoom, y), xs in sorted(by_row.items()):
+        for minimum, maximum in _runs(xs):
+            spans.append(RowSpan(zoom, y, minimum, maximum))
+            if len(spans) > MAX_ROW_SPANS:
+                raise PackError(f"sparse coverage exceeds row-span limit of {MAX_ROW_SPANS}")
+    return spans
+
+
+def _validate_row_spans(row_spans: list[RowSpan], tile_count: int) -> None:
+    if not row_spans or len(row_spans) > MAX_ROW_SPANS:
+        raise PackError("manifest row-span count is invalid")
+    zooms: set[int] = set()
+    total = 0
+    previous: RowSpan | None = None
+    for span in row_spans:
+        if span.zoom < 0 or span.zoom > MAX_ZOOM:
+            raise PackError("invalid manifest row span")
+        world_maximum = (1 << span.zoom) - 1
+        if span.y < 0 or span.y > world_maximum or span.x_minimum < 0 \
+                or span.x_minimum > span.x_maximum or span.x_maximum > world_maximum:
+            raise PackError("invalid manifest row span")
+        if previous is not None and ((span.zoom, span.y) < (previous.zoom, previous.y) or
+                ((span.zoom, span.y) == (previous.zoom, previous.y) and
+                 span.x_minimum <= previous.x_maximum + 1)):
+            raise PackError("manifest row spans are not canonical")
+        total += span.x_maximum - span.x_minimum + 1
+        if total > 0xFFFFFFFF:
+            raise PackError("manifest tile count overflows uint32")
+        zooms.add(span.zoom)
+        previous = span
+    ordered_zooms = sorted(zooms)
+    if ordered_zooms != list(range(ordered_zooms[0], ordered_zooms[-1] + 1)):
+        raise PackError("manifest row spans must cover contiguous zooms")
+    if tile_count <= 0 or tile_count != total:
+        raise PackError("invalid manifest tile count")
+
+
+def serialize_sparse_manifest(*, pack_id: str, name: str, attribution: str, source: str,
+                              license: str, row_spans: list[RowSpan], tile_count: int) -> bytes:
+    _validate_metadata(pack_id, name, attribution, source, license)
+    _validate_row_spans(row_spans, tile_count)
+    payload = bytearray()
+    for field, value in (("pack_id", pack_id), ("name", name), ("attribution", attribution),
+                         ("source", source), ("license", license)):
+        encoded = _checked_text(field, value)
+        payload.append(len(encoded))
+        payload.extend(encoded)
+    payload.extend((row_spans[0].zoom, row_spans[-1].zoom))
+    payload.extend(struct.pack("<HI", len(row_spans), tile_count))
+    for span in row_spans:
+        payload.extend(struct.pack("<BIII", span.zoom, span.y, span.x_minimum, span.x_maximum))
+    length = HEADER_SIZE + len(payload) + 4
+    result = bytearray(struct.pack("<4sBBHII", MAGIC, SPARSE_FORMAT_VERSION, 0, HEADER_SIZE, length, 0))
+    result.extend(payload)
+    result.extend(struct.pack("<I", zlib.crc32(result)))
+    return bytes(result)
+
+
 def _validate_manifest_values(extents: list[ZoomExtent], tile_count: int) -> None:
     if not extents or len(extents) > MAX_ZOOM + 1:
         raise PackError("manifest extent count is invalid")
@@ -528,7 +607,8 @@ def parse_manifest(data: bytes) -> dict[str, object]:
     if len(data) < 20 or len(data) > MAX_MANIFEST_BYTES:
         raise PackError("manifest is truncated or oversized")
     magic, version, reserved, header_size, length, reserved_word = struct.unpack("<4sBBHII", data[:16])
-    if (magic, version, reserved, header_size, length, reserved_word) != (MAGIC, 1, 0, 16, len(data), 0):
+    if magic != MAGIC or version not in (FORMAT_VERSION, SPARSE_FORMAT_VERSION) or \
+            (reserved, header_size, length, reserved_word) != (0, 16, len(data), 0):
         raise PackError("invalid manifest header")
     if zlib.crc32(data[:-4]) != struct.unpack("<I", data[-4:])[0]:
         raise PackError("invalid manifest CRC")
@@ -550,27 +630,48 @@ def parse_manifest(data: bytes) -> dict[str, object]:
         if field == "pack_id" and not PACK_ID_RE.fullmatch(value):
             raise PackError("invalid manifest pack ID")
         values[field] = value
-    if position + 7 > len(data) - 4:
-        raise PackError("manifest fields are truncated")
-    minimum, maximum, count = data[position:position + 3]
-    position += 3
-    tile_count = struct.unpack("<I", data[position:position + 4])[0]
-    position += 4
-    if count > MAX_ZOOM + 1 or count > (len(data) - 4 - position) // EXTENT_SIZE:
-        raise PackError("invalid manifest extent count")
-    extents: list[ZoomExtent] = []
-    for _ in range(count):
-        zoom, interval_count = data[position:position + 2]
-        y_minimum, y_maximum, x0, x1, x2, x3 = struct.unpack("<IIIIII", data[position + 2:position + 26])
-        position += EXTENT_SIZE
-        if interval_count not in (1, 2) or (interval_count == 1 and (x2 != 0 or x3 != 0)):
-            raise PackError("invalid manifest extent")
-        intervals = ((x0, x1),) if interval_count == 1 else ((x0, x1), (x2, x3))
-        extents.append(ZoomExtent(zoom, intervals, y_minimum, y_maximum))
-    if position != len(data) - 4 or not extents or minimum != extents[0].zoom or maximum != extents[-1].zoom:
-        raise PackError("invalid manifest length or zoom range")
-    _validate_manifest_values(extents, tile_count)
-    values.update(min_zoom=minimum, max_zoom=maximum, tile_count=tile_count, extents=extents)
+    if version == FORMAT_VERSION:
+        if position + 7 > len(data) - 4:
+            raise PackError("manifest fields are truncated")
+        minimum, maximum, count = data[position:position + 3]
+        position += 3
+        tile_count = struct.unpack("<I", data[position:position + 4])[0]
+        position += 4
+        if count > MAX_ZOOM + 1 or count > (len(data) - 4 - position) // EXTENT_SIZE:
+            raise PackError("invalid manifest extent count")
+        extents: list[ZoomExtent] = []
+        for _ in range(count):
+            zoom, interval_count = data[position:position + 2]
+            y_minimum, y_maximum, x0, x1, x2, x3 = struct.unpack("<IIIIII", data[position + 2:position + 26])
+            position += EXTENT_SIZE
+            if interval_count not in (1, 2) or (interval_count == 1 and (x2 != 0 or x3 != 0)):
+                raise PackError("invalid manifest extent")
+            intervals = ((x0, x1),) if interval_count == 1 else ((x0, x1), (x2, x3))
+            extents.append(ZoomExtent(zoom, intervals, y_minimum, y_maximum))
+        if position != len(data) - 4 or not extents or minimum != extents[0].zoom or maximum != extents[-1].zoom:
+            raise PackError("invalid manifest length or zoom range")
+        _validate_manifest_values(extents, tile_count)
+        values.update(format_version=version, min_zoom=minimum, max_zoom=maximum,
+                      tile_count=tile_count, extents=extents, row_spans=[])
+    else:
+        if position + 8 > len(data) - 4:
+            raise PackError("manifest sparse fields are truncated")
+        minimum, maximum = data[position:position + 2]
+        position += 2
+        count, tile_count = struct.unpack("<HI", data[position:position + 6])
+        position += 6
+        if count == 0 or count > MAX_ROW_SPANS or count > (len(data) - 4 - position) // ROW_SPAN_SIZE:
+            raise PackError("invalid manifest row-span count")
+        row_spans: list[RowSpan] = []
+        for _ in range(count):
+            zoom, y, x_minimum, x_maximum = struct.unpack("<BIII", data[position:position + ROW_SPAN_SIZE])
+            position += ROW_SPAN_SIZE
+            row_spans.append(RowSpan(zoom, y, x_minimum, x_maximum))
+        if position != len(data) - 4 or minimum != row_spans[0].zoom or maximum != row_spans[-1].zoom:
+            raise PackError("invalid manifest length or zoom range")
+        _validate_row_spans(row_spans, tile_count)
+        values.update(format_version=version, min_zoom=minimum, max_zoom=maximum,
+                      tile_count=tile_count, extents=[], row_spans=row_spans)
     return values
 
 
@@ -659,10 +760,17 @@ def _validate_pack_fd(pack_fd: int, label: Path, max_bytes: int) -> dict[str, ob
         tiles = _discover_tiles_fd(tiles_fd, label / "tiles", tile_count, max_bytes)
     finally:
         os.close(tiles_fd)
-    expected_extents = cast(list[ZoomExtent], parsed["extents"])
-    extents = calculate_extents(tiles, {item.zoom for item in expected_extents if len(item.intervals) == 2})
-    if len(tiles) != tile_count or extents != expected_extents:
+    if len(tiles) != tile_count:
         raise PackError("emitted tile tree does not match manifest")
+    if parsed["format_version"] == FORMAT_VERSION:
+        expected_extents = cast(list[ZoomExtent], parsed["extents"])
+        extents = calculate_extents(tiles, {item.zoom for item in expected_extents if len(item.intervals) == 2})
+        if extents != expected_extents:
+            raise PackError("emitted tile tree does not match manifest")
+    else:
+        expected_spans = cast(list[RowSpan], parsed["row_spans"])
+        if calculate_row_spans(tiles) != expected_spans:
+            raise PackError("emitted tile tree does not match sparse manifest")
     return parsed
 
 
@@ -737,7 +845,8 @@ def _verify_output_chain(output_root: Path, root_fd: int, pyxis_fd: int, pyxis_i
 def build_map_pack(source_directory: Path, output_root: Path, *, pack_id: str, name: str,
                    attribution: str, source: str, license: str,
                    max_tiles: int = DEFAULT_MAX_TILES, max_bytes: int = DEFAULT_MAX_BYTES,
-                   antimeridian_zooms: set[int] | None = None) -> Path:
+                   antimeridian_zooms: set[int] | None = None,
+                   sparse: bool = False) -> Path:
     if not sys.platform.startswith("linux"):
         raise PackError("secure importer supports Linux hosts only")
     _validate_metadata(pack_id, name, attribution, source, license)
@@ -753,9 +862,18 @@ def build_map_pack(source_directory: Path, output_root: Path, *, pack_id: str, n
     committed = False
     try:
         tiles = _discover_tiles_fd(source_fd, source_directory, max_tiles, max_bytes)
-        extents = calculate_extents(tiles, antimeridian_zooms)
-        manifest = serialize_manifest(pack_id=pack_id, name=name, attribution=attribution, source=source,
-                                      license=license, extents=extents, tile_count=len(tiles))
+        try:
+            extents = calculate_extents(tiles, antimeridian_zooms)
+        except PackError as exc:
+            if not sparse or antimeridian_zooms or not str(exc).startswith("incomplete rectangle"):
+                raise
+            row_spans = calculate_row_spans(tiles)
+            manifest = serialize_sparse_manifest(pack_id=pack_id, name=name, attribution=attribution,
+                                                 source=source, license=license,
+                                                 row_spans=row_spans, tile_count=len(tiles))
+        else:
+            manifest = serialize_manifest(pack_id=pack_id, name=name, attribution=attribution, source=source,
+                                          license=license, extents=extents, tile_count=len(tiles))
         output_fd = _open_path(output_root, create=True)
         pyxis_fd, pyxis_identity = _mkdir_open(output_fd, "pyxis-map")
         packs_fd, packs_identity = _mkdir_open(pyxis_fd, "packs")
@@ -831,6 +949,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-tiles", type=int, default=DEFAULT_MAX_TILES)
     parser.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     parser.add_argument("--antimeridian-zoom", action="append", type=int, default=[])
+    parser.add_argument("--sparse", action="store_true",
+                        help="explicitly admit sparse state/polygon coverage and emit PMPK v2")
     return parser
 
 
@@ -842,7 +962,8 @@ def main(argv: list[str] | None = None) -> int:
                                 attribution=arguments.attribution, source=arguments.source,
                                 license=arguments.license, max_tiles=arguments.max_tiles,
                                 max_bytes=arguments.max_bytes,
-                                antimeridian_zooms=set(arguments.antimeridian_zoom))
+                                antimeridian_zooms=set(arguments.antimeridian_zoom),
+                                sparse=arguments.sparse)
     except PublishedDurabilityError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 3

@@ -138,24 +138,35 @@ def test_manifest_matches_committed_153_byte_cpp_fixture() -> None:
     assert actual == fixture
 
 
-def test_incomplete_rectangle_is_rejected(tmp_path: Path) -> None:
+def test_sparse_xyz_tree_builds_version_two_exact_row_spans(tmp_path: Path) -> None:
     tool = load_tool()
     source = tmp_path / "xyz"
     for x, y in ((1, 1), (1, 2), (2, 1)):
         put_tile(source, 2, x, y)
-    with pytest.raises(tool.PackError, match="incomplete rectangle"):
-        tool.build_map_pack(source, tmp_path / "sd", **metadata())
+    built = tool.build_map_pack(source, tmp_path / "sd", sparse=True, **metadata())
+    parsed = tool.validate_pack(built)
+    assert parsed["format_version"] == 2
+    assert parsed["tile_count"] == 3
+    assert parsed["row_spans"] == [
+        tool.RowSpan(2, 1, 1, 2),
+        tool.RowSpan(2, 2, 1, 1),
+    ]
 
 
-def test_antimeridian_split_requires_explicit_zoom(tmp_path: Path) -> None:
+def test_disjoint_rows_require_explicit_sparse_or_antimeridian_mode(tmp_path: Path) -> None:
     tool = load_tool()
     source = tmp_path / "xyz"
     for x in (0, 1, 6, 7):
         for y in (3, 4):
             put_tile(source, 3, x, y)
     with pytest.raises(tool.PackError, match="incomplete rectangle"):
-        tool.build_map_pack(source, tmp_path / "sd-a", **metadata())
+        tool.build_map_pack(source, tmp_path / "default", **metadata())
+    sparse = tool.build_map_pack(source, tmp_path / "sd-a", sparse=True, **metadata())
+    sparse_manifest = tool.validate_pack(sparse)
+    assert sparse_manifest["format_version"] == 2
+    assert len(sparse_manifest["row_spans"]) == 4
     built = tool.build_map_pack(source, tmp_path / "sd-b", antimeridian_zooms={3}, **metadata())
+    assert tool.validate_pack(built)["format_version"] == 1
     assert tool.validate_pack(built)["extents"][0].intervals == ((0, 1), (6, 7))
 
 
