@@ -85,6 +85,15 @@ def test_live_and_chat_outbound_share_a_router_mutex():
     send = cpp[cpp.index("bool UIManager::send_message") : cpp.index("void UIManager::on_message_received")]
     assert "RouterLock" in router_block
     assert "RouterLock" in send
+    assert "RouterLock router_lock(0)" in send
+    assert "_router.try_handle_outbound(" in send
+    assert "persistOutgoingMessage" in send
+    assert "_store.save_message(message)" not in send
+    assert send.index("RouterLock router_lock(0)") < send.index("_router.try_handle_outbound(")
+    assert send.index("_router.try_handle_outbound(") < send.index(
+        "_chat_screen->add_message(message, true)"
+    )
+    assert "return context.store->save_message(*context.message);" in cpp
     network_pump = main[
         main.index("// Process Reticulum") :
         main.index("LOOP_STEP(8);  // Memory monitor")
