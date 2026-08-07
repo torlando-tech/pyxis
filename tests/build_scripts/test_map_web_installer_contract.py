@@ -20,6 +20,8 @@ def test_map_installer_ui_is_local_file_to_sd_and_offline_only() -> None:
     assert "mapSetId: 'osm-bright'" in source
     assert 'newest pack takes priority' in source
     assert "showDirectoryPicker" in source
+    assert "navigator.locks?.request" in source
+    assert "cross-tab locking required for safe map installation" in source
     assert "./js/map-installer.js" in source
     assert "Coalition MUI OSM Bright user download" in source
     assert "Map data (c) OpenStreetMap contributors" in source

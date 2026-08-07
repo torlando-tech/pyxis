@@ -141,6 +141,32 @@ class MemoryDirectoryHandle {
   }
 }
 
+class DirectoryHandleAlias {
+  constructor(target) { this.target = target; this.name = target.name; this.kind = 'directory'; }
+  async getDirectoryHandle(...args) { return this.target.getDirectoryHandle(...args); }
+  async getFileHandle(...args) { return this.target.getFileHandle(...args); }
+  async *entries() { yield* this.target.entries(); }
+  async removeEntry(...args) { return this.target.removeEntry(...args); }
+  async isSameEntry(other) { return this.target === (other?.target || other); }
+}
+
+class MemoryLockManager {
+  constructor() { this.tails = new Map(); }
+  async request(name, _options, operation) {
+    const previous = this.tails.get(name) || Promise.resolve();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const tail = previous.then(() => gate);
+    this.tails.set(name, tail);
+    await previous;
+    try { return await operation(); }
+    finally {
+      release();
+      if (this.tails.get(name) === tail) this.tails.delete(name);
+    }
+  }
+}
+
 async function child(root, path) {
   let current = root;
   for (const part of path.split('/')) current = current.children.get(part);
@@ -320,6 +346,35 @@ test('concurrent installs on one selected root are serialized', async () => {
   const newest = slots.sort((left, right) => right.generation - left.generation)[0];
   assert.equal(newest.generation, 2);
   assert.deepEqual(new Set(newest.packs.map(pack => pack.packId)), new Set(['first-pack', 'second-pack']));
+});
+
+test('distinct handles for one selected root are serialized across tabs', async () => {
+  const archive = storedZip([['2/1/1.png', PNG]]);
+  const root = new MemoryDirectoryHandle('sd-card');
+  const firstHandle = new DirectoryHandleAlias(root);
+  const secondHandle = new DirectoryHandleAlias(root);
+  const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable:true,
+    value:{locks:new MemoryLockManager()},
+  });
+  try {
+    await Promise.all([
+      installMuiZip({archive, rootDirectory:firstHandle, metadata:{...metadata, packId:'tab-one', name:'Tab One'}}),
+      installMuiZip({archive, rootDirectory:secondHandle, metadata:{...metadata, packId:'tab-two', name:'Tab Two'}}),
+    ]);
+  } finally {
+    if (previousNavigator) Object.defineProperty(globalThis, 'navigator', previousNavigator);
+    else delete globalThis.navigator;
+  }
+  const pyxis = root.children.get('pyxis-map');
+  const slots = ['active-pack.0', 'active-pack.1']
+    .map(name => pyxis.children.get(name))
+    .filter(Boolean)
+    .map(handle => decodeActiveSelection(handle.bytes));
+  const newest = slots.sort((left, right) => right.generation - left.generation)[0];
+  assert.equal(newest.generation, 2);
+  assert.deepEqual(new Set(newest.packs.map(pack => pack.packId)), new Set(['tab-one', 'tab-two']));
 });
 
 test('an empty directory created during destination creation is never removed', async () => {

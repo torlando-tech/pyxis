@@ -462,6 +462,10 @@
                 setMapStatus('This browser does not provide writable directory access. Use Chrome, Chromium, or Edge; Brave currently disables this API.', 'error');
                 return;
             }
+            if (typeof navigator.locks?.request !== 'function') {
+                setMapStatus('This browser does not provide the cross-tab locking required for safe map installation. Use a current Chrome, Chromium, or Edge release.', 'error');
+                return;
+            }
             mapInstallBtn.disabled = true;
             try {
                 const rootDirectory = await window.showDirectoryPicker({mode: 'readwrite'});

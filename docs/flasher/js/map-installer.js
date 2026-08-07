@@ -19,7 +19,7 @@ const textDecoder = new TextDecoder('utf-8', {fatal: true});
 const textEncoder = new TextEncoder();
 const installTails = new WeakMap();
 
-async function withInstallLock(rootDirectory, operation) {
+async function withInProcessInstallLock(rootDirectory, operation) {
   const previous = installTails.get(rootDirectory) || Promise.resolve();
   let release;
   const gate = new Promise(resolve => { release = resolve; });
@@ -31,6 +31,28 @@ async function withInstallLock(rootDirectory, operation) {
     release();
     if (installTails.get(rootDirectory) === tail) installTails.delete(rootDirectory);
   }
+}
+
+async function withInstallLock(rootDirectory, operation) {
+  const lockManager = globalThis.navigator?.locks;
+  if (typeof lockManager?.request === 'function') {
+    if (typeof rootDirectory?.name !== 'string' || rootDirectory.name.length === 0) {
+      fail('Selected SD root has no stable directory name');
+    }
+    // Web Locks are shared by every same-origin installer tab. Distinct
+    // FileSystemDirectoryHandle objects for the same root have the same name;
+    // equal names on unrelated roots merely serialize harmlessly.
+    return lockManager.request(
+      `pyxis-map-installer:${rootDirectory.name}`,
+      {mode:'exclusive'},
+      operation,
+    );
+  }
+  if (typeof globalThis.window?.showDirectoryPicker === 'function') {
+    fail('This browser lacks the cross-tab locking required for safe map installation');
+  }
+  // Headless contract tests do not expose browser lock primitives.
+  return withInProcessInstallLock(rootDirectory, operation);
 }
 
 export class MapInstallerError extends Error {}
