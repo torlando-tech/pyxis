@@ -239,7 +239,7 @@ test('rejects traversal, duplicate keys, unsupported compression, and malformed 
   await assert.rejects(inspectMuiZip(storedZip([['2/1/1.png', trailingDeflate]])), /trailing|zlib|deflate/i);
 });
 
-test('removes only its receipt-owned unpublished pack after an interrupted write', async () => {
+test('removes only its receipt-owned contents after an interrupted write', async () => {
   const archive = storedZip([
     ['2/1/1.png', PNG],
     ['2/1/2.png', PNG],
@@ -252,7 +252,16 @@ test('removes only its receipt-owned unpublished pack after an interrupted write
     onProgress(progress) { if (progress.phase === 'write') throw new Error('cancelled'); },
   }), /cancelled/);
   const packs = root.children.get('pyxis-map').children.get('packs');
-  assert.equal(packs.children.has('interrupted'), false);
+  const interrupted = packs.children.get('interrupted');
+  assert.ok(interrupted);
+  assert.deepEqual([...interrupted.children.keys()], []);
+  const retried = await installMuiZip({
+    archive,
+    rootDirectory:root,
+    metadata:{...metadata, packId:'interrupted', name:'Interrupted'},
+  });
+  assert.equal(retried.resumed, false);
+  assert.ok(interrupted.children.has('manifest.pmp'));
 });
 
 test('cleanup preserves an unrelated file that appears in the destination', async () => {
@@ -311,6 +320,37 @@ test('concurrent installs on one selected root are serialized', async () => {
   const newest = slots.sort((left, right) => right.generation - left.generation)[0];
   assert.equal(newest.generation, 2);
   assert.deepEqual(new Set(newest.packs.map(pack => pack.packId)), new Set(['first-pack', 'second-pack']));
+});
+
+test('an empty directory created during destination creation is never removed', async () => {
+  const archive = storedZip([['2/1/1.png', PNG]]);
+  const root = new MemoryDirectoryHandle();
+  const pyxis = await root.getDirectoryHandle('pyxis-map', {create:true});
+  class EmptyRaceDirectory extends MemoryDirectoryHandle {
+    async getDirectoryHandle(name, options = {}) {
+      if (name === metadata.packId && options.create && !this.raced) {
+        this.raced = true;
+        const injected = new MemoryDirectoryHandle(name, this.log);
+        this.children.set(name, injected);
+        return injected;
+      }
+      return super.getDirectoryHandle(name, options);
+    }
+  }
+  const packs = new EmptyRaceDirectory('packs', root.log);
+  pyxis.children.set('packs', packs);
+  await assert.rejects(
+    installMuiZip({
+      archive,
+      rootDirectory:root,
+      metadata,
+      onProgress: progress => { if (progress.phase === 'write') throw new Error('forced interruption'); },
+    }),
+    /forced interruption/i,
+  );
+  const raced = packs.children.get(metadata.packId);
+  assert.ok(raced, 'concurrently created empty directory must remain');
+  assert.deepEqual([...raced.children.keys()], []);
 });
 
 test('destination-creation race preserves a pre-existing pack directory', async () => {

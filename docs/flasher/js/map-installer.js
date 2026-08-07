@@ -537,7 +537,7 @@ async function removeOwnedPack(packs,packId,pack,receiptName,receipt,entries){
     }
     try{await pack.removeEntry('manifest.pmp');}catch(error){if(error?.name!=='NotFoundError')return false;}
     for await(const [name] of pack.entries()){if(name!==receiptName)return false;}
-    await pack.removeEntry(receiptName);await packs.removeEntry(packId);return true;
+    await pack.removeEntry(receiptName);return true;
   }catch{return false;}
 }
 
@@ -575,8 +575,11 @@ async function installMuiZipLocked({archive,rootDirectory,metadata,onProgress=()
   const report=await inspectMuiZip(archive,{onProgress});const manifest=serializeSparseManifest(metadata,report.rowSpans,report.tileCount);const pyxis=await getDirectory(rootDirectory,'pyxis-map');
   await prepareActiveMapSet(pyxis,metadata,report.rowSpans);const packs=await getDirectory(pyxis,'packs');
   let existing=null;try{existing=await packs.getDirectoryHandle(metadata.packId);}catch(error){if(error?.name!=='NotFoundError')throw error;}
-  if(existing){await verifyExistingPack(existing,archive,report,manifest);try{const active=await activateMapSet(pyxis,metadata,report.rowSpans);return{...report,manifestBytes:manifest.length,resumed:true,...active};}catch(error){throw new Error(`Map pack is installed and verified, but activation failed: ${error.message}`);}}
-  const pack=await getDirectory(packs,metadata.packId);await verifyNamedDirectory(packs,metadata.packId,pack,[]);let published=false;const receipt=new Uint8Array(16);crypto.getRandomValues(receipt);const receiptName=`.pyxis-install-owner-${[...receipt].map(byte=>byte.toString(16).padStart(2,'0')).join('')}`;
+  if(existing){
+    let empty=true;for await(const _entry of existing.entries()){empty=false;break;}
+    if(!empty){await verifyExistingPack(existing,archive,report,manifest);try{const active=await activateMapSet(pyxis,metadata,report.rowSpans);return{...report,manifestBytes:manifest.length,resumed:true,...active};}catch(error){throw new Error(`Map pack is installed and verified, but activation failed: ${error.message}`);}}
+  }
+  const pack=existing||await getDirectory(packs,metadata.packId);await verifyNamedDirectory(packs,metadata.packId,pack,[]);let published=false;const receipt=new Uint8Array(16);crypto.getRandomValues(receipt);const receiptName=`.pyxis-install-owner-${[...receipt].map(byte=>byte.toString(16).padStart(2,'0')).join('')}`;
   try{
     await writeVerified(pack,receiptName,receipt);await verifyNamedDirectory(packs,metadata.packId,pack,[receiptName]);
     const tiles=await getDirectory(pack,'tiles');
