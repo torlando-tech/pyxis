@@ -2243,14 +2243,7 @@ void UIManager::call_initiate(const Bytes& peer_hash) {
     _call_screen->set_peer(peer_dest.hash());
     _call_screen->set_state(CallScreen::CallState::CONNECTING);
     _call_screen->set_muted(false);
-<<<<<<< HEAD
     navigate(Route::CALL);
-=======
-    _call_screen->show();
-    _chat_screen->hide();
-    if (_map_screen) _map_screen->hide();
-    _current_screen = SCREEN_CALL;
->>>>>>> 7dae8e7 (feat: add bounded offline map screen)
 
     lxst_breadcrumb(5, ESP.getFreeHeap());
 
@@ -3105,13 +3098,7 @@ void UIManager::call_update() {
         _call_screen->set_peer(_call_peer_hash);
         _call_screen->set_state(CallScreen::CallState::INCOMING_RINGING);
         _call_screen->set_muted(false);
-<<<<<<< HEAD
         navigate(Route::CALL);
-=======
-        _call_screen->show();
-        if (_map_screen) _map_screen->hide();
-        _current_screen = SCREEN_CALL;
->>>>>>> 7dae8e7 (feat: add bounded offline map screen)
 
         // Play notification tone
         if (_settings_screen) {
