@@ -334,4 +334,55 @@ bool MapScreenPresenter::takeApplicableCompletion(MapTileCompletion& output) {
     return false;
 }
 
+bool MapScreenPresenter::visibleTileStatus(MapTileLoadResult& output) const {
+    bool pending = false;
+    bool have_terminal = false;
+    unsigned severity = 0U;
+    MapTileLoadResult terminal = MapTileLoadResult::MISS;
+    for (std::size_t index = 0U; index < TILE_SLOT_COUNT; ++index) {
+        switch (slots_[index].state) {
+            case MapTileSlot::READY:
+                output = MapTileLoadResult::READY;
+                return true;
+            case MapTileSlot::PENDING:
+                pending = true;
+                break;
+            case MapTileSlot::MISS:
+                have_terminal = true;
+                break;
+            case MapTileSlot::TOO_LARGE:
+                if (severity < 1U) {
+                    severity = 1U;
+                    terminal = MapTileLoadResult::TOO_LARGE;
+                }
+                have_terminal = true;
+                break;
+            case MapTileSlot::INVALID_PNG:
+                if (severity < 2U) {
+                    severity = 2U;
+                    terminal = MapTileLoadResult::INVALID_PNG;
+                }
+                have_terminal = true;
+                break;
+            case MapTileSlot::STORAGE_UNAVAILABLE:
+                if (severity < 3U) {
+                    severity = 3U;
+                    terminal = MapTileLoadResult::STORAGE_UNAVAILABLE;
+                }
+                have_terminal = true;
+                break;
+            case MapTileSlot::IO_ERROR:
+                severity = 4U;
+                terminal = MapTileLoadResult::IO_ERROR;
+                have_terminal = true;
+                break;
+            case MapTileSlot::EMPTY:
+                break;
+        }
+    }
+    if (pending || !have_terminal) return false;
+    output = terminal;
+    return true;
+}
+
 }  // namespace Pyxis

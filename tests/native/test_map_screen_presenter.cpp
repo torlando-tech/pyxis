@@ -162,6 +162,45 @@ void generationPanZoomAndRecenterBounds() {
     CHECK(std::fabs(presenter.center().longitude + 0.114) < 1e-9);
 }
 
+void visibleStatusSummarizesTheCurrentFrame() {
+    MapScreenPresenter presenter;
+    presenter.show();
+    CHECK(presenter.buildFrame(requestAt(0.0, 0.0, 5)) ==
+          Pyxis::MapView::Result::OK);
+
+    MapTileLoadResult visible = MapTileLoadResult::IO_ERROR;
+    CHECK(!presenter.visibleTileStatus(visible));
+
+    MapTileRequest requests[MapScreenPresenter::TILE_REQUEST_CAPACITY]{};
+    std::size_t count = 0U;
+    while (count < MapScreenPresenter::TILE_REQUEST_CAPACITY &&
+           presenter.takeRequest(requests[count])) ++count;
+    CHECK(count > 1U);
+    for (std::size_t index = 0U; index < count; ++index) {
+        const MapTileLoadResult result = index == 0U
+            ? MapTileLoadResult::READY : MapTileLoadResult::MISS;
+        CHECK(presenter.publishCompletion(completionFor(requests[index], result)));
+    }
+    MapTileCompletion completion{};
+    while (presenter.takeApplicableCompletion(completion)) {}
+    CHECK(presenter.visibleTileStatus(visible));
+    CHECK(visible == MapTileLoadResult::READY);
+
+    CHECK(presenter.zoomBy(1));
+    CHECK(presenter.buildFrame(requestAt(0.0, 0.0, 6)) ==
+          Pyxis::MapView::Result::OK);
+    count = 0U;
+    while (count < MapScreenPresenter::TILE_REQUEST_CAPACITY &&
+           presenter.takeRequest(requests[count])) ++count;
+    for (std::size_t index = 0U; index < count; ++index) {
+        CHECK(presenter.publishCompletion(
+            completionFor(requests[index], MapTileLoadResult::MISS)));
+    }
+    while (presenter.takeApplicableCompletion(completion)) {}
+    CHECK(presenter.visibleTileStatus(visible));
+    CHECK(visible == MapTileLoadResult::MISS);
+}
+
 void resultStatesAndQueueLimit() {
     MapScreenPresenter presenter;
     presenter.show();
@@ -227,6 +266,7 @@ int main() {
     staleCompletionsRejectedAndAcceptedOnce();
     newestFrameReusesSlotsAndPurgesOldRequests();
     generationPanZoomAndRecenterBounds();
+    visibleStatusSummarizesTheCurrentFrame();
     resultStatesAndQueueLimit();
     deterministicHundredThousandOperationStress();
     std::cout << "map screen presenter: " << passed << " passed, "

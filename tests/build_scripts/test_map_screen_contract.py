@@ -44,6 +44,10 @@ def test_fixed_pool_and_cache_contracts():
     assert "static_assert(MapTileStore::HARD_MAX_ENTRIES == 128" in screen_cpp
     assert "pack_.metadata().attribution" in screen_cpp
     assert '"No active map pack"' in screen_cpp
+    assert "presenter_.visibleTileStatus" in screen_cpp
+    assert "setStatusFor(completion.result)" not in screen_cpp
+    assert 'lv_label_set_text(status_label_, "Loading tiles...")' in screen_cpp
+    assert screen_cpp.count("refreshVisibleStatus();") >= 2
     assert "© OpenStreetMap contributors" not in screen_cpp
     assert "worker_exited_" in screen_h
     assert "if (!center_initialized_ && request.has_local_location" in screen_cpp

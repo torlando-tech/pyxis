@@ -93,6 +93,7 @@ public:
     bool takeRequest(MapTileRequest& output);
     bool publishCompletion(const MapTileCompletion& completion);
     bool takeApplicableCompletion(MapTileCompletion& output);
+    bool visibleTileStatus(MapTileLoadResult& output) const;
 
     const MapView::Frame& frame() const { return frame_; }
     const MapTileSlot& slot(std::size_t index) const { return slots_[index]; }
