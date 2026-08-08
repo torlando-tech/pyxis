@@ -6,6 +6,7 @@
 
 #include "MapScreenPresenter.h"
 #include "DecodedTileCache.h"
+#include "MapStyleSelector.h"
 
 #ifdef ARDUINO
 
@@ -19,6 +20,7 @@
 
 #include "Hardware/TDeck/MapTileStoreSD.h"
 #include "Hardware/TDeck/MapTilePack.h"
+#include "Hardware/TDeck/MapStyleCatalog.h"
 
 namespace UI {
 namespace LXMF {
@@ -64,6 +66,8 @@ private:
     lv_obj_t* zoom_out_button_;
     lv_obj_t* zoom_in_button_;
     lv_obj_t* recenter_button_;
+    lv_obj_t* style_button_;
+    lv_obj_t* style_label_;
     lv_obj_t* pan_buttons_[4];
     lv_obj_t* tile_images_[TILE_COUNT];
     lv_img_dsc_t tile_descriptors_[TILE_COUNT];
@@ -75,10 +79,17 @@ private:
     lv_obj_t* marker_labels_[MARKER_COUNT];
 
     Pyxis::MapScreenPresenter presenter_;
+    Pyxis::MapStyleSelector style_selector_;
     Hardware::TDeck::MapTileStoreSD storage_;
     Hardware::TDeck::MapTilePack pack_;
+    Hardware::TDeck::MapStyleCatalog style_catalog_;
+    Pyxis::MapStyleRequest style_request_;
+    bool style_request_pending_;
+    std::uint32_t style_request_lifecycle_epoch_;
     char pack_attribution_[Pyxis::MapPackManifest::ATTRIBUTION_CAPACITY];
     std::atomic<bool> screen_visible_;
+    std::uint32_t style_lifecycle_epoch_;
+    bool style_lifecycle_exhausted_;
     std::atomic<std::uint32_t> pack_refresh_epoch_;
     std::uint8_t* compressed_staging_;
     SemaphoreHandle_t state_mutex_;
@@ -97,6 +108,9 @@ private:
     static void workerEntry(void* context);
     void workerLoop();
     void publishPackAttribution();
+    void publishStyleCatalog(std::uint32_t activation_token = 0U,
+                             std::uint32_t request_lifecycle_epoch = 0U,
+                             bool activation_failed = false);
     Pyxis::MapTileLoadResult loadTile(const Pyxis::MapTileRequest& request);
     Pyxis::MapTileLoadResult readTile(const Pyxis::MapTileRequest& request);
     Pyxis::MapTileLoadResult readCompressedTile(const Pyxis::MapTileRequest& request);
@@ -114,6 +128,7 @@ private:
     static void onZoomIn(lv_event_t* event);
     static void onZoomOut(lv_event_t* event);
     static void onRecenter(lv_event_t* event);
+    static void onStyle(lv_event_t* event);
     static void onPan(lv_event_t* event);
     static void onMapPressed(lv_event_t* event);
     static void onMapPressing(lv_event_t* event);

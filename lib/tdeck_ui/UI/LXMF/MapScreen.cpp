@@ -70,7 +70,7 @@ private:
 
 lv_obj_t* createToolbarButton(lv_obj_t* parent, const char* text,
                               lv_event_cb_t callback, void* context,
-                              lv_coord_t width) {
+                              lv_coord_t width, lv_obj_t** label_output = nullptr) {
     lv_obj_t* button = lv_btn_create(parent);
     lv_obj_set_size(button, width, 26);
     lv_obj_set_style_pad_all(button, 0, 0);
@@ -80,7 +80,17 @@ lv_obj_t* createToolbarButton(lv_obj_t* parent, const char* text,
     lv_obj_t* label = lv_label_create(button);
     lv_label_set_text(label, text);
     lv_obj_center(label);
+    if (label_output) *label_output = label;
     return button;
+}
+
+const char* styleLabel(const char* style_id) {
+    if (style_id == nullptr) return "Style";
+    if (std::strcmp(style_id, "osm-bright") == 0) return "Bright";
+    if (std::strcmp(style_id, "dark-matter") == 0) return "Dark";
+    if (std::strcmp(style_id, "positron") == 0) return "Positron";
+    if (std::strcmp(style_id, "toner") == 0) return "Toner";
+    return "Style";
 }
 
 }  // namespace
@@ -92,11 +102,16 @@ MapScreen::MapScreen(lv_obj_t* parent)
     : screen_(nullptr), toolbar_(nullptr), viewport_(nullptr),
       status_label_(nullptr), attribution_label_(nullptr), zoom_label_(nullptr),
       zoom_out_button_(nullptr), zoom_in_button_(nullptr),
-      recenter_button_(nullptr), pan_buttons_{}, tile_images_{},
+      recenter_button_(nullptr), style_button_(nullptr), style_label_(nullptr),
+      pan_buttons_{}, tile_images_{},
       tile_descriptors_{}, tile_pixels_{}, decoded_tile_cache_(TILE_PIXEL_COUNT),
       decoded_cache_pixels_{}, approximation_halos_{}, markers_{}, marker_labels_{},
-      presenter_(), storage_(), pack_(storage_), pack_attribution_{},
-      screen_visible_(false), pack_refresh_epoch_(0U),
+      presenter_(), style_selector_(), storage_(), pack_(storage_),
+      style_catalog_(storage_), style_request_{}, style_request_pending_(false),
+      style_request_lifecycle_epoch_(0U),
+      pack_attribution_{},
+      screen_visible_(false), style_lifecycle_epoch_(0U),
+      style_lifecycle_exhausted_(false), pack_refresh_epoch_(0U),
       compressed_staging_(nullptr),
       state_mutex_(nullptr), worker_task_(nullptr),
       worker_exited_(true), worker_started_(false),
@@ -141,6 +156,12 @@ MapScreen::MapScreen(lv_obj_t* parent)
                                            onZoomIn, this, 36);
     recenter_button_ = createToolbarButton(toolbar_, LV_SYMBOL_GPS,
                                             onRecenter, this, 44);
+    style_button_ = createToolbarButton(toolbar_, "Style", onStyle, this, 80,
+                                        &style_label_);
+    lv_obj_add_state(style_button_, LV_STATE_DISABLED);
+    lv_obj_set_width(style_label_, 74);
+    lv_label_set_long_mode(style_label_, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(style_label_, LV_TEXT_ALIGN_CENTER, 0);
 
     viewport_ = lv_obj_create(screen_);
     lv_obj_set_size(viewport_, Pyxis::MapScreenPresenter::VIEWPORT_WIDTH,
@@ -332,11 +353,47 @@ void MapScreen::publishPackAttribution() {
     unlockState();
 }
 
+void MapScreen::publishStyleCatalog(std::uint32_t activation_token,
+                                    std::uint32_t request_lifecycle_epoch,
+                                    bool activation_failed) {
+    Pyxis::MapStyleSummary summaries[Pyxis::MapStyleSelector::MAX_STYLES] = {};
+    char active_id[Pyxis::MapPackManifest::PACK_ID_CAPACITY] = {};
+    const std::size_t count = style_catalog_.count();
+    for (std::size_t index = 0U; index < count; ++index) {
+        const Hardware::TDeck::MapStyleSummary* source = style_catalog_.style(index);
+        if (source == nullptr) continue;
+        std::strncpy(summaries[index].id, source->id,
+                     sizeof(summaries[index].id) - 1U);
+        std::strncpy(summaries[index].label, styleLabel(source->id),
+                     sizeof(summaries[index].label) - 1U);
+        if (source->active) {
+            std::strncpy(active_id, source->id, sizeof(active_id) - 1U);
+        }
+    }
+    if (!lockState(portMAX_DELAY)) return;
+    const bool retain_error = activation_failed &&
+        screen_visible_.load(std::memory_order_acquire) &&
+        !style_lifecycle_exhausted_ &&
+        request_lifecycle_epoch == style_lifecycle_epoch_;
+    if (activation_token == 0U) {
+        (void)style_selector_.setCatalog(style_catalog_.generation(), summaries, count,
+                                         active_id[0] == '\0' ? nullptr : active_id);
+    } else {
+        (void)style_selector_.reconcileActivation(
+            activation_token, style_catalog_.generation(), summaries, count,
+            active_id[0] == '\0' ? nullptr : active_id, retain_error);
+    }
+    unlockState();
+}
+
 void MapScreen::workerLoop() {
     std::uint32_t handled_pack_refresh_epoch =
         pack_refresh_epoch_.load(std::memory_order_acquire);
     (void)pack_.initialize();
     publishPackAttribution();
+    if (style_catalog_.discover() == Hardware::TDeck::MapStyleCatalogResult::OK) {
+        publishStyleCatalog();
+    }
     while (!stop_requested_.load(std::memory_order_acquire)) {
         const bool screen_visible =
             screen_visible_.load(std::memory_order_acquire);
@@ -359,7 +416,88 @@ void MapScreen::workerLoop() {
                 decoded_tile_cache_.clear();
             }
             publishPackAttribution();
+            if (style_catalog_.discover() == Hardware::TDeck::MapStyleCatalogResult::OK) {
+                publishStyleCatalog();
+            }
             handled_pack_refresh_epoch = pack_refresh_epoch;
+        }
+
+        Pyxis::MapStyleRequest style_request{};
+        std::uint32_t style_request_lifecycle_epoch = 0U;
+        bool have_style_request = false;
+        if (lockState(pdMS_TO_TICKS(20))) {
+            if (style_request_pending_) {
+                const bool style_screen_visible =
+                    screen_visible_.load(std::memory_order_acquire);
+                if (!style_screen_visible || style_lifecycle_exhausted_ ||
+                    style_request_lifecycle_epoch_ != style_lifecycle_epoch_) {
+                    (void)style_selector_.cancelPending(style_request_.token);
+                    style_request_pending_ = false;
+                    style_request_ = Pyxis::MapStyleRequest();
+                } else if (style_selector_.activationOwnedBy(style_request_.token)) {
+                    style_request = style_request_;
+                    style_request_lifecycle_epoch = style_request_lifecycle_epoch_;
+                    style_request_pending_ = false;
+                    have_style_request = true;
+                } else {
+                    style_request_pending_ = false;
+                    style_request_ = Pyxis::MapStyleRequest();
+                }
+            }
+            unlockState();
+        }
+        if (have_style_request) {
+            const Hardware::TDeck::MapStyleCatalogResult activation =
+                style_catalog_.activate(style_request.catalog_generation,
+                                        style_request.style_id);
+            bool success = activation == Hardware::TDeck::MapStyleCatalogResult::OK;
+            if (success) {
+                const Hardware::TDeck::MapTilePackResult initialized = pack_.initialize();
+                success = initialized == Hardware::TDeck::MapTilePackResult::OK &&
+                    pack_.hasSelection() &&
+                    std::strcmp(pack_.metadata().pack_id, style_request.style_id) == 0;
+            }
+            if (success) {
+                decoded_tile_cache_.clear();
+                publishPackAttribution();
+            }
+            Pyxis::MapStyleCompletion style_completion{};
+            style_completion.token = style_request.token;
+            style_completion.catalog_generation = style_request.catalog_generation;
+            std::strncpy(style_completion.style_id, style_request.style_id,
+                         sizeof(style_completion.style_id) - 1U);
+            style_completion.success = success;
+            if (lockState(portMAX_DELAY)) {
+                const bool same_visible_lifecycle =
+                    screen_visible_.load(std::memory_order_acquire) &&
+                    !style_lifecycle_exhausted_ &&
+                    style_request_lifecycle_epoch == style_lifecycle_epoch_;
+                const bool completed = style_selector_.complete(style_completion);
+                if (completed && !same_visible_lifecycle && !success) {
+                    (void)style_selector_.clearError();
+                }
+                if (success) {
+                    presenter_.invalidateTiles();
+                    requests_released_ = false;
+                }
+                unlockState();
+            }
+            // Reconcile the reservation owner's catalog on every outcome. A
+            // durable activate() may have advanced its generation even when the
+            // subsequent pack reload failed; stale-generation failures can also
+            // follow a refresh that raced the queued request. Keep the lease until
+            // both the in-memory truth and any successful rediscovery are published.
+            publishStyleCatalog(style_request.token,
+                                style_request_lifecycle_epoch, !success);
+            if (style_catalog_.discover() == Hardware::TDeck::MapStyleCatalogResult::OK) {
+                publishStyleCatalog(style_request.token,
+                                    style_request_lifecycle_epoch, !success);
+            }
+            if (lockState(portMAX_DELAY)) {
+                (void)style_selector_.releaseActivation(style_request.token);
+                unlockState();
+            }
+            continue;
         }
 
         Pyxis::MapTileRequest request{};
@@ -549,9 +687,24 @@ void MapScreen::applyFrame() {
     std::snprintf(zoom_text, sizeof(zoom_text), "z%lu",
                   static_cast<unsigned long>(presenter_.zoom()));
     lv_label_set_text(zoom_label_, zoom_text);
+    if (style_selector_.state() == Pyxis::MapStyleSelector::State::APPLYING) {
+        lv_label_set_text(style_label_, "Switching");
+    } else {
+        lv_label_set_text(style_label_, style_selector_.activeLabel());
+    }
+    if (style_selector_.canCycle()) {
+        lv_obj_clear_state(style_button_, LV_STATE_DISABLED);
+    } else {
+        lv_obj_add_state(style_button_, LV_STATE_DISABLED);
+    }
     lv_label_set_text(attribution_label_, pack_attribution_[0] != '\0'
         ? pack_attribution_ : "No active map pack");
     refreshVisibleStatus();
+    if (style_selector_.state() == Pyxis::MapStyleSelector::State::APPLYING) {
+        lv_label_set_text(status_label_, "Switching style...");
+    } else if (style_selector_.state() == Pyxis::MapStyleSelector::State::ERROR) {
+        lv_label_set_text(status_label_, "Style switch failed");
+    }
     // Non-ready images are now detached under LVGL_LOCK, so the worker may
     // safely decode into their permanent buffers without a draw race.
     requests_released_ = true;
@@ -631,6 +784,7 @@ void MapScreen::show() {
         lv_group_add_obj(group, zoom_out_button_);
         lv_group_add_obj(group, zoom_in_button_);
         lv_group_add_obj(group, recenter_button_);
+        lv_group_add_obj(group, style_button_);
         for (std::size_t i = 0; i < 4U; ++i) lv_group_add_obj(group, pan_buttons_[i]);
         lv_group_focus_obj(back_button_);
     }
@@ -639,7 +793,18 @@ void MapScreen::show() {
 void MapScreen::hide() {
     screen_visible_.store(false, std::memory_order_release);
     if (worker_task_) xTaskNotifyGive(worker_task_);
-    if (lockState(pdMS_TO_TICKS(100))) {
+    if (lockState(portMAX_DELAY)) {
+        if (style_lifecycle_epoch_ == UINT32_MAX) {
+            style_lifecycle_exhausted_ = true;
+        } else {
+            ++style_lifecycle_epoch_;
+        }
+        if (style_request_pending_) {
+            (void)style_selector_.cancelPending(style_request_.token);
+            style_request_pending_ = false;
+            style_request_ = Pyxis::MapStyleRequest();
+        }
+        (void)style_selector_.clearError();
         presenter_.hide();
         unlockState();
     }
@@ -649,6 +814,7 @@ void MapScreen::hide() {
         lv_group_remove_obj(zoom_out_button_);
         lv_group_remove_obj(zoom_in_button_);
         lv_group_remove_obj(recenter_button_);
+        lv_group_remove_obj(style_button_);
         for (std::size_t i = 0; i < 4U; ++i) lv_group_remove_obj(pan_buttons_[i]);
     }
     lv_obj_add_flag(screen_, LV_OBJ_FLAG_HIDDEN);
@@ -696,6 +862,22 @@ void MapScreen::onRecenter(lv_event_t* event) {
     if (centered) screen->center_initialized_ = true;
     screen->unlockState();
     if (!centered) lv_label_set_text(screen->status_label_, "No GPS fix");
+}
+
+void MapScreen::onStyle(lv_event_t* event) {
+    MapScreen* screen = fromEvent(event);
+    bool queued = false;
+    if (screen && screen->lockState(pdMS_TO_TICKS(100))) {
+        if (!screen->style_lifecycle_exhausted_ &&
+            screen->style_selector_.requestNext(screen->style_request_)) {
+            screen->style_request_lifecycle_epoch_ =
+                screen->style_lifecycle_epoch_;
+            screen->style_request_pending_ = true;
+            queued = true;
+        }
+        screen->unlockState();
+    }
+    if (queued && screen->worker_task_) xTaskNotifyGive(screen->worker_task_);
 }
 
 void MapScreen::onPan(lv_event_t* event) {

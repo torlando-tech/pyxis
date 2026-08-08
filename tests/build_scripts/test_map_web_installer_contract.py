@@ -17,14 +17,30 @@ def test_map_installer_ui_is_local_file_to_sd_and_offline_only() -> None:
     assert 'id="map-pack-name"' in source
     assert 'id="map-install-btn"' in source
     assert 'Install and Enable' in source
-    assert "mapSetId: 'osm-bright'" in source
+    assert 'id="map-style"' in source
+    assert '<option value="" selected disabled>Select map style…</option>' in source
+    for style in ("osm-bright", "dark-matter", "positron", "toner"):
+        assert f'value="{style}"' in source
+    assert "resolveMuiStyleProfile" in source
+    assert "mapSetId: style.id" in source
     assert 'newest pack takes priority' in source
     assert "showDirectoryPicker" in source
     assert "navigator.locks?.request" in source
     assert "cross-tab locking required for safe map installation" in source
-    assert "./js/map-installer.js" in source
-    assert "Coalition MUI OSM Bright user download" in source
-    assert "Map data (c) OpenStreetMap contributors" in source
+    assert "./js/map-installer.js?v=map-style-picker-2" in source
+    assert "Oxed's Map Tile Downloader" in source
+    assert "OpenStreetMap contributors" in source
+    assert "suggestMapIdentity" in source
+    assert "const suggestion = suggestMapIdentity(file.name);" in source
+    assert "mapPackNameInput.value = suggestion.name;" in source
+    assert "mapPackIdInput.value = suggestion.packId;" in source
+    assert ".map-field select option" in source
+    assert "background: var(--card);" in source
+
+    click_start = source.index("mapInstallBtn.addEventListener('click'")
+    picker = source.index("const rootDirectory = await window.showDirectoryPicker", click_start)
+    click_before_picker = source[click_start:picker]
+    assert "resolveMuiStyleProfile" in click_before_picker
 
 
 def test_map_installer_explains_the_complete_sd_card_workflow() -> None:

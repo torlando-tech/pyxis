@@ -54,7 +54,8 @@ class FakeStorage : public MapTileStorage {
 public:
     FakeStorage()
         : available(true), file_count(0U), open_file(NULL), position(0U),
-          read_calls(0U), end_calls(0U), fail_read_call(0U), zero_read_call(0U) {}
+          read_calls(0U), end_calls(0U), fail_read_call(0U), zero_read_call(0U),
+          fail_begin_path(NULL), fail_begin_result(TileStoreResult::IO_ERROR) {}
 
     void clear() { file_count = 0U; open_file = NULL; position = 0U; }
     void add(const char* path, const std::uint8_t* bytes, std::size_t size) {
@@ -83,6 +84,8 @@ public:
     virtual bool isAvailable() const { return available; }
     virtual TileStoreResult beginRead(const char* path, std::uint32_t& size) {
         if (!available) return TileStoreResult::STORAGE_UNAVAILABLE;
+        if (fail_begin_path != NULL && std::strcmp(path, fail_begin_path) == 0)
+            return fail_begin_result;
         if (open_file != NULL) return TileStoreResult::BUSY;
         File* file = find(path);
         if (file == NULL) return TileStoreResult::MISS;
@@ -122,6 +125,8 @@ public:
     std::size_t end_calls;
     std::size_t fail_read_call;
     std::size_t zero_read_call;
+    const char* fail_begin_path;
+    TileStoreResult fail_begin_result;
 };
 
 MapPackManifest manifestFor(const char* id) {
@@ -172,15 +177,31 @@ void testPutU16(std::uint8_t* output, std::uint16_t value) {
     output[1] = static_cast<std::uint8_t>(value >> 8U);
 }
 
-std::uint8_t hexValue(char value) {
-    if (value >= '0' && value <= '9') return static_cast<std::uint8_t>(value - '0');
-    return static_cast<std::uint8_t>(10 + value - 'a');
-}
-
 void addManifest(FakeStorage& storage, const char* id) {
     std::uint8_t bytes[MapPackManifest::MAX_SERIALIZED_SIZE];
     std::size_t written = 0U;
     CHECK(MapPackManifest::serialize(manifestFor(id), bytes, sizeof(bytes), written) == Pyxis::ManifestResult::OK);
+    char path[MapTilePack::PATH_CAPACITY];
+    CHECK(MapTilePack::manifestPath(id, path, sizeof(path)) == MapTilePackResult::OK);
+    storage.add(path, bytes, written);
+}
+
+void addSparseManifest(FakeStorage& storage, const char* id, const char* attribution,
+                       const char* source, const char* license,
+                       const RowSpan* spans, std::size_t span_count) {
+    MapPackManifest manifest = {};
+    std::strcpy(manifest.pack_id, id); std::strcpy(manifest.name, "Test Pack");
+    std::strcpy(manifest.attribution, attribution); std::strcpy(manifest.source, source);
+    std::strcpy(manifest.license, license);
+    manifest.min_zoom = spans[0].zoom; manifest.max_zoom = spans[span_count - 1U].zoom;
+    std::uint32_t tile_count = 0U;
+    for (std::size_t index = 0U; index < span_count; ++index) {
+        tile_count += spans[index].x_maximum - spans[index].x_minimum + 1U;
+    }
+    manifest.tile_count = tile_count;
+    std::uint8_t bytes[MapPackManifest::MAX_SERIALIZED_SIZE]; std::size_t written = 0U;
+    CHECK(MapPackManifest::serializeSparse(manifest, spans, span_count, bytes,
+        sizeof(bytes), written) == Pyxis::ManifestResult::OK);
     char path[MapTilePack::PATH_CAPACITY];
     CHECK(MapTilePack::manifestPath(id, path, sizeof(path)) == MapTilePackResult::OK);
     storage.add(path, bytes, written);
@@ -199,20 +220,20 @@ void addSlot(FakeStorage& storage, const char* path, const char* id, std::uint32
     storage.add(path, record, sizeof(record));
 }
 
-void addMapSetSlot(FakeStorage& storage, const char* path, std::uint32_t generation) {
+void addMapSetSlot(FakeStorage& storage, const char* path, std::uint32_t generation,
+                   const char* map_set = "osm-bright",
+                   const char* attribution = "Map data (c) OpenStreetMap contributors") {
     std::uint8_t record[256] = {};
     record[0] = 'P'; record[1] = 'M'; record[2] = 'A'; record[3] = 'S'; record[4] = 2U;
     testPutU32(record + 8U, generation);
     std::size_t position = 12U;
-    const char* map_set = "osm-bright";
-    const char* attribution = "Map data attribution";
     record[position++] = static_cast<std::uint8_t>(std::strlen(map_set));
     std::memcpy(record + position, map_set, std::strlen(map_set)); position += std::strlen(map_set);
     record[position++] = static_cast<std::uint8_t>(std::strlen(attribution));
     std::memcpy(record + position, attribution, std::strlen(attribution)); position += std::strlen(attribution);
     record[position++] = 2U;
     const char* ids[2] = {"detail", "state"};
-    const RowSpan detail[] = {{2U, 1U, 1U, 1U}, {4U, 5U, 5U, 5U}};
+    const RowSpan detail[] = {{2U, 1U, 1U, 1U}, {3U, 5U, 5U, 5U}};
     const RowSpan state[] = {{2U, 1U, 1U, 2U}};
     const RowSpan* spans[2] = {detail, state};
     const std::uint16_t counts[2] = {2U, 1U};
@@ -232,6 +253,16 @@ void addMapSetSlot(FakeStorage& storage, const char* path, std::uint32_t generat
     testPutU16(record + 6U, static_cast<std::uint16_t>(total_length));
     testPutU32(record + position, testCrc32(record, position));
     storage.add(path, record, total_length);
+}
+
+void addLegacyBrightMapSetManifests(FakeStorage& storage) {
+    const RowSpan detail[] = {{2U, 1U, 1U, 1U}, {3U, 5U, 5U, 5U}};
+    const RowSpan state[] = {{2U, 1U, 1U, 2U}};
+    const char* attribution = "Map data (c) OpenStreetMap contributors";
+    addSparseManifest(storage, "detail", attribution,
+                      "Coalition MUI OSM Bright user download", "ODbL-1.0", detail, 2U);
+    addSparseManifest(storage, "state", attribution,
+                      "Coalition MUI OSM Bright user download", "ODbL-1.0", state, 1U);
 }
 
 void testNoSelection() {
@@ -409,26 +440,101 @@ void testActiveSelectionSlotsPreferNewestValidAndRejectConflict() {
     MapTilePack conflict_pack(conflict);
     CHECK(conflict_pack.initialize() == MapTilePackResult::INVALID_PACK_ID);
 }
+void testEqualGenerationIdentityUsesLengthAndExactBytesNotTrailingChecksum() {
+    beginTest();
+    std::uint8_t first[MapTilePack::LEGACY_ACTIVE_SELECTION_SIZE] = {};
+    std::uint8_t second[MapTilePack::LEGACY_ACTIVE_SELECTION_SIZE] = {};
+    FakeStorage records;
+    addSlot(records, "first", "one", 7U); addSlot(records, "second", "two", 7U);
+    std::memcpy(first, records.find("first")->bytes, sizeof(first));
+    std::memcpy(second, records.find("second")->bytes, sizeof(second));
+    std::memcpy(second + sizeof(second) - 4U, first + sizeof(first) - 4U, 4U);
+    CHECK(!MapTilePack::selectionRecordsEqual(first, sizeof(first), second, sizeof(second)));
+    CHECK(MapTilePack::selectionRecordsEqual(first, sizeof(first), first, sizeof(first)));
+    CHECK(!MapTilePack::selectionRecordsEqual(first, sizeof(first), first, sizeof(first) - 1U));
+}
+void testActiveMapSetRequiresAllowlistedStyleAndMatchingImmutableManifests() {
+    beginTest();
+    FakeStorage valid;
+    addMapSetSlot(valid, MapTilePack::ACTIVE_PACK_SLOT_0_PATH, 1U);
+    addLegacyBrightMapSetManifests(valid);
+    MapTilePack valid_pack(valid); CHECK(valid_pack.initialize() == MapTilePackResult::OK);
+
+    FakeStorage unknown;
+    addMapSetSlot(unknown, MapTilePack::ACTIVE_PACK_SLOT_0_PATH, 1U, "rogue");
+    addLegacyBrightMapSetManifests(unknown);
+    MapTilePack unknown_pack(unknown); CHECK(unknown_pack.initialize() != MapTilePackResult::OK);
+
+    const RowSpan detail[] = {{2U, 1U, 1U, 1U}, {3U, 5U, 5U, 5U}};
+    const RowSpan state[] = {{2U, 1U, 1U, 2U}};
+    FakeStorage altered_attribution;
+    addMapSetSlot(altered_attribution, MapTilePack::ACTIVE_PACK_SLOT_0_PATH, 1U);
+    addSparseManifest(altered_attribution, "detail", "changed attribution",
+                      "Coalition MUI OSM Bright user download", "ODbL-1.0", detail, 2U);
+    addSparseManifest(altered_attribution, "state", "changed attribution",
+                      "Coalition MUI OSM Bright user download", "ODbL-1.0", state, 1U);
+    MapTilePack attribution_pack(altered_attribution);
+    CHECK(attribution_pack.initialize() != MapTilePackResult::OK);
+
+    FakeStorage wrong_coverage;
+    addMapSetSlot(wrong_coverage, MapTilePack::ACTIVE_PACK_SLOT_0_PATH, 1U);
+    const RowSpan changed_detail[] = {{2U, 1U, 1U, 2U}, {3U, 5U, 5U, 5U}};
+    addSparseManifest(wrong_coverage, "detail", "Map data (c) OpenStreetMap contributors",
+                      "Coalition MUI OSM Bright user download", "ODbL-1.0", changed_detail, 2U);
+    addSparseManifest(wrong_coverage, "state", "Map data (c) OpenStreetMap contributors",
+                      "Coalition MUI OSM Bright user download", "ODbL-1.0", state, 1U);
+    MapTilePack coverage_pack(wrong_coverage); CHECK(coverage_pack.initialize() != MapTilePackResult::OK);
+}
+void testNewCanonicalProfilesPassAndCrossStyleCompositionFails() {
+    beginTest();
+    const RowSpan detail[] = {{2U, 1U, 1U, 1U}, {3U, 5U, 5U, 5U}};
+    const RowSpan state[] = {{2U, 1U, 1U, 2U}};
+    const char* styles[] = {"osm-bright", "dark-matter", "positron", "toner"};
+    const char* labels[] = {"OSM Bright", "Dark Matter", "Positron", "Toner"};
+    const char* attributions[] = {
+        "(c) OpenMapTiles (c) OpenStreetMap contributors",
+        "(c) OpenMapTiles (c) OpenStreetMap contributors; style (c) CARTO",
+        "(c) OpenMapTiles (c) OpenStreetMap contributors; style (c) CARTO",
+        "(c) MapTiler (c) OpenStreetMap contributors"};
+    const char* licenses[] = {
+        "OSM ODbL; style CC-BY-4.0/BSD-3-Clause",
+        "OSM ODbL; style CC-BY-4.0/BSD-3-Clause (CARTO CC-BY-3.0)",
+        "OSM ODbL; style CC-BY-4.0/BSD-3-Clause (CARTO CC-BY-3.0)",
+        "OSM ODbL; style CC-BY-4.0/BSD-3-Clause (Stamen ISC)"};
+    for (std::size_t index = 0U; index < 4U; ++index) {
+        FakeStorage storage;
+        addMapSetSlot(storage, MapTilePack::ACTIVE_PACK_SLOT_0_PATH, 1U,
+                      styles[index], attributions[index]);
+        char source[128] = {}; std::snprintf(source, sizeof(source),
+            "Oxed's Map Tile Downloader (%s)", labels[index]);
+        addSparseManifest(storage, "detail", attributions[index], source, licenses[index], detail, 2U);
+        addSparseManifest(storage, "state", attributions[index], source, licenses[index], state, 1U);
+        MapTilePack pack(storage); CHECK(pack.initialize() == MapTilePackResult::OK);
+    }
+
+    FakeStorage mixed;
+    addMapSetSlot(mixed, MapTilePack::ACTIVE_PACK_SLOT_0_PATH, 1U, "dark-matter", attributions[1]);
+    addSparseManifest(mixed, "detail", attributions[1],
+                      "Oxed's Map Tile Downloader (Positron)", licenses[2], detail, 2U);
+    addSparseManifest(mixed, "state", attributions[1],
+                      "Oxed's Map Tile Downloader (Dark Matter)", licenses[1], state, 1U);
+    MapTilePack mixed_pack(mixed); CHECK(mixed_pack.initialize() != MapTilePackResult::OK);
+}
 void testActiveMapSetComposesPacksByPriorityAndCoverage() {
     beginTest();
     FakeStorage storage;
     addMapSetSlot(storage, MapTilePack::ACTIVE_PACK_SLOT_0_PATH, 1U);
-    const char* golden = "504d415302006900010000000a6f736d2d627269676874144d61702064617461206174747269627574696f6e020664657461696c020002010000000100000001000000040500000005000000050000000573746174650100020100000001000000020000009de230d6";
-    File* selection = storage.find(MapTilePack::ACTIVE_PACK_SLOT_0_PATH); CHECK(selection != NULL);
-    CHECK(selection->size * 2U == std::strlen(golden));
-    for (std::size_t index = 0U; index < selection->size; ++index) {
-        CHECK(selection->bytes[index] == static_cast<std::uint8_t>((hexValue(golden[index * 2U]) << 4U) | hexValue(golden[index * 2U + 1U])));
-    }
+    addLegacyBrightMapSetManifests(storage);
     const std::uint8_t detail = 1U, state_overlap = 2U, state_wide = 3U, detail_high = 4U;
     storage.add("/pyxis-map/packs/detail/tiles/2/1/1.png", &detail, 1U);
-    storage.add("/pyxis-map/packs/detail/tiles/4/5/5.png", &detail_high, 1U);
+    storage.add("/pyxis-map/packs/detail/tiles/3/5/5.png", &detail_high, 1U);
     storage.add("/pyxis-map/packs/state/tiles/2/1/1.png", &state_overlap, 1U);
     storage.add("/pyxis-map/packs/state/tiles/2/2/1.png", &state_wide, 1U);
     MapTilePack pack(storage); CHECK(pack.initialize() == MapTilePackResult::OK);
     CHECK(std::strcmp(pack.metadata().pack_id, "osm-bright") == 0);
     CHECK(pack.selectionGeneration() == 1U);
-    CHECK(std::strcmp(pack.metadata().attribution, "Map data attribution") == 0);
-    const TileKey keys[] = {{2U,1U,1U},{2U,2U,1U},{4U,5U,5U}};
+    CHECK(std::strcmp(pack.metadata().attribution, "Map data (c) OpenStreetMap contributors") == 0);
+    const TileKey keys[] = {{2U,1U,1U},{2U,2U,1U},{3U,5U,5U}};
     const std::uint8_t expected[] = {detail,state_wide,detail_high};
     for (std::size_t index = 0U; index < 3U; ++index) {
         std::uint32_t size = 0U; CHECK(pack.beginGet(keys[index], size) == MapTilePackResult::OK); CHECK(size == 1U);
@@ -436,16 +542,62 @@ void testActiveMapSetComposesPacksByPriorityAndCoverage() {
         CHECK(pack.readGetChunk(&output, 1U, count) == MapTilePackResult::OK); CHECK(count == 1U); CHECK(output == expected[index]);
     }
     std::uint32_t size = 0U;
-    CHECK(pack.beginGet(TileKey{3U,1U,1U}, size) == MapTilePackResult::UNCOVERED);
+    CHECK(pack.beginGet(TileKey{4U,1U,1U}, size) == MapTilePackResult::UNCOVERED);
 
     FakeStorage fallback;
     addMapSetSlot(fallback, MapTilePack::ACTIVE_PACK_SLOT_0_PATH, 1U);
+    addLegacyBrightMapSetManifests(fallback);
     fallback.add("/pyxis-map/packs/state/tiles/2/1/1.png", &state_overlap, 1U);
     MapTilePack fallback_pack(fallback); CHECK(fallback_pack.initialize() == MapTilePackResult::OK);
     CHECK(fallback_pack.beginGet(TileKey{2U,1U,1U}, size) == MapTilePackResult::OK);
     std::uint8_t output = 0U; std::size_t count = 0U;
     CHECK(fallback_pack.readGetChunk(&output, 1U, count) == MapTilePackResult::OK);
     CHECK(output == state_overlap);
+}
+void testRebootFallsBackFromNewerSemanticallyInvalidMapSet() {
+    beginTest(); FakeStorage storage;
+    addMapSetSlot(storage, MapTilePack::ACTIVE_PACK_SLOT_0_PATH, 4U);
+    addMapSetSlot(storage, MapTilePack::ACTIVE_PACK_SLOT_1_PATH, 5U, "dark-matter",
+                  "(c) OpenMapTiles (c) OpenStreetMap contributors; style (c) CARTO");
+    addLegacyBrightMapSetManifests(storage);
+    const std::uint8_t tile = 0x5aU;
+    storage.add("/pyxis-map/packs/detail/tiles/2/1/1.png", &tile, 1U);
+    MapTilePack pack(storage); CHECK(pack.initialize() == MapTilePackResult::OK);
+    CHECK(pack.selectionGeneration() == 4U);
+    CHECK(std::strcmp(pack.metadata().pack_id, "osm-bright") == 0);
+    std::uint32_t size = 0U; CHECK(pack.beginGet(TileKey{2U,1U,1U}, size) == MapTilePackResult::OK);
+    std::uint8_t output = 0U; std::size_t count = 0U;
+    CHECK(pack.readGetChunk(&output, 1U, count) == MapTilePackResult::OK);
+    CHECK(count == 1U && output == tile);
+}
+void testNewerManifestIndeterminateDoesNotFallBackAndPreservesSelection() {
+    beginTest(); FakeStorage storage;
+    addMapSetSlot(storage, MapTilePack::ACTIVE_PACK_SLOT_0_PATH, 4U);
+    addLegacyBrightMapSetManifests(storage);
+    const std::uint8_t tile = 0x6bU;
+    storage.add("/pyxis-map/packs/detail/tiles/2/1/1.png", &tile, 1U);
+    MapTilePack pack(storage); CHECK(pack.initialize() == MapTilePackResult::OK);
+    addMapSetSlot(storage, MapTilePack::ACTIVE_PACK_SLOT_1_PATH, 5U, "dark-matter",
+                  "(c) OpenMapTiles (c) OpenStreetMap contributors; style (c) CARTO");
+    storage.fail_begin_path = "/pyxis-map/packs/detail/manifest.pmp";
+    storage.fail_begin_result = TileStoreResult::BUSY;
+    CHECK(pack.initialize() == MapTilePackResult::BUSY);
+    CHECK(pack.status() == MapTilePackStatus::READY);
+    CHECK(pack.selectionGeneration() == 4U);
+    CHECK(std::strcmp(pack.metadata().pack_id, "osm-bright") == 0);
+    std::uint32_t size = 0U; CHECK(pack.beginGet(TileKey{2U,1U,1U}, size) == MapTilePackResult::OK);
+    std::uint8_t output = 0U; std::size_t count = 0U;
+    CHECK(pack.readGetChunk(&output, 1U, count) == MapTilePackResult::OK);
+    CHECK(count == 1U && output == tile);
+}
+void testBothSemanticallyInvalidSlotsDoNotUseLegacyMarker() {
+    beginTest(); FakeStorage storage;
+    addMapSetSlot(storage, MapTilePack::ACTIVE_PACK_SLOT_0_PATH, 4U, "rogue");
+    addMapSetSlot(storage, MapTilePack::ACTIVE_PACK_SLOT_1_PATH, 5U, "also-rogue");
+    addSelection(storage, "legacy", manifestFor("legacy"));
+    MapTilePack pack(storage);
+    CHECK(pack.initialize() == MapTilePackResult::INVALID_MANIFEST);
+    CHECK(!pack.hasSelection());
 }
 void testCoreDoesNotAllocate() {
     beginTest(); FakeStorage storage; addSelection(storage, "one", manifestFor("one")); const std::uint8_t tile[] = {7U};
@@ -463,7 +615,13 @@ int main() {
     testPrematureEndCloses(); testReinitializeSelectionChange(); testFailedReinitializeIsTransactional();
     testReinitializeAndDestructorCloseStreams(); testDeclaredLengthsAndEmbeddedNulFailClosed();
     testTileDeclaredLengthCapsWritesAndProbesEof(); testActiveSelectionSlotsPreferNewestValidAndRejectConflict();
+    testEqualGenerationIdentityUsesLengthAndExactBytesNotTrailingChecksum();
+    testActiveMapSetRequiresAllowlistedStyleAndMatchingImmutableManifests();
+    testNewCanonicalProfilesPassAndCrossStyleCompositionFails();
     testActiveMapSetComposesPacksByPriorityAndCoverage();
+    testRebootFallsBackFromNewerSemanticallyInvalidMapSet();
+    testNewerManifestIndeterminateDoesNotFallBackAndPreservesSelection();
+    testBothSemanticallyInvalidSlotsDoNotUseLegacyMarker();
     testCoreDoesNotAllocate();
     std::cout << "map tile pack: " << tests_run << " tests passed\n";
     return 0;
