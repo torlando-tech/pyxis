@@ -85,8 +85,11 @@ private:
     Hardware::TDeck::MapStyleCatalog style_catalog_;
     Pyxis::MapStyleRequest style_request_;
     bool style_request_pending_;
+    std::uint32_t style_request_lifecycle_epoch_;
     char pack_attribution_[Pyxis::MapPackManifest::ATTRIBUTION_CAPACITY];
     std::atomic<bool> screen_visible_;
+    std::uint32_t style_lifecycle_epoch_;
+    bool style_lifecycle_exhausted_;
     std::atomic<std::uint32_t> pack_refresh_epoch_;
     std::uint8_t* compressed_staging_;
     SemaphoreHandle_t state_mutex_;
@@ -105,7 +108,9 @@ private:
     static void workerEntry(void* context);
     void workerLoop();
     void publishPackAttribution();
-    void publishStyleCatalog();
+    void publishStyleCatalog(std::uint32_t activation_token = 0U,
+                             std::uint32_t request_lifecycle_epoch = 0U,
+                             bool activation_failed = false);
     Pyxis::MapTileLoadResult loadTile(const Pyxis::MapTileRequest& request);
     Pyxis::MapTileLoadResult readTile(const Pyxis::MapTileRequest& request);
     Pyxis::MapTileLoadResult readCompressedTile(const Pyxis::MapTileRequest& request);

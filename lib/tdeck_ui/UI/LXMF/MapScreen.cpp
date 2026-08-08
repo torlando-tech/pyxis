@@ -108,8 +108,10 @@ MapScreen::MapScreen(lv_obj_t* parent)
       decoded_cache_pixels_{}, approximation_halos_{}, markers_{}, marker_labels_{},
       presenter_(), style_selector_(), storage_(), pack_(storage_),
       style_catalog_(storage_), style_request_{}, style_request_pending_(false),
+      style_request_lifecycle_epoch_(0U),
       pack_attribution_{},
-      screen_visible_(false), pack_refresh_epoch_(0U),
+      screen_visible_(false), style_lifecycle_epoch_(0U),
+      style_lifecycle_exhausted_(false), pack_refresh_epoch_(0U),
       compressed_staging_(nullptr),
       state_mutex_(nullptr), worker_task_(nullptr),
       worker_exited_(true), worker_started_(false),
@@ -351,7 +353,9 @@ void MapScreen::publishPackAttribution() {
     unlockState();
 }
 
-void MapScreen::publishStyleCatalog() {
+void MapScreen::publishStyleCatalog(std::uint32_t activation_token,
+                                    std::uint32_t request_lifecycle_epoch,
+                                    bool activation_failed) {
     Pyxis::MapStyleSummary summaries[Pyxis::MapStyleSelector::MAX_STYLES] = {};
     char active_id[Pyxis::MapPackManifest::PACK_ID_CAPACITY] = {};
     const std::size_t count = style_catalog_.count();
@@ -367,8 +371,18 @@ void MapScreen::publishStyleCatalog() {
         }
     }
     if (!lockState(portMAX_DELAY)) return;
-    (void)style_selector_.setCatalog(style_catalog_.generation(), summaries, count,
-                                     active_id[0] == '\0' ? nullptr : active_id);
+    const bool retain_error = activation_failed &&
+        screen_visible_.load(std::memory_order_acquire) &&
+        !style_lifecycle_exhausted_ &&
+        request_lifecycle_epoch == style_lifecycle_epoch_;
+    if (activation_token == 0U) {
+        (void)style_selector_.setCatalog(style_catalog_.generation(), summaries, count,
+                                         active_id[0] == '\0' ? nullptr : active_id);
+    } else {
+        (void)style_selector_.reconcileActivation(
+            activation_token, style_catalog_.generation(), summaries, count,
+            active_id[0] == '\0' ? nullptr : active_id, retain_error);
+    }
     unlockState();
 }
 
@@ -409,12 +423,26 @@ void MapScreen::workerLoop() {
         }
 
         Pyxis::MapStyleRequest style_request{};
+        std::uint32_t style_request_lifecycle_epoch = 0U;
         bool have_style_request = false;
         if (lockState(pdMS_TO_TICKS(20))) {
-            if (style_request_pending_ && screen_visible) {
-                style_request = style_request_;
-                style_request_pending_ = false;
-                have_style_request = true;
+            if (style_request_pending_) {
+                const bool style_screen_visible =
+                    screen_visible_.load(std::memory_order_acquire);
+                if (!style_screen_visible || style_lifecycle_exhausted_ ||
+                    style_request_lifecycle_epoch_ != style_lifecycle_epoch_) {
+                    (void)style_selector_.cancelPending(style_request_.token);
+                    style_request_pending_ = false;
+                    style_request_ = Pyxis::MapStyleRequest();
+                } else if (style_selector_.activationOwnedBy(style_request_.token)) {
+                    style_request = style_request_;
+                    style_request_lifecycle_epoch = style_request_lifecycle_epoch_;
+                    style_request_pending_ = false;
+                    have_style_request = true;
+                } else {
+                    style_request_pending_ = false;
+                    style_request_ = Pyxis::MapStyleRequest();
+                }
             }
             unlockState();
         }
@@ -440,23 +468,34 @@ void MapScreen::workerLoop() {
                          sizeof(style_completion.style_id) - 1U);
             style_completion.success = success;
             if (lockState(portMAX_DELAY)) {
-                (void)style_selector_.complete(style_completion);
+                const bool same_visible_lifecycle =
+                    screen_visible_.load(std::memory_order_acquire) &&
+                    !style_lifecycle_exhausted_ &&
+                    style_request_lifecycle_epoch == style_lifecycle_epoch_;
+                const bool completed = style_selector_.complete(style_completion);
+                if (completed && !same_visible_lifecycle && !success) {
+                    (void)style_selector_.clearError();
+                }
                 if (success) {
                     presenter_.invalidateTiles();
                     requests_released_ = false;
                 }
                 unlockState();
             }
-            if (success) {
-                // activate() already advanced the durable catalog generation and
-                // updated active flags. Publish that in-memory truth before any
-                // fallible post-commit SD rediscovery so the next request cannot
-                // carry a stale generation token.
-                publishStyleCatalog();
+            // Reconcile the reservation owner's catalog on every outcome. A
+            // durable activate() may have advanced its generation even when the
+            // subsequent pack reload failed; stale-generation failures can also
+            // follow a refresh that raced the queued request. Keep the lease until
+            // both the in-memory truth and any successful rediscovery are published.
+            publishStyleCatalog(style_request.token,
+                                style_request_lifecycle_epoch, !success);
+            if (style_catalog_.discover() == Hardware::TDeck::MapStyleCatalogResult::OK) {
+                publishStyleCatalog(style_request.token,
+                                    style_request_lifecycle_epoch, !success);
             }
-            if (success && style_catalog_.discover() ==
-                               Hardware::TDeck::MapStyleCatalogResult::OK) {
-                publishStyleCatalog();
+            if (lockState(portMAX_DELAY)) {
+                (void)style_selector_.releaseActivation(style_request.token);
+                unlockState();
             }
             continue;
         }
@@ -754,7 +793,18 @@ void MapScreen::show() {
 void MapScreen::hide() {
     screen_visible_.store(false, std::memory_order_release);
     if (worker_task_) xTaskNotifyGive(worker_task_);
-    if (lockState(pdMS_TO_TICKS(100))) {
+    if (lockState(portMAX_DELAY)) {
+        if (style_lifecycle_epoch_ == UINT32_MAX) {
+            style_lifecycle_exhausted_ = true;
+        } else {
+            ++style_lifecycle_epoch_;
+        }
+        if (style_request_pending_) {
+            (void)style_selector_.cancelPending(style_request_.token);
+            style_request_pending_ = false;
+            style_request_ = Pyxis::MapStyleRequest();
+        }
+        (void)style_selector_.clearError();
         presenter_.hide();
         unlockState();
     }
@@ -818,7 +868,10 @@ void MapScreen::onStyle(lv_event_t* event) {
     MapScreen* screen = fromEvent(event);
     bool queued = false;
     if (screen && screen->lockState(pdMS_TO_TICKS(100))) {
-        if (screen->style_selector_.requestNext(screen->style_request_)) {
+        if (!screen->style_lifecycle_exhausted_ &&
+            screen->style_selector_.requestNext(screen->style_request_)) {
+            screen->style_request_lifecycle_epoch_ =
+                screen->style_lifecycle_epoch_;
             screen->style_request_pending_ = true;
             queued = true;
         }

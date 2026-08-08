@@ -40,14 +40,26 @@ public:
     bool setCatalog(std::uint32_t generation, const MapStyleSummary* styles,
                     std::size_t count, const char* active_id);
     bool requestNext(MapStyleRequest& output);
+    bool activationOwnedBy(std::uint32_t expected_token) const {
+        return expected_token != 0U && activation_token_ == expected_token;
+    }
+    bool reconcileActivation(std::uint32_t expected_token,
+                             std::uint32_t generation,
+                             const MapStyleSummary* styles,
+                             std::size_t count, const char* active_id,
+                             bool retain_error);
+    bool releaseActivation(std::uint32_t expected_token);
+    bool cancelPending(std::uint32_t expected_token);
+    bool clearError();
     bool complete(const MapStyleCompletion& completion);
 
     State state() const { return state_; }
     std::size_t count() const { return count_; }
     bool canCycle() const {
         return (count_ > 1U || (count_ == 1U && active_index_ < 0)) &&
-            state_ != State::APPLYING;
+            state_ != State::APPLYING && activation_token_ == 0U;
     }
+    bool activationInFlight() const { return activation_token_ != 0U; }
     const char* activeId() const;
     const char* activeLabel() const;
     std::uint32_t generation() const { return catalog_generation_; }
@@ -60,8 +72,12 @@ private:
     std::uint32_t catalog_generation_;
     std::uint32_t next_token_;
     std::uint32_t pending_token_;
+    std::uint32_t activation_token_;
     State state_;
 
+    bool applyCatalog(std::uint32_t generation, const MapStyleSummary* styles,
+                      std::size_t count, const char* active_id,
+                      State next_state);
     static bool validString(const char* value, std::size_t capacity, bool identifier);
     static std::uint32_t advance(std::uint32_t value);
 };

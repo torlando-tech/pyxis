@@ -160,16 +160,23 @@ def test_style_switch_is_bounded_and_worker_owned():
     assert "lv_obj_t* style_label_;" in header
     assert "Pyxis::MapStyleRequest style_request_;" in header
     assert "bool style_request_pending_;" in header
+    assert "std::uint32_t style_request_lifecycle_epoch_;" in header
+    assert "std::uint32_t style_lifecycle_epoch_;" in header
+    assert "bool style_lifecycle_exhausted_;" in header
 
     callback = function_body(source, "void MapScreen::onStyle(lv_event_t* event)")
     assert "style_selector_.requestNext" in callback
     assert "style_request_pending_ = true" in callback
+    assert "style_request_lifecycle_epoch_" in callback
+    assert "screen->style_lifecycle_epoch_;" in callback
     assert "style_catalog_.activate" not in callback
     assert "pack_.initialize" not in callback
 
     worker = function_body(source, "void MapScreen::workerLoop()")
     assert "style_catalog_.discover()" in worker
     assert "style_catalog_.activate" in worker
+    assert "style_selector_.activationOwnedBy(style_request_.token)" in worker
+    assert "style_selector_.releaseActivation(style_request.token)" in worker
     assert "pack_.initialize()" in worker
     assert "presenter_.invalidateTiles()" in worker
     activation = worker.index("style_catalog_.activate")
@@ -177,10 +184,15 @@ def test_style_switch_is_bounded_and_worker_owned():
     cache_invalidation = worker.index("decoded_tile_cache_.clear()", committed_reload)
     selector_completion = worker.index("style_selector_.complete", committed_reload)
     tile_invalidation = worker.index("presenter_.invalidateTiles()", committed_reload)
-    committed_catalog = worker.index("publishStyleCatalog();", tile_invalidation)
+    committed_catalog = worker.index("publishStyleCatalog(style_request.token", tile_invalidation)
     rediscovery = worker.index("style_catalog_.discover()", committed_reload)
     assert activation < committed_reload < cache_invalidation
     assert cache_invalidation < selector_completion < tile_invalidation < committed_catalog < rediscovery
+    assert "publishStyleCatalog(style_request.token" in worker
+    assert "style_request_lifecycle_epoch, !success" in worker
+    assert "retain_style_error" not in worker
+    release = worker.index("style_selector_.releaseActivation(style_request.token)")
+    assert rediscovery < release
     assert "success = discovery" not in worker
     assert worker.index("style_catalog_.activate") < worker.index("presenter_.takeRequest")
 
@@ -191,6 +203,18 @@ def test_style_switch_is_bounded_and_worker_owned():
         assert "pack_.initialize" not in body
     assert "lv_group_add_obj(group, style_button_)" in source
     assert "lv_group_remove_obj(style_button_)" in source
+    publisher = function_body(source, "void MapScreen::publishStyleCatalog(")
+    assert "activation_failed &&" in publisher
+    assert "screen_visible_.load" in publisher
+    assert "!style_lifecycle_exhausted_" in publisher
+    assert "request_lifecycle_epoch == style_lifecycle_epoch_" in publisher
+    assert publisher.index("lockState(portMAX_DELAY)") < publisher.index("activation_failed &&")
+    hide = function_body(source, "void MapScreen::hide()")
+    assert "lockState(portMAX_DELAY)" in hide
+    assert "style_lifecycle_exhausted_" in hide
+    assert "UINT32_MAX" in hide
+    assert "style_selector_.cancelPending(style_request_.token)" in hide
+    assert "style_selector_.clearError()" in hide
 
 
 def test_ui_manager_services_before_lock_and_hides_map_everywhere():

@@ -10,7 +10,7 @@ namespace Pyxis {
 MapStyleSelector::MapStyleSelector()
     : styles_(), count_(0U), active_index_(-1), pending_index_(0U),
       catalog_generation_(0U), next_token_(1U), pending_token_(0U),
-      state_(State::DISCOVERING) {}
+      activation_token_(0U), state_(State::DISCOVERING) {}
 
 std::uint32_t MapStyleSelector::advance(std::uint32_t value) {
     ++value;
@@ -35,6 +35,14 @@ bool MapStyleSelector::validString(const char* value, std::size_t capacity,
 bool MapStyleSelector::setCatalog(std::uint32_t generation,
                                   const MapStyleSummary* styles,
                                   std::size_t count, const char* active_id) {
+    if (activation_token_ != 0U) return false;
+    return applyCatalog(generation, styles, count, active_id, State::READY);
+}
+
+bool MapStyleSelector::applyCatalog(std::uint32_t generation,
+                                    const MapStyleSummary* styles,
+                                    std::size_t count, const char* active_id,
+                                    State next_state) {
     if (generation == 0U || count > MAX_STYLES ||
         (count != 0U && styles == NULL) ||
         (count == 0U && active_id != NULL)) return false;
@@ -61,7 +69,7 @@ bool MapStyleSelector::setCatalog(std::uint32_t generation,
     pending_token_ = 0U;
     catalog_generation_ = generation;
     next_token_ = advance(next_token_);
-    state_ = State::READY;
+    state_ = next_state;
     return true;
 }
 
@@ -75,12 +83,44 @@ bool MapStyleSelector::requestNext(MapStyleRequest& output) {
     output.token = pending_token_;
     output.catalog_generation = catalog_generation_;
     std::strcpy(output.style_id, styles_[pending_index_].id);
+    activation_token_ = pending_token_;
     state_ = State::APPLYING;
+    return true;
+}
+
+bool MapStyleSelector::reconcileActivation(
+    std::uint32_t expected_token, std::uint32_t generation,
+    const MapStyleSummary* styles, std::size_t count, const char* active_id,
+    bool retain_error) {
+    if (!activationOwnedBy(expected_token)) return false;
+    return applyCatalog(generation, styles, count, active_id,
+                        retain_error ? State::ERROR : State::READY);
+}
+
+bool MapStyleSelector::releaseActivation(std::uint32_t expected_token) {
+    if (activation_token_ == 0U || activation_token_ != expected_token) return false;
+    activation_token_ = 0U;
+    return true;
+}
+
+bool MapStyleSelector::cancelPending(std::uint32_t expected_token) {
+    if (!activationOwnedBy(expected_token) || state_ != State::APPLYING ||
+        pending_token_ != expected_token) return false;
+    pending_token_ = 0U;
+    activation_token_ = 0U;
+    state_ = State::READY;
+    return true;
+}
+
+bool MapStyleSelector::clearError() {
+    if (state_ != State::ERROR) return false;
+    state_ = State::READY;
     return true;
 }
 
 bool MapStyleSelector::complete(const MapStyleCompletion& completion) {
     if (state_ != State::APPLYING || completion.token != pending_token_ ||
+        completion.token != activation_token_ ||
         completion.catalog_generation != catalog_generation_ ||
         std::strcmp(completion.style_id, styles_[pending_index_].id) != 0) return false;
     pending_token_ = 0U;
