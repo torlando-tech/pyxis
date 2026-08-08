@@ -17,7 +17,6 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
-#include "Hardware/TDeck/MapTileStore.h"
 #include "Hardware/TDeck/MapTileStoreSD.h"
 #include "Hardware/TDeck/MapTilePack.h"
 
@@ -77,8 +76,6 @@ private:
 
     Pyxis::MapScreenPresenter presenter_;
     Hardware::TDeck::MapTileStoreSD storage_;
-    Hardware::TDeck::TileStoreConfig store_config_;
-    Hardware::TDeck::MapTileStore store_;
     Hardware::TDeck::MapTilePack pack_;
     char pack_attribution_[Pyxis::MapPackManifest::ATTRIBUTION_CAPACITY];
     std::atomic<bool> screen_visible_;
@@ -89,7 +86,6 @@ private:
     std::atomic<bool> stop_requested_;
     std::atomic<bool> worker_exited_;
     bool worker_started_;
-    bool store_initialized_;
     bool requests_released_;
     bool has_location_fix_;
     bool center_initialized_;
@@ -99,16 +95,11 @@ private:
     BackCallback back_callback_;
 
     static void workerEntry(void* context);
-    enum class CompressedTileSource : std::uint8_t {
-        PACK = 0,
-        LIVE_STORE
-    };
     void workerLoop();
     void publishPackAttribution();
     Pyxis::MapTileLoadResult loadTile(const Pyxis::MapTileRequest& request);
     Pyxis::MapTileLoadResult readTile(const Pyxis::MapTileRequest& request);
-    Pyxis::MapTileLoadResult readCompressedTile(
-        const Pyxis::MapTileRequest& request, CompressedTileSource source);
+    Pyxis::MapTileLoadResult readCompressedTile(const Pyxis::MapTileRequest& request);
     bool startWorker();
     void stopWorker();
     bool lockState(TickType_t ticks = portMAX_DELAY);
