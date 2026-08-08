@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
 import test from 'node:test';
 import {
   decodeActiveSelection,
@@ -189,6 +190,111 @@ test('active map-set wire format matches the cross-language golden record', () =
   ]});
   assert.equal(Buffer.from(record).toString('hex'), '504d415302006900010000000a6f736d2d627269676874144d61702064617461206174747269627574696f6e020664657461696c020002010000000100000001000000040500000005000000050000000573746174650100020100000001000000020000009de230d6');
   assert.deepEqual(decodeActiveSelection(record).packs.map(pack => pack.packId), ['detail','state']);
+});
+
+test('accepts a sanitized downloader-shaped rootless stored ZIP fixture', async () => {
+  const bytes = await readFile(new URL('./fixtures/downloader-rootless-stored-descriptor.zip', import.meta.url));
+  const archive = new Blob([bytes], {type: 'application/zip'});
+
+  // Walk the ZIP structures instead of searching for signatures, which may also
+  // occur in PNG payloads. This fixture intentionally exercises signed streaming
+  // descriptors, a stricter shape than inspectMuiZip itself requires.
+  const requireRange = (offset, length, label) => {
+    assert(Number.isSafeInteger(offset) && offset >= 0 && length >= 0 && offset + length <= bytes.length,
+      `${label} is outside the fixture`);
+  };
+  const u16 = (offset, label) => { requireRange(offset, 2, label); return bytes.readUInt16LE(offset); };
+  const u32 = (offset, label) => { requireRange(offset, 4, label); return bytes.readUInt32LE(offset); };
+  const eocdOffset = bytes.length - 22;
+  requireRange(eocdOffset, 22, 'EOCD');
+  assert.equal(u32(eocdOffset, 'EOCD signature'), 0x06054b50);
+  assert.equal(u16(eocdOffset + 4, 'EOCD disk number'), 0);
+  assert.equal(u16(eocdOffset + 6, 'EOCD central-directory disk'), 0);
+  assert.equal(u16(eocdOffset + 8, 'EOCD disk record count'), 3);
+  assert.equal(u16(eocdOffset + 10, 'EOCD record count'), 3);
+  assert.equal(u16(eocdOffset + 20, 'EOCD comment length'), 0);
+  const centralSize = u32(eocdOffset + 12, 'central-directory size');
+  const centralOffset = u32(eocdOffset + 16, 'central-directory offset');
+  requireRange(centralOffset, centralSize, 'central directory');
+  assert.equal(centralOffset + centralSize, eocdOffset);
+
+  const expectedEntries = [
+    {name: '0/0/0.png', size: 270},
+    {name: '1/0/0.png', size: 270},
+    {name: '2/1/1.png', size: 270},
+  ];
+  const records = [];
+  let position = centralOffset;
+  for (const expected of expectedEntries) {
+    requireRange(position, 46, `central header for ${expected.name}`);
+    assert.equal(u32(position, `central signature for ${expected.name}`), 0x02014b50);
+    const nameLength = u16(position + 28, `central name length for ${expected.name}`);
+    const extraLength = u16(position + 30, `central extra length for ${expected.name}`);
+    const commentLength = u16(position + 32, `central comment length for ${expected.name}`);
+    const recordLength = 46 + nameLength + extraLength + commentLength;
+    requireRange(position, recordLength, `central record for ${expected.name}`);
+    const name = bytes.toString('utf8', position + 46, position + 46 + nameLength);
+    assert.equal(name, expected.name);
+    assert.equal(u16(position + 4, `creator for ${name}`), 20); // DOS creator, ZIP 2.0
+    assert.equal(u16(position + 8, `flags for ${name}`), 0x0008);
+    assert.equal(u16(position + 10, `method for ${name}`), 0);
+    assert.equal(extraLength, 0);
+    assert.equal(commentLength, 0);
+    assert.equal(u16(position + 34, `disk start for ${name}`), 0);
+    assert.equal(u32(position + 38, `external attributes for ${name}`), 0);
+    const crc = u32(position + 16, `CRC for ${name}`);
+    const compressedSize = u32(position + 20, `compressed size for ${name}`);
+    const uncompressedSize = u32(position + 24, `uncompressed size for ${name}`);
+    assert.equal(compressedSize, expected.size);
+    assert.equal(uncompressedSize, expected.size);
+    records.push({name, crc, compressedSize, uncompressedSize, localOffset: u32(position + 42, `local offset for ${name}`)});
+    position += recordLength;
+  }
+  assert.equal(position, centralOffset + centralSize, 'central directory must contain exactly three records');
+
+  for (let index = 0; index < records.length; index++) {
+    const record = records[index];
+    const local = record.localOffset;
+    requireRange(local, 30, `local header for ${record.name}`);
+    assert.equal(u32(local, `local signature for ${record.name}`), 0x04034b50);
+    assert.equal(u16(local + 6, `local flags for ${record.name}`), 0x0008);
+    assert.equal(u16(local + 8, `local method for ${record.name}`), 0);
+    assert.equal(u32(local + 14, `local CRC for ${record.name}`), 0);
+    assert.equal(u32(local + 18, `local compressed size for ${record.name}`), 0);
+    assert.equal(u32(local + 22, `local uncompressed size for ${record.name}`), 0);
+    const localNameLength = u16(local + 26, `local name length for ${record.name}`);
+    const localExtraLength = u16(local + 28, `local extra length for ${record.name}`);
+    assert.equal(localExtraLength, 0);
+    requireRange(local + 30, localNameLength, `local name for ${record.name}`);
+    assert.equal(bytes.toString('utf8', local + 30, local + 30 + localNameLength), record.name);
+
+    const descriptor = local + 30 + localNameLength + localExtraLength + record.compressedSize;
+    requireRange(descriptor, 16, `data descriptor for ${record.name}`);
+    assert.equal(u32(descriptor, `descriptor signature for ${record.name}`), 0x08074b50);
+    assert.equal(u32(descriptor + 4, `descriptor CRC for ${record.name}`), record.crc);
+    assert.equal(u32(descriptor + 8, `descriptor compressed size for ${record.name}`), record.compressedSize);
+    assert.equal(u32(descriptor + 12, `descriptor uncompressed size for ${record.name}`), record.uncompressedSize);
+    assert.equal(descriptor + 16, records[index + 1]?.localOffset ?? centralOffset,
+      `data descriptor for ${record.name} must immediately follow its payload`);
+  }
+
+  const report = await inspectMuiZip(archive);
+  assert.equal(report.tileCount, 3);
+  assert.equal(report.minZoom, 0);
+  assert.equal(report.maxZoom, 2);
+  assert.deepEqual(report.rowSpans, [
+    {zoom: 0, y: 0, xMinimum: 0, xMaximum: 0},
+    {zoom: 1, y: 0, xMinimum: 0, xMaximum: 0},
+    {zoom: 2, y: 1, xMinimum: 1, xMaximum: 1},
+  ]);
+
+  const root = new MemoryDirectoryHandle();
+  const result = await installMuiZip({archive, rootDirectory: root, metadata});
+  assert.equal(result.tileCount, 3);
+  assert.deepEqual(
+    [...(await child(root, 'pyxis-map/packs/overview/tiles/0/0/0.png')).bytes],
+    [...PNG],
+  );
 });
 
 test('inspects and transactionally installs a sparse stored MUI XYZ ZIP', async () => {
