@@ -667,7 +667,10 @@ bool MapScreen::applyOneCompletion() {
     Pyxis::MapTileCompletion completion{};
     const bool applied = presenter_.takeApplicableCompletion(completion);
     if (applied) {
-        setStatusFor(completion.result);
+        Pyxis::MapTileLoadResult visible_status{};
+        if (presenter_.visibleTileStatus(visible_status)) {
+            setStatusFor(visible_status);
+        }
         if (completion.result == Pyxis::MapTileLoadResult::READY &&
             completion.slot_index < TILE_COUNT) {
             const std::size_t index = completion.slot_index;
