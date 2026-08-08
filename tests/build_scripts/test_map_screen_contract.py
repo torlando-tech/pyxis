@@ -149,6 +149,50 @@ def test_sd_adapter_never_mounts_or_formats():
         assert forbidden not in source
 
 
+def test_style_switch_is_bounded_and_worker_owned():
+    source = text(UI / "MapScreen.cpp")
+    header = text(UI / "MapScreen.h")
+    assert '#include "MapStyleSelector.h"' in header
+    assert '#include "Hardware/TDeck/MapStyleCatalog.h"' in header
+    assert "Hardware::TDeck::MapStyleCatalog style_catalog_;" in header
+    assert "Pyxis::MapStyleSelector style_selector_;" in header
+    assert "lv_obj_t* style_button_;" in header
+    assert "lv_obj_t* style_label_;" in header
+    assert "Pyxis::MapStyleRequest style_request_;" in header
+    assert "bool style_request_pending_;" in header
+
+    callback = function_body(source, "void MapScreen::onStyle(lv_event_t* event)")
+    assert "style_selector_.requestNext" in callback
+    assert "style_request_pending_ = true" in callback
+    assert "style_catalog_.activate" not in callback
+    assert "pack_.initialize" not in callback
+
+    worker = function_body(source, "void MapScreen::workerLoop()")
+    assert "style_catalog_.discover()" in worker
+    assert "style_catalog_.activate" in worker
+    assert "pack_.initialize()" in worker
+    assert "presenter_.invalidateTiles()" in worker
+    activation = worker.index("style_catalog_.activate")
+    committed_reload = worker.index("pack_.initialize()", activation)
+    cache_invalidation = worker.index("decoded_tile_cache_.clear()", committed_reload)
+    selector_completion = worker.index("style_selector_.complete", committed_reload)
+    tile_invalidation = worker.index("presenter_.invalidateTiles()", committed_reload)
+    committed_catalog = worker.index("publishStyleCatalog();", tile_invalidation)
+    rediscovery = worker.index("style_catalog_.discover()", committed_reload)
+    assert activation < committed_reload < cache_invalidation
+    assert cache_invalidation < selector_completion < tile_invalidation < committed_catalog < rediscovery
+    assert "success = discovery" not in worker
+    assert worker.index("style_catalog_.activate") < worker.index("presenter_.takeRequest")
+
+    for signature in ("void MapScreen::applyFrame()",
+                      "bool MapScreen::applyOneCompletion()"):
+        body = function_body(source, signature)
+        assert "style_catalog_." not in body
+        assert "pack_.initialize" not in body
+    assert "lv_group_add_obj(group, style_button_)" in source
+    assert "lv_group_remove_obj(style_button_)" in source
+
+
 def test_ui_manager_services_before_lock_and_hides_map_everywhere():
     source = text(UI / "UIManager.cpp")
     update = function_body(source, "void UIManager::update()")

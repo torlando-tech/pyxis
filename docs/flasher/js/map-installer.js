@@ -57,6 +57,34 @@ async function withInstallLock(rootDirectory, operation) {
 
 export class MapInstallerError extends Error {}
 function fail(message) { throw new MapInstallerError(message); }
+
+const MUI_STYLE_PROFILES = Object.freeze({
+  'osm-bright': Object.freeze({label:'OSM Bright',attribution:'(c) OpenMapTiles (c) OpenStreetMap contributors',license:'OSM ODbL; style CC-BY-4.0/BSD-3-Clause'}),
+  'dark-matter': Object.freeze({label:'Dark Matter',attribution:'(c) OpenMapTiles (c) OpenStreetMap contributors; style (c) CARTO',license:'OSM ODbL; style CC-BY-4.0/BSD-3-Clause (CARTO CC-BY-3.0)'}),
+  'positron': Object.freeze({label:'Positron',attribution:'(c) OpenMapTiles (c) OpenStreetMap contributors; style (c) CARTO',license:'OSM ODbL; style CC-BY-4.0/BSD-3-Clause (CARTO CC-BY-3.0)'}),
+  'toner': Object.freeze({label:'Toner',attribution:'(c) MapTiler (c) OpenStreetMap contributors',license:'OSM ODbL; style CC-BY-4.0/BSD-3-Clause (Stamen ISC)'}),
+});
+
+export function getMuiStyleProfile(styleId) {
+  const profile = MUI_STYLE_PROFILES[styleId];
+  if (!profile) fail(`Unsupported MUI map style: ${styleId || 'unknown'}`);
+  return {
+    id: styleId,
+    label: profile.label,
+    attribution: profile.attribution,
+    source: `Oxed's Map Tile Downloader (${profile.label})`,
+    license: profile.license,
+  };
+}
+
+export function resolveMuiStyleProfile(detectedStyleId, selectedStyleId) {
+  if (detectedStyleId !== null && detectedStyleId !== undefined) {
+    return getMuiStyleProfile(detectedStyleId);
+  }
+  if (!selectedStyleId) fail('Select map style before installing this rootless XYZ ZIP');
+  return getMuiStyleProfile(selectedStyleId);
+}
+
 function u16(view, offset) { return view.getUint16(offset, true); }
 function u32(view, offset) { return view.getUint32(offset, true); }
 function putU16(view, offset, value) { view.setUint16(offset, value, true); }
@@ -432,8 +460,9 @@ export async function inspectMuiZip(archive, {onProgress = () => {}} = {}) {
   entries.sort((a,b) => a.zoom-b.zoom || a.x-b.x || a.y-b.y);
   const zooms = [...new Set(entries.map(entry => entry.zoom))].sort((a,b) => a-b);
   if (zooms.some((zoom,index) => zoom !== zooms[0] + index)) fail('ZIP zoom levels must be contiguous');
+  const styleId = prefix ? prefix.slice('maps/'.length, -1) : null;
   return {entries, rowSpans:makeRowSpans(entries), tileCount:entries.length,
-          totalBytes, minZoom:zooms[0], maxZoom:zooms.at(-1), prefix};
+          totalBytes, minZoom:zooms[0], maxZoom:zooms.at(-1), prefix, styleId};
 }
 
 export function serializeSparseManifest(metadata, rowSpans, tileCount) {
@@ -545,6 +574,7 @@ async function verifyNamedDirectory(parent,name,expected,allowedEntries){
 }
 async function writeVerified(parent,name,bytes){ const handle=await parent.getFileHandle(name,{create:true}); const writable=await handle.createWritable({keepExistingData:false}); try{await writable.write(bytes);await writable.close();}catch(error){try{await writable.abort();}catch{} throw error;} const actual=new Uint8Array(await (await handle.getFile()).arrayBuffer()); if(actual.length!==bytes.length) fail(`SD read-back mismatch: ${name}`); for(let index=0;index<bytes.length;index++) if(actual[index]!==bytes[index]) fail(`SD read-back mismatch: ${name}`); return handle; }
 async function readSelection(pyxis,name){ let handle; try{handle=await pyxis.getFileHandle(name);}catch(error){if(error?.name==='NotFoundError')return null;throw error;} const bytes=new Uint8Array(await(await handle.getFile()).arrayBuffer()); try{return decodeActiveSelection(bytes);}catch{return null;} }
+async function readStyleSelection(mapSets,name){let handle;try{handle=await mapSets.getFileHandle(name);}catch(error){if(error?.name==='NotFoundError')return null;throw error;}const bytes=new Uint8Array(await(await handle.getFile()).arrayBuffer());try{return decodeActiveSelection(bytes);}catch{fail(`Installed style record is invalid: ${name}`);}}
 async function fileBytes(parent,name){const handle=await parent.getFileHandle(name);return new Uint8Array(await(await handle.getFile()).arrayBuffer());}
 function equalBytes(left,right){if(left.length!==right.length)return false;for(let index=0;index<left.length;index++)if(left[index]!==right[index])return false;return true;}
 async function removeOwnedPack(packs,packId,pack,receiptName,receipt,entries){
@@ -568,22 +598,28 @@ async function prepareActiveMapSet(pyxis,metadata,rowSpans){
   if(slots[0]&&slots[1]&&slots[0].generation===slots[1].generation&&JSON.stringify(slots[0])!==JSON.stringify(slots[1]))fail('Conflicting active map-set records');
   const valid=slots.filter(Boolean);const highest=Math.max(0,...valid.map(slot=>slot.generation));if(highest===0xffffffff)fail('Active selection generation is exhausted');
   const current=valid.sort((left,right)=>right.generation-left.generation)[0];
+  const mapSets=await getDirectory(pyxis,'map-sets');const styleName=`${metadata.mapSetId}.pmas`;
+  const installed=await readStyleSelection(mapSets,styleName);
+  if(installed&&(installed.version!==2||installed.mapSetId!==metadata.mapSetId||installed.attribution!==metadata.attribution))fail('Installed style record does not match selected map set');
+  const composition=installed||(current?.version===2&&current.mapSetId===metadata.mapSetId?current:null);
   let packs=[];
-  if(current?.version===2&&current.mapSetId===metadata.mapSetId){
-    if(current.attribution!==metadata.attribution)fail('Installed map set attribution does not match');
-    packs=current.packs.filter(pack=>pack.packId!==metadata.packId);
+  if(composition){
+    if(composition.attribution!==metadata.attribution)fail('Installed map set attribution does not match');
+    packs=composition.packs.filter(pack=>pack.packId!==metadata.packId);
   }
   packs.unshift({packId:metadata.packId,rowSpans});
   const target=!slots[0]?'active-pack.0':!slots[1]?'active-pack.1':slots[0].generation<=slots[1].generation?'active-pack.0':'active-pack.1';
   const record=encodeActiveMapSet({generation:highest+1,mapSetId:metadata.mapSetId,attribution:metadata.attribution,packs});
-  return {target,record,packs};
+  return {target,record,packs,mapSets,styleName};
 }
 
 async function activateMapSet(pyxis,metadata,rowSpans){
-  const {target,record}=await prepareActiveMapSet(pyxis,metadata,rowSpans);
+  const {target,record,mapSets,styleName}=await prepareActiveMapSet(pyxis,metadata,rowSpans);
+  await writeVerified(mapSets,styleName,record);const installed=decodeActiveSelection(await fileBytes(mapSets,styleName));
+  if(installed.version!==2||installed.mapSetId!==metadata.mapSetId||installed.packs[0].packId!==metadata.packId)fail('Style map-set verification failed');
   await writeVerified(pyxis,target,record);const selected=decodeActiveSelection(await fileBytes(pyxis,target));
   if(selected.version!==2||selected.mapSetId!==metadata.mapSetId||selected.packs[0].packId!==metadata.packId)fail('Active map-set verification failed');
-  return {selectionFile:target,enabledPacks:selected.packs.map(pack=>pack.packId)};
+  return {selectionFile:target,styleFile:styleName,enabledPacks:selected.packs.map(pack=>pack.packId)};
 }
 
 async function verifyExistingPack(pack,archive,report,manifest){
@@ -593,8 +629,10 @@ async function verifyExistingPack(pack,archive,report,manifest){
 }
 
 async function installMuiZipLocked({archive,rootDirectory,metadata,onProgress=()=>{}}){
-  validateMetadata(metadata);if(!/^[a-z0-9_-]{1,31}$/.test(metadata.mapSetId||''))fail('Map set ID is invalid');if(!rootDirectory||rootDirectory.kind!=='directory')fail('Choose an SD-card directory');
-  const report=await inspectMuiZip(archive,{onProgress});const manifest=serializeSparseManifest(metadata,report.rowSpans,report.tileCount);const pyxis=await getDirectory(rootDirectory,'pyxis-map');
+  validateMetadata(metadata);if(!/^[a-z0-9_-]{1,31}$/.test(metadata.mapSetId||''))fail('Map set ID is invalid');const profile=getMuiStyleProfile(metadata.mapSetId);if(metadata.attribution!==profile.attribution||metadata.source!==profile.source||metadata.license!==profile.license)fail('Required style attribution or provenance was changed');if(!rootDirectory||rootDirectory.kind!=='directory')fail('Choose an SD-card directory');
+  const report=await inspectMuiZip(archive,{onProgress});
+  if(report.styleId&&report.styleId!==metadata.mapSetId)fail('MUI ZIP style does not match the selected map set');
+  const manifest=serializeSparseManifest(metadata,report.rowSpans,report.tileCount);const pyxis=await getDirectory(rootDirectory,'pyxis-map');
   await prepareActiveMapSet(pyxis,metadata,report.rowSpans);const packs=await getDirectory(pyxis,'packs');
   let existing=null;try{existing=await packs.getDirectoryHandle(metadata.packId);}catch(error){if(error?.name!=='NotFoundError')throw error;}
   if(existing){

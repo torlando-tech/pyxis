@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "Hardware/TDeck/ActiveMapSetCodec.h"
 #include "Hardware/TDeck/MapTileStore.h"
 #include "UI/LXMF/MapPackManifest.h"
 
@@ -58,9 +59,9 @@ public:
     static const char ACTIVE_PACK_SLOT_0_PATH[];
     static const char ACTIVE_PACK_SLOT_1_PATH[];
     static const std::size_t LEGACY_ACTIVE_SELECTION_SIZE = 48U;
-    static const std::size_t ACTIVE_SELECTION_SIZE = 7105U;
-    static const std::size_t MAX_ACTIVE_PACKS = 8U;
-    static const std::size_t MAX_ACTIVE_ROW_SPANS = 512U;
+    static const std::size_t ACTIVE_SELECTION_SIZE = ActiveMapSetCodec::MAX_SERIALIZED_SIZE;
+    static const std::size_t MAX_ACTIVE_PACKS = ActiveMapSetCodec::MAX_PACKS;
+    static const std::size_t MAX_ACTIVE_ROW_SPANS = ActiveMapSetCodec::MAX_ROW_SPANS;
     static const std::size_t PATH_CAPACITY = 80U;
     static const std::size_t MANIFEST_BUFFER_CAPACITY = Pyxis::MapPackManifest::MAX_SERIALIZED_SIZE;
 
@@ -75,9 +76,15 @@ public:
     std::uint32_t selectionGeneration() const { return selection_generation_; }
 
     static bool isValidPackId(const char* pack_id);
+    static bool selectionRecordsEqual(const std::uint8_t* first, std::size_t first_length,
+                                      const std::uint8_t* second, std::size_t second_length);
     static MapTilePackResult manifestPath(const char* pack_id, char* output, std::size_t capacity);
     static MapTilePackResult tilePath(const char* pack_id, const TileKey& key,
                                       char* output, std::size_t capacity);
+    static MapTilePackResult validateMapSet(MapTileStorage& storage,
+                                            const ActiveMapSetView& view,
+                                            std::uint8_t* scratch,
+                                            std::size_t scratch_capacity);
 
     MapTilePackResult beginGet(const TileKey& key, std::uint32_t& size);
     MapTilePackResult readGetChunk(std::uint8_t* output, std::size_t capacity,
@@ -86,7 +93,7 @@ public:
 
     static std::size_t ramBytes() {
 #if defined(ARDUINO_ARCH_ESP32)
-        return sizeof(MapTilePack) + 2U * ACTIVE_SELECTION_SIZE;
+        return sizeof(MapTilePack) + 2U * ACTIVE_SELECTION_SIZE + MANIFEST_BUFFER_CAPACITY;
 #else
         return sizeof(MapTilePack);
 #endif
@@ -94,7 +101,7 @@ public:
     static std::size_t internalRamBytes() { return sizeof(MapTilePack); }
     static std::size_t psramBytes() {
 #if defined(ARDUINO_ARCH_ESP32)
-        return 2U * ACTIVE_SELECTION_SIZE;
+        return 2U * ACTIVE_SELECTION_SIZE + MANIFEST_BUFFER_CAPACITY;
 #else
         return 0U;
 #endif
@@ -120,6 +127,7 @@ private:
     std::uint8_t* selection_buffers_;
 #else
     std::uint8_t selection_buffers_[2][ACTIVE_SELECTION_SIZE];
+    std::uint8_t manifest_buffer_[MANIFEST_BUFFER_CAPACITY];
 #endif
     std::uint8_t active_selection_buffer_;
 
@@ -133,6 +141,9 @@ private:
                                MapTilePackResult oversized_result);
     static bool isValidKey(const TileKey& key);
     std::uint8_t* selectionBuffer(std::uint8_t index);
+    std::uint8_t* manifestBuffer();
+    bool fileMatches(const char* path, const std::uint8_t* expected, std::size_t length);
+
     static bool parseMapSetSelection(const std::uint8_t* input, std::size_t length,
                                      std::uint32_t& generation,
                                      Pyxis::MapPackManifest& metadata,

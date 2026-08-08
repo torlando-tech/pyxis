@@ -242,7 +242,7 @@
             margin: 1rem 0;
         }
         .map-field label { display: block; color: var(--muted); font-size: 0.875rem; margin-bottom: 0.4rem; }
-        .map-field input { width: 100%; box-sizing: border-box; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 0.65rem; }
+        .map-field input, .map-field select { width: 100%; box-sizing: border-box; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 0.65rem; }
         .map-status { margin: 0.8rem 0; color: var(--muted); overflow-wrap: anywhere; }
         .map-status.success { color: var(--success); }
         .map-status.error { color: var(--error); }
@@ -319,7 +319,7 @@
                 <li>
                     Download a compatible MUI map ZIP from
                     <a href="https://download.tiles.coalition.space/" target="_blank" rel="noopener noreferrer">Oxed's Map Tile Downloader</a>.
-                    Choose OSM Bright for current Pyxis compatibility.
+                    Choose OSM Bright, Dark Matter, Positron, or Toner.
                 </li>
                 <li>Turn the T-Deck off, remove its microSD card, and insert the card into your computer.</li>
                 <li>Choose the downloaded ZIP below, enter a map name and pack ID, and wait for local validation.</li>
@@ -333,6 +333,16 @@
                     <input id="map-archive" type="file" accept=".zip,application/zip">
                 </div>
                 <div class="map-field">
+                    <label for="map-style">Map style</label>
+                    <select id="map-style">
+                        <option value="" selected disabled>Select map style…</option>
+                        <option value="osm-bright">OSM Bright</option>
+                        <option value="dark-matter">Dark Matter</option>
+                        <option value="positron">Positron</option>
+                        <option value="toner">Toner</option>
+                    </select>
+                </div>
+                <div class="map-field">
                     <label for="map-pack-name">Map name</label>
                     <input id="map-pack-name" type="text" maxlength="63" placeholder="Offline map">
                 </div>
@@ -342,9 +352,9 @@
                 </div>
             </div>
             <p class="map-note">
-                Source profile: Coalition MUI OSM Bright user download.<br>
-                Attribution: Map data (c) OpenStreetMap contributors — ODbL-1.0.<br>
-                Compatible OSM Bright packs are enabled together. The newest pack takes priority where coverage overlaps.
+                Source profile and style are read from the selected MUI ZIP. Rootless XYZ ZIPs use the style selected above.<br>
+                Attribution: Map data (c) OpenStreetMap contributors — ODbL-1.0 data; style terms at source.<br>
+                Compatible packs of the same style are enabled together. The newest pack takes priority where coverage overlaps.
             </p>
             <div id="map-install-status" class="map-status">Choose a ZIP to validate it locally. No tiles are uploaded.</div>
             <div class="button-group">
@@ -387,7 +397,7 @@
 
     <script type="module">
         import { ESPLoader, Transport } from './js/esptool.js';
-        import { inspectMuiZip, installMuiZip } from './js/map-installer.js';
+        import { inspectMuiZip, installMuiZip, resolveMuiStyleProfile } from './js/map-installer.js';
 
         const flashBtn = document.getElementById('flash-btn');
         const eraseCheckbox = document.getElementById('erase-checkbox');
@@ -401,6 +411,7 @@
         const customFirmwareInput = document.getElementById('custom-firmware');
         const customFirmwareStatus = document.getElementById('custom-firmware-status');
         const mapArchiveInput = document.getElementById('map-archive');
+        const mapStyleSelect = document.getElementById('map-style');
         const mapPackNameInput = document.getElementById('map-pack-name');
         const mapPackIdInput = document.getElementById('map-pack-id');
         const mapInstallStatus = document.getElementById('map-install-status');
@@ -435,10 +446,24 @@
         });
         mapPackIdInput.addEventListener('input', () => { mapPackIdInput.dataset.edited = 'true'; });
 
+        function setReadyMapStatus(report, style) {
+            setMapStatus(`Ready: ${style.label}, ${report.tileCount} tiles, zoom ${report.minZoom}-${report.maxZoom}, ${report.rowSpans.length} sparse row spans, ${report.totalBytes.toLocaleString()} bytes.`, 'success');
+        }
+
+        mapStyleSelect.addEventListener('change', () => {
+            if (validatedMapArchive && !validatedMapArchive.report.styleId) {
+                const style = resolveMuiStyleProfile(null, mapStyleSelect.value);
+                mapInstallBtn.disabled = false;
+                setReadyMapStatus(validatedMapArchive.report, style);
+            }
+        });
+
         mapArchiveInput.addEventListener('change', async function() {
             const token = ++mapSelectionToken;
             validatedMapArchive = null;
             mapInstallBtn.disabled = true;
+            mapStyleSelect.disabled = false;
+            mapStyleSelect.value = '';
             const file = this.files?.[0];
             if (!file) { setMapStatus('Choose a ZIP to validate it locally. No tiles are uploaded.'); return; }
             if (!mapPackNameInput.value) mapPackNameInput.value = file.name.replace(/\.zip$/i, '') || 'Offline map';
@@ -451,18 +476,38 @@
                     }
                 }});
                 if (token !== mapSelectionToken) return;
+                const style = report.styleId
+                    ? resolveMuiStyleProfile(report.styleId, '')
+                    : (mapStyleSelect.value ? resolveMuiStyleProfile(null, mapStyleSelect.value) : null);
+                if (report.styleId) {
+                    mapStyleSelect.value = style.id;
+                    mapStyleSelect.disabled = true;
+                }
                 validatedMapArchive = {file, report};
-                mapInstallBtn.disabled = false;
-                setMapStatus(`Ready: ${report.tileCount} tiles, zoom ${report.minZoom}-${report.maxZoom}, ${report.rowSpans.length} sparse row spans, ${report.totalBytes.toLocaleString()} bytes.`, 'success');
+                if (style) {
+                    mapInstallBtn.disabled = false;
+                    setReadyMapStatus(report, style);
+                } else {
+                    setMapStatus('Select map style to enable this validated rootless XYZ ZIP.');
+                }
             } catch (error) {
                 if (token !== mapSelectionToken) return;
                 this.value = '';
+                mapStyleSelect.disabled = false;
                 setMapStatus(error.message, 'error');
             }
         });
 
         mapInstallBtn.addEventListener('click', async () => {
             if (!validatedMapArchive) return;
+            let style;
+            try {
+                style = resolveMuiStyleProfile(validatedMapArchive.report.styleId, mapStyleSelect.value);
+            } catch (error) {
+                mapInstallBtn.disabled = true;
+                setMapStatus(error.message, 'error');
+                return;
+            }
             const name = mapPackNameInput.value.trim();
             const packId = mapPackIdInput.value.trim();
             if (!name || !/^[a-z0-9_-]{1,31}$/.test(packId)) {
@@ -486,11 +531,11 @@
                     rootDirectory,
                     metadata: {
                         packId,
-                        mapSetId: 'osm-bright',
+                        mapSetId: style.id,
                         name,
-                        attribution: 'Map data (c) OpenStreetMap contributors',
-                        source: 'Coalition MUI OSM Bright user download',
-                        license: 'ODbL-1.0',
+                        attribution: style.attribution,
+                        source: style.source,
+                        license: style.license,
                     },
                     onProgress(progress) {
                         if (progress.phase === 'write' && (progress.completed % 25 === 0 || progress.completed === progress.total)) {
@@ -498,7 +543,7 @@
                         }
                     },
                 });
-                setMapStatus(`Installed and enabled ${name} in OSM Bright: ${result.tileCount} tiles; ${result.enabledPacks.length} compatible pack(s) active. Safely eject the SD card before returning it to the T-Deck.`, 'success');
+                setMapStatus(`Installed and enabled ${name} in ${style.label}: ${result.tileCount} tiles; ${result.enabledPacks.length} compatible pack(s) active. Safely eject the SD card before returning it to the T-Deck.`, 'success');
             } catch (error) {
                 if (error?.name !== 'AbortError') setMapStatus(`Installation failed: ${error.message}`, 'error');
             } finally {

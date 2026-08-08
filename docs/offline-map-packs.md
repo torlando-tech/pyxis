@@ -6,7 +6,7 @@ Pyxis can read prebuilt raster map packs from an SD card. Importers accept only 
 
 Open the Pyxis web flasher in current Chrome or Edge and use **Install Offline Maps**:
 
-1. Download an OSM Bright MUI ZIP from [Oxed's Map Tile Downloader](https://download.tiles.coalition.space/).
+1. Download an OSM Bright, Dark Matter, Positron, or Toner MUI ZIP from [Oxed's Map Tile Downloader](https://download.tiles.coalition.space/).
 2. Turn the T-Deck off, remove its SD card, and mount the card on the computer.
 3. Choose the ZIP, enter a map name and pack ID, and wait for local validation.
 4. Click **Install and Enable**, then choose the SD-card root.
@@ -40,10 +40,25 @@ coverage. Outside the detail area at z10-z16, the key is uncovered. If a
 higher-priority pack declares a tile but its file is missing, Pyxis safely tries
 the next compatible pack.
 
-The browser currently imports Coalition/MUI OSM Bright data into the bounded
-`osm-bright` map set. Newly installed packs take priority over earlier packs
-where their exact row-span coverage overlaps. Different styles or providers
-must use a different map set rather than being blended implicitly.
+The browser detects Coalition/MUI OSM Bright, Dark Matter, Positron, and Toner
+ZIP roots and places each style into a separate bounded map set. For rootless
+XYZ ZIPs, the user must select the correct style. Newly installed packs take
+priority over earlier packs of the same style where their exact row-span
+coverage overlaps; different styles are never blended implicitly.
+
+Each successful install publishes a bounded style snapshot at
+`/pyxis-map/map-sets/<style>.pmas` before updating the redundant active slots.
+When two or more valid snapshots are installed, use the style control in the
+Maps toolbar to cycle them. Pyxis probes only the four documented paths and
+never scans the SD card. Activation is committed and read back before the map
+reloads; a failed switch leaves the previous valid active slot available.
+
+The generated PMAS attribution follows the upstream style licenses as well as
+OpenStreetMap data: [OSM Bright](https://github.com/openmaptiles/osm-bright-gl-style),
+[Dark Matter](https://github.com/openmaptiles/dark-matter-gl-style),
+[Positron](https://github.com/openmaptiles/positron-gl-style), and
+[Toner](https://github.com/openmaptiles/maptiler-toner-gl-style). Do not remove
+or replace the attribution metadata when repackaging tiles.
 
 ## Input requirements
 

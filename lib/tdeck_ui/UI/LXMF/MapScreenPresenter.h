@@ -88,6 +88,7 @@ public:
     bool zoomBy(int delta);
     bool recenter(bool has_fix,
                   const Telemetry::LocationTelemetry& location);
+    void invalidateTiles();
 
     MapView::Result buildFrame(const MapView::Request& request);
     bool takeRequest(MapTileRequest& output);

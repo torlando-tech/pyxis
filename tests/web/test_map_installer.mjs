@@ -7,9 +7,11 @@ import test from 'node:test';
 import {
   decodeActiveSelection,
   encodeActiveMapSet,
+  getMuiStyleProfile,
   inspectMuiZip,
   installMuiZip,
   parseSparseManifest,
+  resolveMuiStyleProfile,
 } from '../../docs/flasher/js/map-installer.js';
 
 const PNG = Buffer.from(
@@ -178,10 +180,73 @@ const metadata = {
   packId: 'overview',
   mapSetId: 'osm-bright',
   name: 'Overview',
-  attribution: 'Map data (c) OpenStreetMap contributors',
-  source: 'Coalition MUI OSM Bright user download',
-  license: 'ODbL-1.0',
+  attribution: '(c) OpenMapTiles (c) OpenStreetMap contributors',
+  source: "Oxed's Map Tile Downloader (OSM Bright)",
+  license: 'OSM ODbL; style CC-BY-4.0/BSD-3-Clause',
 };
+
+test('maps supported Coalition styles to separate map sets and provenance', async () => {
+  const expected = [
+    ['osm-bright', 'OSM Bright', '(c) OpenMapTiles (c) OpenStreetMap contributors',
+      'OSM ODbL; style CC-BY-4.0/BSD-3-Clause'],
+    ['dark-matter', 'Dark Matter', '(c) OpenMapTiles (c) OpenStreetMap contributors; style (c) CARTO',
+      'OSM ODbL; style CC-BY-4.0/BSD-3-Clause (CARTO CC-BY-3.0)'],
+    ['positron', 'Positron', '(c) OpenMapTiles (c) OpenStreetMap contributors; style (c) CARTO',
+      'OSM ODbL; style CC-BY-4.0/BSD-3-Clause (CARTO CC-BY-3.0)'],
+    ['toner', 'Toner', '(c) MapTiler (c) OpenStreetMap contributors',
+      'OSM ODbL; style CC-BY-4.0/BSD-3-Clause (Stamen ISC)'],
+  ];
+  for (const [styleId, label, attribution, license] of expected) {
+    assert.deepEqual(getMuiStyleProfile(styleId), {
+      id: styleId,
+      label,
+      attribution,
+      source: `Oxed's Map Tile Downloader (${label})`,
+      license,
+    });
+    const report = await inspectMuiZip(storedZip([[`maps/${styleId}/2/1/1.png`, PNG]]));
+    assert.equal(report.styleId, styleId);
+  }
+  assert.throws(() => getMuiStyleProfile('unknown-style'), /unsupported MUI map style/i);
+});
+
+test('rootless archive requires explicit style before SD mutation and then installs', async () => {
+  const archive = storedZip([['2/1/1.png', PNG]]);
+  const report = await inspectMuiZip(archive);
+  assert.equal(report.styleId, null);
+  const root = new MemoryDirectoryHandle();
+  assert.throws(() => resolveMuiStyleProfile(report.styleId, ''), /select map style/i);
+  assert.equal(root.children.has('pyxis-map'), false);
+
+  const style = resolveMuiStyleProfile(report.styleId, 'positron');
+  assert.equal(style.id, 'positron');
+  const result = await installMuiZip({archive, rootDirectory:root, metadata:{
+    ...metadata, mapSetId:style.id, attribution:style.attribution,
+    source:style.source, license:style.license,
+  }});
+  assert.equal(result.tileCount, 1);
+  assert.ok(root.children.has('pyxis-map'));
+});
+
+test('rejects installing a detected style into a different map set', async () => {
+  const archive = storedZip([['maps/dark-matter/2/1/1.png', PNG]]);
+  const root = new MemoryDirectoryHandle();
+  await assert.rejects(
+    installMuiZip({archive, rootDirectory:root, metadata}),
+    /style.*selected map set/i,
+  );
+  assert.equal(root.children.has('pyxis-map'), false);
+});
+
+test('rejects altered required style attribution before touching the SD root', async () => {
+  const root = new MemoryDirectoryHandle();
+  await assert.rejects(
+    installMuiZip({archive:storedZip([['2/1/1.png', PNG]]),rootDirectory:root,
+      metadata:{...metadata,attribution:'Map data'}}),
+    /attribution|provenance/i,
+  );
+  assert.equal(root.children.has('pyxis-map'), false);
+});
 
 test('active map-set wire format matches the cross-language golden record', () => {
   const record = encodeActiveMapSet({generation:1,mapSetId:'osm-bright',attribution:'Map data attribution',packs:[
@@ -307,6 +372,7 @@ test('inspects and transactionally installs a sparse stored MUI XYZ ZIP', async 
   assert.equal(report.tileCount, 3);
   assert.equal(report.minZoom, 2);
   assert.equal(report.maxZoom, 2);
+  assert.equal(report.styleId, null);
   assert.deepEqual(report.rowSpans, [
     {zoom: 2, y: 1, xMinimum: 1, xMaximum: 2},
     {zoom: 2, y: 2, xMinimum: 1, xMaximum: 1},
@@ -327,6 +393,11 @@ test('inspects and transactionally installs a sparse stored MUI XYZ ZIP', async 
   assert.equal(selection.mapSetId, 'osm-bright');
   assert.deepEqual(selection.packs.map(pack => pack.packId), ['overview']);
   assert.equal(selection.generation, 1);
+  const firstCatalog = decodeActiveSelection(
+    (await child(root, 'pyxis-map/map-sets/osm-bright.pmas')).bytes,
+  );
+  assert.equal(firstCatalog.mapSetId, 'osm-bright');
+  assert.deepEqual(firstCatalog.packs.map(pack => pack.packId), ['overview']);
   const firstManifestWrite = root.log.indexOf('write:manifest.pmp');
   assert(firstManifestWrite > root.log.lastIndexOf('write:1.png'));
   assert(root.log.indexOf('write:active-pack.0') > firstManifestWrite);
@@ -339,6 +410,10 @@ test('inspects and transactionally installs a sparse stored MUI XYZ ZIP', async 
   const secondSelection = decodeActiveSelection((await child(root, 'pyxis-map/active-pack.1')).bytes);
   assert.equal(secondSelection.generation, 2);
   assert.deepEqual(secondSelection.packs.map(pack => pack.packId), ['overview-two','overview']);
+  const secondCatalog = decodeActiveSelection(
+    (await child(root, 'pyxis-map/map-sets/osm-bright.pmas')).bytes,
+  );
+  assert.deepEqual(secondCatalog.packs.map(pack => pack.packId), ['overview-two','overview']);
   const third = await installMuiZip({
     archive, rootDirectory:root,
     metadata:{...metadata, packId:'overview-three', name:'Overview Three'},
@@ -356,6 +431,36 @@ test('inspects and transactionally installs a sparse stored MUI XYZ ZIP', async 
   const resumedSelection = decodeActiveSelection((await child(root, 'pyxis-map/active-pack.1')).bytes);
   assert.equal(resumedSelection.generation, 4);
   assert.deepEqual(resumedSelection.packs.map(pack => pack.packId), ['overview-two','overview-three','overview']);
+});
+
+test('preserves separate installed-style PMAS snapshots when activation changes', async () => {
+  const root = new MemoryDirectoryHandle();
+  const bright = getMuiStyleProfile('osm-bright');
+  const dark = getMuiStyleProfile('dark-matter');
+  await installMuiZip({
+    archive: storedZip([['maps/osm-bright/2/1/1.png', PNG]]),
+    rootDirectory: root,
+    metadata: {...metadata, packId:'bright-pack', mapSetId:bright.id,
+      attribution:bright.attribution, source:bright.source, license:bright.license},
+  });
+  await installMuiZip({
+    archive: storedZip([['maps/dark-matter/2/1/1.png', PNG]]),
+    rootDirectory: root,
+    metadata: {...metadata, packId:'dark-pack', mapSetId:dark.id,
+      attribution:dark.attribution, source:dark.source, license:dark.license},
+  });
+  const brightCatalog = decodeActiveSelection(
+    (await child(root, 'pyxis-map/map-sets/osm-bright.pmas')).bytes,
+  );
+  const darkCatalog = decodeActiveSelection(
+    (await child(root, 'pyxis-map/map-sets/dark-matter.pmas')).bytes,
+  );
+  assert.equal(brightCatalog.mapSetId, 'osm-bright');
+  assert.deepEqual(brightCatalog.packs.map(pack => pack.packId), ['bright-pack']);
+  assert.equal(darkCatalog.mapSetId, 'dark-matter');
+  assert.deepEqual(darkCatalog.packs.map(pack => pack.packId), ['dark-pack']);
+  const active = decodeActiveSelection((await child(root, 'pyxis-map/active-pack.1')).bytes);
+  assert.equal(active.mapSetId, 'dark-matter');
 });
 
 test('rejects traversal, duplicate keys, unsupported compression, and malformed PNGs', async () => {
