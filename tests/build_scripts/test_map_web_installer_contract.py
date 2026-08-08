@@ -30,6 +30,12 @@ def test_map_installer_ui_is_local_file_to_sd_and_offline_only() -> None:
     assert "./js/map-installer.js" in source
     assert "Oxed's Map Tile Downloader" in source
     assert "OpenStreetMap contributors" in source
+    assert "suggestMapIdentity" in source
+    assert "const suggestion = suggestMapIdentity(file.name);" in source
+    assert "mapPackNameInput.value = suggestion.name;" in source
+    assert "mapPackIdInput.value = suggestion.packId;" in source
+    assert ".map-field select option" in source
+    assert "background: var(--card);" in source
 
     click_start = source.index("mapInstallBtn.addEventListener('click'")
     picker = source.index("const rootDirectory = await window.showDirectoryPicker", click_start)

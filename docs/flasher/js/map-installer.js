@@ -85,6 +85,16 @@ export function resolveMuiStyleProfile(detectedStyleId, selectedStyleId) {
   return getMuiStyleProfile(selectedStyleId);
 }
 
+export function suggestMapIdentity(filename) {
+  const base = String(filename || '').replace(/\.zip$/i, '').trim().slice(0, 63);
+  const name = base || 'Offline map';
+  const packId = name.toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 31) || 'offline-map';
+  return {name, packId};
+}
+
 function u16(view, offset) { return view.getUint16(offset, true); }
 function u32(view, offset) { return view.getUint32(offset, true); }
 function putU16(view, offset, value) { view.setUint16(offset, value, true); }

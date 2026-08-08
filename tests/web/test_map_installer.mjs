@@ -12,12 +12,28 @@ import {
   installMuiZip,
   parseSparseManifest,
   resolveMuiStyleProfile,
+  suggestMapIdentity,
 } from '../../docs/flasher/js/map-installer.js';
 
 const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAIAAADTED8xAAAA1UlEQVR4nO3BMQEAAADCoPVP7WULoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAGwEtAAHMpTgHAAAAAElFTkSuQmCC',
   'base64',
 );
+
+test('each selected archive receives a fresh suggested name and pack ID', () => {
+  assert.deepEqual(suggestMapIdentity('regional-overview.zip'), {
+    name: 'regional-overview',
+    packId: 'regional-overview',
+  });
+  assert.deepEqual(suggestMapIdentity('Local Detail Tiles.ZIP'), {
+    name: 'Local Detail Tiles',
+    packId: 'local-detail-tiles',
+  });
+  assert.deepEqual(suggestMapIdentity('.zip'), {
+    name: 'Offline map',
+    packId: 'offline-map',
+  });
+});
 
 function crc32(bytes) {
   let crc = 0xffffffff;

@@ -242,7 +242,9 @@
             margin: 1rem 0;
         }
         .map-field label { display: block; color: var(--muted); font-size: 0.875rem; margin-bottom: 0.4rem; }
-        .map-field input, .map-field select { width: 100%; box-sizing: border-box; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 0.65rem; }
+        .map-field input, .map-field select { width: 100%; box-sizing: border-box; color: var(--text); background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; padding: 0.65rem; }
+        .map-field select { color-scheme: dark; }
+        .map-field select option { color: var(--text); background: var(--card); }
         .map-status { margin: 0.8rem 0; color: var(--muted); overflow-wrap: anywhere; }
         .map-status.success { color: var(--success); }
         .map-status.error { color: var(--error); }
@@ -397,7 +399,7 @@
 
     <script type="module">
         import { ESPLoader, Transport } from './js/esptool.js';
-        import { inspectMuiZip, installMuiZip, resolveMuiStyleProfile } from './js/map-installer.js';
+        import { inspectMuiZip, installMuiZip, resolveMuiStyleProfile, suggestMapIdentity } from './js/map-installer.js';
 
         const flashBtn = document.getElementById('flash-btn');
         const eraseCheckbox = document.getElementById('erase-checkbox');
@@ -466,8 +468,10 @@
             mapStyleSelect.value = '';
             const file = this.files?.[0];
             if (!file) { setMapStatus('Choose a ZIP to validate it locally. No tiles are uploaded.'); return; }
-            if (!mapPackNameInput.value) mapPackNameInput.value = file.name.replace(/\.zip$/i, '') || 'Offline map';
-            if (!mapPackIdInput.value) mapPackIdInput.value = slugifyMapName(mapPackNameInput.value);
+            const suggestion = suggestMapIdentity(file.name);
+            mapPackNameInput.value = suggestion.name;
+            mapPackIdInput.value = suggestion.packId;
+            delete mapPackIdInput.dataset.edited;
             setMapStatus(`Validating ${file.name} locally...`);
             try {
                 const report = await inspectMuiZip(file, {onProgress(progress) {
