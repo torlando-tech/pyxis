@@ -247,6 +247,9 @@
         .map-status.success { color: var(--success); }
         .map-status.error { color: var(--error); }
         .map-note { color: var(--muted); font-size: 0.875rem; line-height: 1.5; }
+        .map-install-steps { margin: 0.8rem 0 1rem; padding-left: 1.5rem; color: var(--muted); }
+        .map-install-steps li { margin: 0.5rem 0; line-height: 1.5; }
+        .map-install-steps a { color: var(--primary); }
 
         footer {
             text-align: center;
@@ -312,10 +315,18 @@
 
         <div class="card map-section">
             <h2>Install Offline Maps</h2>
-            <p class="map-note">
-                Select a Coalition/MUI XYZ ZIP already downloaded to this computer, then choose the mounted SD-card root.
-                Turn the T-Deck off and remove its SD card before installation. Existing unrelated SD-card files are preserved.
-            </p>
+            <ol class="map-install-steps">
+                <li>
+                    Download a compatible MUI map ZIP from
+                    <a href="https://download.tiles.coalition.space/" target="_blank" rel="noopener noreferrer">Oxed's Map Tile Downloader</a>.
+                    Choose OSM Bright for current Pyxis compatibility.
+                </li>
+                <li>Turn the T-Deck off, remove its microSD card, and insert the card into your computer.</li>
+                <li>Choose the downloaded ZIP below, enter a map name and pack ID, and wait for local validation.</li>
+                <li>Click <strong>Install and Enable</strong>, then choose the mounted SD-card root.</li>
+                <li>Safely eject the SD card, return it to the T-Deck, power it on, and open Maps.</li>
+            </ol>
+            <p class="map-note">Existing unrelated SD-card files are preserved. Map tiles are validated locally and are never uploaded.</p>
             <div class="map-installer-grid">
                 <div class="map-field">
                     <label for="map-archive">Map tile ZIP</label>

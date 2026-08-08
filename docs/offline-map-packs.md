@@ -6,7 +6,7 @@ Pyxis can read prebuilt raster map packs from an SD card. Importers accept only 
 
 Open the Pyxis web flasher in current Chrome or Edge and use **Install Offline Maps**:
 
-1. Download a Coalition/MUI XYZ ZIP separately.
+1. Download an OSM Bright MUI ZIP from [Oxed's Map Tile Downloader](https://download.tiles.coalition.space/).
 2. Turn the T-Deck off, remove its SD card, and mount the card on the computer.
 3. Choose the ZIP, enter a map name and pack ID, and wait for local validation.
 4. Click **Install and Enable**, then choose the SD-card root.
