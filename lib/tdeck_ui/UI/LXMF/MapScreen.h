@@ -115,6 +115,7 @@ private:
     void unlockState();
     void setPlaceholder(std::size_t index);
     void setStatusFor(Pyxis::MapTileLoadResult result);
+    void refreshVisibleStatus();
     void pan(double dx, double dy);
 
     static MapScreen* fromEvent(lv_event_t* event);

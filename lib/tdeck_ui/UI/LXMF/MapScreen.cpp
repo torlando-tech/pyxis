@@ -629,6 +629,7 @@ void MapScreen::applyFrame() {
     lv_label_set_text(zoom_label_, zoom_text);
     lv_label_set_text(attribution_label_, pack_attribution_[0] != '\0'
         ? pack_attribution_ : "No active map pack");
+    refreshVisibleStatus();
     // Non-ready images are now detached under LVGL_LOCK, so the worker may
     // safely decode into their permanent buffers without a draw race.
     requests_released_ = true;
@@ -662,15 +663,21 @@ void MapScreen::setStatusFor(Pyxis::MapTileLoadResult result) {
     }
 }
 
+void MapScreen::refreshVisibleStatus() {
+    Pyxis::MapTileLoadResult visible_status{};
+    if (presenter_.visibleTileStatus(visible_status)) {
+        setStatusFor(visible_status);
+    } else {
+        lv_label_set_text(status_label_, "Loading tiles...");
+    }
+}
+
 bool MapScreen::applyOneCompletion() {
     if (!lockState(pdMS_TO_TICKS(100))) return false;
     Pyxis::MapTileCompletion completion{};
     const bool applied = presenter_.takeApplicableCompletion(completion);
     if (applied) {
-        Pyxis::MapTileLoadResult visible_status{};
-        if (presenter_.visibleTileStatus(visible_status)) {
-            setStatusFor(visible_status);
-        }
+        refreshVisibleStatus();
         if (completion.result == Pyxis::MapTileLoadResult::READY &&
             completion.slot_index < TILE_COUNT) {
             const std::size_t index = completion.slot_index;
