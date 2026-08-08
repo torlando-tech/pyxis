@@ -41,7 +41,9 @@ def test_fixed_pool_and_cache_contracts():
     assert re.search(r"#define\s+LV_IMG_CACHE_DEF_SIZE\s+0\b", lv_conf)
     assert "std::vector" not in presenter + screen_h + screen_cpp
     assert "std::map" not in presenter + screen_h + screen_cpp
-    assert "static_assert(MapTileStore::HARD_MAX_ENTRIES == 128" in screen_cpp
+    assert '#include "Hardware/TDeck/MapTileStore.h"' not in screen_h
+    assert "Hardware::TDeck::MapTileStore store_;" not in screen_h
+    assert "TileStoreConfig" not in screen_h + screen_cpp
     assert "pack_.metadata().attribution" in screen_cpp
     assert '"No active map pack"' in screen_cpp
     assert "presenter_.visibleTileStatus" in screen_cpp
@@ -59,7 +61,7 @@ def test_worker_predecodes_and_render_path_has_no_io():
     assert "lodepng_decode(" in source
     assert "lodepng_inspect" in source
     assert "max_output_size" in source
-    assert "store_.removeTile(request.key)" in source
+    assert "store_.removeTile(request.key)" not in source
     assert "decode_failed_keys_" not in header
     assert "decodeFailedFor" not in source
     assert "markDecodeFailed" not in source
@@ -75,7 +77,7 @@ def test_worker_predecodes_and_render_path_has_no_io():
     assert "MAX_COMPLETIONS_PER_TICK = 1" in text(UI / "MapScreen.h")
 
 
-def test_selected_pack_is_worker_owned_read_only_and_precedes_live_cache():
+def test_selected_pack_is_the_only_sd_tile_source():
     source = text(UI / "MapScreen.cpp")
     header = text(UI / "MapScreen.h")
     assert '#include "Hardware/TDeck/MapTilePack.h"' in header
@@ -85,51 +87,39 @@ def test_selected_pack_is_worker_owned_read_only_and_precedes_live_cache():
     assert "pack_(storage_)" in constructor
 
     worker = function_body(source, "void MapScreen::workerLoop()")
-    assert worker.index("store_.initialize()") < worker.index("pack_.initialize()")
+    assert "pack_.initialize()" in worker
+    assert "store_.initialize()" not in worker
 
     read_tile = function_body(source, "Pyxis::MapTileLoadResult MapScreen::readTile(")
-    assert read_tile.index("decoded_tile_cache_.get") < read_tile.index("PACK")
-    assert read_tile.index("PACK") < read_tile.index("LIVE_STORE")
+    assert (read_tile.index("decoded_tile_cache_.get") <
+            read_tile.index("readCompressedTile(request)"))
+    assert "LIVE_STORE" not in read_tile
 
     pack_read = function_body(
         source, "Pyxis::MapTileLoadResult MapScreen::readCompressedTile(")
-    assert ("source == CompressedTileSource::LIVE_STORE && !store_initialized_"
-            in pack_read)
     assert "MapTileStreamReader::readExact" in pack_read
     assert "PackReadStream pack_stream(pack_)" in pack_read
-    assert "LiveReadStream live_stream(store_)" in pack_read
+    assert "LiveReadStream" not in source
     pack_adapter = source[source.index("class PackReadStream"):
-                          source.index("class LiveReadStream")]
-    live_adapter = source[source.index("class LiveReadStream"):
                           source.index("class AtomicStopSource")]
     assert "pack_.beginGet" in pack_adapter
     assert "pack_.readGetChunk" in pack_adapter
     assert "pack_.endGet" in pack_adapter
     assert "remove" not in pack_adapter
-    assert "store_.beginGet" in live_adapter
-    assert "store_.readGetChunk" in live_adapter
-    assert "store_.endGet" in live_adapter
-    remove_token = "store_.removeTile(request.key)"
-    remove_offsets = []
-    cursor = 0
-    while True:
-        offset = pack_read.find(remove_token, cursor)
-        if offset < 0:
-            break
-        remove_offsets.append(offset)
-        cursor = offset + len(remove_token)
-    assert len(remove_offsets) == 2
-    for offset in remove_offsets:
-        remove_block = pack_read[max(0, offset - 220):offset + 80]
-        assert "source == CompressedTileSource::LIVE_STORE" in remove_block
+    assert '#include "Hardware/TDeck/MapTileStore.h"' not in header
+    assert "Hardware::TDeck::MapTileStore store_;" not in header
+    assert "MapTileLookupPolicy" not in source + header
+    assert not (UI / "MapTileLookupPolicy.h").exists()
+    assert not (UI / "MapTileLookupPolicy.cpp").exists()
+    assert "store_initialized_" not in source + header
+    assert "store_config_" not in source + header
+    assert "LIVE_STORE" not in source + header
+    assert "/pyxis-map/tiles" not in source + header
 
-    # Covered-missing, uncovered, and corrupt immutable-pack tiles all continue
-    # to the mutable legacy cache, but production never starts online acquisition.
+    # Covered-missing, uncovered, and corrupt immutable-pack tiles remain typed
+    # pack results. Production never falls through to an untyped style-less cache.
     assert "MapTilePackResult::UNCOVERED" in pack_adapter
     assert "MapTilePackResult::TILE_MISSING" in pack_adapter
-    assert "MapTileLookupPolicy::readLocal" in read_tile
-    assert "static MapTileLoadResult resolveLocal" in text(UI / "MapTileLookupPolicy.h")
-    assert "MapTileLookupPolicy::shouldStartOnline" not in source
     load_tile = function_body(source, "Pyxis::MapTileLoadResult MapScreen::loadTile(")
     assert "return readTile(request);" in load_tile
 

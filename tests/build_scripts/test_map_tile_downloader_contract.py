@@ -78,7 +78,7 @@ def test_dormant_downloader_chain_remains_verified_but_is_not_map_screen_wired()
                for value in fingerprints)
 
 
-def test_production_map_screen_is_strictly_sd_pack_first_without_network_acquisition():
+def test_production_map_screen_uses_only_sd_packs_without_network_acquisition():
     screen = MAP_SCREEN.read_text()
     header = (ROOT / "lib/tdeck_ui/UI/LXMF/MapScreen.h").read_text()
     settings = SETTINGS.read_text()
@@ -92,7 +92,10 @@ def test_production_map_screen_is_strictly_sd_pack_first_without_network_acquisi
         assert forbidden not in screen
         assert forbidden not in header
     assert "return readTile(request);" in screen
-    assert "MapTileLookupPolicy::readLocal" in screen
+    assert "MapTileLookupPolicy" not in screen + header
+    assert "LiveReadStream" not in screen
+    assert "LIVE_STORE" not in screen + header
+    assert "store_.initialize()" not in screen
     assert "MapTilePack pack_" in header
     assert "pack_.initialize()" in screen
     assert "pack_refresh_epoch_.fetch_add" in screen
@@ -126,7 +129,8 @@ def test_recent_decoded_tiles_use_a_fixed_psram_lru_before_sd_decode():
     assert "decoded_tile_cache_.get" in screen
     read_tile = screen[screen.index("Pyxis::MapTileLoadResult MapScreen::readTile("):
                        screen.index("Pyxis::MapTileLoadResult MapScreen::readCompressedTile(")]
-    assert read_tile.index("decoded_tile_cache_.get") < read_tile.index("MapTileLookupPolicy::readLocal")
+    assert (read_tile.index("decoded_tile_cache_.get") <
+            read_tile.index("readCompressedTile(request)"))
     assert "decoded_tile_cache_.put" in screen
     assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in screen
     assert "decoded_cache_pixels_[Pyxis::DecodedTileCache::CAPACITY]" in header
