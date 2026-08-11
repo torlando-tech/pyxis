@@ -620,7 +620,9 @@ void MapScreen::updateModel(const Pyxis::MapView::Request& request) {
         presenter_.recenter(true, request.local_location)) {
         center_initialized_ = true;
     }
-    requests_released_ = false;
+    if (!presenter_.frameBuiltForCurrentEpoch()) {
+        requests_released_ = false;
+    }
     (void)presenter_.buildFrame(request);
     unlockState();
 }

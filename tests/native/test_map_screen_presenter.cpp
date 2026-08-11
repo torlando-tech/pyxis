@@ -67,6 +67,32 @@ void fixedCapacityAndDedupe() {
     }
 }
 
+void frameBuildLifecycleKeepsReleasedWorkAvailable() {
+    MapScreenPresenter presenter;
+    presenter.show();
+    CHECK(!presenter.frameBuiltForCurrentEpoch());
+    CHECK(presenter.buildFrame(requestAt(0.0, 0.0, 3)) ==
+          Pyxis::MapView::Result::OK);
+    CHECK(presenter.frameBuiltForCurrentEpoch());
+
+    // Rebuilding the unchanged UI model must not revoke the worker's access
+    // to requests that were released after the first render of this epoch.
+    CHECK(presenter.buildFrame(requestAt(0.0, 0.0, 3)) ==
+          Pyxis::MapView::Result::OK);
+    CHECK(presenter.frameBuiltForCurrentEpoch());
+
+    CHECK(presenter.zoomBy(1));
+    CHECK(!presenter.frameBuiltForCurrentEpoch());
+    CHECK(presenter.buildFrame(requestAt(0.0, 0.0, 4)) ==
+          Pyxis::MapView::Result::OK);
+    CHECK(presenter.frameBuiltForCurrentEpoch());
+
+    presenter.invalidateTiles();
+    CHECK(!presenter.frameBuiltForCurrentEpoch());
+    presenter.hide();
+    CHECK(!presenter.frameBuiltForCurrentEpoch());
+}
+
 void staleCompletionsRejectedAndAcceptedOnce() {
     MapScreenPresenter presenter;
     presenter.show();
@@ -285,6 +311,7 @@ void deterministicHundredThousandOperationStress() {
 
 int main() {
     fixedCapacityAndDedupe();
+    frameBuildLifecycleKeepsReleasedWorkAvailable();
     staleCompletionsRejectedAndAcceptedOnce();
     newestFrameReusesSlotsAndPurgesOldRequests();
     generationPanZoomAndRecenterBounds();

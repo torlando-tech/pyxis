@@ -77,6 +77,17 @@ def test_worker_predecodes_and_render_path_has_no_io():
     assert "MAX_COMPLETIONS_PER_TICK = 1" in text(UI / "MapScreen.h")
 
 
+def test_unchanged_model_does_not_starve_released_tile_requests():
+    source = text(UI / "MapScreen.cpp")
+    presenter = text(UI / "MapScreenPresenter.h")
+    update = function_body(source, "void MapScreen::updateModel(")
+    assert "frameBuiltForCurrentEpoch" in presenter
+    guard = update.index("if (!presenter_.frameBuiltForCurrentEpoch())")
+    revoke = update.index("requests_released_ = false")
+    build = update.index("presenter_.buildFrame(request)")
+    assert guard < revoke < build
+
+
 def test_selected_pack_is_the_only_sd_tile_source():
     source = text(UI / "MapScreen.cpp")
     header = text(UI / "MapScreen.h")

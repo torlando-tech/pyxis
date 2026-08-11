@@ -102,6 +102,7 @@ public:
     std::uint32_t zoom() const { return zoom_; }
     std::uint32_t generation() const { return generation_; }
     std::uint32_t frameEpoch() const { return frame_epoch_; }
+    bool frameBuiltForCurrentEpoch() const { return frame_built_for_epoch_; }
     std::size_t requestCount() const { return request_count_; }
     std::size_t completionCount() const { return completion_count_; }
 
