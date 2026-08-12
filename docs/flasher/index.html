@@ -795,6 +795,7 @@
                 if (!resp.ok) throw new Error(`GitHub API returned HTTP ${resp.status}`);
                 const releases = await resp.json();
                 let publishedCount = 0;
+                let defaultStableOption = null;
 
                 for (const release of releases) {
                     if (release.draft) continue;
@@ -821,6 +822,9 @@
                     option.dataset.hasFullAssets = hasAll ? 'true' : 'false';
                     option.releaseMetadata = metadata;
                     versionSelect.appendChild(option);
+                    if (!release.prerelease && defaultStableOption === null) {
+                        defaultStableOption = option;
+                    }
                     publishedCount++;
                 }
 
@@ -835,8 +839,8 @@
 
                 versionSelect.options[0].textContent = 'Select a published release...';
                 versionSelect.disabled = false;
-                if (customFirmwareSelectionToken === 0) {
-                    versionSelect.selectedIndex = 1;
+                if (customFirmwareSelectionToken === 0 && defaultStableOption !== null) {
+                    versionSelect.value = defaultStableOption.value;
                     selectPublishedRelease();
                 }
             } catch (e) {

@@ -41,6 +41,16 @@ def test_flasher_filters_drafts_but_includes_prereleases_with_a_clear_label():
     assert "RELEASE_METADATA_ASSET = 'pyxis-release.json'" in source
     assert "if (!assetNames.includes(RELEASE_METADATA_ASSET)) continue;" in source
     assert "firmware/releases/${release.tag_name}/" in source
+
+
+def test_flasher_defaults_to_a_stable_release_not_a_prerelease():
+    source = FLASHER.read_text()
+
+    assert "let defaultStableOption = null;" in source
+    assert "if (!release.prerelease && defaultStableOption === null)" in source
+    assert "if (customFirmwareSelectionToken === 0 && defaultStableOption !== null)" in source
+    assert "versionSelect.value = defaultStableOption.value;" in source
+    assert "versionSelect.selectedIndex = 1;" not in source
     assert "selectPublishedRelease" in source
     assert "flashBtn.disabled = false;" in source
 
