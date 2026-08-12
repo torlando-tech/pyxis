@@ -149,9 +149,10 @@ def test_failed_littlefs_mount_enters_stable_recovery_mode_before_reticulum():
 
     assert "Storage::mount_or_initialize_erased_littlefs(" in source
     assert "[]() { return fs.init(false); }" in source
-    assert "ESP_PARTITION_TYPE_DATA," in source
-    assert "ESP_PARTITION_SUBTYPE_DATA_SPIFFS," in source
-    assert "LITTLEFS_PARTITION_LABEL);" in source
+    assert """littlefs_partition = esp_partition_find_first(
+                ESP_PARTITION_TYPE_DATA,
+                ESP_PARTITION_SUBTYPE_DATA_SPIFFS,
+                LITTLEFS_PARTITION_LABEL);""" in source
     assert 'static constexpr const char* LITTLEFS_PARTITION_LABEL = "spiffs";' in source
     assert 'true, "/littlefs", 10, LITTLEFS_PARTITION_LABEL' in source
     assert "Persistent storage unavailable" in source
