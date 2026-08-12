@@ -147,7 +147,14 @@ def test_failed_littlefs_mount_enters_stable_recovery_mode_before_reticulum():
     setup = function_body(source, "void setup()", "void loop()")
     loop = source[source.index("void loop()"):]
 
-    assert "persistent_storage_ready = fs.init(false);" in source
+    assert "Storage::mount_or_initialize_erased_littlefs(" in source
+    assert "[]() { return fs.init(false); }" in source
+    assert """littlefs_partition = esp_partition_find_first(
+                ESP_PARTITION_TYPE_DATA,
+                ESP_PARTITION_SUBTYPE_DATA_SPIFFS,
+                LITTLEFS_PARTITION_LABEL);""" in source
+    assert 'static constexpr const char* LITTLEFS_PARTITION_LABEL = "spiffs";' in source
+    assert 'true, "/littlefs", 10, LITTLEFS_PARTITION_LABEL' in source
     assert "Persistent storage unavailable" in source
     assert "USB serial recovery remains available." in source
     assert setup.index("if (!persistent_storage_ready)") < setup.index("setup_reticulum();")

@@ -189,17 +189,27 @@
         .version-select-group select {
             width: 100%;
             padding: 0.625rem 1rem;
-            background: rgba(0,0,0,0.3);
+            background-color: #111827;
             color: var(--text);
             border: 1px solid rgba(255,255,255,0.15);
             border-radius: 8px;
             font-family: inherit;
             font-size: 1rem;
             cursor: pointer;
+            color-scheme: dark;
             appearance: none;
             background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2394a3b8' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E");
             background-repeat: no-repeat;
             background-position: right 1rem center;
+        }
+
+        .version-select-group select option {
+            background-color: #111827;
+            color: var(--text);
+        }
+
+        .version-select-group select option:disabled {
+            color: var(--muted);
         }
 
         .version-select-group select:focus {
@@ -321,7 +331,6 @@
                 <li>
                     Download a compatible MUI map ZIP from
                     <a href="https://download.tiles.coalition.space/" target="_blank" rel="noopener noreferrer">Oxed's Map Tile Downloader</a>.
-                    Choose OSM Bright, Dark Matter, Positron, or Toner.
                 </li>
                 <li>Turn the T-Deck off, remove its microSD card, and insert the card into your computer.</li>
                 <li>Choose the downloaded ZIP below, enter a map name and pack ID, and wait for local validation.</li>
@@ -424,7 +433,7 @@
         const CONNECT_TIMEOUT_MS = 15000;
         const EXPECTED_CHIP = 'ESP32-S3';
 
-        // Fail closed until the GitHub API supplies a published, non-prerelease version.
+        // Fail closed until the GitHub API supplies a published release with audited metadata.
         let firmwarePathPrefix = null;
         let selectedReleaseMetadata = null;
         let customFirmwareBytes = null;
@@ -835,9 +844,10 @@
                 if (!resp.ok) throw new Error(`GitHub API returned HTTP ${resp.status}`);
                 const releases = await resp.json();
                 let publishedCount = 0;
+                let defaultStableOption = null;
 
                 for (const release of releases) {
-                    if (release.draft || release.prerelease) continue;
+                    if (release.draft) continue;
                     const assetNames = release.assets.map(a => a.name);
                     if (!assetNames.includes(RELEASE_METADATA_ASSET)) continue;
                     if (!assetNames.includes('firmware.bin')) continue;
@@ -852,12 +862,18 @@
 
                     const option = document.createElement('option');
                     const hasAll = REQUIRED_FULL_ASSETS.every(f => assetNames.includes(f));
+                    const releaseChannel = release.prerelease ? ' — Pre-release' : '';
                     option.value = release.tag_name;
-                    option.textContent = release.tag_name + (release.name && release.name !== release.tag_name ? ` — ${release.name}` : '');
+                    option.textContent = release.tag_name
+                        + (release.name && release.name !== release.tag_name ? ` — ${release.name}` : '')
+                        + releaseChannel;
                     option.dataset.downloadUrl = prefix;
                     option.dataset.hasFullAssets = hasAll ? 'true' : 'false';
                     option.releaseMetadata = metadata;
                     versionSelect.appendChild(option);
+                    if (!release.prerelease && defaultStableOption === null) {
+                        defaultStableOption = option;
+                    }
                     publishedCount++;
                 }
 
@@ -872,8 +888,8 @@
 
                 versionSelect.options[0].textContent = 'Select a published release...';
                 versionSelect.disabled = false;
-                if (customFirmwareSelectionToken === 0) {
-                    versionSelect.selectedIndex = 1;
+                if (customFirmwareSelectionToken === 0 && defaultStableOption !== null) {
+                    versionSelect.value = defaultStableOption.value;
                     selectPublishedRelease();
                 }
             } catch (e) {
@@ -1002,7 +1018,7 @@
         flashBtn.addEventListener('click', flash);
 
         // Initialize with no flashable target; loadVersions enables flashing only
-        // after selecting a published, non-prerelease GitHub release.
+        // after selecting a published GitHub release with audited metadata.
         loadVersions();
     </script>
 </body>
