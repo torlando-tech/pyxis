@@ -67,6 +67,16 @@ def test_custom_firmware_upload_is_explicit_validated_and_update_only():
     assert "const useFullInstall = customFirmwareBytes ? false : eraseCheckbox.checked;" in source
 
 
+def test_full_install_erases_flash_while_updates_preserve_persistent_partitions():
+    source = FLASHER.read_text()
+    flash = source[source.index("async function flash()") :]
+
+    assert "const useFullInstall = customFirmwareBytes ? false : eraseCheckbox.checked;" in flash
+    assert "eraseAll: useFullInstall," in flash
+    assert "useFullInstall ? fw.full : fw.update" in flash
+    assert "{ offset: 0x610000" not in source
+
+
 def test_custom_firmware_selection_invalidates_stale_async_results():
     source = FLASHER.read_text()
     handler = source[source.index("customFirmwareInput.addEventListener('change'"):source.index("function selectPublishedRelease")]
@@ -163,6 +173,7 @@ def test_release_audit_rejects_stale_version_and_destructive_storage_firmware():
 
     assert 'b"Firmware: v1.0.0"' in audit
     assert 'b"FileSystem mount failed; preserving persistent data"' in audit
+    assert 'b"Blank LittleFS partition; formatting once"' in audit
     assert '"git", "describe", "--tags", "--always", "--dirty"' in audit
     assert 'os.environ.get("PYXIS_VERSION_OVERRIDE")' in audit
     assert 'f"Firmware: {expected_version}".encode()' in audit

@@ -34,6 +34,7 @@ EXCLUDED_STRINGS = (
 )
 REQUIRED_STRINGS = (
     b"FileSystem mount failed; preserving persistent data",
+    b"Blank LittleFS partition; formatting once",
 )
 EXCLUDED_SYMBOLS = (
     "test_call_",
