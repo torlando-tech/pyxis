@@ -25,6 +25,8 @@
 #include <new>  // placement new
 #include <soc/rtc_cntl_reg.h>
 
+#include "storage/LittleFSInitializationPolicy.h"
+
 // Reticulum
 #include <microReticulum/Reticulum.h>
 #include <microReticulum/Utilities/OS.h>
@@ -964,6 +966,8 @@ static void pump_ntp_sync_if_pending() {
     }
 }
 
+static constexpr const char* LITTLEFS_PARTITION_LABEL = "spiffs";
+
 void setup_hardware() {
     INFO("\n=== Hardware Initialization ===");
 
@@ -981,7 +985,44 @@ void setup_hardware() {
     // Pyxis's lib/universal_filesystem/ is now dead code on this build path and
     // can be deleted once the graft lands.
     static microStore::Adapters::LittleFSFileSystem fs("/littlefs");
-    persistent_storage_ready = fs.init(false);
+
+    // Mount non-destructively first: never format on a mount failure by itself,
+    // because a corrupt filesystem holds user conversations that must be preserved.
+    //
+    // An erased or uninitialized LittleFS partition is all 0xFF. Its mount fails,
+    // but formatting is safe because the partition contains no programmed bytes.
+    // Any nonblank or unreadable partition remains untouched and falls through to
+    // recovery mode. The policy is portable so every destructive branch is covered
+    // by host tests while these callbacks retain the real ESP32 operations.
+    const esp_partition_t* littlefs_partition = nullptr;
+    persistent_storage_ready = Storage::mount_or_initialize_erased_littlefs(
+        []() { return fs.init(false); },
+        [&littlefs_partition](size_t& size) {
+            littlefs_partition = esp_partition_find_first(
+                ESP_PARTITION_TYPE_DATA,
+                ESP_PARTITION_SUBTYPE_DATA_SPIFFS,
+                LITTLEFS_PARTITION_LABEL);
+            if (!littlefs_partition) {
+                ERROR("Unable to locate LittleFS partition for blank check");
+                return false;
+            }
+            size = littlefs_partition->size;
+            return true;
+        },
+        [&littlefs_partition](size_t offset, uint8_t* buffer, size_t size) {
+            if (esp_partition_read(littlefs_partition, offset, buffer, size) != ESP_OK) {
+                ERROR("Failed to read LittleFS partition for blank check");
+                return false;
+            }
+            return true;
+        },
+        []() {
+            // Use LittleFS.begin() directly because microStore's adapter returns
+            // immediately when its non-destructive mount fails.
+            INFO("Blank LittleFS partition; formatting once");
+            return LittleFS.begin(
+                true, "/littlefs", 10, LITTLEFS_PARTITION_LABEL);
+        });
     location_filesystem_available = persistent_storage_ready;
     if (!persistent_storage_ready) {
         ERROR("FileSystem mount failed; preserving persistent data");

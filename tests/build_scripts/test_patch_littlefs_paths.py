@@ -132,11 +132,23 @@ def test_persistent_partitions_do_not_overlap_app_slots():
         if not line or line.startswith("#"):
             continue
         fields = [field.strip() for field in line.split(",")]
-        rows.append((fields[0], int(fields[3], 0), int(fields[4], 0)))
+        rows.append(
+            (
+                fields[0],
+                fields[1],
+                fields[2],
+                int(fields[3], 0),
+                int(fields[4], 0),
+            )
+        )
 
-    by_name = {name: (offset, offset + size) for name, offset, size in rows}
-    persistent = [by_name["nvs"], by_name["spiffs"]]
-    applications = [by_name["app0"], by_name["app1"]]
+    by_name = {
+        name: (partition_type, subtype, offset, offset + size)
+        for name, partition_type, subtype, offset, size in rows
+    }
+    assert by_name["spiffs"] == ("data", "spiffs", 0x610000, 0x7F0000)
+    persistent = [by_name["nvs"][2:], by_name["spiffs"][2:]]
+    applications = [by_name["app0"][2:], by_name["app1"][2:]]
 
     for data_start, data_end in persistent:
         for app_start, app_end in applications:
