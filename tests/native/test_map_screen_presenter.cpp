@@ -67,6 +67,32 @@ void fixedCapacityAndDedupe() {
     }
 }
 
+void frameBuildLifecycleKeepsReleasedWorkAvailable() {
+    MapScreenPresenter presenter;
+    presenter.show();
+    CHECK(!presenter.frameBuiltForCurrentEpoch());
+    CHECK(presenter.buildFrame(requestAt(0.0, 0.0, 3)) ==
+          Pyxis::MapView::Result::OK);
+    CHECK(presenter.frameBuiltForCurrentEpoch());
+
+    // Rebuilding the unchanged UI model must not revoke the worker's access
+    // to requests that were released after the first render of this epoch.
+    CHECK(presenter.buildFrame(requestAt(0.0, 0.0, 3)) ==
+          Pyxis::MapView::Result::OK);
+    CHECK(presenter.frameBuiltForCurrentEpoch());
+
+    CHECK(presenter.zoomBy(1));
+    CHECK(!presenter.frameBuiltForCurrentEpoch());
+    CHECK(presenter.buildFrame(requestAt(0.0, 0.0, 4)) ==
+          Pyxis::MapView::Result::OK);
+    CHECK(presenter.frameBuiltForCurrentEpoch());
+
+    presenter.invalidateTiles();
+    CHECK(!presenter.frameBuiltForCurrentEpoch());
+    presenter.hide();
+    CHECK(!presenter.frameBuiltForCurrentEpoch());
+}
+
 void staleCompletionsRejectedAndAcceptedOnce() {
     MapScreenPresenter presenter;
     presenter.show();
@@ -229,6 +255,28 @@ void resultStatesAndQueueLimit() {
     CHECK(presenter.completionCount() == 0);
 }
 
+void styleChangeInvalidatesEveryVisibleTile() {
+    MapScreenPresenter presenter;
+    presenter.show();
+    CHECK(presenter.buildFrame(requestAt(0.0, 0.0, 5)) ==
+          Pyxis::MapView::Result::OK);
+    MapTileRequest old_request{};
+    CHECK(presenter.takeRequest(old_request));
+    const std::uint32_t old_epoch = presenter.frameEpoch();
+    presenter.invalidateTiles();
+    CHECK(presenter.frameEpoch() != old_epoch);
+    CHECK(presenter.requestCount() == 0U);
+    CHECK(presenter.completionCount() == 0U);
+    for (std::size_t index = 0U; index < MapScreenPresenter::TILE_SLOT_COUNT; ++index) {
+        CHECK(presenter.slot(index).state == MapTileSlot::EMPTY);
+    }
+    CHECK(!presenter.publishCompletion(
+        completionFor(old_request, MapTileLoadResult::READY)));
+    CHECK(presenter.buildFrame(requestAt(0.0, 0.0, 5)) ==
+          Pyxis::MapView::Result::OK);
+    CHECK(presenter.requestCount() == presenter.frame().tile_count);
+}
+
 void deterministicHundredThousandOperationStress() {
     MapScreenPresenter presenter;
     presenter.show();
@@ -263,11 +311,13 @@ void deterministicHundredThousandOperationStress() {
 
 int main() {
     fixedCapacityAndDedupe();
+    frameBuildLifecycleKeepsReleasedWorkAvailable();
     staleCompletionsRejectedAndAcceptedOnce();
     newestFrameReusesSlotsAndPurgesOldRequests();
     generationPanZoomAndRecenterBounds();
     visibleStatusSummarizesTheCurrentFrame();
     resultStatesAndQueueLimit();
+    styleChangeInvalidatesEveryVisibleTile();
     deterministicHundredThousandOperationStress();
     std::cout << "map screen presenter: " << passed << " passed, "
               << failures << " failed\n";

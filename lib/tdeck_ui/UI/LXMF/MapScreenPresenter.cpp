@@ -156,6 +156,12 @@ bool MapScreenPresenter::recenter(
     return true;
 }
 
+void MapScreenPresenter::invalidateTiles() {
+    startNewFrame();
+    clearSlots();
+    frame_.tile_count = 0U;
+}
+
 int MapScreenPresenter::findSlot(const Hardware::TDeck::TileKey& key) const {
     for (std::size_t index = 0; index < TILE_SLOT_COUNT; ++index) {
         if (slots_[index].state != MapTileSlot::EMPTY &&
