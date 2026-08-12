@@ -189,17 +189,27 @@
         .version-select-group select {
             width: 100%;
             padding: 0.625rem 1rem;
-            background: rgba(0,0,0,0.3);
+            background-color: #111827;
             color: var(--text);
             border: 1px solid rgba(255,255,255,0.15);
             border-radius: 8px;
             font-family: inherit;
             font-size: 1rem;
             cursor: pointer;
+            color-scheme: dark;
             appearance: none;
             background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2394a3b8' viewBox='0 0 16 16'%3E%3Cpath d='M8 11L3 6h10z'/%3E%3C/svg%3E");
             background-repeat: no-repeat;
             background-position: right 1rem center;
+        }
+
+        .version-select-group select option {
+            background-color: #111827;
+            color: var(--text);
+        }
+
+        .version-select-group select option:disabled {
+            color: var(--muted);
         }
 
         .version-select-group select:focus {
@@ -319,7 +329,6 @@
                 <li>
                     Download a compatible MUI map ZIP from
                     <a href="https://download.tiles.coalition.space/" target="_blank" rel="noopener noreferrer">Oxed's Map Tile Downloader</a>.
-                    Choose OSM Bright for current Pyxis compatibility.
                 </li>
                 <li>Turn the T-Deck off, remove its microSD card, and insert the card into your computer.</li>
                 <li>Choose the downloaded ZIP below, enter a map name and pack ID, and wait for local validation.</li>

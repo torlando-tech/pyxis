@@ -20,6 +20,15 @@ def test_flasher_starts_disabled_until_a_published_release_is_selected():
     assert '<option value="latest">' not in source
 
 
+def test_firmware_version_menu_uses_high_contrast_dark_colors():
+    source = FLASHER.read_text()
+
+    assert ".version-select-group select option {" in source
+    assert "background-color: #111827;" in source
+    assert "color: var(--text);" in source
+    assert "color-scheme: dark;" in source
+
+
 def test_flasher_filters_drafts_but_includes_prereleases_with_a_clear_label():
     source = FLASHER.read_text()
 
