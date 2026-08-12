@@ -16,6 +16,7 @@ struct Harness {
     bool mount_result = false;
     bool resolve_result = true;
     bool read_result = true;
+    std::size_t fail_read_at = SIZE_MAX;
     bool format_mount_result = true;
     int mount_calls = 0;
     int resolve_calls = 0;
@@ -36,7 +37,8 @@ struct Harness {
             },
             [this](std::size_t offset, uint8_t* output, std::size_t size) {
                 ++read_calls;
-                if (!read_result || offset + size > partition.size()) return false;
+                if (!read_result || offset >= fail_read_at ||
+                    offset + size > partition.size()) return false;
                 for (std::size_t i = 0; i < size; ++i) output[i] = partition[offset + i];
                 return true;
             },
@@ -81,10 +83,24 @@ int main() {
     }
     {
         Harness harness;
+        CHECK(!harness.run());
+        CHECK(harness.read_calls == 0);
+        CHECK(harness.format_mount_calls == 0);
+    }
+    {
+        Harness harness;
         harness.partition.assign(4096, 0xFF);
         harness.read_result = false;
         CHECK(!harness.run());
         CHECK(harness.read_calls == 1);
+        CHECK(harness.format_mount_calls == 0);
+    }
+    {
+        Harness harness;
+        harness.partition.assign(8192, 0xFF);
+        harness.fail_read_at = 4096;
+        CHECK(!harness.run());
+        CHECK(harness.read_calls == 2);
         CHECK(harness.format_mount_calls == 0);
     }
     {

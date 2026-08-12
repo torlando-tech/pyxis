@@ -16,4 +16,4 @@ def test_littlefs_initialization_policy(tmp_path):
         sources=[HERE / "test_littlefs_initialization_policy.cpp"],
         include_dirs=[PYXIS_ROOT / "lib" / "storage"],
     )
-    assert "19 passed, 0 failed" in ran.stdout
+    assert "25 passed, 0 failed" in ran.stdout
