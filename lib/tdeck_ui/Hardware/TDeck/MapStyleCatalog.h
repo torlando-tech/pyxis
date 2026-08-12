@@ -23,6 +23,7 @@ enum class MapStyleCatalogResult : std::uint8_t {
     STALE_CATALOG,
     UNKNOWN_STYLE,
     GENERATION_EXHAUSTED,
+    CANCELLED,
     WRITE_FAILED,
     READBACK_MISMATCH
 };
@@ -39,6 +40,8 @@ struct MapStyleSummary {
 /** Fixed-allowlist PMAS discovery and redundant-slot transactional activation. */
 class MapStyleCatalog {
 public:
+    typedef bool (*BeginCommitCallback)(void* context);
+
     static const std::size_t MAX_STYLES = 4U;
     static const char ACTIVE_SLOT_0_PATH[];
     static const char ACTIVE_SLOT_1_PATH[];
@@ -48,7 +51,9 @@ public:
 
     MapStyleCatalogResult discover();
     MapStyleCatalogResult activate(std::uint32_t expected_catalog_generation,
-                                   const char* style_id);
+                                   const char* style_id,
+                                   BeginCommitCallback begin_commit = NULL,
+                                   void* commit_context = NULL);
 
     std::size_t count() const { return count_; }
     const MapStyleSummary* style(std::size_t index) const {

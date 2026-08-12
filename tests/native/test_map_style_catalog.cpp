@@ -26,6 +26,7 @@ void fail(const char* expression, int line) {
 }
 #define CHECK(expression) do { if (!(expression)) fail(#expression, __LINE__); } while (false)
 void beginTest() { ++tests_run; }
+bool rejectCommit(void*) { return false; }
 
 std::uint32_t crc32(const std::uint8_t* input, std::size_t length) {
     std::uint32_t crc = UINT32_C(0xffffffff);
@@ -290,6 +291,20 @@ void testStaleAndUnknownActivationAreRejectedWithoutWrite() {
     CHECK(catalog.activate(generation, "rogue") == MapStyleCatalogResult::UNKNOWN_STYLE);
     CHECK(storage.find(MapStyleCatalog::ACTIVE_SLOT_1_PATH) == NULL);
 }
+void testCancellationAbortsBeforePublishingActiveSlot() {
+    beginTest(); FakeStorage storage; addStyle(storage, "osm-bright");
+    addStyle(storage, "dark-matter"); addActive(storage, 0U, "osm-bright", 4U);
+    MapStyleCatalog catalog(storage); CHECK(catalog.discover() == MapStyleCatalogResult::OK);
+    CHECK(catalog.activate(catalog.generation(), "dark-matter", &rejectCommit,
+                           NULL) == MapStyleCatalogResult::CANCELLED);
+    CHECK(storage.abort_calls == 1U);
+    File* target = storage.find(MapStyleCatalog::ACTIVE_SLOT_1_PATH);
+    CHECK(target != NULL && target->size == 0U);
+    File* active = storage.find(MapStyleCatalog::ACTIVE_SLOT_0_PATH);
+    ActiveMapSetView view = {};
+    CHECK(active != NULL && ActiveMapSetCodec::decode(active->bytes, active->size, view));
+    CHECK(std::strcmp(view.map_set_id, "osm-bright") == 0);
+}
 void testActivationTargetsMissingThenOlderSlotAndVerifiesBytes() {
     beginTest(); FakeStorage storage; addStyle(storage, "osm-bright"); addStyle(storage, "dark-matter");
     addActive(storage, 0U, "osm-bright", 4U); MapStyleCatalog catalog(storage);
@@ -381,6 +396,7 @@ int main() {
     testDiscoveryRejectsMismatchedAndMalformedStyleRecords();
     testMissingCurrentRecordIsSynthesizedWithoutWrite();
     testStaleAndUnknownActivationAreRejectedWithoutWrite();
+    testCancellationAbortsBeforePublishingActiveSlot();
     testActivationTargetsMissingThenOlderSlotAndVerifiesBytes();
     testActivationSemanticallyValidatesBeforeAnySlotWrite();
     testActivationRejectsIndeterminateConflictAndExhaustion();

@@ -193,11 +193,18 @@ def test_style_switch_is_bounded_and_worker_owned():
     activation = worker.index("style_catalog_.activate")
     admission_lock = worker.rindex("lockState(portMAX_DELAY)", 0, activation)
     admission_guard = worker.rindex("activation_admitted =", 0, activation)
-    admission_unlock = worker.index("unlockState();", activation)
-    assert admission_lock < admission_guard < activation < admission_unlock
+    admission_unlock = worker.rindex("unlockState();", 0, activation)
+    assert admission_lock < admission_guard < admission_unlock < activation
     assert "style_request_lifecycle_epoch == style_lifecycle_epoch_" in worker[admission_guard:activation]
     assert "style_selector_.activationOwnedBy(style_request.token)" in worker[admission_guard:activation]
-    assert "if (!activation_admitted) continue;" in worker[activation:]
+    assert "if (!activation_admitted) continue;" in worker[:activation]
+    assert "&MapScreen::beginStyleActivationCommit" in worker
+    commit_guard = function_body(source, "bool MapScreen::beginStyleActivationCommit(void* raw_context)")
+    assert "lockState(portMAX_DELAY)" in commit_guard
+    assert "screen_visible_.load" in commit_guard
+    assert "lifecycle_epoch == screen->style_lifecycle_epoch_" in commit_guard
+    assert "activationOwnedBy(context->token)" in commit_guard
+    assert commit_guard.index("screen->unlockState()") < commit_guard.index("return admitted")
     committed_reload = worker.index("pack_.initialize()", activation)
     cache_invalidation = worker.index("decoded_tile_cache_.clear()", committed_reload)
     selector_completion = worker.index("style_selector_.complete", committed_reload)

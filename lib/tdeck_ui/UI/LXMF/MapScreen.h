@@ -56,6 +56,14 @@ public:
     bool applyOneCompletion();
 
 private:
+    struct StyleActivationCommitContext {
+        MapScreen* screen;
+        std::uint32_t token;
+        std::uint32_t lifecycle_epoch;
+    };
+
+    static bool beginStyleActivationCommit(void* context);
+
     lv_obj_t* screen_;
     lv_obj_t* toolbar_;
     lv_obj_t* viewport_;

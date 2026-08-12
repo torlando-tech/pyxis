@@ -185,7 +185,9 @@ MapStyleCatalogResult MapStyleCatalog::discover() {
 }
 
 MapStyleCatalogResult MapStyleCatalog::activate(std::uint32_t expected_catalog_generation,
-                                                const char* style_id) {
+                                                const char* style_id,
+                                                BeginCommitCallback begin_commit,
+                                                void* commit_context) {
     if (expected_catalog_generation != catalog_generation_) return MapStyleCatalogResult::STALE_CATALOG;
     std::size_t style_index = 0U;
     if (!allowedIndex(style_id, style_index)) return MapStyleCatalogResult::UNKNOWN_STYLE;
@@ -251,6 +253,9 @@ MapStyleCatalogResult MapStyleCatalog::activate(std::uint32_t expected_catalog_g
             storage_.abortWrite(); return MapStyleCatalogResult::WRITE_FAILED;
         }
         offset += written;
+    }
+    if (begin_commit != NULL && !begin_commit(commit_context)) {
+        storage_.abortWrite(); return MapStyleCatalogResult::CANCELLED;
     }
     if (storage_.commitWrite() != TileStoreResult::OK) {
         storage_.abortWrite(); return MapStyleCatalogResult::WRITE_FAILED;

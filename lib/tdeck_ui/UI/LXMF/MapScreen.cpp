@@ -386,6 +386,24 @@ void MapScreen::publishStyleCatalog(std::uint32_t activation_token,
     unlockState();
 }
 
+bool MapScreen::beginStyleActivationCommit(void* raw_context) {
+    StyleActivationCommitContext* context =
+        static_cast<StyleActivationCommitContext*>(raw_context);
+    if (context == NULL || context->screen == NULL) return false;
+    MapScreen* screen = context->screen;
+    if (!screen->lockState(portMAX_DELAY)) return false;
+    const bool admitted =
+        screen->screen_visible_.load(std::memory_order_acquire) &&
+        !screen->style_lifecycle_exhausted_ &&
+        context->lifecycle_epoch == screen->style_lifecycle_epoch_ &&
+        screen->style_selector_.activationOwnedBy(context->token);
+    // This is the lifecycle linearization point. Release before commitWrite()
+    // so LVGL navigation never waits on SD I/O. A hide that wins this lock
+    // rejects publication; a commit admitted first represents visible intent.
+    screen->unlockState();
+    return admitted;
+}
+
 void MapScreen::workerLoop() {
     std::uint32_t handled_pack_refresh_epoch =
         pack_refresh_epoch_.load(std::memory_order_acquire);
@@ -448,28 +466,33 @@ void MapScreen::workerLoop() {
             unlockState();
         }
         if (have_style_request) {
-            Hardware::TDeck::MapStyleCatalogResult activation =
-                Hardware::TDeck::MapStyleCatalogResult::ACTIVE_IO_INDETERMINATE;
             bool activation_admitted = false;
-            // Linearize durable activation with hide(). If hide wins this lock,
-            // the stale request is cancelled without touching the active slots.
-            // If activation wins, hide cannot mark the screen hidden until the
-            // bounded SD commit has completed.
             if (lockState(portMAX_DELAY)) {
                 activation_admitted =
                     screen_visible_.load(std::memory_order_acquire) &&
                     !style_lifecycle_exhausted_ &&
                     style_request_lifecycle_epoch == style_lifecycle_epoch_ &&
                     style_selector_.activationOwnedBy(style_request.token);
-                if (activation_admitted) {
-                    activation = style_catalog_.activate(
-                        style_request.catalog_generation, style_request.style_id);
-                } else {
+                if (!activation_admitted) {
                     (void)style_selector_.cancelPending(style_request.token);
                 }
                 unlockState();
             }
             if (!activation_admitted) continue;
+            StyleActivationCommitContext commit_context = {
+                this, style_request.token, style_request_lifecycle_epoch};
+            const Hardware::TDeck::MapStyleCatalogResult activation =
+                style_catalog_.activate(style_request.catalog_generation,
+                                        style_request.style_id,
+                                        &MapScreen::beginStyleActivationCommit,
+                                        &commit_context);
+            if (activation == Hardware::TDeck::MapStyleCatalogResult::CANCELLED) {
+                if (lockState(portMAX_DELAY)) {
+                    (void)style_selector_.cancelPending(style_request.token);
+                    unlockState();
+                }
+                continue;
+            }
             bool success = activation == Hardware::TDeck::MapStyleCatalogResult::OK;
             if (success) {
                 const Hardware::TDeck::MapTilePackResult initialized = pack_.initialize();
