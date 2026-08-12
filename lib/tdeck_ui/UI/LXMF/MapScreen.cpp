@@ -438,6 +438,7 @@ void MapScreen::workerLoop() {
                     style_request = style_request_;
                     style_request_lifecycle_epoch = style_request_lifecycle_epoch_;
                     style_request_pending_ = false;
+                    style_request_ = Pyxis::MapStyleRequest();
                     have_style_request = true;
                 } else {
                     style_request_pending_ = false;
@@ -447,9 +448,28 @@ void MapScreen::workerLoop() {
             unlockState();
         }
         if (have_style_request) {
-            const Hardware::TDeck::MapStyleCatalogResult activation =
-                style_catalog_.activate(style_request.catalog_generation,
-                                        style_request.style_id);
+            Hardware::TDeck::MapStyleCatalogResult activation =
+                Hardware::TDeck::MapStyleCatalogResult::ACTIVE_IO_INDETERMINATE;
+            bool activation_admitted = false;
+            // Linearize durable activation with hide(). If hide wins this lock,
+            // the stale request is cancelled without touching the active slots.
+            // If activation wins, hide cannot mark the screen hidden until the
+            // bounded SD commit has completed.
+            if (lockState(portMAX_DELAY)) {
+                activation_admitted =
+                    screen_visible_.load(std::memory_order_acquire) &&
+                    !style_lifecycle_exhausted_ &&
+                    style_request_lifecycle_epoch == style_lifecycle_epoch_ &&
+                    style_selector_.activationOwnedBy(style_request.token);
+                if (activation_admitted) {
+                    activation = style_catalog_.activate(
+                        style_request.catalog_generation, style_request.style_id);
+                } else {
+                    (void)style_selector_.cancelPending(style_request.token);
+                }
+                unlockState();
+            }
+            if (!activation_admitted) continue;
             bool success = activation == Hardware::TDeck::MapStyleCatalogResult::OK;
             if (success) {
                 const Hardware::TDeck::MapTilePackResult initialized = pack_.initialize();
@@ -793,9 +813,8 @@ void MapScreen::show() {
 }
 
 void MapScreen::hide() {
-    screen_visible_.store(false, std::memory_order_release);
-    if (worker_task_) xTaskNotifyGive(worker_task_);
     if (lockState(portMAX_DELAY)) {
+        screen_visible_.store(false, std::memory_order_release);
         if (style_lifecycle_epoch_ == UINT32_MAX) {
             style_lifecycle_exhausted_ = true;
         } else {
@@ -810,6 +829,7 @@ void MapScreen::hide() {
         presenter_.hide();
         unlockState();
     }
+    if (worker_task_) xTaskNotifyGive(worker_task_);
     lv_group_t* group = LVGL::LVGLInit::get_default_group();
     if (group) {
         lv_group_remove_obj(back_button_);

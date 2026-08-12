@@ -191,6 +191,13 @@ def test_style_switch_is_bounded_and_worker_owned():
     assert "pack_.initialize()" in worker
     assert "presenter_.invalidateTiles()" in worker
     activation = worker.index("style_catalog_.activate")
+    admission_lock = worker.rindex("lockState(portMAX_DELAY)", 0, activation)
+    admission_guard = worker.rindex("activation_admitted =", 0, activation)
+    admission_unlock = worker.index("unlockState();", activation)
+    assert admission_lock < admission_guard < activation < admission_unlock
+    assert "style_request_lifecycle_epoch == style_lifecycle_epoch_" in worker[admission_guard:activation]
+    assert "style_selector_.activationOwnedBy(style_request.token)" in worker[admission_guard:activation]
+    assert "if (!activation_admitted) continue;" in worker[activation:]
     committed_reload = worker.index("pack_.initialize()", activation)
     cache_invalidation = worker.index("decoded_tile_cache_.clear()", committed_reload)
     selector_completion = worker.index("style_selector_.complete", committed_reload)
@@ -222,6 +229,7 @@ def test_style_switch_is_bounded_and_worker_owned():
     assert publisher.index("lockState(portMAX_DELAY)") < publisher.index("activation_failed &&")
     hide = function_body(source, "void MapScreen::hide()")
     assert "lockState(portMAX_DELAY)" in hide
+    assert hide.index("lockState(portMAX_DELAY)") < hide.index("screen_visible_.store(false")
     assert "style_lifecycle_exhausted_" in hide
     assert "UINT32_MAX" in hide
     assert "style_selector_.cancelPending(style_request_.token)" in hide
