@@ -212,9 +212,14 @@ private:
     // visible once active is observed true.
     std::atomic<bool> _bg_fill_active{false};      // streaming the rest of the page in
     size_t _bg_fill_target = 0;                    // _display_start_idx to fill down to
+    // Opening a chat prepends the rest of its first page asynchronously. Keep
+    // the viewport pinned to the newest message during only that initial fill;
+    // user-triggered pagination at the top must preserve the user's position.
+    std::atomic<bool> _keep_bottom_during_background_fill{false};
 
     // Load more messages (infinite scroll + background fill)
     void load_more_messages(size_t batch = MESSAGES_PER_PAGE);
+    void scroll_to_bottom();
     static void on_scroll(lv_event_t* event);
 
     // Utility
