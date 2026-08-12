@@ -26,6 +26,9 @@ def test_flasher_filters_drafts_but_includes_prereleases_with_a_clear_label():
     assert "if (release.draft) continue;" in source
     assert "if (release.draft || release.prerelease) continue;" not in source
     assert "const releaseChannel = release.prerelease ? ' — Pre-release' : '';" in source
+    assert """option.textContent = release.tag_name
+                        + (release.name && release.name !== release.tag_name ? ` — ${release.name}` : '')
+                        + releaseChannel;""" in source
     assert "RELEASE_METADATA_ASSET = 'pyxis-release.json'" in source
     assert "if (!assetNames.includes(RELEASE_METADATA_ASSET)) continue;" in source
     assert "firmware/releases/${release.tag_name}/" in source
