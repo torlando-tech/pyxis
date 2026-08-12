@@ -134,7 +134,7 @@ jobs:
           # Fetch all published releases and download their firmware assets
           # so versioned firmware is available same-origin on GitHub Pages.
           # With keep_files: true, each release only needs to be downloaded once.
-          for tag in $(gh api repos/${{ github.repository }}/releases --jq '.[] | select(.draft == false and .prerelease == false) | select(any(.assets[]; .name == "pyxis-release.json")) | .tag_name'); do
+          for tag in $(gh api repos/${{ github.repository }}/releases --jq '.[] | select(.draft == false) | select(any(.assets[]; .name == "pyxis-release.json")) | .tag_name'); do
             dir="docs/flasher/firmware/releases/${tag}"
             # Skip if we already have this version's firmware (e.g., current tagged build)
             if python tools/validate_pyxis_web_release.py --directory "${dir}" --version "${tag}"; then

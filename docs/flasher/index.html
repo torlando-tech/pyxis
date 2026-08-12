@@ -411,7 +411,7 @@
         const CONNECT_TIMEOUT_MS = 15000;
         const EXPECTED_CHIP = 'ESP32-S3';
 
-        // Fail closed until the GitHub API supplies a published, non-prerelease version.
+        // Fail closed until the GitHub API supplies a published release with audited metadata.
         let firmwarePathPrefix = null;
         let selectedReleaseMetadata = null;
         let customFirmwareBytes = null;
@@ -788,7 +788,7 @@
                 let publishedCount = 0;
 
                 for (const release of releases) {
-                    if (release.draft || release.prerelease) continue;
+                    if (release.draft) continue;
                     const assetNames = release.assets.map(a => a.name);
                     if (!assetNames.includes(RELEASE_METADATA_ASSET)) continue;
                     if (!assetNames.includes('firmware.bin')) continue;
@@ -803,8 +803,11 @@
 
                     const option = document.createElement('option');
                     const hasAll = REQUIRED_FULL_ASSETS.every(f => assetNames.includes(f));
+                    const releaseChannel = release.prerelease ? ' — Pre-release' : '';
                     option.value = release.tag_name;
-                    option.textContent = release.tag_name + (release.name && release.name !== release.tag_name ? ` — ${release.name}` : '');
+                    option.textContent = release.tag_name
+                        + (release.name && release.name !== release.tag_name ? ` — ${release.name}` : '')
+                        + releaseChannel;
                     option.dataset.downloadUrl = prefix;
                     option.dataset.hasFullAssets = hasAll ? 'true' : 'false';
                     option.releaseMetadata = metadata;
@@ -953,7 +956,7 @@
         flashBtn.addEventListener('click', flash);
 
         // Initialize with no flashable target; loadVersions enables flashing only
-        // after selecting a published, non-prerelease GitHub release.
+        // after selecting a published GitHub release with audited metadata.
         loadVersions();
     </script>
 </body>

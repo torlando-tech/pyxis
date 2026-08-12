@@ -20,10 +20,12 @@ def test_flasher_starts_disabled_until_a_published_release_is_selected():
     assert '<option value="latest">' not in source
 
 
-def test_flasher_filters_drafts_and_prereleases_and_selects_a_versioned_path():
+def test_flasher_filters_drafts_but_includes_prereleases_with_a_clear_label():
     source = FLASHER.read_text()
 
-    assert "if (release.draft || release.prerelease) continue;" in source
+    assert "if (release.draft) continue;" in source
+    assert "if (release.draft || release.prerelease) continue;" not in source
+    assert "const releaseChannel = release.prerelease ? ' — Pre-release' : '';" in source
     assert "RELEASE_METADATA_ASSET = 'pyxis-release.json'" in source
     assert "if (!assetNames.includes(RELEASE_METADATA_ASSET)) continue;" in source
     assert "firmware/releases/${release.tag_name}/" in source
@@ -123,7 +125,8 @@ def test_tag_builds_cannot_overwrite_pages_and_only_main_deploys():
     workflow = WORKFLOW.read_text()
 
     assert workflow.count("if: github.ref == 'refs/heads/main'") >= 4
-    assert "select(.draft == false and .prerelease == false)" in workflow
+    assert "select(.draft == false)" in workflow
+    assert "select(.draft == false and .prerelease == false)" not in workflow
     assert 'select(any(.assets[]; .name == "pyxis-release.json"))' in workflow
     assert 'validate_pyxis_web_release.py --directory "${dir}" --version "${tag}"' in workflow
     assert 'rm -rf "${dir}"' in workflow
