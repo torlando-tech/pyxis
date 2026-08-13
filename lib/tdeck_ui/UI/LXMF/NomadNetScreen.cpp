@@ -29,8 +29,15 @@ void nomad_screen_heap_checkpoint(const char*) {}
 #endif
 
 const lv_font_t* run_font(const NomadNet::CompactPage::RunRecord& run, bool large) {
+    const bool bold = run.style & NomadNet::CompactPage::BOLD;
     const bool italic = run.style & NomadNet::CompactPage::ITALIC;
-    if (large) return italic ? &nomadnet_font_16_italic : &nomadnet_font_16;
+    if (large) {
+        if (bold && italic) return &nomadnet_font_16_bold_italic;
+        if (bold) return &nomadnet_font_16_bold;
+        return italic ? &nomadnet_font_16_italic : &nomadnet_font_16;
+    }
+    if (bold && italic) return &nomadnet_font_12_bold_italic;
+    if (bold) return &nomadnet_font_12_bold;
     return italic ? &nomadnet_font_12_italic : &nomadnet_font_12;
 }
 }
@@ -362,7 +369,7 @@ void NomadNetScreen::layout_page(){
             const uint16_t run_index=static_cast<uint16_t>(block.first_run+r);
             const auto& run=_page.runs()[run_index];
             const auto text=_page.text(run);
-            const bool large=(run.style&NomadNet::CompactPage::BOLD)||block.type==NomadNet::BlockType::HEADING;
+            const bool large=block.type==NomadNet::BlockType::HEADING;
             const lv_font_t* font=run_font(run,large);
             const int16_t height=static_cast<int16_t>(font->line_height+3);
             line_h=std::max(line_h,height);
