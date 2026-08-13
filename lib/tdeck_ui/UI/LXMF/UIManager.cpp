@@ -54,14 +54,15 @@ constexpr const char* NOMAD_LIBRARY_STAGE = "/nomadnet/library.new";
 constexpr const char* NOMAD_LIBRARY_BACKUP = "/nomadnet/library.bak";
 constexpr const char* NOMAD_LIBRARY_OLD = "/nomadnet/library.old";
 
-#ifdef MEMORY_INSTRUMENTATION_ENABLED
+#if defined(MEMORY_INSTRUMENTATION_ENABLED) || defined(PYXIS_NOMAD_MEMORY_DIAGNOSTIC)
 void nomad_heap_checkpoint(const char* phase) {
-    INFOF("NomadNet heap %s: internal=%u largest=%u minimum=%u psram=%u",
-          phase,
-          static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
-          static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
-          static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
-          static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+    Serial.printf(
+        "T:NOMAD_HEAP phase=%s free=%u largest=%u minimum=%u psram=%u\n",
+        phase,
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
 }
 #else
 void nomad_heap_checkpoint(const char*) {}
@@ -1985,7 +1986,7 @@ bool UIManager::nomad_link_pending() const {
 }
 
 bool UIManager::nomad_operation_active() const {
-    return _nomad_state != NomadState::IDLE;
+    return _nomad_state.load(std::memory_order_acquire) != NomadState::IDLE;
 }
 
 #if defined(PYXIS_TEST_HOOKS) || defined(PYXIS_NOMAD_LINK_DIAGNOSTIC)
@@ -2033,6 +2034,18 @@ void UIManager::nomad_release_request() {
     }
 }
 
+void UIManager::nomad_finish_request_keep_link() {
+    // A RESPONSE event arrives only after the dependency marks the receipt
+    // READY and removes it from Link::pending_requests(). Seal callback delivery
+    // before dropping our concluded receipt, but retain the ACTIVE Link so a
+    // same-destination page can issue its next anonymous request directly.
+    _nomad_mailbox.seal();
+    _nomad_request = RequestReceipt(Type::NONE);
+    _nomad_state = NomadState::IDLE;
+    _nomad_deadline_ms = 0;
+    nomad_heap_checkpoint("request-finished");
+}
+
 void UIManager::nomad_stop_transport() {
     // Link teardown can synchronously cancel an in-flight response Resource,
     // update its shared RequestReceipt and invoke callbacks. Keep that mutation
@@ -2046,7 +2059,9 @@ void UIManager::nomad_stop_transport() {
     _nomad_mailbox.seal();
     if (_nomad_link && _nomad_link.status() != Type::Link::CLOSED) _nomad_link.teardown();
     nomad_release_request();
+    nomad_heap_checkpoint("stop-request-released");
     _nomad_link = Link(Type::NONE);
+    nomad_heap_checkpoint("stop-link-released");
     nomad_heap_checkpoint("stop-done");
 }
 
@@ -2084,6 +2099,26 @@ void UIManager::nomad_open(const std::string& address, bool add_history) {
     RouterLock router_lock;
     if (!router_lock.acquired()) return;
     nomad_heap_checkpoint("open-locked");
+    const bool same_destination = _nomad_state == NomadState::IDLE &&
+        _nomad_link && _nomad_link.status() == Type::Link::ACTIVE &&
+        !_nomad_url.destination_hex.empty() &&
+        parsed.destination_hex == _nomad_url.destination_hex;
+    if (same_destination) {
+        _nomad_response.clear();
+        _nomad_request_policy.reset();
+        _nomad_url = parsed;
+        _nomad_history.open(parsed.str(), add_history);
+        {
+            LVGL_LOCK();
+            _nomadnet_screen->set_address(parsed.str());
+            _nomadnet_screen->set_status("Requesting page...");
+        }
+        // Reopen only the bounded early-request callback window. The retained
+        // Link is already ACTIVE and remains owned by this owner task.
+        _nomad_mailbox.prepare();
+        nomad_send_request();
+        return;
+    }
     _nomad_mailbox.seal();
     if (_nomad_link && _nomad_link.status() != Type::Link::CLOSED) _nomad_link.teardown();
     nomad_release_request();
@@ -2188,6 +2223,8 @@ void UIManager::nomad_update() {
 
     NomadNet::AsyncMailbox::Event event;
     if (!_nomad_mailbox.take(event)) return;
+    if (event.kind == NomadNet::AsyncMailbox::Kind::RESPONSE)
+        nomad_heap_checkpoint("response-taken");
     switch (event.kind) {
         case NomadNet::AsyncMailbox::Kind::LINK_ESTABLISHED:
             if (_nomad_state == NomadState::LINK) {
@@ -2215,19 +2252,20 @@ void UIManager::nomad_update() {
             { LVGL_LOCK(); _nomadnet_screen->set_status("Page exceeds 64 KiB limit"); }
             break;
         case NomadNet::AsyncMailbox::Kind::RESPONSE: {
-            // The callback payload has been moved into this local event. Each
-            // browser request uses a fresh Link, so release session state now;
-            // this also covers malformed responses. Clear callback tokens
-            // first so teardown cannot replace the terminal page status.
-            nomad_stop_transport();
+            // The dependency has already removed this successful request from
+            // Link::pending_requests(). Validate it before deciding whether the
+            // Link is safe to retain for same-destination navigation.
             if (!NomadNet::normalize_response(event.data.data(), event.data.size(), _nomad_response)) {
+                nomad_stop_transport();
                 LVGL_LOCK();
                 _nomadnet_screen->set_status("Malformed NomadNet response");
                 break;
             }
+            nomad_heap_checkpoint("response-normalized");
             const auto& bytes = _nomad_response.bytes();
             const NomadNet::Document document = _nomad_parser.parse(
                 reinterpret_cast<const char*>(bytes.data()), bytes.size());
+            nomad_heap_checkpoint("response-parsed");
             if (!(document.malformed && document.blocks.empty())) {
                 std::vector<std::string> heading_runs;
                 for (const auto& block : document.blocks) {
@@ -2241,12 +2279,34 @@ void UIManager::nomad_update() {
                     _nomad_library_dirty = true;
             }
             const bool page_saved = _nomad_library.page_saved(_nomad_url.str());
-            LVGL_LOCK();
-            if (document.malformed && document.blocks.empty())
+            if (document.malformed && document.blocks.empty()) {
+                nomad_stop_transport();
+                LVGL_LOCK();
                 _nomadnet_screen->set_status("Page is not valid UTF-8/Micron");
-            else {
+                break;
+            }
+            bool page_applied = false;
+            {
+                LVGL_LOCK();
                 _nomadnet_screen->set_library(_nomad_library);
-                _nomadnet_screen->set_page(document);
+                page_applied = _nomadnet_screen->set_page(document);
+            }
+            nomad_heap_checkpoint("response-page-applied");
+            if (!page_applied) {
+                nomad_stop_transport();
+                break;
+            }
+            // A close callback can race a terminal response and is deliberately
+            // suppressed so the valid page wins. Recheck the live Link after
+            // applying the page; retain only ACTIVE ownership, otherwise perform
+            // ordered full teardown instead of leaving a CLOSED Link attached.
+            if (_nomad_link && _nomad_link.status() == Type::Link::ACTIVE) {
+                nomad_finish_request_keep_link();
+            } else {
+                nomad_stop_transport();
+            }
+            {
+                LVGL_LOCK();
                 _nomadnet_screen->set_page_saved(page_saved);
                 _nomadnet_screen->set_status(document.truncated ? "Page loaded (truncated)" : "Page loaded");
             }

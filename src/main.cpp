@@ -384,6 +384,7 @@ extern "C" void pyxis_audio_dump(const void*, size_t) {}
 
 // Forward declarations
 void start_tcp_interface();
+void create_tcp_interface();
 void start_auto_interface();
 void on_wifi_connected();
 
@@ -1536,8 +1537,7 @@ void setup_ui_manager() {
 
                 if (new_settings.tcp_enabled) {
                     if (!tcp_interface_impl) {
-                        tcp_interface_impl = new TCPClientInterface("tcp0");
-                        tcp_interface = new Interface(tcp_interface_impl);
+                        create_tcp_interface();
                     }
                     tcp_interface_impl->set_target_host(new_settings.tcp_host.c_str());
                     tcp_interface_impl->set_target_port(new_settings.tcp_port);
@@ -1759,6 +1759,15 @@ void start_auto_interface() {
     }
 }
 
+void create_tcp_interface() {
+    if (tcp_interface_impl) return;
+    tcp_interface_impl = new TCPClientInterface("tcp0");
+    tcp_interface_impl->set_operation_active_callback([]() {
+        return ui_manager && ui_manager->nomad_operation_active();
+    });
+    tcp_interface = new Interface(tcp_interface_impl);
+}
+
 void start_tcp_interface() {
     if (!app_settings.tcp_enabled || WiFi.status() != WL_CONNECTED) {
         return;
@@ -1767,8 +1776,7 @@ void start_tcp_interface() {
     if (!tcp_interface_impl) {
         String server_addr = app_settings.tcp_host + ":" + String(app_settings.tcp_port);
         INFO(("Creating TCP interface to " + std::string(server_addr.c_str())).c_str());
-        tcp_interface_impl = new TCPClientInterface("tcp0");
-        tcp_interface = new Interface(tcp_interface_impl);
+        create_tcp_interface();
     }
     if (tcp_interface_registered) return;
     INFO("Starting TCP interface...");

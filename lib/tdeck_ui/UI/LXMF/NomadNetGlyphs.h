@@ -6,7 +6,9 @@
 #ifdef ARDUINO
 #include <lvgl.h>
 LV_FONT_DECLARE(nomadnet_font_12)
+LV_FONT_DECLARE(nomadnet_font_12_italic)
 LV_FONT_DECLARE(nomadnet_font_16)
+LV_FONT_DECLARE(nomadnet_font_16_italic)
 #endif
 
 namespace UI::LXMF::NomadNet {

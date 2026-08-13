@@ -46,6 +46,8 @@ static bool resource_progress = false;
 static bool receipt_failed = false;
 static bool pending_empty = false;
 static bool link_closed = false;
+static int link_callbacks = 0;
+static int reuse_requests = 0;
 
 static std::vector<uint8_t> bytes_vector(const RNS::Bytes& bytes) {
     if (bytes.size() == 0) return {};
@@ -197,11 +199,13 @@ static void on_link_closed(RNS::Link& closed_link) {
 
 static void on_link_established(RNS::Link& established_link) {
     link_established = true;
+    ++link_callbacks;
     mailbox.begin(bytes_vector(established_link.link_id()));
     established_link.set_resource_started_callback(on_resource_started);
     std::string path;
     double timeout = 8.0;
     if (scenario == "immediate") path = "/page/immediate.mu";
+    else if (scenario == "reuse") path = "/page/reuse-first.mu";
     else if (scenario == "lan") path = "/page/index.mu";
     else if (scenario == "resource") path = "/page/resource.mu";
     else if (scenario == "near-limit") path = "/page/near-limit.mu";
@@ -221,6 +225,7 @@ static void on_link_established(RNS::Link& established_link) {
     }
     mailbox.expect_request(bytes_vector(receipt.get_request_id()));
     request_started = true;
+    if (scenario == "reuse") ++reuse_requests;
     request_started_at = RNS::Utilities::OS::time();
 }
 
@@ -263,12 +268,41 @@ static void consume_event() {
                 return;
             }
             const RNS::Bytes response(event.data.data(), event.data.size());
-            const bool expected_resource = scenario == "resource" || scenario == "near-limit";
+            const bool expected_resource = scenario == "resource" || scenario == "near-limit" ||
+                                           (scenario == "reuse" && reuse_requests == 2);
             if (expected_resource && progress_callbacks == 0) {
                 fail("Resource response had no progress callback");
                 return;
             }
             passed = validate_page(response, expected_resource);
+            if (!passed) return;
+            if (scenario == "reuse" && reuse_requests == 1) {
+                if (!active_link || active_link.status() != RNS::Type::Link::ACTIVE ||
+                    !active_link.pending_requests().empty()) {
+                    fail("first reuse request did not conclude on active Link");
+                    return;
+                }
+                mailbox.prepare();
+                active_link.set_resource_started_callback(on_resource_started);
+                const auto nil = NN::no_form_request_data();
+                receipt = active_link.request(RNS::Bytes("/page/reuse-second.mu"),
+                    RNS::Bytes(nil.data(), nil.size()), on_response, on_failed,
+                    on_progress, 8.0, NN::AsyncMailbox::MAX_WIRE_BYTES);
+                if (!receipt) {
+                    fail("second request creation on retained Link");
+                    return;
+                }
+                mailbox.expect_request(bytes_vector(receipt.get_request_id()));
+                ++reuse_requests;
+                request_started_at = RNS::Utilities::OS::time();
+                break;
+            }
+            if (scenario == "reuse" &&
+                (reuse_requests != 2 || link_callbacks != 1 ||
+                 !active_link.pending_requests().empty())) {
+                fail("same-destination Link reuse invariants");
+                return;
+            }
             completed = true;
             break;
         }
@@ -331,13 +365,13 @@ static bool cleanup_complete() {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "usage: %s immediate|resource|near-limit|oversized|timeout|cancel | lan host port destination\n", argv[0]);
+        std::fprintf(stderr, "usage: %s immediate|resource|near-limit|oversized|timeout|cancel|reuse | lan host port destination\n", argv[0]);
         return 2;
     }
     scenario = argv[1];
     if (scenario != "immediate" && scenario != "resource" && scenario != "near-limit" &&
         scenario != "oversized" &&
-        scenario != "timeout" && scenario != "cancel" && scenario != "lan") return 2;
+        scenario != "timeout" && scenario != "cancel" && scenario != "reuse" && scenario != "lan") return 2;
     if ((scenario == "lan" && argc != 5) || (scenario != "lan" && argc != 2)) return 2;
 
     microStore::FileSystem filesystem{microStore::Adapters::UniversalFileSystem(".")};
@@ -403,7 +437,7 @@ int main(int argc, char** argv) {
     cleanup_complete();
     std::printf("RESULT scenario=%s announce=%d path=%d link=%d request=%d progress=%d callbacks=%d "
                 "cancel=%d deadline=%d resource_started=%d resource_progress=%d receipt_failed=%d "
-                "pending=%zu link_closed=%d stale_rejected=%d passed=%d\n",
+                "pending=%zu link_closed=%d stale_rejected=%d reuse_requests=%d link_callbacks=%d passed=%d\n",
                 scenario.c_str(), announce_seen ? 1 : 0,
                 destination_hex.empty() ? 0 : 1, link_established ? 1 : 0,
                 request_started ? 1 : 0, progress_seen ? 1 : 0, progress_callbacks,
@@ -411,7 +445,7 @@ int main(int argc, char** argv) {
                 resource_started ? 1 : 0, resource_progress ? 1 : 0,
                 receipt_failed ? 1 : 0,
                 active_link ? active_link.pending_requests().size() : 0,
-                link_closed ? 1 : 0, stale_callback_rejections,
+                link_closed ? 1 : 0, stale_callback_rejections, reuse_requests, link_callbacks,
                 passed ? 1 : 0);
     if (scenario == "lan") {
         std::printf("LAN TRANSPORT rx=%zu rxbytes=%zu tx=%zu txbytes=%zu\n",

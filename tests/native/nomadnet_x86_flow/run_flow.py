@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[3]
 SERVER = Path(__file__).with_name("server.py")
 CLIENT = Path(sys.argv[1])
 PYTHON = Path(sys.argv[2])
-SCENARIOS = ("immediate", "resource", "near-limit", "oversized", "timeout", "cancel")
+SCENARIOS = ("immediate", "resource", "near-limit", "oversized", "timeout", "cancel", "reuse")
 
 failed = False
 for scenario in SCENARIOS:
@@ -53,6 +53,12 @@ for scenario in SCENARIOS:
             "pending=0", "link_closed=1",
         ))
         ok &= "SERVER PASS cancellation observed" in server_text
+    if scenario == "reuse":
+        ok &= all(marker in client_text for marker in (
+            "reuse_requests=2", "link_callbacks=1", "pending=0",
+        ))
+        ok &= server_text.count("SERVER request count=") == 2
+        ok &= "SERVER PASS reused one Link for two anonymous requests" in server_text
     print(f"SCENARIO {scenario}: {'PASS' if ok else 'FAIL'} server={server_rc} client={client_rc}")
     failed |= not ok
 

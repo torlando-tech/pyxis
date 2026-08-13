@@ -8,8 +8,33 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdio>
+#if defined(PYXIS_NOMAD_MEMORY_DIAGNOSTIC)
+#include <esp_heap_caps.h>
+#endif
 
 namespace UI::LXMF {
+namespace {
+#if defined(PYXIS_NOMAD_MEMORY_DIAGNOSTIC)
+void nomad_screen_heap_checkpoint(const char* phase) {
+    Serial.printf(
+        "T:NOMAD_HEAP phase=%s free=%u largest=%u minimum=%u psram=%u\n",
+        phase,
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+}
+#else
+void nomad_screen_heap_checkpoint(const char*) {}
+#endif
+
+const lv_font_t* run_font(const NomadNet::CompactPage::RunRecord& run, bool large) {
+    const bool italic = run.style & NomadNet::CompactPage::ITALIC;
+    if (large) return italic ? &nomadnet_font_16_italic : &nomadnet_font_16;
+    return italic ? &nomadnet_font_12_italic : &nomadnet_font_12;
+}
+}
+
 NomadNetScreen::NomadNetScreen() {
     _screen=lv_obj_create(lv_scr_act()); lv_obj_set_size(_screen,320,240);
     lv_obj_set_style_bg_color(_screen,Theme::surface(),0); lv_obj_set_style_border_width(_screen,0,0); lv_obj_set_style_pad_all(_screen,0,0);
@@ -82,6 +107,7 @@ void NomadNetScreen::set_page_saved(bool saved){
     lv_obj_set_style_bg_color(_save_button,saved?Theme::primary():Theme::surfaceContainer(),0);
 }
 void NomadNetScreen::clear_document(){
+    nomad_screen_heap_checkpoint("clear-before");
     auto* group=LVGL::LVGLInit::get_default_group();
     if(group){
         if(lv_group_get_editing(group)&&lv_group_get_focused(group)==_content)lv_group_set_editing(group,false);
@@ -95,9 +121,18 @@ void NomadNetScreen::clear_document(){
     lv_obj_invalidate(_content);
     _page_loaded=false;
     set_page_saved(false);
+    nomad_screen_heap_checkpoint("clear-after");
+}
+void NomadNetScreen::clear_directory(){
+    auto* group=LVGL::LVGLInit::get_default_group();
+    if(group)detach_focusables(group);
+    lv_obj_clean(_directory);
+    std::vector<lv_obj_t*>().swap(_directory_focusables);
+    std::vector<std::string>().swap(_directory_targets);
 }
 void NomadNetScreen::begin_navigation(const std::string& target){
     clear_document();
+    clear_directory();
     set_address(target);
     show_browser(false);
     set_status("Opening NomadNet page...");
@@ -121,9 +156,8 @@ void NomadNetScreen::show_browser(bool editing){
     rebuild_focus();
 }
 void NomadNetScreen::render_directory(View view){
-    auto* group=LVGL::LVGLInit::get_default_group();
-    if(group)detach_focusables(group);
-    _directory_focusables.clear();_directory_targets.clear();lv_obj_clean(_directory);_view=view;
+    clear_directory();
+    _view=view;
     _directory_visible.store(true,std::memory_order_release);
     lv_obj_clear_flag(_directory,LV_OBJ_FLAG_HIDDEN);
     for(auto* object:{_address_row,_status,_content,_reload_button,_save_button})lv_obj_add_flag(object,LV_OBJ_FLAG_HIDDEN);
@@ -275,13 +309,13 @@ void NomadNetScreen::set_status(const char* value){
     const bool loaded_ack=_page_loaded&&status.rfind("Page loaded",0)==0;
     apply_browser_layout(!loaded_ack);
 }
-void NomadNetScreen::set_page(const NomadNet::Document& document) {
+bool NomadNetScreen::set_page(const NomadNet::Document& document) {
     auto* group=LVGL::LVGLInit::get_default_group();
     if(group)lv_group_remove_obj(_content);
     if(!_page.assign(document)) {
         clear_document();
         set_status("Page is too large for available memory");
-        return;
+        return false;
     }
     if(_page.truncated())_page.append_notice("[Page truncated to device safety limits]");
     else if(_page.unsupported())_page.append_notice("[Unsupported Micron content]");
@@ -293,6 +327,7 @@ void NomadNetScreen::set_page(const NomadNet::Document& document) {
     lv_obj_scroll_to_y(_content,0,LV_ANIM_OFF);
     lv_obj_refresh_self_size(_content);
     lv_obj_invalidate(_content);
+    return true;
 }
 
 void NomadNetScreen::layout_page(){
@@ -327,8 +362,8 @@ void NomadNetScreen::layout_page(){
             const uint16_t run_index=static_cast<uint16_t>(block.first_run+r);
             const auto& run=_page.runs()[run_index];
             const auto text=_page.text(run);
-            const lv_font_t* font=(run.style&NomadNet::CompactPage::BOLD)||block.type==NomadNet::BlockType::HEADING
-                ?&nomadnet_font_16:&nomadnet_font_12;
+            const bool large=(run.style&NomadNet::CompactPage::BOLD)||block.type==NomadNet::BlockType::HEADING;
+            const lv_font_t* font=run_font(run,large);
             const int16_t height=static_cast<int16_t>(font->line_height+3);
             line_h=std::max(line_h,height);
             std::size_t offset=0;
@@ -338,7 +373,7 @@ void NomadNetScreen::layout_page(){
                 while(end<text.size()&&((text[end]==' '||text[end]=='\t')==whitespace)&&end-offset<255)++end;
                 if(end==offset)++end;
                 int16_t fragment_w=static_cast<int16_t>(lv_txt_get_width(text.data()+offset,
-                    static_cast<uint32_t>(end-offset),font,(run.style&NomadNet::CompactPage::ITALIC)?1:0,LV_TEXT_FLAG_NONE));
+                    static_cast<uint32_t>(end-offset),font,0,LV_TEXT_FLAG_NONE));
                 if(whitespace&&x+fragment_w>indent+available){offset=end;continue;}
                 if(!whitespace&&x>indent&&x+fragment_w>indent+available){
                     align_line(line_first,_page_layout.size(),line_y);
@@ -353,7 +388,7 @@ void NomadNetScreen::layout_page(){
                         _lv_txt_encoded_next(text.data(),&next_index);
                         end=next_index;
                         const int16_t candidate=static_cast<int16_t>(lv_txt_get_width(text.data()+offset,
-                            static_cast<uint32_t>(end-offset),font,(run.style&NomadNet::CompactPage::ITALIC)?1:0,LV_TEXT_FLAG_NONE));
+                            static_cast<uint32_t>(end-offset),font,0,LV_TEXT_FLAG_NONE));
                         if(candidate>available&&previous>offset){end=previous;break;}
                         fragment_w=candidate;
                     }
@@ -361,7 +396,7 @@ void NomadNetScreen::layout_page(){
                 if(!(whitespace&&x==indent)){
                     _page_layout.push_back(LayoutFragment(run_index,static_cast<uint16_t>(offset),
                         static_cast<uint16_t>(end-offset),run.link_index,x,y,fragment_w,height,false,
-                        font==&nomadnet_font_16));
+                        large));
                     x=static_cast<int16_t>(x+fragment_w);
                 }
                 offset=end;
@@ -407,10 +442,10 @@ void NomadNetScreen::draw_page(lv_event_t* event){
             lv_draw_rect_dsc_t bg;lv_draw_rect_dsc_init(&bg);bg.bg_color=selected?Theme::primaryPressed():lv_color_hex(run.background);lv_draw_rect(draw_ctx,&bg,&area);
         }
         lv_draw_label_dsc_t dsc;lv_draw_label_dsc_init(&dsc);
-        dsc.font=fragment.large_font?&nomadnet_font_16:&nomadnet_font_12;
+        dsc.font=run_font(run, fragment.large_font);
         dsc.color=run.link_index>=0?Theme::primaryLight():(run.style&NomadNet::CompactPage::HAS_FOREGROUND)
             ?lv_color_hex(run.foreground):_page.has_foreground()?lv_color_hex(_page.foreground()):Theme::textPrimary();
-        dsc.letter_space=(run.style&NomadNet::CompactPage::ITALIC)?1:0;
+        dsc.letter_space=0;
         dsc.decor=(run.style&NomadNet::CompactPage::UNDERLINE)||run.link_index>=0?LV_TEXT_DECOR_UNDERLINE:LV_TEXT_DECOR_NONE;
         lv_draw_label(draw_ctx,&dsc,&area,scratch,nullptr);
     }

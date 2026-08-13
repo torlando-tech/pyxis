@@ -31,10 +31,13 @@ def test_nomadnet_x86_real_peer_flow():
         timeout=180,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.count("SCENARIO ") == 6
-    assert result.stdout.count(": PASS server=0 client=0") == 6
+    assert result.stdout.count("SCENARIO ") == 7
+    assert result.stdout.count(": PASS server=0 client=0") == 7
     assert "anonymous=True" in result.stdout
     assert "EVENT oversized transfer=" in result.stdout
+    assert "SCENARIO reuse: PASS server=0 client=0" in result.stdout
+    assert "reuse_requests=2" in result.stdout
+    assert "link_callbacks=1" in result.stdout
 
 
 def test_x86_flow_has_real_lan_tcp_nomadnet_mode():
@@ -47,6 +50,19 @@ def test_x86_flow_has_real_lan_tcp_nomadnet_mode():
     assert 'path = "/page/index.mu"' in client
     assert "set_target_host" in client
     assert "set_target_port" in client
+
+
+def test_x86_flow_proves_two_pages_reuse_one_encrypted_link():
+    runner = (ROOT / "tests/native/nomadnet_x86_flow/run_flow.py").read_text()
+    server = (ROOT / "tests/native/nomadnet_x86_flow/server.py").read_text()
+    client = (ROOT / "tests/native/nomadnet_x86_flow/client.cpp").read_text()
+
+    assert '"reuse"' in runner
+    assert '"/page/reuse-first.mu"' in server
+    assert '"/page/reuse-second.mu"' in server
+    assert 'scenario == "reuse"' in client
+    assert 'link_callbacks != 1' in client
+    assert 'reuse_requests == 2' in client
 
 
 def test_physical_lan_flow_captures_both_link_wire_boundaries_and_crypto_vector():

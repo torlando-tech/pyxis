@@ -422,7 +422,7 @@ private:
     RNS::Link _nomad_link{RNS::Type::NONE};
     RNS::RequestReceipt _nomad_request{RNS::Type::NONE};
     enum class NomadState { IDLE, PATH, LINK, REQUEST };
-    NomadState _nomad_state = NomadState::IDLE;
+    std::atomic<NomadState> _nomad_state{NomadState::IDLE};
     uint32_t _nomad_deadline_ms = 0;
     static UIManager* s_nomad_instance;
 
@@ -434,6 +434,7 @@ private:
     void nomad_update();
     void nomad_start_link();
     void nomad_send_request();
+    void nomad_finish_request_keep_link();
     void nomad_release_request();
     void nomad_stop_transport();
     bool nomad_refresh_path_after_link_failure();

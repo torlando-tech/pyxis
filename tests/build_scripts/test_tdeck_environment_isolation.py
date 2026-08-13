@@ -39,6 +39,63 @@ def test_nomad_link_diagnostic_is_minimal_and_separate_from_broad_hooks():
     assert "PYXIS_NOMAD_LINK_DIAGNOSTIC" not in production
 
 
+def test_tcp_liveness_diagnostic_extends_release_without_broad_hooks():
+    config = CONFIG.read_text()
+    diagnostic = section(config, "tdeck-tcp-liveness-diagnostic")
+
+    assert "extends = env:tdeck-release" in diagnostic
+    assert "-DPYXIS_TCP_LIVENESS_DIAGNOSTIC" in diagnostic
+    assert "-DPYXIS_TEST_HOOKS" not in diagnostic
+    assert "PYXIS_TEST_TCP_HOST" not in diagnostic
+    assert "PYXIS_TEST_TCP_PORT" not in diagnostic
+
+
+def test_tcp_liveness_diagnostic_reports_worker_socket_and_keepalive_state():
+    source = (ROOT / "src/TCPClientInterface.cpp").read_text()
+
+    assert "#ifdef PYXIS_TCP_LIVENESS_DIAGNOSTIC" in source
+    assert '"T:TCP_WORKER ' in source
+    assert '"T:TCP_ATTEMPT ' in source
+    assert '"T:TCP_SOCKET ' in source
+    assert '"T:TCP_DROP ' in source
+    assert '"T:TCP_MAIN ' in source
+    assert "getsockopt" in source
+    assert "heap_caps_get_largest_free_block" in source
+
+
+def test_tcp_liveness_diagnostic_has_narrow_nomad_memory_boundaries():
+    config = CONFIG.read_text()
+    diagnostic = section(config, "tdeck-tcp-liveness-diagnostic")
+    manager = (ROOT / "lib/tdeck_ui/UI/LXMF/UIManager.cpp").read_text()
+    screen = (ROOT / "lib/tdeck_ui/UI/LXMF/NomadNetScreen.cpp").read_text()
+
+    assert "-DPYXIS_NOMAD_MEMORY_DIAGNOSTIC" in diagnostic
+    assert "-DMEMORY_INSTRUMENTATION_ENABLED" not in diagnostic
+    assert "-DPYXIS_TEST_HOOKS" not in diagnostic
+    assert "PYXIS_TEST_TCP_HOST" not in diagnostic
+    assert "PYXIS_TEST_TCP_PORT" not in diagnostic
+    assert '"T:NOMAD_HEAP phase=%s ' in manager
+    for phase in (
+        "action-before-navigation",
+        "action-after-navigation",
+        "link-before-construct",
+        "link-after-construct",
+        "request-enter",
+        "request-created",
+        "response-taken",
+        "response-normalized",
+        "response-parsed",
+        "response-page-applied",
+        "request-finished",
+        "stop-enter",
+        "stop-request-released",
+        "stop-link-released",
+    ):
+        assert f'nomad_heap_checkpoint("{phase}")' in manager
+    assert 'nomad_screen_heap_checkpoint("clear-before")' in screen
+    assert 'nomad_screen_heap_checkpoint("clear-after")' in screen
+
+
 def test_nomad_link_diagnostic_uses_fixed_buffer_status_output():
     main = MAIN.read_text()
     manager = (ROOT / "lib/tdeck_ui/UI/LXMF/UIManager.cpp").read_text()

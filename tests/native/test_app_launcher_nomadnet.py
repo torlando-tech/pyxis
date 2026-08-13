@@ -123,7 +123,7 @@ def test_nomadnet_page_body_uses_one_compact_custom_viewport():
     screen = (INCLUDE / "NomadNetScreen.cpp").read_text()
     compact_h = (INCLUDE / "NomadNetCompactPage.h").read_text()
 
-    set_page = screen[screen.index("void NomadNetScreen::set_page("):
+    set_page = screen[screen.index("bool NomadNetScreen::set_page("):
                       screen.index("void NomadNetScreen::show()")]
     assert "_page.assign(document)" in set_page
     assert "lv_obj_clean(_content)" not in set_page
@@ -162,6 +162,8 @@ def test_directory_rebuild_has_one_final_focus_owner():
     render_start = screen.index("void NomadNetScreen::render_directory(View view)")
     detach_start = screen.index("void NomadNetScreen::detach_focusables(", render_start)
     rebuild_start = screen.index("void NomadNetScreen::rebuild_focus()", detach_start)
+    clear_start = screen.index("void NomadNetScreen::clear_directory()")
+    clear = screen[clear_start:screen.index("void NomadNetScreen::begin_navigation(", clear_start)]
     render = screen[render_start:detach_start]
     detach = screen[detach_start:rebuild_start]
     rebuild_end = screen.index("void NomadNetScreen::apply_browser_layout", rebuild_start)
@@ -169,10 +171,11 @@ def test_directory_rebuild_has_one_final_focus_owner():
 
     # Creating replacement buttons must not auto-enrol/focus the first object
     # through LVGL's default-group constructor hook.
-    assert "detach_focusables(group);" in render
+    assert "clear_directory();" in render
+    assert "detach_focusables(group);" in clear
     assert "lv_group_set_default(nullptr);" in render
     assert "lv_group_set_default(previous_default_group);" in render
-    assert render.index("detach_focusables(group);") < render.index("lv_group_set_default(nullptr);")
+    assert render.index("clear_directory();") < render.index("lv_group_set_default(nullptr);")
     assert render.index("lv_group_set_default(nullptr);") < render.index("auto add_row=")
     assert render.index("lv_group_set_default(previous_default_group);") > render.index("if(_directory_focusables.empty())")
 
@@ -191,6 +194,26 @@ def test_directory_rebuild_has_one_final_focus_owner():
     assert "lv_group_focus_freeze(group,false);" in rebuild
     assert rebuild.index("lv_group_focus_freeze(group,true);") < rebuild.index("lv_group_add_obj")
     assert rebuild.index("lv_group_focus_freeze(group,false);") < rebuild.rindex("lv_group_focus_obj")
+
+
+def test_begin_navigation_releases_directory_rows_before_transport():
+    """Hidden directory rows must not consume Wi-Fi/Link internal SRAM."""
+    screen_h = (INCLUDE / "NomadNetScreen.h").read_text()
+    screen = (INCLUDE / "NomadNetScreen.cpp").read_text()
+
+    clear_start = screen.index("void NomadNetScreen::clear_directory()")
+    begin_start = screen.index("void NomadNetScreen::begin_navigation(")
+    show_start = screen.index("void NomadNetScreen::show_start()", begin_start)
+    clear = screen[clear_start:begin_start]
+    begin = screen[begin_start:show_start]
+
+    assert "void clear_directory();" in screen_h
+    assert "detach_focusables(group);" in clear
+    assert "lv_obj_clean(_directory);" in clear
+    assert "std::vector<lv_obj_t*>().swap(_directory_focusables);" in clear
+    assert "std::vector<std::string>().swap(_directory_targets);" in clear
+    assert "clear_directory();" in begin
+    assert begin.index("clear_directory();") < begin.index("show_browser(false);")
 
 
 def test_launcher_transition_has_one_final_focus_owner():
@@ -387,6 +410,76 @@ def test_nomadnet_requests_are_anonymous_and_back_cleanup_is_serialized():
                          manager_cpp.index("void UIManager::on_nomad_link_established")]
     assert "RouterLock router_lock;" in update
     assert "nomad_stop_transport();" in update
+
+
+def test_nomadnet_italic_uses_a_real_italic_font_not_letter_spacing():
+    glyphs_h = (INCLUDE / "NomadNetGlyphs.h").read_text()
+    browser_cpp = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    fonts = INCLUDE.parent / "Fonts"
+    italic_12 = (fonts / "nomadnet_font_12_italic.c").read_text()
+    italic_16 = (fonts / "nomadnet_font_16_italic.c").read_text()
+    ofl = (fonts / "LICENSE-OFL-1.1.txt").read_text()
+    dejavu_license = (fonts / "LICENSE-DejaVu.txt").read_text()
+
+    assert "LV_FONT_DECLARE(nomadnet_font_12_italic)" in glyphs_h
+    assert "LV_FONT_DECLARE(nomadnet_font_16_italic)" in glyphs_h
+    assert "const lv_font_t* run_font" in browser_cpp
+    assert "NomadNet::CompactPage::ITALIC" in browser_cpp
+    assert "&nomadnet_font_12_italic" in browser_cpp
+    assert "&nomadnet_font_16_italic" in browser_cpp
+    assert "dsc.font=run_font(run, fragment.large_font);" in browser_cpp
+    assert "dsc.letter_space=0;" in browser_cpp
+    assert "?1:0,LV_TEXT_FLAG_NONE" not in browser_cpp
+    for font in (italic_12, italic_16):
+        assert font.count("/* U+") == 385
+        assert '/* U+00AD "­" */' in font
+        assert '/* U+20BC "₼" */' in font
+        assert "NomadNetFontCoverage.h" in font
+        assert "nomadnet_font_has_codepoint" in font
+        assert "LICENSE-OFL-1.1.txt" in font
+    assert "Copyright 2022 The Noto Project Authors" in ofl
+    assert "Copyright 2024 The Montserrat.Git Project Authors" in ofl
+    assert "SIL OPEN FONT LICENSE Version 1.1" in ofl
+    assert "Copyright (c) 2003 by Bitstream, Inc." in dejavu_license
+
+
+def test_nomadnet_same_destination_navigation_reuses_active_link():
+    screen_h = (INCLUDE / "NomadNetScreen.h").read_text()
+    manager_cpp = (INCLUDE / "UIManager.cpp").read_text()
+
+    assert "bool set_page(const NomadNet::Document& document);" in screen_h
+
+    reopen = manager_cpp[manager_cpp.index("void UIManager::nomad_open("):
+                         manager_cpp.index("void UIManager::nomad_reload()")]
+    assert "same_destination" in reopen
+    assert "_nomad_link.status() == Type::Link::ACTIVE" in reopen
+    assert reopen.index("if (same_destination") < reopen.index("_nomad_link.teardown()")
+    same_site = reopen[reopen.index("if (same_destination"):reopen.index("_nomad_link.teardown()")]
+    assert "nomad_send_request();" in same_site
+    assert "Transport::request_path" not in same_site
+
+    response = manager_cpp[manager_cpp.index("case NomadNet::AsyncMailbox::Kind::RESPONSE:"):
+                           manager_cpp.index("case NomadNet::AsyncMailbox::Kind::NONE:")]
+    assert response.index("normalize_response") < response.index("nomad_finish_request_keep_link();")
+    assert response.index("document.malformed && document.blocks.empty()") < response.index(
+        "nomad_finish_request_keep_link();"
+    )
+    malformed = response[response.index("if (!NomadNet::normalize_response"):response.index(
+        "nomad_finish_request_keep_link();"
+    )]
+    assert "nomad_stop_transport();" in malformed
+    assert "page_applied = _nomadnet_screen->set_page(document);" in response
+    assert "if (!page_applied)" in response
+    assert response.index("_nomadnet_screen->set_page(document)") < response.index(
+        "nomad_finish_request_keep_link();"
+    )
+    retained = response[response.index("_nomadnet_screen->set_page(document)"):
+                        response.index("set_page_saved(page_saved)")]
+    assert "_nomad_link.status() == Type::Link::ACTIVE" in retained
+    assert "nomad_stop_transport();" in retained
+    application_failure = response[response.index("if (!page_applied)"):
+                                   response.index("set_page_saved(page_saved)")]
+    assert "nomad_stop_transport();" in application_failure
 
 
 def test_nomadnet_physical_test_hooks_are_isolated_and_owner_queued():

@@ -26,7 +26,7 @@ public:
     void set_address(const std::string& address);
     std::string address() const;
     void set_status(const char* status);
-    void set_page(const NomadNet::Document& document);
+    bool set_page(const NomadNet::Document& document);
     void set_library(const NomadNet::Library& library);
     void set_page_saved(bool saved);
     void begin_navigation(const std::string& target);
@@ -80,6 +80,7 @@ private:
     void render_directory(View view);
     void show_browser(bool editing);
     void clear_document();
+    void clear_directory();
     void layout_page();
     void draw_page(lv_event_t* event);
     void select_link(int direction);
