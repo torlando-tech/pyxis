@@ -15,7 +15,7 @@ class AsyncMailbox {
 public:
     static constexpr std::size_t MAX_BYTES = 64 * 1024;
     static constexpr std::size_t MAX_WIRE_BYTES = MAX_BYTES + 64;
-    enum class Kind { NONE, LINK_ESTABLISHED, LINK_CLOSED, RESPONSE, FAILED, OVERSIZED };
+    enum class Kind { NONE, LINK_ESTABLISHED, LINK_CLOSED, PROGRESS, RESPONSE, FAILED, OVERSIZED };
     struct Event {
         Kind kind = Kind::NONE;
         ExternalVector<uint8_t> data;
@@ -36,7 +36,7 @@ public:
         Guard guard(_lock);
         _sealed = false;
         if (_request_token == request_token &&
-            (_event.kind == Kind::RESPONSE || _event.kind == Kind::FAILED ||
+            (_event.kind == Kind::PROGRESS || _event.kind == Kind::RESPONSE || _event.kind == Kind::FAILED ||
              _event.kind == Kind::OVERSIZED)) return;
         _request_token = request_token;
         _event = Event{};
@@ -67,8 +67,8 @@ public:
         if (token.empty()) return false;
         if (_request_token.empty()) _request_token = token;
         if (token != _request_token) return false;
-        if (transfer_size > MAX_WIRE_BYTES || size > MAX_WIRE_BYTES || (!data && size != 0)) {
-            set_oversized(transfer_size);
+        if (size > MAX_WIRE_BYTES || (!data && size != 0)) {
+            set_oversized(size);
             return true;
         }
         _event.kind = Kind::RESPONSE;
@@ -97,8 +97,21 @@ public:
         if (token.empty()) return false;
         if (_request_token.empty()) _request_token = token;
         if (token != _request_token) return false;
-        if (transfer_size <= MAX_WIRE_BYTES) return true;
-        set_oversized(transfer_size);
+        if (_event.kind == Kind::RESPONSE || _event.kind == Kind::FAILED ||
+            _event.kind == Kind::OVERSIZED) return false;
+        _event.kind = Kind::PROGRESS;
+        _event.data.clear();
+        _event.transfer_size = transfer_size;
+        return true;
+    }
+
+    bool publish_oversized(const std::vector<uint8_t>& token, std::size_t response_size) {
+        Guard guard(_lock);
+        if (_sealed || token.empty()) return false;
+        if (_request_token.empty()) _request_token = token;
+        if (token != _request_token) return false;
+        if (_event.kind == Kind::RESPONSE) return false;
+        set_oversized(response_size);
         return true;
     }
 

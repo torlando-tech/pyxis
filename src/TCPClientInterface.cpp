@@ -29,6 +29,30 @@ static constexpr size_t MAX_TCP_BYTES_PER_LOOP = 4096;
 static constexpr size_t MAX_TCP_FRAMES_PER_LOOP = 32;
 static constexpr size_t MAX_TCP_FRAME_BUFFER = 16384;
 
+#if defined(ARDUINO) && defined(PYXIS_NOMAD_LINK_DIAGNOSTIC)
+static const char* nomad_link_packet_kind(const RNS::Bytes& packet) {
+    if (packet.size() < Type::Reticulum::HEADER_MINSIZE) return nullptr;
+    if ((packet.data()[0] & 0x03) == Type::Packet::LINKREQUEST) return "LINKREQUEST";
+    const bool header_2 = (packet.data()[0] & 0x40) != 0;
+    const size_t context_offset = header_2 ? 34 : 18;
+    if (packet.size() > context_offset && packet.data()[context_offset] == Type::Packet::LRPROOF) {
+        return "LRPROOF";
+    }
+    return nullptr;
+}
+
+static void nomad_trace_packet(const char* direction, const RNS::Bytes& packet,
+                               size_t framed_size, size_t io_size) {
+    const char* kind = nomad_link_packet_kind(packet);
+    if (!kind) return;
+    Serial.printf("T:WIRE %s kind=%s raw=%u framed=%u io=%u hex=",
+                  direction, kind, static_cast<unsigned>(packet.size()),
+                  static_cast<unsigned>(framed_size), static_cast<unsigned>(io_size));
+    for (size_t i = 0; i < packet.size(); ++i) Serial.printf("%02x", packet.data()[i]);
+    Serial.println();
+}
+#endif
+
 static bool contains_complete_hdlc_frame(const RNS::Bytes& buffer) {
     bool saw_start = false;
     for (size_t i = 0; i < buffer.size(); ++i) {
@@ -71,6 +95,10 @@ TCPClientInterface::TCPClientInterface(const char* name /*= "TCPClientInterface"
     // RECONNECT_WAIT_MS. Unsigned wraparound keeps this correct when
     // millis() < RECONNECT_WAIT_MS.
     _last_connect_attempt = millis() - RECONNECT_WAIT_MS;
+    // stop() leaves the prior worker's completion latched. Runtime settings
+    // reuse this object, so re-arm the latch before publishing/running the next
+    // worker; otherwise a later stop can skip joining the replacement task.
+    _task_done = false;
     _task_running = true;
     BaseType_t r = xTaskCreatePinnedToCore(tcp_task, "tcp", 6144, this, 1, &_task_handle, 0);
     if (r != pdPASS) {
@@ -279,7 +307,7 @@ void TCPClientInterface::handle_disconnect() {
         INFO("TCPClientInterface: Connection lost, will attempt reconnection");
         disconnect();
         // Reset connect attempt timer to enforce wait before reconnection
-        _last_connect_attempt = millis();
+        _last_connect_attempt = static_cast<uint32_t>(Utilities::OS::time() * 1000);
     }
 #endif
 }
@@ -301,24 +329,26 @@ void TCPClientInterface::task_loop() {
             uint32_t now = millis();
             if (now - _last_connect_attempt >= RECONNECT_WAIT_MS) {
                 _last_connect_attempt = now;
-                if (ESP.getMaxAllocHeap() >= 20000) {  // skip under heap pressure
-                    _conn_state.store(CONNECTING);      // claim _client
-                    if (connect()) {
-                        _frame_buffer.clear();
-                        _last_data_received = millis();
-                        // _online is owned by the main loop (it sets it on
-                        // observing CONNECTED); writing it here would race with
-                        // loop()'s `_online = false` during the CONNECTING window.
-                        // Publish CONNECTED BEFORE _reconnected: seq-cst then
-                        // guarantees that whenever the main loop observes
-                        // _reconnected==true the interface is already CONNECTED,
-                        // so check_reconnected() can't fire the announce on an
-                        // offline interface (which would drop it).
-                        _conn_state.store(CONNECTED);   // hand _client to main loop
-                        _reconnected.store(true);       // main loop announces
-                    } else {
-                        _conn_state.store(DISCONNECTED);
-                    }
+                // connect() is bounded and runs off loopTask. Do not gate it on
+                // a fixed largest-free-block threshold: the complete UI remains
+                // healthy below 20 KiB, and such a gate can suppress every TCP
+                // attempt forever while persisted paths still target tcp0.
+                _conn_state.store(CONNECTING);      // claim _client
+                if (connect()) {
+                    _frame_buffer.clear();
+                    _last_data_received = millis();
+                    // _online is owned by the main loop (it sets it on
+                    // observing CONNECTED); writing it here would race with
+                    // loop()'s `_online = false` during the CONNECTING window.
+                    // Publish CONNECTED BEFORE _reconnected: seq-cst then
+                    // guarantees that whenever the main loop observes
+                    // _reconnected==true the interface is already CONNECTED,
+                    // so check_reconnected() can't fire the announce on an
+                    // offline interface (which would drop it).
+                    _conn_state.store(CONNECTED);   // hand _client to main loop
+                    _reconnected.store(true);       // main loop announces
+                } else {
+                    _conn_state.store(DISCONNECTED);
                 }
             }
         }
@@ -402,6 +432,10 @@ void TCPClientInterface::task_loop() {
     extract_and_process_frames();
     return;
 #endif
+    // This legacy diagnostic/reconnect body is unreachable on Arduino because
+    // the Arduino path returns above, but retain it there byte-for-byte so host
+    // portability does not alter the embedded image.
+#ifdef ARDUINO
     // Periodic status logging
     static uint32_t last_status_log = 0;
     static uint32_t loop_count = 0;
@@ -421,7 +455,7 @@ void TCPClientInterface::task_loop() {
         }
         loop_count = 0;
     }
-
+#endif
     // Handle reconnection if not connected
     if (!_online) {
         if (_initiator) {
@@ -432,6 +466,7 @@ void TCPClientInterface::task_loop() {
 #endif
             if (now - _last_connect_attempt >= RECONNECT_WAIT_MS) {
                 _last_connect_attempt = now;
+#ifdef ARDUINO
                 // Skip reconnection if memory is too low - prevents fragmentation
                 uint32_t max_block = ESP.getMaxAllocHeap();
                 if (max_block < 20000) {
@@ -440,6 +475,10 @@ void TCPClientInterface::task_loop() {
                     DEBUG("TCPClientInterface: Attempting reconnection...");
                     connect();
                 }
+#else
+                DEBUG("TCPClientInterface: Attempting reconnection...");
+                connect();
+#endif
             }
         }
         return;
@@ -497,14 +536,22 @@ void TCPClientInterface::extract_and_process_frames() {
 
         if (start < 0) {
             // No FLAG found, discard buffer (garbage data before any frame)
+#ifdef ARDUINO
             Serial.printf("[HDLC] No FLAG in %d bytes, clearing\n", (int)_frame_buffer.size());
+#else
+            DEBUG("TCPClientInterface: No HDLC flag in buffered data; clearing");
+#endif
             _frame_buffer.clear();
             break;
         }
 
         // Discard data before first FLAG
         if (start > 0) {
+#ifdef ARDUINO
             Serial.printf("[HDLC] Discarding %d bytes before FLAG\n", start);
+#else
+            DEBUG("TCPClientInterface: Discarding bytes before HDLC flag");
+#endif
             _frame_buffer = _frame_buffer.mid(start);
         }
 
@@ -526,7 +573,11 @@ void TCPClientInterface::extract_and_process_frames() {
         Bytes frame_content = _frame_buffer.mid(1, end - 1);
         frame_count++;
         if (RNS::loglevel() >= RNS::LOG_DEBUG) {
+#ifdef ARDUINO
             Serial.printf("[HDLC] Frame #%u: %d escaped bytes\n", frame_count, (int)frame_content.size());
+#else
+            DEBUG("TCPClientInterface: Received escaped HDLC frame");
+#endif
         }
 
         // Remove processed frame from buffer (keep data after end FLAG)
@@ -534,14 +585,20 @@ void TCPClientInterface::extract_and_process_frames() {
 
         // Skip empty frames (consecutive FLAGs)
         if (frame_content.size() == 0) {
+#ifdef ARDUINO
             if (RNS::loglevel() >= RNS::LOG_DEBUG) Serial.printf("[HDLC] Empty frame, skipping\n");
+#else
+            DEBUG("TCPClientInterface: Empty HDLC frame, skipping");
+#endif
             continue;
         }
 
         // Unescape frame
         Bytes unescaped = HDLC::unescape(frame_content);
         if (unescaped.size() == 0) {
+#ifdef ARDUINO
             if (RNS::loglevel() >= RNS::LOG_DEBUG) Serial.printf("[HDLC] Unescape failed!\n");
+#endif
             DEBUG("TCPClientInterface: HDLC unescape error, discarding frame");
             continue;
         }
@@ -552,9 +609,17 @@ void TCPClientInterface::extract_and_process_frames() {
             continue;
         }
 
+#if defined(ARDUINO) && defined(PYXIS_NOMAD_LINK_DIAGNOSTIC)
+        nomad_trace_packet("RX", unescaped, static_cast<size_t>(end + 1), frame_content.size());
+#endif
+
         // Pass to transport layer
         if (RNS::loglevel() >= RNS::LOG_DEBUG) {
+#ifdef ARDUINO
             Serial.printf("[TCP] Processing frame: %d bytes\n", (int)unescaped.size());
+#else
+            DEBUG("TCPClientInterface: Processing unescaped HDLC frame");
+#endif
         }
         DEBUG(toString() + ": Received frame, " + std::to_string(unescaped.size()) + " bytes");
         InterfaceImpl::handle_incoming(unescaped);
@@ -607,6 +672,9 @@ void TCPClientInterface::extract_and_process_frames() {
             return false;  // not connected; Reticulum will retry/route
         }
         size_t written = _client.write(framed.data(), framed.size());
+#ifdef PYXIS_NOMAD_LINK_DIAGNOSTIC
+        nomad_trace_packet("TX", data, framed.size(), written);
+#endif
         if (written != framed.size()) {
             ERROR("TCPClientInterface: Write incomplete, " + std::to_string(written) +
                   " of " + std::to_string(framed.size()) + " bytes");

@@ -80,6 +80,11 @@ public:
         return true;
     }
 
+    bool terminal_pending() {
+        Guard guard(_lock);
+        return _terminal_pending;
+    }
+
     void clear() {
         Guard guard(_lock);
         _head = 0;

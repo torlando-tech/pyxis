@@ -30,6 +30,11 @@
 // Reticulum
 #include <microReticulum/Reticulum.h>
 #include <microReticulum/Utilities/OS.h>
+#ifdef PYXIS_NOMAD_LINK_DIAGNOSTIC
+#include <microReticulum/Cryptography/Ed25519.h>
+#include <microReticulum/Cryptography/HKDF.h>
+#include <microReticulum/Cryptography/X25519.h>
+#endif
 
 // Filesystem
 // Was: <UniversalFileSystem.h> (pyxis-provided RNS::FileSystem wrapper).
@@ -2084,6 +2089,8 @@ static volatile uint8_t loop_step = 0;
 //   T:SENDPROP <hex> <text>      — queue an outbound PROPAGATED message
 //   T:SYNCPROP                   — request_messages_from_propagation_node
 //   T:SYNCSTATE                  — print current PR_* sync state
+//   T:NOMAD <url>                — queue an owner-loop NomadNet page open
+//   T:NOMAD_STATUS               — print protocol state and internal heap
 static String hex_byte_to_string(const RNS::Bytes& b) { return String(b.toHex().c_str()); }
 
 static RNS::Bytes parse_hex_arg(const String& hex) {
@@ -2180,6 +2187,19 @@ static void handle_test_hook_command(const String& line) {
         if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
         ui_manager->announce_lxst();
         Serial.println("T:OK announced");
+    }
+    else if (cmd == "T:NOMAD") {
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        if (args.length() == 0) { Serial.println("T:ERR usage T:NOMAD <url>"); return; }
+        if (!ui_manager->test_nomad_open(std::string(args.c_str()))) {
+            Serial.println("T:ERR nomad action queue full");
+            return;
+        }
+        Serial.println("T:OK queued");
+    }
+    else if (cmd == "T:NOMAD_STATUS") {
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        ui_manager->test_nomad_status();
     }
     else if (cmd == "T:PATHS") {
         const auto& path_table = RNS::Transport::path_table();
@@ -2785,6 +2805,102 @@ static void handle_test_hook_command(const String& line) {
 }
 #endif // PYXIS_TEST_HOOKS
 
+#ifdef PYXIS_NOMAD_LINK_DIAGNOSTIC
+// Minimal diagnostic command surface. Keep this separate from the broad test
+// handler so audio, UDP, message rings and unrelated protocol hooks do not enter
+// the production-footprint Link measurement image.
+static bool nomad_suspend_nonessential = false;
+
+static bool decode_vector_hex(const char* hex, uint8_t* output, size_t output_size) {
+    for (size_t i = 0; i < output_size; ++i) {
+        const char high = hex[i * 2];
+        const char low = hex[i * 2 + 1];
+        const int high_value = high >= 'a' ? high - 'a' + 10 : high - '0';
+        const int low_value = low >= 'a' ? low - 'a' + 10 : low - '0';
+        if (high_value < 0 || high_value > 15 || low_value < 0 || low_value > 15) return false;
+        output[i] = static_cast<uint8_t>((high_value << 4) | low_value);
+    }
+    return hex[output_size * 2] == '\0';
+}
+
+static void run_nomad_crypto_vector() {
+    using RNS::Bytes;
+    using RNS::Cryptography::Ed25519PrivateKey;
+    using RNS::Cryptography::X25519PrivateKey;
+
+    uint8_t x_private[32], x_peer[32], x_public[32], x_shared[32];
+    uint8_t ed_private[32], ed_public[32], ed_signature[64], hkdf_expected[64];
+    uint8_t ikm[32], salt[16];
+    bool fixture_ok =
+        decode_vector_hex("77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a", x_private, sizeof(x_private)) &&
+        decode_vector_hex("de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f", x_peer, sizeof(x_peer)) &&
+        decode_vector_hex("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a", x_public, sizeof(x_public)) &&
+        decode_vector_hex("4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742", x_shared, sizeof(x_shared)) &&
+        decode_vector_hex("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", ed_private, sizeof(ed_private)) &&
+        decode_vector_hex("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", ed_public, sizeof(ed_public)) &&
+        decode_vector_hex("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b", ed_signature, sizeof(ed_signature)) &&
+        decode_vector_hex("2bc3faec9f360e81e77086b6e17a9ce8722a4cb3bc0ed90b4d78d37036e43a0f87f4827f9c7d1f4b72c9340e43f04a034051d0856816eae0164f7d0af7a06d76", hkdf_expected, sizeof(hkdf_expected));
+    for (uint8_t i = 0; i < sizeof(ikm); ++i) ikm[i] = i;
+    for (uint8_t i = 0; i < sizeof(salt); ++i) salt[i] = i;
+
+    const uint32_t before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    bool xpub_ok = false, xdh_ok = false, edpub_ok = false, edsig_ok = false, hkdf_ok = false;
+    try {
+        auto x_key = X25519PrivateKey::from_private_bytes(Bytes(x_private, sizeof(x_private)));
+        xpub_ok = x_key->public_key()->public_bytes() == Bytes(x_public, sizeof(x_public));
+        xdh_ok = x_key->exchange(Bytes(x_peer, sizeof(x_peer))) == Bytes(x_shared, sizeof(x_shared));
+        auto ed_key = Ed25519PrivateKey::from_private_bytes(Bytes(ed_private, sizeof(ed_private)));
+        edpub_ok = ed_key->public_key()->public_bytes() == Bytes(ed_public, sizeof(ed_public));
+        edsig_ok = ed_key->sign(Bytes::NONE) == Bytes(ed_signature, sizeof(ed_signature));
+        hkdf_ok = RNS::Cryptography::hkdf(64, Bytes(ikm, sizeof(ikm)), Bytes(salt, sizeof(salt))) ==
+                  Bytes(hkdf_expected, sizeof(hkdf_expected));
+    } catch (...) {
+        fixture_ok = false;
+    }
+    const uint32_t after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    const bool pass = fixture_ok && xpub_ok && xdh_ok && edpub_ok && edsig_ok && hkdf_ok;
+    Serial.printf("T:CRYPTO_VECTOR %s xpub=%d xdh=%d edpub=%d edsig=%d hkdf=%d before=%u after=%u\n",
+                  pass ? "PASS" : "FAIL", xpub_ok, xdh_ok, edpub_ok, edsig_ok, hkdf_ok, before, after);
+}
+
+static void handle_nomad_link_diagnostic_command(const String& line) {
+    if (line == "T:CRYPTO_VECTOR") {
+        run_nomad_crypto_vector();
+        return;
+    }
+    if (line == "T:NOMAD_MODE NORMAL") {
+        nomad_suspend_nonessential = false;
+        Serial.println("T:OK mode=NORMAL");
+        return;
+    }
+    if (line == "T:NOMAD_MODE SUSPEND") {
+        nomad_suspend_nonessential = true;
+        Serial.println("T:OK mode=SUSPEND");
+        return;
+    }
+    if (!ui_manager) {
+        Serial.println("T:ERR no ui_manager");
+        return;
+    }
+    if (line == "T:NOMAD_STATUS") {
+        ui_manager->test_nomad_status();
+        return;
+    }
+    if (line.startsWith("T:NOMAD ")) {
+        const String address = line.substring(8);
+        if (address.length() == 0) {
+            Serial.println("T:ERR usage T:NOMAD <url>");
+        } else if (ui_manager->test_nomad_open(std::string(address.c_str()))) {
+            Serial.println("T:OK queued");
+        } else {
+            Serial.println("T:ERR nomad action queue full");
+        }
+        return;
+    }
+    Serial.println("T:ERR unknown nomad diagnostic command");
+}
+#endif
+
 void loop() {
     esp_task_wdt_reset();
 
@@ -2811,6 +2927,10 @@ void loop() {
 #ifdef PYXIS_TEST_HOOKS
             else if (serial_cmd_buffer.startsWith("T:")) {
                 handle_test_hook_command(serial_cmd_buffer);
+            }
+#elif defined(PYXIS_NOMAD_LINK_DIAGNOSTIC)
+            else if (serial_cmd_buffer.startsWith("T:NOMAD") || serial_cmd_buffer == "T:CRYPTO_VECTOR") {
+                handle_nomad_link_diagnostic_command(serial_cmd_buffer);
             }
 #endif
             serial_cmd_buffer = "";
@@ -2863,6 +2983,17 @@ void loop() {
         pending_wifi_password = "";
     }
 
+    // A Back/Home click is published from LVGL without touching protocol state.
+    // Service that terminal action before accepting another synchronous inbound
+    // packet/Resource pass so cancellation cannot be starved by network work.
+    if (ui_manager) ui_manager->service_nomad_terminal_action();
+    const bool nomad_link_pending = ui_manager && ui_manager->nomad_link_pending();
+#ifdef PYXIS_NOMAD_LINK_DIAGNOSTIC
+    const bool nomad_busy = nomad_suspend_nonessential && nomad_link_pending;
+#else
+    const bool nomad_busy = false;
+#endif
+
     // Process Reticulum
     LOOP_STEP(4);  // reticulum->loop()
     {
@@ -2906,12 +3037,14 @@ void loop() {
     // crashes, revisit microStore's flush cadence rather than re-adding
     // the fork-only Identity API.)
     LOOP_STEP(6);  // persist data
-    uint32_t persistence_started_ms = millis();
-    reticulum->should_persist_data();
-    uint32_t persistence_elapsed_ms = millis() - persistence_started_ms;
-    if (persistence_elapsed_ms > 1000) {
-        WARNINGF("Reticulum persistence stalled loopTask for %lu ms (TWDT limit is 60000 ms)",
-                 (unsigned long)persistence_elapsed_ms);
+    if (!nomad_busy) {
+        uint32_t persistence_started_ms = millis();
+        reticulum->should_persist_data();
+        uint32_t persistence_elapsed_ms = millis() - persistence_started_ms;
+        if (persistence_elapsed_ms > 1000) {
+            WARNINGF("Reticulum persistence stalled loopTask for %lu ms (TWDT limit is 60000 ms)",
+                     (unsigned long)persistence_elapsed_ms);
+        }
     }
     esp_task_wdt_reset();
 
@@ -2938,7 +3071,7 @@ void loop() {
 
     // Periodic announce (using interval from settings)
     LOOP_STEP(9);  // Periodic tasks
-    if (app_settings.announce_interval > 0) {  // 0 = disabled
+    if (!nomad_busy && app_settings.announce_interval > 0) {  // 0 = disabled
         uint32_t announce_interval_ms = app_settings.announce_interval * 1000;
         if (millis() - last_announce > announce_interval_ms) {
             // Announce if any interface is online
@@ -2956,7 +3089,7 @@ void loop() {
     }
 
     // Periodic propagation sync (fetch messages from prop node)
-    if (app_settings.sync_interval > 0 && router) {  // 0 = disabled
+    if (!nomad_busy && app_settings.sync_interval > 0 && router) {  // 0 = disabled
         bool should_sync = false;
         uint32_t now = millis();
 
@@ -2991,7 +3124,7 @@ void loop() {
     // Check for TCP reconnection (handles rapid disconnect/reconnect)
     if (tcp_interface_impl && tcp_interface_impl->check_reconnected()) {
         INFO("TCP interface reconnected - sending announce");
-        if (router) {
+        if (router && !nomad_busy) {
             delay(500);  // Brief stabilization delay
             UI::LXMF::RouterLock router_lock;
             if (router_lock.acquired()) {
@@ -3067,7 +3200,7 @@ void loop() {
         // offline->online edge so peers that can exchange LXMF messages also
         // receive a routable lxst.telephony path without waiting for the
         // periodic announce interval.
-        if (tcp_online && !last_tcp_online) {
+        if (tcp_online && !last_tcp_online && !nomad_busy) {
             announce_reachable_destinations();
         }
 

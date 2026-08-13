@@ -14,6 +14,7 @@
 #include "NomadNetLibrary.h"
 #include "NomadNetActionMailbox.h"
 #include "NomadNetMailbox.h"
+#include "NomadNetCompactPage.h"
 #include "NomadNetProtocol.h"
 #include "NomadNetRequestPolicy.h"
 #include "NomadNetUrl.h"
@@ -33,6 +34,7 @@ using UI::LXMF::NomadNet::UserActionKind;
 using UI::LXMF::NomadNet::sanitize_directory_name;
 using UI::LXMF::NomadNet::page_title;
 using UI::LXMF::NomadNet::AsyncMailbox;
+using UI::LXMF::NomadNet::CompactPage;
 using UI::LXMF::NomadNet::ResponseBuffer;
 using UI::LXMF::NomadNet::RequestPolicy;
 using UI::LXMF::NomadNet::Url;
@@ -112,8 +114,8 @@ int main(int argc, char** argv) {
     check("prepared early link event crosses mailbox",
           mailbox.take(event) && event.kind == AsyncMailbox::Kind::LINK_ESTABLISHED);
     mailbox.expect_request(new_request);
-    check("oversized transfer is rejected before payload retention",
-          mailbox.publish_progress(new_request, AsyncMailbox::MAX_WIRE_BYTES + 1) && mailbox.take(event) &&
+    check("oversized response is rejected before payload retention",
+          mailbox.publish_oversized(new_request, AsyncMailbox::MAX_WIRE_BYTES + 1) && mailbox.take(event) &&
           event.kind == AsyncMailbox::Kind::OVERSIZED && event.data.empty());
 
     Url url;
@@ -151,6 +153,28 @@ int main(int argc, char** argv) {
     check("alignment modifier represented", doc.blocks[1].alignment == Alignment::CENTER);
     check("links are model elements", doc.links.size() == 1 &&
                                        doc.links[0].target.find("/page/next.mu") != std::string::npos);
+    CompactPage compact;
+    check("compact page owns one bounded text arena", compact.assign(doc) &&
+          compact.arena_bytes() > 0 && compact.blocks().size() == doc.blocks.size() &&
+          compact.runs().size() <= CompactPage::MAX_RUNS && compact.links().size() == doc.links.size());
+    check("compact runs address text by arena offset", !compact.runs().empty() &&
+          std::string(compact.text(compact.runs().front()).data(), compact.text(compact.runs().front()).size()) ==
+              doc.blocks.front().runs.front().text);
+    check("compact links address targets without renderer copies", !compact.links().empty() &&
+          std::string(compact.target(0).data(), compact.target(0).size()) == doc.links.front().target);
+    check("compact page preserves document presentation flags",
+          compact.has_background() == doc.has_background && compact.background() == doc.background &&
+          compact.has_foreground() == doc.has_foreground && compact.foreground() == doc.foreground);
+    compact.clear();
+    check("compact page teardown releases every retained record", compact.empty() &&
+          compact.arena_bytes() == 0 && compact.blocks().empty() && compact.runs().empty() && compact.links().empty());
+    UI::LXMF::NomadNet::Document oversized_compact;
+    UI::LXMF::NomadNet::Block oversized_block;
+    oversized_block.runs.push_back(UI::LXMF::NomadNet::Run{
+        std::string(CompactPage::MAX_ARENA_BYTES + 1, 'x')});
+    oversized_compact.blocks.push_back(std::move(oversized_block));
+    check("compact page rejects text beyond its independent arena bound",
+          !compact.assign(oversized_compact) && compact.empty() && compact.arena_bytes() == 0);
     auto link_fields = parser.parse("`[Search`:/page/search.mu`q=pyxis]\n");
     check("link target excludes request fields", link_fields.links.size() == 1 &&
           link_fields.links[0].target == ":/page/search.mu" && link_fields.links[0].fields == "q=pyxis");
@@ -433,6 +457,23 @@ int main(int argc, char** argv) {
     while (actions.pop(action) && action.kind == UserActionKind::SAVE) ++retained_saves;
     check("terminal slot preserves every queued explicit save",
           retained_saves == ActionMailbox::CAPACITY && action.kind == UserActionKind::BACK);
+
+    AsyncMailbox progress_mailbox;
+    const std::vector<uint8_t> progress_token{1, 2, 3};
+    progress_mailbox.expect_request(progress_token);
+    check("bounded Resource progress is published",
+          progress_mailbox.publish_progress(progress_token, 2048));
+    AsyncMailbox::Event progress_event;
+    check("bounded Resource progress is observable by the UI owner",
+          progress_mailbox.take(progress_event) &&
+          progress_event.kind == AsyncMailbox::Kind::PROGRESS &&
+          progress_event.transfer_size == 2048);
+    check("wire transfer accounting may exceed the response payload limit",
+          progress_mailbox.publish_progress(progress_token, AsyncMailbox::MAX_WIRE_BYTES * 2));
+    check("large wire transfer accounting remains progress, not oversized payload",
+          progress_mailbox.take(progress_event) &&
+          progress_event.kind == AsyncMailbox::Kind::PROGRESS &&
+          progress_event.transfer_size == AsyncMailbox::MAX_WIRE_BYTES * 2);
 
     RequestPolicy request_policy;
     check("path discovery deadline does not undercut transport timeout",

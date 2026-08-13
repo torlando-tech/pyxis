@@ -6,6 +6,7 @@
 #include "../LVGL/LVGLInit.h"
 #include "../TextAreaHelper.h"
 #include <algorithm>
+#include <cstring>
 #include <cstdio>
 
 namespace UI::LXMF {
@@ -55,6 +56,8 @@ NomadNetScreen::NomadNetScreen() {
     lv_obj_set_flex_flow(_content,LV_FLEX_FLOW_COLUMN);lv_obj_set_flex_align(_content,LV_FLEX_ALIGN_START,LV_FLEX_ALIGN_START,LV_FLEX_ALIGN_START);
     lv_obj_add_flag(_content,LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(_content,LV_DIR_VER);lv_obj_set_scrollbar_mode(_content,LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_add_flag(_content,LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(_content,page_event,LV_EVENT_ALL,this);
     _directory=lv_obj_create(_screen);lv_obj_set_size(_directory,320,206);lv_obj_align(_directory,LV_ALIGN_BOTTOM_MID,0,0);
     lv_obj_set_style_bg_color(_directory,Theme::surface(),0);lv_obj_set_style_border_width(_directory,0,0);lv_obj_set_style_pad_all(_directory,7,0);
     lv_obj_set_flex_flow(_directory,LV_FLEX_FLOW_COLUMN);lv_obj_set_flex_align(_directory,LV_FLEX_ALIGN_START,LV_FLEX_ALIGN_START,LV_FLEX_ALIGN_START);
@@ -80,10 +83,16 @@ void NomadNetScreen::set_page_saved(bool saved){
 }
 void NomadNetScreen::clear_document(){
     auto* group=LVGL::LVGLInit::get_default_group();
-    if(group)for(auto* object:_focusables)lv_group_remove_obj(object);
-    _focusables.clear();
-    _link_targets.clear();
-    lv_obj_clean(_content);
+    if(group){
+        if(lv_group_get_editing(group)&&lv_group_get_focused(group)==_content)lv_group_set_editing(group,false);
+        lv_group_remove_obj(_content);
+    }
+    _page.clear();
+    NomadNet::ExternalVector<LayoutFragment>().swap(_page_layout);
+    _page_height=0;
+    _selected_link=-1;
+    lv_obj_refresh_self_size(_content);
+    lv_obj_invalidate(_content);
     _page_loaded=false;
     set_page_saved(false);
 }
@@ -192,7 +201,7 @@ void NomadNetScreen::detach_focusables(lv_group_t* group){
         if(!candidate)return false;
         for(auto* object:{_back_button,_home_button,_reload_button,_save_button,_address,_go_button,_edit_button})
             if(candidate==object)return true;
-        for(auto* object:_focusables)if(candidate==object)return true;
+        if(candidate==_content)return true;
         for(auto* object:_directory_focusables)if(candidate==object)return true;
         return false;
     };
@@ -200,7 +209,7 @@ void NomadNetScreen::detach_focusables(lv_group_t* group){
         if(object&&object!=focused)lv_group_remove_obj(object);
     };
     for(auto* object:{_back_button,_home_button,_reload_button,_save_button,_address,_go_button,_edit_button})detach_non_owner(object);
-    for(auto* object:_focusables)detach_non_owner(object);
+    detach_non_owner(_content);
     for(auto* object:_directory_focusables)detach_non_owner(object);
     if(focused&&owned_focusable(focused))lv_group_remove_obj(focused);
 }
@@ -223,7 +232,7 @@ void NomadNetScreen::rebuild_focus(){
     if(!lv_obj_has_flag(_save_button,LV_OBJ_FLAG_HIDDEN))lv_group_add_obj(group,_save_button);
     if(_editing){lv_group_add_obj(group,_address);lv_group_add_obj(group,_go_button);}
     else lv_group_add_obj(group,_edit_button);
-    for(auto* object:_focusables)lv_group_add_obj(group,object);
+    if(!_page.empty())lv_group_add_obj(group,_content);
     // Keep a newly loaded document at its beginning. Focusing the first link
     // makes LVGL auto-scroll that link into view, which can hide the heading.
     lv_group_focus_freeze(group,false);
@@ -267,103 +276,209 @@ void NomadNetScreen::set_status(const char* value){
     apply_browser_layout(!loaded_ack);
 }
 void NomadNetScreen::set_page(const NomadNet::Document& document) {
-    auto* group = LVGL::LVGLInit::get_default_group();
-    if (group) for (auto* object : _focusables) lv_group_remove_obj(object);
-    lv_obj_clean(_content);
-    _focusables.clear();
-    _link_targets.clear();
-    std::size_t objects = 0;
-    std::size_t spans = 0;
-    bool render_truncated = false;
-    lv_obj_set_style_bg_color(_content, document.has_background
-        ? lv_color_hex(document.background) : Theme::surface(), 0);
-
-    for (const auto& block : document.blocks) {
-        if (objects >= MAX_UI_OBJECTS || spans >= MAX_UI_SPANS) {
-            render_truncated = true;
-            break;
-        }
-        if (block.type == NomadNet::BlockType::DIVIDER) {
-            lv_obj_t* line = lv_obj_create(_content);
-            lv_obj_set_size(line, 304, 1);
-            lv_obj_set_style_bg_color(line, Theme::border(), 0);
-            lv_obj_set_style_border_width(line, 0, 0);
-            ++objects;
-            continue;
-        }
-
-        // Spans preserve mixed inline styling and wrap the complete source line
-        // together instead of introducing breaks at every style transition.
-        lv_obj_t* text = lv_spangroup_create(_content);
-        const lv_coord_t indent = block.type == NomadNet::BlockType::HEADING
-            ? 0 : static_cast<lv_coord_t>(std::min<unsigned>(block.depth, 8) * 4);
-        lv_obj_set_width(text, 304 - indent);
-        lv_obj_set_style_translate_x(text, indent, 0);
-        lv_spangroup_set_mode(text, LV_SPAN_MODE_BREAK);
-        lv_spangroup_set_overflow(text, LV_SPAN_OVERFLOW_CLIP);
-        lv_spangroup_set_lines(text, -1);
-        lv_spangroup_set_align(text, block.alignment == NomadNet::Alignment::CENTER
-            ? LV_TEXT_ALIGN_CENTER : block.alignment == NomadNet::Alignment::RIGHT
-                ? LV_TEXT_ALIGN_RIGHT : LV_TEXT_ALIGN_LEFT);
-        ++objects;
-
-        for (const auto& run : block.runs) {
-            if (spans >= MAX_UI_SPANS) { render_truncated = true; break; }
-            lv_span_t* span = lv_spangroup_new_span(text);
-            const auto rendered_text = NomadNet::display_text(run.text);
-            lv_span_set_text(span, rendered_text.c_str());
-            const bool is_link = run.link_index >= 0 &&
-                static_cast<std::size_t>(run.link_index) < document.links.size();
-            lv_style_set_text_color(&span->style, is_link ? Theme::primaryLight() :
-                run.has_foreground ? lv_color_hex(run.foreground) :
-                document.has_foreground ? lv_color_hex(document.foreground) : Theme::textPrimary());
-            lv_style_set_text_font(&span->style,
-                (run.bold || block.type == NomadNet::BlockType::HEADING)
-                    ? &nomadnet_font_16 : &nomadnet_font_12);
-            lv_style_set_text_line_space(&span->style, 3);
-            if (run.underline || is_link)
-                lv_style_set_text_decor(&span->style, LV_TEXT_DECOR_UNDERLINE);
-            if (run.italic) lv_style_set_text_letter_space(&span->style, 1);
-            if (run.has_background) lv_style_set_bg_color(&span->style, lv_color_hex(run.background));
-            ++spans;
-        }
-        lv_spangroup_refr_mode(text);
-
-        // A visual span cannot itself participate in the encoder focus group.
-        // Add one bounded, focusable activation control for every rendered link.
-        for (const auto& run : block.runs) {
-            if (run.link_index < 0 || static_cast<std::size_t>(run.link_index) >= document.links.size()) continue;
-            if (objects + 2 > MAX_UI_OBJECTS) { render_truncated = true; break; }
-            lv_obj_t* button = lv_btn_create(_content);
-            lv_obj_set_size(button, 304, 28);
-            lv_obj_set_style_pad_all(button, 4, 0);
-            lv_obj_t* label = lv_label_create(button);
-            const std::string caption = "Open: " + NomadNet::display_text(run.text);
-            lv_label_set_text(label, caption.c_str());
-            lv_obj_set_style_text_font(label, &nomadnet_font_12, 0);
-            lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-            lv_obj_set_width(label, 294);
-            lv_obj_center(label);
-            _link_targets.push_back(document.links[run.link_index].target);
-            lv_obj_set_user_data(button, reinterpret_cast<void*>(_link_targets.size()));
-            lv_obj_add_event_cb(button, clicked, LV_EVENT_CLICKED, this);
-            _focusables.push_back(button);
-            if (_visible && _view == View::BROWSER && group) lv_group_add_obj(group, button);
-            objects += 2;
-        }
+    auto* group=LVGL::LVGLInit::get_default_group();
+    if(group)lv_group_remove_obj(_content);
+    if(!_page.assign(document)) {
+        clear_document();
+        set_status("Page is too large for available memory");
+        return;
     }
-    if (document.truncated || render_truncated) {
-        lv_obj_t* notice = lv_label_create(_content);
-        lv_label_set_text(notice, "[Page truncated to device safety limits]");
-        lv_obj_set_style_text_color(notice, Theme::warning(), 0);
-    } else if (document.unsupported) {
-        lv_obj_t* notice = lv_label_create(_content);
-        lv_label_set_text(notice, "Forms, partials, tables and downloads are unsupported in this MVP.");
-        lv_obj_set_style_text_color(notice, Theme::warning(), 0);
-    }
+    if(_page.truncated())_page.append_notice("[Page truncated to device safety limits]");
+    else if(_page.unsupported())_page.append_notice("[Unsupported Micron content]");
+    layout_page();
+    lv_obj_set_style_bg_color(_content,_page.has_background()
+        ?lv_color_hex(_page.background()):Theme::surface(),0);
     _page_loaded=true;
     show_browser(false);
     lv_obj_scroll_to_y(_content,0,LV_ANIM_OFF);
+    lv_obj_refresh_self_size(_content);
+    lv_obj_invalidate(_content);
+}
+
+void NomadNetScreen::layout_page(){
+    _page_layout.clear();
+    _page_layout.reserve(std::min<std::size_t>(_page.runs().size()*4,MAX_LAYOUT_FRAGMENTS));
+    constexpr std::size_t content_fragment_limit=MAX_LAYOUT_FRAGMENTS-1;
+    constexpr int16_t width=304;
+    int16_t y=0;
+    for(const auto& block:_page.blocks()){
+        if(_page_layout.size()>=content_fragment_limit)break;
+        if(block.type==NomadNet::BlockType::DIVIDER){
+            _page_layout.push_back(LayoutFragment(0,0,0,-1,0,y,width,1,true));y+=9;continue;
+        }
+        const int16_t indent=block.type==NomadNet::BlockType::HEADING?0:
+            static_cast<int16_t>(std::min<unsigned>(block.depth,8)*4);
+        const int16_t available=width-indent;
+        int16_t x=indent;
+        int16_t line_h=16;
+        std::size_t line_first=_page_layout.size();
+        int16_t line_y=y;
+        auto align_line=[&](std::size_t begin,std::size_t end,int16_t current_y){
+            if(begin>=end||block.alignment==NomadNet::Alignment::LEFT)return;
+            int16_t line_width=0;
+            for(std::size_t i=begin;i<end;++i)if(_page_layout[i].y==current_y)
+                line_width=std::max<int16_t>(line_width,_page_layout[i].x+_page_layout[i].width-indent);
+            const int16_t shift=block.alignment==NomadNet::Alignment::CENTER
+                ?(available-line_width)/2:available-line_width;
+            if(shift>0)for(std::size_t i=begin;i<end;++i)
+                if(_page_layout[i].y==current_y)_page_layout[i].x+=shift;
+        };
+        for(uint16_t r=0;r<block.run_count&&block.first_run+r<_page.runs().size();++r){
+            const uint16_t run_index=static_cast<uint16_t>(block.first_run+r);
+            const auto& run=_page.runs()[run_index];
+            const auto text=_page.text(run);
+            const lv_font_t* font=(run.style&NomadNet::CompactPage::BOLD)||block.type==NomadNet::BlockType::HEADING
+                ?&nomadnet_font_16:&nomadnet_font_12;
+            const int16_t height=static_cast<int16_t>(font->line_height+3);
+            line_h=std::max(line_h,height);
+            std::size_t offset=0;
+            while(offset<text.size()&&_page_layout.size()<content_fragment_limit){
+                std::size_t end=offset;
+                const bool whitespace=text[offset]==' '||text[offset]=='\t';
+                while(end<text.size()&&((text[end]==' '||text[end]=='\t')==whitespace)&&end-offset<255)++end;
+                if(end==offset)++end;
+                int16_t fragment_w=static_cast<int16_t>(lv_txt_get_width(text.data()+offset,
+                    static_cast<uint32_t>(end-offset),font,(run.style&NomadNet::CompactPage::ITALIC)?1:0,LV_TEXT_FLAG_NONE));
+                if(whitespace&&x+fragment_w>indent+available){offset=end;continue;}
+                if(!whitespace&&x>indent&&x+fragment_w>indent+available){
+                    align_line(line_first,_page_layout.size(),line_y);
+                    y+=line_h;x=indent;line_h=height;line_first=_page_layout.size();line_y=y;
+                }
+                if(fragment_w>available){
+                    end=offset;
+                    fragment_w=0;
+                    while(end<text.size()&&end-offset<255){
+                        const std::size_t previous=end;
+                        uint32_t next_index=static_cast<uint32_t>(end);
+                        _lv_txt_encoded_next(text.data(),&next_index);
+                        end=next_index;
+                        const int16_t candidate=static_cast<int16_t>(lv_txt_get_width(text.data()+offset,
+                            static_cast<uint32_t>(end-offset),font,(run.style&NomadNet::CompactPage::ITALIC)?1:0,LV_TEXT_FLAG_NONE));
+                        if(candidate>available&&previous>offset){end=previous;break;}
+                        fragment_w=candidate;
+                    }
+                }
+                if(!(whitespace&&x==indent)){
+                    _page_layout.push_back(LayoutFragment(run_index,static_cast<uint16_t>(offset),
+                        static_cast<uint16_t>(end-offset),run.link_index,x,y,fragment_w,height,false,
+                        font==&nomadnet_font_16));
+                    x=static_cast<int16_t>(x+fragment_w);
+                }
+                offset=end;
+            }
+        }
+        align_line(line_first,_page_layout.size(),line_y);
+        y+=line_h+3;
+    }
+    if(_page_layout.size()>=content_fragment_limit&&
+       _page.append_notice("[Page layout truncated to device safety limits]")){
+        const uint16_t notice_run_index=static_cast<uint16_t>(_page.runs().size()-1);
+        const auto notice=_page.text(_page.runs()[notice_run_index]);
+        const int16_t notice_width=static_cast<int16_t>(std::min<lv_coord_t>(304,
+            lv_txt_get_width(notice.data(),static_cast<uint32_t>(notice.size()),
+                &nomadnet_font_12,0,LV_TEXT_FLAG_NONE)));
+        _page_layout.push_back(LayoutFragment(notice_run_index,0,
+            static_cast<uint16_t>(notice.size()),-1,0,y,notice_width,19,false));
+        y+=22;
+    }
+    _page_height=std::max<int32_t>(y,lv_obj_get_content_height(_content));
+}
+
+void NomadNetScreen::draw_page(lv_event_t* event){
+    auto* draw_ctx=lv_event_get_draw_ctx(event);
+    const int16_t scroll=lv_obj_get_scroll_y(_content);
+    const int16_t top=_content->coords.y1+lv_obj_get_style_pad_top(_content,0);
+    const int16_t left=_content->coords.x1+lv_obj_get_style_pad_left(_content,0);
+    char scratch[256];
+    for(const auto& fragment:_page_layout){
+        const int16_t draw_y=static_cast<int16_t>(top+fragment.y-scroll);
+        if(draw_y+fragment.height<_content->coords.y1||draw_y>_content->coords.y2)continue;
+        lv_area_t area{static_cast<lv_coord_t>(left+fragment.x),draw_y,
+            static_cast<lv_coord_t>(left+fragment.x+std::max<int16_t>(fragment.width,1)-1),
+            static_cast<lv_coord_t>(draw_y+std::max<int16_t>(fragment.height,1)-1)};
+        if(fragment.divider){lv_draw_rect_dsc_t dsc;lv_draw_rect_dsc_init(&dsc);dsc.bg_color=Theme::border();lv_draw_rect(draw_ctx,&dsc,&area);continue;}
+        if(fragment.run_index>=_page.runs().size())continue;
+        const auto& run=_page.runs()[fragment.run_index];
+        const auto text=_page.text(run);
+        if(fragment.byte_offset+fragment.byte_length>text.size()||fragment.byte_length>=sizeof(scratch))continue;
+        std::memcpy(scratch,text.data()+fragment.byte_offset,fragment.byte_length);scratch[fragment.byte_length]='\0';
+        const bool selected=fragment.link_index>=0&&fragment.link_index==_selected_link;
+        if((run.style&NomadNet::CompactPage::HAS_BACKGROUND)||selected){
+            lv_draw_rect_dsc_t bg;lv_draw_rect_dsc_init(&bg);bg.bg_color=selected?Theme::primaryPressed():lv_color_hex(run.background);lv_draw_rect(draw_ctx,&bg,&area);
+        }
+        lv_draw_label_dsc_t dsc;lv_draw_label_dsc_init(&dsc);
+        dsc.font=fragment.large_font?&nomadnet_font_16:&nomadnet_font_12;
+        dsc.color=run.link_index>=0?Theme::primaryLight():(run.style&NomadNet::CompactPage::HAS_FOREGROUND)
+            ?lv_color_hex(run.foreground):_page.has_foreground()?lv_color_hex(_page.foreground()):Theme::textPrimary();
+        dsc.letter_space=(run.style&NomadNet::CompactPage::ITALIC)?1:0;
+        dsc.decor=(run.style&NomadNet::CompactPage::UNDERLINE)||run.link_index>=0?LV_TEXT_DECOR_UNDERLINE:LV_TEXT_DECOR_NONE;
+        lv_draw_label(draw_ctx,&dsc,&area,scratch,nullptr);
+    }
+}
+
+void NomadNetScreen::select_link(int direction){
+    if(_page.links().empty()){
+        const int next=std::max(0,lv_obj_get_scroll_y(_content)+direction*40);
+        lv_obj_scroll_to_y(_content,next,LV_ANIM_ON);
+        return;
+    }
+    const int count=static_cast<int>(_page.links().size());
+    int candidate=_selected_link;
+    for(int attempt=0;attempt<count;++attempt){
+        candidate=candidate<0?(direction>=0?0:count-1):(candidate+direction+count)%count;
+        bool rendered=false;
+        for(const auto& fragment:_page_layout)if(fragment.link_index==candidate){rendered=true;break;}
+        if(rendered){_selected_link=candidate;break;}
+    }
+    if(_selected_link<0)return;
+    for(const auto& fragment:_page_layout)if(fragment.link_index==_selected_link){
+        const int top=fragment.y;const int bottom=fragment.y+fragment.height;
+        const int scroll=lv_obj_get_scroll_y(_content);const int visible=lv_obj_get_content_height(_content);
+        if(top<scroll)lv_obj_scroll_to_y(_content,top,LV_ANIM_ON);
+        else if(bottom>scroll+visible)lv_obj_scroll_to_y(_content,bottom-visible,LV_ANIM_ON);
+        break;
+    }
+    lv_obj_invalidate(_content);
+}
+
+void NomadNetScreen::activate_selected_link(){
+    if(_selected_link<0||static_cast<std::size_t>(_selected_link)>=_page.links().size()||!_link)return;
+    const auto target_view=_page.target(static_cast<std::size_t>(_selected_link));
+    const std::string target(target_view.data(),target_view.size());
+    if(_link(target))begin_navigation(target);else set_status("Browser action queue is busy");
+}
+
+void NomadNetScreen::page_event(lv_event_t* event){
+    auto* self=static_cast<NomadNetScreen*>(lv_event_get_user_data(event));
+    const auto code=lv_event_get_code(event);
+    if(code==LV_EVENT_DRAW_MAIN)self->draw_page(event);
+    else if(code==LV_EVENT_GET_SELF_SIZE){auto* size=static_cast<lv_point_t*>(lv_event_get_param(event));size->y=std::max<lv_coord_t>(size->y,self->_page_height);}
+    else if(code==LV_EVENT_FOCUSED){
+        auto* group=static_cast<lv_group_t*>(lv_obj_get_group(self->_content));
+        if(group)lv_group_set_editing(group,true);
+        if(self->_selected_link<0&&!self->_page.links().empty())self->select_link(1);
+    }
+    else if(code==LV_EVENT_DEFOCUSED){
+        auto* group=static_cast<lv_group_t*>(lv_obj_get_group(self->_content));
+        if(group&&lv_group_get_editing(group))lv_group_set_editing(group,false);
+    }
+    else if(code==LV_EVENT_KEY){
+        const uint32_t key=lv_event_get_key(event);
+        if(key==LV_KEY_DOWN||key==LV_KEY_RIGHT)self->select_link(1);
+        else if(key==LV_KEY_UP)self->select_link(-1);
+        else if(key==LV_KEY_LEFT){
+            auto* group=static_cast<lv_group_t*>(lv_obj_get_group(self->_content));
+            if(group){lv_group_set_editing(group,false);lv_group_focus_obj(self->_edit_button);}
+        }else if(key==LV_KEY_ENTER)self->activate_selected_link();
+    }
+    else if(code==LV_EVENT_CLICKED){
+        auto* indev=lv_indev_get_act();
+        if(!indev||lv_indev_get_type(indev)!=LV_INDEV_TYPE_POINTER)return;
+        lv_point_t point;lv_indev_get_point(indev,&point);const int scroll=lv_obj_get_scroll_y(self->_content);
+        const int x=point.x-self->_content->coords.x1-lv_obj_get_style_pad_left(self->_content,0);
+        const int y=point.y-self->_content->coords.y1-lv_obj_get_style_pad_top(self->_content,0)+scroll;
+        for(const auto& fragment:self->_page_layout)if(fragment.link_index>=0&&x>=fragment.x&&x<fragment.x+fragment.width&&y>=fragment.y&&y<fragment.y+fragment.height){self->_selected_link=fragment.link_index;self->activate_selected_link();break;}
+    }
 }
 void NomadNetScreen::show(){
     _visible=true;lv_obj_clear_flag(_screen,LV_OBJ_FLAG_HIDDEN);lv_obj_move_foreground(_screen);
@@ -372,8 +487,9 @@ void NomadNetScreen::show(){
 void NomadNetScreen::hide(){
     _visible=false;auto* group=LVGL::LVGLInit::get_default_group();
     if(group){
+        if(lv_group_get_editing(group)&&lv_group_get_focused(group)==_content)lv_group_set_editing(group,false);
         for(auto* object:{_back_button,_home_button,_reload_button,_save_button,_address,_go_button,_edit_button})lv_group_remove_obj(object);
-        for(auto* object:_focusables)lv_group_remove_obj(object);
+        lv_group_remove_obj(_content);
         for(auto* object:_directory_focusables)lv_group_remove_obj(object);
     }
     lv_obj_add_flag(_screen,LV_OBJ_FLAG_HIDDEN);
@@ -397,7 +513,7 @@ void NomadNetScreen::clicked(lv_event_t* event){
             const std::string selected=self->_directory_targets[code-2001];
             if(self->_open&&self->_open(selected))self->begin_navigation(selected);
             else self->set_status("Browser action queue is busy");
-        }else if(code>0&&code<=self->_link_targets.size()&&self->_link){const std::string selected=self->_link_targets[code-1];if(self->_link(selected))self->begin_navigation(selected);else self->set_status("Browser action queue is busy");}
+        }
     }
 }
 }

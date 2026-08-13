@@ -115,6 +115,45 @@ def test_worker_tasks_are_watched_or_yield_with_bounded_timeouts():
     assert "vTaskDelay(pdMS_TO_TICKS(5));" in playback
 
 
+def test_tcp_connect_worker_does_not_silently_starve_below_heap_threshold():
+    source = TCP_INTERFACE.read_text()
+    tcp_task = function_body(source, "void TCPClientInterface::task_loop()", "#endif")
+
+    # The complete T-Deck UI can have a largest internal allocation below 20 KiB
+    # while remaining healthy. A fixed heap gate here permanently suppresses
+    # every initial/reconnect attempt, leaving persisted routes pointed at an
+    # offline interface. Safety comes from the task-side bounded connect timeout
+    # and retry cadence, not from silently skipping connect().
+    assert "ESP.getMaxAllocHeap()" not in tcp_task
+    assert "_conn_state.store(CONNECTING)" in tcp_task
+    assert "if (connect())" in tcp_task
+    assert "RECONNECT_WAIT_MS" in tcp_task
+    assert "vTaskDelay(pdMS_TO_TICKS(100));" in tcp_task
+
+
+def test_tcp_connect_worker_restart_rearms_join_completion_latch():
+    source = TCP_INTERFACE.read_text()
+    start = function_body(
+        source,
+        "/*virtual*/ bool TCPClientInterface::start()",
+        "bool TCPClientInterface::connect()",
+    )
+    stop = function_body(
+        source,
+        "/*virtual*/ void TCPClientInterface::stop()",
+        "/*virtual*/ void TCPClientInterface::loop()",
+    )
+
+    # Runtime settings reuse the interface with stop() -> start() -> stop().
+    # Every new worker must re-arm the completion latch before publication, or
+    # the second stop can mistake the prior worker's completion for the current
+    # worker and disconnect/free its socket and owner without joining it.
+    assert "_task_done = false;" in start
+    assert start.index("_task_done = false;") < start.index("_task_running = true;")
+    assert start.index("_task_done = false;") < start.index("xTaskCreatePinnedToCore(")
+    assert "while (!_task_done" in stop
+
+
 def test_registered_interfaces_have_one_polling_owner():
     main = MAIN.read_text()
     loop = main[main.index("void loop()") :]

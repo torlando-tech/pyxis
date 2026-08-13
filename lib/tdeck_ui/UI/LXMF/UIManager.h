@@ -102,6 +102,26 @@ public:
      */
     void update();
 
+    // Service an already-published NomadNet Back/Home before another inbound
+    // Reticulum pass. No-ops when no terminal browser action is pending.
+    void service_nomad_terminal_action();
+
+    // True only during the bounded pending-Link epoch. Diagnostic A/B mode may
+    // defer nonessential maintenance here; Reticulum/TCP and Back/Home remain
+    // unconditional, and work resumes immediately on ACTIVE/CLOSED/timeout.
+    bool nomad_link_pending() const;
+
+    // Directory scans and NomadNet library writes remain deferred for the
+    // whole browser operation; their dirty/due flags are retained for IDLE.
+    bool nomad_operation_active() const;
+
+#if defined(PYXIS_TEST_HOOKS) || defined(PYXIS_NOMAD_LINK_DIAGNOSTIC)
+    // Physical-test surface. Opening is mailbox-only so Reticulum and UI
+    // ownership remains on the normal main-loop path.
+    bool test_nomad_open(const std::string& address);
+    void test_nomad_status() const;
+#endif
+
     /**
      * Pump TX audio without LVGL lock — call from main loop for low-latency TX.
      * Safe to call on every loop iteration; no-ops when not in a call.
@@ -392,6 +412,7 @@ private:
     NomadNet::ActionMailbox _nomad_actions;
     NomadNet::Library _nomad_library;
     NomadNet::RequestPolicy _nomad_request_policy;
+    RNS::HAnnounceHandler _nomad_announce_handler;
 
     std::atomic<bool> _nomad_directory_refresh_pending{false};
     bool _nomad_library_dirty = false;
@@ -416,6 +437,8 @@ private:
     void nomad_release_request();
     void nomad_stop_transport();
     bool nomad_refresh_path_after_link_failure();
+    void nomad_hear_node(const RNS::Bytes& destination_hash,
+                         const RNS::Bytes& app_data);
     void nomad_refresh_nodes();
     bool nomad_load_library();
     bool nomad_save_library();
@@ -426,6 +449,8 @@ private:
     static void on_nomad_response(const RNS::RequestReceipt& receipt);
     static void on_nomad_failed(const RNS::RequestReceipt& receipt);
     static void on_nomad_progress(const RNS::RequestReceipt& receipt);
+    static void on_nomad_resource_started(const RNS::Resource& resource);
+    static void on_nomad_resource_progress(const RNS::Resource& resource);
 
     // Screen navigation handlers
     void on_conversation_selected(const RNS::Bytes& peer_hash);

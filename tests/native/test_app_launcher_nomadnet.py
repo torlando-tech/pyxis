@@ -37,6 +37,7 @@ def test_app_launcher_nomadnet_native(tmp_path):
         _cxx(), "-std=c++17", "-Wall", "-Wextra", "-Werror",
         f"-I{INCLUDE}", str(SOURCE),
         str(INCLUDE / "NomadNetDocument.cpp"),
+        str(INCLUDE / "NomadNetCompactPage.cpp"),
         str(INCLUDE / "NomadNetGlyphs.cpp"),
         str(INCLUDE / "NomadNetLibrary.cpp"),
         str(INCLUDE / "NomadNetUrl.cpp"),
@@ -84,14 +85,13 @@ def test_ui_wiring_contract():
     failed = manager_cpp[manager_cpp.index("void UIManager::on_nomad_failed"):
                          manager_cpp.index("void UIManager::on_nomad_progress")]
     assert "receipt.response_size()" in failed
-    assert "NomadNet::AsyncMailbox::MAX_WIRE_BYTES + 1" in failed
-    assert "publish_progress" in failed
+    assert "publish_oversized" in failed
     assert "response_transfer_size()" in manager_cpp
     assert "DEPENDENCY HARDENING GAP" not in manager_cpp
     assert "lv_obj_set_scroll_dir" in browser_cpp
     assert "lv_textarea_set_max_length" in browser_cpp
     assert "set_link_callback" in manager_cpp
-    assert "_link_targets" in browser_cpp
+    assert "_page.target(" in browser_cpp
     assert "lv_obj_scroll_to_y(_content,0,LV_ANIM_OFF);" in browser_cpp
     assert "lv_group_focus_obj(_focusables.front())" not in browser_cpp
     assert "LV_SYMBOL_HOME" in browser_cpp
@@ -116,6 +116,44 @@ def test_ui_wiring_contract():
     assert "handle_library_back" in browser_cpp
     assert "set_library" in browser_cpp
     assert "set_save_callback" in manager_cpp
+
+
+def test_nomadnet_page_body_uses_one_compact_custom_viewport():
+    screen_h = (INCLUDE / "NomadNetScreen.h").read_text()
+    screen = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    compact_h = (INCLUDE / "NomadNetCompactPage.h").read_text()
+
+    set_page = screen[screen.index("void NomadNetScreen::set_page("):
+                      screen.index("void NomadNetScreen::show()")]
+    assert "_page.assign(document)" in set_page
+    assert "lv_obj_clean(_content)" not in set_page
+    assert "lv_spangroup_create" not in set_page
+    assert "lv_spangroup_new_span" not in set_page
+    assert "lv_btn_create(_content)" not in set_page
+    assert "lv_label_create(_content)" not in set_page
+    assert "LV_EVENT_DRAW_MAIN" in screen
+    assert "lv_draw_label(" in screen
+    assert "align_line" in screen
+    assert "[Page truncated to device safety limits]" in screen
+    assert "[Unsupported Micron content]" in screen
+    assert "lv_obj_set_scroll_dir(_content,LV_DIR_VER)" in screen
+    assert "CompactPage _page;" in screen_h
+    assert "std::vector<std::string> _link_targets" not in screen_h
+    assert "ExternalVector<char> _arena" in compact_h
+    assert "uint32_t text_offset" in compact_h
+    assert "uint32_t target_offset" in compact_h
+    assert "MAX_ARENA_BYTES" in compact_h
+    compact_cpp = (INCLUDE / "NomadNetCompactPage.cpp").read_text()
+    assert "const std::string rendered_text" not in compact_cpp
+    assert "visit_display_text" in compact_cpp
+    assert "lv_indev_get_type(indev)!=LV_INDEV_TYPE_POINTER" in screen
+    assert "_page.append_notice(\"[Page layout truncated to device safety limits]\")" in screen
+    assert "notice_run_index" in screen
+    assert "_page_layout.push_back(LayoutFragment(notice_run_index" in screen
+    assert "whitespace&&x+fragment_w>indent+available" in screen
+    assert "for(int attempt=0;attempt<count;++attempt)" in screen
+    assert "fragment.link_index==candidate" in screen
+    assert "lv_group_set_editing(group,false)" in screen
 
 
 def test_directory_rebuild_has_one_final_focus_owner():
@@ -279,6 +317,32 @@ def test_nomadnet_latency_and_path_lifecycle_contracts():
     # boundary, otherwise Back/Open remains frozen behind flash erase/GC.
     assert main_cpp.index("ui_manager->update();") < main_cpp.index("reticulum->should_persist_data();")
 
+    # Terminal browser cancellation must be serviced before another inbound
+    # transport pass. Resource receive/assembly is synchronous on this owner
+    # loop and must not repeatedly outrun an already-published Back/Home.
+    assert main_cpp.index("ui_manager->service_nomad_terminal_action();") < \
+        main_cpp.index("reticulum->loop();")
+
+    # Back/Home published immediately after Save must not remain queued behind
+    # the synchronous NomadNet library transaction. Drain only the bounded
+    # Save->terminal batch; ordinary Open actions remain one-per-pass.
+    action_update = manager_cpp[manager_cpp.index("void UIManager::nomad_update_user_actions()"):
+                                manager_cpp.index("void UIManager::nomad_release_request()")]
+    assert "ActionMailbox::CAPACITY + 1" in action_update
+    assert "action.kind != NomadNet::UserActionKind::SAVE" in action_update
+    assert "_nomad_actions.terminal_pending()" in action_update
+    assert manager_cpp.index("nomad_update_user_actions();") < manager_cpp.index("nomad_update_library();")
+
+    # Requesting is ambiguous. Once the dependency reports Resource progress,
+    # expose that distinct phase instead of leaving the stale request status.
+    assert "case NomadNet::AsyncMailbox::Kind::PROGRESS:" in manager_cpp
+    assert 'set_status("Receiving page...")' in manager_cpp
+    request_start = manager_cpp[manager_cpp.index("void UIManager::nomad_send_request()"):
+                                manager_cpp.index("void UIManager::nomad_update()")]
+    assert "set_resource_started_callback" in request_start
+    assert "set_progress_callback" in manager_cpp
+    assert "on_nomad_resource_progress" in manager_cpp
+
     refresh = manager_cpp[manager_cpp.index("void UIManager::nomad_refresh_nodes()"):
                           manager_cpp.index("void UIManager::nomad_update_library()")]
     assert refresh.index("Transport::has_path(destination_hash)") < refresh.index("Identity::recall(destination_hash)")
@@ -293,3 +357,146 @@ def test_nomadnet_latency_and_path_lifecycle_contracts():
     back = manager_cpp[manager_cpp.index("void UIManager::back()"):
                        manager_cpp.index("void UIManager::home()")]
     assert back.index("handle_library_back()") < back.index("nomad_stop_transport();")
+
+
+def test_nomadnet_requests_are_anonymous_and_back_cleanup_is_serialized():
+    manager_cpp = (INCLUDE / "UIManager.cpp").read_text()
+
+    # Canonical NomadNet identifies only for nodes with an explicit per-node
+    # identify-on-connect policy. Pyxis has no such opt-in setting, so ordinary
+    # page requests must remain anonymous.
+    link_event = manager_cpp[manager_cpp.index("case NomadNet::AsyncMailbox::Kind::LINK_ESTABLISHED:"):
+                             manager_cpp.index("case NomadNet::AsyncMailbox::Kind::LINK_CLOSED:")]
+    assert ".identify(" not in link_event
+    assert "nomad_send_request();" in link_event
+
+    # Link teardown cancels an in-flight Resource and updates its shared request
+    # receipt. Observe that cancellation before using the compatibility pending-
+    # receipt cleanup, and keep both mutations under the Reticulum owner lock.
+    stop = manager_cpp[manager_cpp.index("void UIManager::nomad_stop_transport()"):
+                       manager_cpp.index("bool UIManager::nomad_refresh_path_after_link_failure()")]
+    assert "RouterLock router_lock;" in stop
+    assert stop.index("_nomad_link.teardown()") < stop.index("nomad_release_request();")
+
+    reopen = manager_cpp[manager_cpp.index("void UIManager::nomad_open("):
+                         manager_cpp.index("void UIManager::nomad_reload()")]
+    assert "RouterLock router_lock;" in reopen
+    assert reopen.index("_nomad_link.teardown()") < reopen.index("nomad_release_request();")
+
+    update = manager_cpp[manager_cpp.index("void UIManager::nomad_update()"):
+                         manager_cpp.index("void UIManager::on_nomad_link_established")]
+    assert "RouterLock router_lock;" in update
+    assert "nomad_stop_transport();" in update
+
+
+def test_nomadnet_physical_test_hooks_are_isolated_and_owner_queued():
+    main = (ROOT / "src/main.cpp").read_text()
+    header = (INCLUDE / "UIManager.h").read_text()
+    implementation = (INCLUDE / "UIManager.cpp").read_text()
+    runner = (ROOT / "tests/hardware/nomadnet_tdeck_harness.py").read_text()
+    server = (ROOT / "tests/native/nomadnet_x86_flow/lan_server.py").read_text()
+
+    assert "T:NOMAD <url>" in main
+    assert "T:NOMAD_STATUS" in main
+    assert "ui_manager->test_nomad_open" in main
+    assert "ui_manager->test_nomad_status" in main
+
+    declaration = header[header.index(
+        "#if defined(PYXIS_TEST_HOOKS) || defined(PYXIS_NOMAD_LINK_DIAGNOSTIC)") :]
+    assert "bool test_nomad_open(const std::string& address);" in declaration
+    assert "void test_nomad_status() const;" in declaration
+
+    open_start = implementation.index("bool UIManager::test_nomad_open")
+    open_end = implementation.index("void UIManager::test_nomad_status", open_start)
+    open_body = implementation[open_start:open_end]
+    assert "_nomad_actions.publish(NomadNet::UserActionKind::OPEN" in open_body
+    assert "nomad_open(" not in open_body[open_body.index("{") + 1 :]
+
+    status_start = implementation.index("void UIManager::test_nomad_status")
+    status_body = implementation[status_start : status_start + 2500]
+    for field in ("state=", "path=", "identity=", "link=", "request=",
+                  "response=", "free=", "largest=", "minimum="):
+        assert field in status_body
+
+    assert "PYXIS_TEST_HOOKS" in header
+    assert "PYXIS_TEST_HOOKS" in implementation
+    assert "T:NOMAD_STATUS" in runner
+    assert "LAN SERVER link established" in server
+    assert "LAN SERVER request path={path}" in server
+    assert "Guru Meditation" in runner
+    assert "watchdog" in runner.lower()
+
+
+def test_nomadnet_active_window_defers_only_nonessential_owner_loop_work():
+    main = (ROOT / "src/main.cpp").read_text()
+    header = (INCLUDE / "UIManager.h").read_text()
+    implementation = (INCLUDE / "UIManager.cpp").read_text()
+
+    assert "bool nomad_link_pending() const;" in header
+    assert "bool UIManager::nomad_link_pending() const" in implementation
+    assert "const bool nomad_link_pending = ui_manager && ui_manager->nomad_link_pending();" in main
+    assert "const bool nomad_busy = nomad_suspend_nonessential && nomad_link_pending;" in main
+    assert "const bool nomad_busy = false;" in main
+    assert 'line == "T:NOMAD_MODE NORMAL"' in main
+    assert 'line == "T:NOMAD_MODE SUSPEND"' in main
+
+    # Python RNS continues socket ingress and Link/proof processing throughout
+    # establishment. The embedded owner-task equivalent must remain unconditional.
+    reticulum = main[main.index("// Process Reticulum") : main.index("// Best-effort instantaneous RSSI")]
+    assert "if (!nomad_busy)" not in reticulum
+    assert "reticulum->loop();" in reticulum
+    assert main.index("service_nomad_terminal_action();") < main.index("reticulum->loop();")
+
+    persistence = main[main.index("// Periodically persist identity/transport data") :
+                       main.index("// Reticulum::loop() above")]
+    assert "if (!nomad_busy)" in persistence
+    assert "reticulum->should_persist_data();" in persistence
+
+    periodic = main[main.index("// Periodic announce") : main.index("// Check for TCP reconnection")]
+    assert periodic.count("!nomad_busy") >= 2
+    assert "announce_reachable_destinations();" in periodic
+    assert "request_messages_from_propagation_node();" in periodic
+
+    # Diagnostic activity suspension is bounded to the pending Link epoch. It
+    # ends on ACTIVE, CLOSED, timeout, Back/Home, or replacement navigation.
+    predicate = implementation[implementation.index("bool UIManager::nomad_link_pending() const") :]
+    predicate = predicate[:predicate.index("}") + 1]
+    assert "_nomad_state == NomadState::LINK" in predicate
+    assert "RNS::Type::Link::ACTIVE" in predicate
+    assert "RNS::Type::Link::CLOSED" in predicate
+    stop = implementation[implementation.index("void UIManager::nomad_stop_transport()") :
+                          implementation.index("bool UIManager::nomad_refresh_path_after_link_failure()")]
+    assert "_nomad_state = NomadState::IDLE;" in stop
+
+
+def test_nomadnet_persisted_heard_announces_are_not_pruned_by_route_state():
+    manager_cpp = (INCLUDE / "UIManager.cpp").read_text()
+    manager_h = (INCLUDE / "UIManager.h").read_text()
+    refresh = manager_cpp[manager_cpp.index("void UIManager::nomad_refresh_nodes()"):
+                          manager_cpp.index("void UIManager::nomad_update_library()")]
+
+    # Canonical NomadNet persists its bounded announce stream independently of
+    # current route availability. A reboot or expired path must not erase the
+    # user's heard-node history from Pyxis's durable library.
+    assert "remove_heard_node" not in refresh
+    assert 'AnnounceHandler("nomadnetwork.node")' in manager_cpp
+    assert "Transport::register_announce_handler(_nomad_announce_handler)" in manager_cpp
+    hear = manager_cpp[manager_cpp.index("void UIManager::nomad_hear_node"):
+                       manager_cpp.index("void UIManager::nomad_refresh_nodes")]
+    assert "_nomad_library.hear_node" in hear
+    assert "_nomad_library_dirty = true;" in hear
+
+    # The announce callback captures this, so its Transport registration must
+    # have the same lifetime as that exact UIManager. A process-global handler
+    # can outlive its manager or be deregistered by a different manager.
+    assert "RNS::HAnnounceHandler _nomad_announce_handler;" in manager_h
+    assert "static std::shared_ptr<NomadNetAnnounceHandler> s_nomad_announce_handler" not in manager_cpp
+    assert "s_nomad_announce_handler" not in manager_cpp
+    assert "Transport::register_announce_handler(_nomad_announce_handler)" in manager_cpp
+
+    destructor = manager_cpp[manager_cpp.index("UIManager::~UIManager()"):
+                             manager_cpp.index("bool UIManager::init()")]
+    assert "RouterLock router_lock;" in destructor
+    assert "Transport::deregister_announce_handler(_nomad_announce_handler)" in destructor
+    assert destructor.index("RouterLock router_lock;") < destructor.index(
+        "Transport::deregister_announce_handler(_nomad_announce_handler)")

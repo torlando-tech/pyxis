@@ -26,6 +26,75 @@ def test_test_hooks_are_isolated_from_production_tdeck():
     assert '\'-DPYXIS_TEST_TCP_PORT="${sysenv.PYXIS_TEST_TCP_PORT}"\'' in instrumented
 
 
+def test_nomad_link_diagnostic_is_minimal_and_separate_from_broad_hooks():
+    config = CONFIG.read_text()
+    production = section(config, "tdeck")
+    diagnostic = section(config, "tdeck-nomad-link-diagnostic")
+
+    assert "extends = env:tdeck" in diagnostic
+    assert "-DPYXIS_NOMAD_LINK_DIAGNOSTIC" in diagnostic
+    assert "-DPYXIS_TEST_HOOKS" not in diagnostic
+    assert "PYXIS_TEST_TCP_HOST" not in diagnostic
+    assert "PYXIS_TEST_TCP_PORT" not in diagnostic
+    assert "PYXIS_NOMAD_LINK_DIAGNOSTIC" not in production
+
+
+def test_nomad_link_diagnostic_uses_fixed_buffer_status_output():
+    main = MAIN.read_text()
+    manager = (ROOT / "lib/tdeck_ui/UI/LXMF/UIManager.cpp").read_text()
+    header = (ROOT / "lib/tdeck_ui/UI/LXMF/UIManager.h").read_text()
+
+    assert "#ifdef PYXIS_NOMAD_LINK_DIAGNOSTIC" in main
+    assert "T:NOMAD_STATUS" in main
+    assert "void test_nomad_status() const;" in header
+    status_start = manager.index("void UIManager::test_nomad_status() const")
+    status = manager[status_start : status_start + 2200]
+    assert "Serial.printf(" in status
+    assert "std::string(" not in status
+    assert "std::to_string(" not in status
+
+
+def test_nomad_link_crypto_vector_uses_pinned_wrappers_without_secret_output():
+    config = CONFIG.read_text()
+    main = MAIN.read_text()
+    diagnostic = section(config, "tdeck-nomad-link-diagnostic")
+    production = section(config, "tdeck")
+
+    assert "-DPYXIS_NOMAD_LINK_DIAGNOSTIC" in diagnostic
+    assert "PYXIS_NOMAD_LINK_DIAGNOSTIC" not in production
+    assert 'line == "T:CRYPTO_VECTOR"' in main
+    assert "run_nomad_crypto_vector()" in main
+    assert "X25519PrivateKey::from_private_bytes" in main
+    assert "Ed25519PrivateKey::from_private_bytes" in main
+    assert "RNS::Cryptography::hkdf" in main
+    assert 'Serial.printf("T:CRYPTO_VECTOR %s xpub=%d xdh=%d edpub=%d edsig=%d hkdf=%d' in main
+
+    vector_start = main.index("static void run_nomad_crypto_vector()")
+    vector_end = main.index("static void handle_nomad_link_diagnostic_command", vector_start)
+    vector_body = main[vector_start:vector_end]
+    assert ".toHex()" not in vector_body
+    assert "private=" not in vector_body
+    assert "shared=" not in vector_body
+
+
+def test_nomad_link_wire_capture_is_fixed_buffer_and_arduino_diagnostic_only():
+    source = (ROOT / "src/TCPClientInterface.cpp").read_text()
+    assert "#if defined(ARDUINO) && defined(PYXIS_NOMAD_LINK_DIAGNOSTIC)" in source
+    assert 'nomad_trace_packet("TX", data' in source
+    assert 'nomad_trace_packet("RX", unescaped' in source
+    assert 'Serial.printf("T:WIRE %s kind=%s raw=%u framed=%u io=%u hex="' in source
+    assert "std::string hex" not in source[source.index("static void nomad_trace_packet") : source.index("TCPClientInterface::TCPClientInterface")]
+    assert "InterfaceImpl::handle_incoming(unescaped);" in source
+
+
+def test_nomad_harness_extracts_machine_response_from_interleaved_serial_line():
+    harness = (ROOT / "tests/hardware/nomadnet_tdeck_harness.py").read_text()
+
+    assert "for prefix in prefixes:" in harness
+    assert "marker = line.find(prefix)" in harness
+    assert "return line[marker:], observed" in harness
+
+
 def test_audio_diagnostic_state_and_recorder_initialization_are_test_only():
     main = MAIN.read_text()
     assert "#ifdef PYXIS_TEST_HOOKS\n// --- Audio loopback PCM dump" in main
