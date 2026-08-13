@@ -469,7 +469,7 @@ def test_nomadnet_uses_real_jetbrains_mono_nl_faces_at_each_size():
     assert "Copyright 2022 The Noto Project Authors" in noto_license
     assert "SIL OPEN FONT LICENSE Version 1.1" in noto_license
 
-    assert "const lv_font_t* run_font" in browser_cpp
+    assert "const lv_font_t* page_run_font" in browser_cpp
     assert "NomadNet::CompactPage::BOLD" in browser_cpp
     assert "NomadNet::CompactPage::ITALIC" in browser_cpp
     assert "&nomadnet_font_12_bold" in browser_cpp
@@ -478,16 +478,41 @@ def test_nomadnet_uses_real_jetbrains_mono_nl_faces_at_each_size():
     assert "&nomadnet_font_16_bold" in browser_cpp
     assert "&nomadnet_font_16_italic" in browser_cpp
     assert "&nomadnet_font_16_bold_italic" in browser_cpp
-    assert "dsc.font=run_font(run, fragment.large_font);" in browser_cpp
+    assert "dsc.font=page_run_font(run, fragment.large_font);" in browser_cpp
     assert "dsc.letter_space=0;" in browser_cpp
     assert "?1:0,LV_TEXT_FLAG_NONE" not in browser_cpp
+
+
+def test_nomadnet_page_fonts_do_not_leak_into_navigation_widgets():
+    browser_cpp = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    constructor = browser_cpp[
+        browser_cpp.index("NomadNetScreen::NomadNetScreen()") :
+        browser_cpp.index("NomadNetScreen::~NomadNetScreen()")
+    ]
+    directory = browser_cpp[
+        browser_cpp.index("void NomadNetScreen::render_directory(View view)") :
+        browser_cpp.index("void NomadNetScreen::detach_focusables(")
+    ]
+    layout = browser_cpp[
+        browser_cpp.index("void NomadNetScreen::layout_page()") :
+        browser_cpp.index("void NomadNetScreen::draw_page(")
+    ]
+    draw = browser_cpp[
+        browser_cpp.index("void NomadNetScreen::draw_page(") :
+        browser_cpp.index("void NomadNetScreen::select_link(")
+    ]
+
+    assert "nomadnet_font_" not in constructor
+    assert "nomadnet_font_" not in directory
+    assert "page_run_font(run,large)" in layout
+    assert "dsc.font=page_run_font(run, fragment.large_font);" in draw
 
 
 def test_nomadnet_bold_body_text_keeps_body_font_metrics():
     browser_cpp = (INCLUDE / "NomadNetScreen.cpp").read_text()
     fonts = INCLUDE.parent / "Fonts"
     layout = browser_cpp[browser_cpp.index("const bool large=") : browser_cpp.index(
-        "const lv_font_t* font=run_font", browser_cpp.index("const bool large=")
+        "const lv_font_t* font=page_run_font", browser_cpp.index("const bool large=")
     )]
 
     assert "block.type==NomadNet::BlockType::HEADING" in layout
