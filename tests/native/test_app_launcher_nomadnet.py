@@ -216,6 +216,30 @@ def test_begin_navigation_releases_directory_rows_before_transport():
     assert begin.index("clear_directory();") < begin.index("show_browser(false);")
 
 
+def test_nomadnet_validates_queued_addresses_before_navigation_teardown():
+    """A malformed manual address must preserve the current page or directory."""
+    screen = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    manager = (INCLUDE / "UIManager.cpp").read_text()
+
+    # UI callbacks enqueue only; the owner validates before starting navigation.
+    activate = screen[screen.index("void NomadNetScreen::activate_selected_link()"):
+                      screen.index("void NomadNetScreen::page_event")]
+    clicked = screen[screen.index("void NomadNetScreen::clicked("):]
+    assert "begin_navigation(" not in activate
+    assert "begin_navigation(" not in clicked
+
+    actions = manager[manager.index("void UIManager::nomad_update_user_actions()"):
+                      manager.index("void UIManager::service_nomad_terminal_action()")]
+    assert "begin_navigation(" not in actions
+
+    open_page = manager[manager.index("void UIManager::nomad_open("):
+                        manager.index("void UIManager::nomad_reload()")]
+    parse = open_page.index("NomadNet::Url::parse")
+    navigation = open_page.index("_nomadnet_screen->begin_navigation(parsed.str())")
+    same_destination = open_page.index("const bool same_destination")
+    assert parse < navigation < same_destination
+
+
 def test_launcher_transition_has_one_final_focus_owner():
     """Leaving and restoring Home must not transiently focus later tiles."""
     home = (INCLUDE / "HomeScreen.cpp").read_text()

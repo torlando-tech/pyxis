@@ -480,7 +480,7 @@ void NomadNetScreen::activate_selected_link(){
     if(_selected_link<0||static_cast<std::size_t>(_selected_link)>=_page.links().size()||!_link)return;
     const auto target_view=_page.target(static_cast<std::size_t>(_selected_link));
     const std::string target(target_view.data(),target_view.size());
-    if(_link(target))begin_navigation(target);else set_status("Browser action queue is busy");
+    if(!_link(target))set_status("Browser action queue is busy");
 }
 
 void NomadNetScreen::page_event(lv_event_t* event){
@@ -533,10 +533,10 @@ void NomadNetScreen::clicked(lv_event_t* event){
     auto* self=static_cast<NomadNetScreen*>(lv_event_get_user_data(event));auto* target=lv_event_get_target(event);
     if(target==self->_back_button&&self->_back)self->_back();
     else if(target==self->_home_button&&self->_home)self->_home();
-    else if(target==self->_reload_button&&self->_reload){const std::string address=self->address();if(self->_reload(address))self->begin_navigation(address);else self->set_status("Browser action queue is busy");}
+    else if(target==self->_reload_button&&self->_reload){const std::string address=self->address();if(!self->_reload(address))self->set_status("Browser action queue is busy");}
     else if(target==self->_save_button&&self->_save){if(!self->_save(self->address()))self->set_status("Browser action queue is busy");}
     else if(target==self->_edit_button){self->set_address_editing(true);self->set_status("Edit destination or page path");}
-    else if((target==self->_go_button||target==self->_address)&&self->_open){const std::string address=self->address();if(self->_open(address))self->begin_navigation(address);else self->set_status("Browser action queue is busy");}
+    else if((target==self->_go_button||target==self->_address)&&self->_open){const std::string address=self->address();if(!self->_open(address))self->set_status("Browser action queue is busy");}
     else{
         const std::size_t code=reinterpret_cast<std::size_t>(lv_obj_get_user_data(target));
         if(code==1001)self->render_directory(View::HEARD);
@@ -546,8 +546,7 @@ void NomadNetScreen::clicked(lv_event_t* event){
         else if(code==1005){self->clear_document();self->show_browser(true);self->set_status("Enter a NomadNet address");}
         else if(code>2000&&code<=2000+self->_directory_targets.size()){
             const std::string selected=self->_directory_targets[code-2001];
-            if(self->_open&&self->_open(selected))self->begin_navigation(selected);
-            else self->set_status("Browser action queue is busy");
+            if(!self->_open||!self->_open(selected))self->set_status("Browser action queue is busy");
         }
     }
 }

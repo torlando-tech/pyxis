@@ -1940,17 +1940,10 @@ void UIManager::nomad_update_user_actions() {
         const std::string target = action.target();
         nomad_heap_checkpoint("action-target-copied");
         switch (action.kind) {
-        case NomadNet::UserActionKind::OPEN: {
-            {
-                LVGL_LOCK();
-                nomad_heap_checkpoint("action-before-navigation");
-                _nomadnet_screen->begin_navigation(target);
-                nomad_heap_checkpoint("action-after-navigation");
-            }
+        case NomadNet::UserActionKind::OPEN:
             nomad_heap_checkpoint("action-before-open");
             nomad_open(target);
             break;
-        }
         case NomadNet::UserActionKind::SAVE: {
             const bool save = !_nomad_library.page_saved(target);
             if (!_nomad_library.set_page_saved(target, save)) break;
@@ -2099,6 +2092,15 @@ void UIManager::nomad_open(const std::string& address, bool add_history) {
     RouterLock router_lock;
     if (!router_lock.acquired()) return;
     nomad_heap_checkpoint("open-locked");
+    {
+        // Validation must precede destructive UI cleanup so a malformed manual
+        // address cannot discard the current page or directory. Keep cleanup
+        // before any retained-Link request or new transport construction.
+        LVGL_LOCK();
+        nomad_heap_checkpoint("action-before-navigation");
+        _nomadnet_screen->begin_navigation(parsed.str());
+        nomad_heap_checkpoint("action-after-navigation");
+    }
     const bool same_destination = _nomad_state == NomadState::IDLE &&
         _nomad_link && _nomad_link.status() == Type::Link::ACTIVE &&
         !_nomad_url.destination_hex.empty() &&
