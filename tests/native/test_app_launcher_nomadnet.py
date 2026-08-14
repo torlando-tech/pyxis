@@ -508,6 +508,27 @@ def test_nomadnet_page_fonts_do_not_leak_into_navigation_widgets():
     assert "dsc.font=page_run_font(run, fragment.large_font);" in draw
 
 
+def test_nomadnet_navigation_keeps_theme_font_with_remote_glyph_fallback():
+    browser_cpp = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    selector = browser_cpp[
+        browser_cpp.index("const lv_font_t* navigation_font_12()") :
+        browser_cpp.index("const lv_font_t* page_run_font(")
+    ]
+    constructor = browser_cpp[
+        browser_cpp.index("NomadNetScreen::NomadNetScreen()") :
+        browser_cpp.index("NomadNetScreen::~NomadNetScreen()")
+    ]
+    directory = browser_cpp[
+        browser_cpp.index("void NomadNetScreen::render_directory(View view)") :
+        browser_cpp.index("void NomadNetScreen::detach_focusables(")
+    ]
+
+    assert "font=lv_font_montserrat_12" in selector
+    assert "font.fallback=&nomadnet_font_12" in selector
+    assert constructor.count("navigation_font_12()") == 2
+    assert directory.count("navigation_font_12()") == 3
+
+
 def test_nomadnet_bold_body_text_keeps_body_font_metrics():
     browser_cpp = (INCLUDE / "NomadNetScreen.cpp").read_text()
     fonts = INCLUDE.parent / "Fonts"
