@@ -16,6 +16,7 @@
 #include "NomadNetMailbox.h"
 #include "NomadNetCompactPage.h"
 #include "NomadNetColors.h"
+#include "NomadNetFocus.h"
 #include "NomadNetProtocol.h"
 #include "NomadNetRequestPolicy.h"
 #include "NomadNetUrl.h"
@@ -37,6 +38,7 @@ using UI::LXMF::NomadNet::page_title;
 using UI::LXMF::NomadNet::AsyncMailbox;
 using UI::LXMF::NomadNet::CompactPage;
 using UI::LXMF::NomadNet::resolve_foreground;
+using UI::LXMF::NomadNet::for_each_focus_span;
 using UI::LXMF::NomadNet::ResponseBuffer;
 using UI::LXMF::NomadNet::RequestPolicy;
 using UI::LXMF::NomadNet::Url;
@@ -238,6 +240,38 @@ int main(int argc, char** argv) {
     saturated_blue_run.background = 0x0000ff;
     check("focus border uses sRGB contrast for saturated blue",
           resolve_focus_border(color_page, saturated_blue_run, 0x1d1a1e) == 0xffffff);
+
+    struct FocusFragmentFixture {
+        int16_t link_index;
+        uint16_t run_index;
+        int16_t x;
+        int16_t y;
+        int16_t width;
+        int16_t height;
+    };
+    const std::vector<FocusFragmentFixture> focus_fragments{
+        {3, 7, 10, 20, 28, 16},
+        {3, 7, 38, 20, 7, 16},
+        {3, 7, 45, 20, 35, 16},
+        {3, 7, 10, 39, 24, 16},
+        {3, 8, 34, 39, 20, 16},
+        {4, 9, 60, 39, 30, 16},
+    };
+    std::vector<UI::LXMF::NomadNet::FocusSpan> focus_spans;
+    for_each_focus_span(focus_fragments, 3, [&](const auto& span) {
+        focus_spans.push_back(span);
+    });
+    check("selected multi-word links use one focus outline per visual line and style run",
+          focus_spans.size() == 3 &&
+              focus_spans[0].x == 10 && focus_spans[0].y == 20 &&
+              focus_spans[0].width == 70 && focus_spans[0].height == 16 &&
+              focus_spans[0].run_index == 7 &&
+              focus_spans[1].x == 10 && focus_spans[1].y == 39 &&
+              focus_spans[1].width == 24 && focus_spans[1].height == 16 &&
+              focus_spans[1].run_index == 7 &&
+              focus_spans[2].x == 34 && focus_spans[2].y == 39 &&
+              focus_spans[2].width == 20 && focus_spans[2].height == 16 &&
+              focus_spans[2].run_index == 8);
 
     auto reset_color_doc = parser.parse(
         "#!fg=abc\n`Ff00inline`fpage `[unstyled link`:/page/plain.mu]\n");
