@@ -133,6 +133,12 @@ int main(int argc, char** argv) {
     check("relative same-node path parses with context",
           Url::parse(":/page/about.mu", url, error, "fedcba9876543210fedcba9876543210") &&
           url.destination_hex == "fedcba9876543210fedcba9876543210");
+    check("link fields are separated from the registered request path",
+          Url::parse(":/page/repo.mu`g=reticulum|r=lxmf", url, error,
+                     "fedcba9876543210fedcba9876543210") &&
+          url.path == "/page/repo.mu" && url.fields == "g=reticulum|r=lxmf");
+    check("canonical URL preserves link fields for history and reload",
+          url.str() == "fedcba9876543210fedcba9876543210:/page/repo.mu`g=reticulum|r=lxmf");
     check("wrong destination length rejected", !Url::parse("abcd:/page/index.mu", url, error));
     check("nonhex destination rejected", !Url::parse("zz23456789abcdef0123456789abcdef:/page/index.mu", url, error));
     check("control characters rejected", !Url::parse("0123456789abcdef0123456789abcdef:/page/a\nb", url, error));
@@ -332,6 +338,11 @@ int main(int argc, char** argv) {
     auto link_fields = parser.parse("`[Search`:/page/search.mu`q=pyxis]\n");
     check("link target excludes request fields", link_fields.links.size() == 1 &&
           link_fields.links[0].target == ":/page/search.mu" && link_fields.links[0].fields == "q=pyxis");
+    CompactPage link_fields_page;
+    check("compact link navigation retains request fields",
+          link_fields_page.assign(link_fields) && link_fields_page.links().size() == 1 &&
+          std::string(link_fields_page.target(0).data(), link_fields_page.target(0).size()) ==
+              ":/page/search.mu`q=pyxis");
     check("divider parsed", doc.blocks[3].type == BlockType::DIVIDER);
     check("literal mode suppresses formatting", doc.blocks[4].runs.size() == 1 &&
                                                  doc.blocks[4].runs[0].text == "`!literal");
@@ -411,17 +422,37 @@ int main(int argc, char** argv) {
         check("authoritative Aleph fixture is readable", input.good() || input.eof());
         check("authoritative fixture yields headings", !real.blocks.empty() && real.blocks[0].type == BlockType::HEADING);
         check("authoritative fixture yields links", !real.links.empty());
+        bool retained_fixture_fields = false;
+        CompactPage real_page;
+        if (real_page.assign(real)) {
+            for (std::size_t i = 0; i < real.links.size(); ++i) {
+                if (real.links[i].fields.empty()) continue;
+                const auto target = real_page.target(i);
+                retained_fixture_fields = std::string(target.data(), target.size()) ==
+                    real.links[i].target + "`" + real.links[i].fields;
+                break;
+            }
+        }
+        check("authoritative link fields survive compact navigation", retained_fixture_fields);
         check("authoritative fixture remains within bounds", real.blocks.size() <= DocumentParser::MAX_BLOCKS &&
                                                              real.links.size() <= DocumentParser::MAX_LINKS);
     } else {
         check("authoritative Aleph fixture is readable", false);
         check("authoritative fixture yields headings", false);
         check("authoritative fixture yields links", false);
+        check("authoritative link fields survive compact navigation", false);
         check("authoritative fixture remains within bounds", false);
     }
 
     const auto nil = UI::LXMF::NomadNet::no_form_request_data();
     check("no-form request is exact msgpack nil", nil.size() == 1 && nil[0] == 0xc0);
+    const auto configured_variables = UI::LXMF::NomadNet::request_data("g=reticulum|r=lxmf");
+    const std::vector<uint8_t> expected_variables{
+        0x82,
+        0xa5, 'v', 'a', 'r', '_', 'g', 0xa9, 'r', 'e', 't', 'i', 'c', 'u', 'l', 'u', 'm',
+        0xa5, 'v', 'a', 'r', '_', 'r', 0xa4, 'l', 'x', 'm', 'f'};
+    check("configured link variables encode as the NomadNet request-data map",
+          configured_variables == expected_variables);
     ResponseBuffer response;
     const uint8_t bin8[] = {0xc4, 0x03, 'm', 'u', '!'};
     check("msgpack bin8 response normalizes", UI::LXMF::NomadNet::normalize_response(bin8, sizeof(bin8), response) &&

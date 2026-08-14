@@ -18,13 +18,23 @@ bool Url::parse(const std::string& input, Url& result, std::string& error,
             return false;
         }
     }
-    const auto colon = input.find(':');
-    if (colon != std::string::npos && input.find(':', colon + 1) != std::string::npos) {
+    const auto fields_separator = input.find('`');
+    if (fields_separator != std::string::npos &&
+        input.find('`', fields_separator + 1) != std::string::npos) {
+        error = "Address has too many field separators";
+        return false;
+    }
+    const std::string address = fields_separator == std::string::npos
+        ? input : input.substr(0, fields_separator);
+    std::string fields = fields_separator == std::string::npos
+        ? std::string() : input.substr(fields_separator + 1);
+    const auto colon = address.find(':');
+    if (colon != std::string::npos && address.find(':', colon + 1) != std::string::npos) {
         error = "Address has too many separators";
         return false;
     }
-    std::string destination = colon == std::string::npos ? input : input.substr(0, colon);
-    std::string path = colon == std::string::npos ? DEFAULT_PATH : input.substr(colon + 1);
+    std::string destination = colon == std::string::npos ? address : address.substr(0, colon);
+    std::string path = colon == std::string::npos ? DEFAULT_PATH : address.substr(colon + 1);
     if (destination.empty()) destination = current_destination;
     if (destination.size() != 32 ||
         !std::all_of(destination.begin(), destination.end(), [](unsigned char c) { return std::isxdigit(c); })) {
@@ -44,6 +54,7 @@ bool Url::parse(const std::string& input, Url& result, std::string& error,
     }
     result.destination_hex = std::move(destination);
     result.path = std::move(path);
+    result.fields = std::move(fields);
     return true;
 }
 

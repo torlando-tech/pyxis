@@ -51,7 +51,8 @@ bool CompactPage::assign(const Document& document) {
             }
         }
         for (std::size_t i = 0; i < link_count; ++i) {
-            const std::size_t bytes = document.links[i].target.size() + 1;
+            const std::size_t bytes = document.links[i].target.size() +
+                (document.links[i].fields.empty() ? 0 : document.links[i].fields.size() + 1) + 1;
             if (bytes > MAX_ARENA_BYTES - std::min(arena_size, MAX_ARENA_BYTES)) return false;
             arena_size += bytes;
         }
@@ -62,7 +63,12 @@ bool CompactPage::assign(const Document& document) {
 
         for (std::size_t i = 0; i < link_count; ++i) {
             LinkRecord link;
-            if (!append(document.links[i].target, link.target_offset, link.target_length)) {
+            std::string navigation_target = document.links[i].target;
+            if (!document.links[i].fields.empty()) {
+                navigation_target += '`';
+                navigation_target += document.links[i].fields;
+            }
+            if (!append(navigation_target, link.target_offset, link.target_length)) {
                 clear();
                 return false;
             }
