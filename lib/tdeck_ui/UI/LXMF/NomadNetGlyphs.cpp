@@ -57,20 +57,27 @@ bool decode_utf8(const std::string& value, std::size_t offset,
 
 } // namespace
 
-std::string display_text(const std::string& utf8) {
-    std::string output;
-    output.reserve(utf8.size());
+void visit_display_text(const std::string& utf8, DisplayTextVisitor visitor, void* context) {
+    static const char replacement = '?';
     for (std::size_t offset = 0; offset < utf8.size();) {
         uint32_t codepoint = 0;
         std::size_t length = 1;
         if (!decode_utf8(utf8, offset, codepoint, length) ||
             !nomadnet_font_has_codepoint(codepoint)) {
-            output.push_back('?');
+            visitor(&replacement, 1, context);
         } else {
-            output.append(utf8, offset, length);
+            visitor(utf8.data() + offset, length, context);
         }
         offset += length;
     }
+}
+
+std::string display_text(const std::string& utf8) {
+    std::string output;
+    output.reserve(utf8.size());
+    visit_display_text(utf8, [](const char* bytes, std::size_t length, void* context) {
+        static_cast<std::string*>(context)->append(bytes, length);
+    }, &output);
     return output;
 }
 

@@ -20,6 +20,7 @@
 #include "LXSTSignalParser.h"
 #include "ULBWVoiceProfilePolicy.h"
 #include <microReticulum/Packet.h>
+#include <microReticulum/Resource.h>
 #include <microReticulum/Transport.h>
 #include <microReticulum/Destination.h>
 #include <microReticulum/Utilities/OS.h>
@@ -52,6 +53,20 @@ constexpr const char* NOMAD_LIBRARY_TMP = "/nomadnet/library.tmp";
 constexpr const char* NOMAD_LIBRARY_STAGE = "/nomadnet/library.new";
 constexpr const char* NOMAD_LIBRARY_BACKUP = "/nomadnet/library.bak";
 constexpr const char* NOMAD_LIBRARY_OLD = "/nomadnet/library.old";
+
+#if defined(MEMORY_INSTRUMENTATION_ENABLED) || defined(PYXIS_NOMAD_MEMORY_DIAGNOSTIC)
+void nomad_heap_checkpoint(const char* phase) {
+    Serial.printf(
+        "T:NOMAD_HEAP phase=%s free=%u largest=%u minimum=%u psram=%u\n",
+        phase,
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+}
+#else
+void nomad_heap_checkpoint(const char*) {}
+#endif
 
 bool read_nomad_library_file(const char* path, NomadNet::ExternalVector<uint8_t>& bytes) {
     File file = LittleFS.open(path, "r");
@@ -120,6 +135,22 @@ public:
     }
 };
 static std::shared_ptr<LXSTAnnounceHandler> s_lxst_announce_handler;
+
+class NomadNetAnnounceHandler : public AnnounceHandler {
+public:
+    using Callback = std::function<void(const Bytes&, const Bytes&)>;
+
+    explicit NomadNetAnnounceHandler(Callback callback)
+        : AnnounceHandler("nomadnetwork.node"), callback_(std::move(callback)) {}
+
+    void received_announce(const Bytes& destination_hash, const Identity& /*identity*/,
+                           const Bytes& app_data) override {
+        if (callback_) callback_(destination_hash, app_data);
+    }
+
+private:
+    Callback callback_;
+};
 
 uint64_t monotonicMillis() {
     return static_cast<uint64_t>(esp_timer_get_time() / 1000LL);
@@ -301,9 +332,14 @@ UIManager::~UIManager() {
     // the current call. Clear it only when the manager itself is destroyed.
     if (s_call_instance == this) s_call_instance = nullptr;
     if (s_nomad_instance == this) s_nomad_instance = nullptr;
-    _nomad_mailbox.clear();
-    nomad_release_request();
-    if (_nomad_link && _nomad_link.status() != RNS::Type::Link::CLOSED) _nomad_link.teardown();
+    if (_nomad_announce_handler) {
+        RouterLock router_lock;
+        if (router_lock.acquired()) {
+            Transport::deregister_announce_handler(_nomad_announce_handler);
+            _nomad_announce_handler = HAnnounceHandler();
+        }
+    }
+    nomad_stop_transport();
 
     if (_home_screen) delete _home_screen;
     if (_network_screen) delete _network_screen;
@@ -579,6 +615,20 @@ bool UIManager::init() {
     _lxst_destination.set_link_established_callback(on_lxst_link_established);
     s_call_instance = this;
     s_nomad_instance = this;
+
+    // Canonical NomadNet records matching announces as they arrive and then
+    // persists its bounded stream. Do the same instead of depending on the
+    // directory screen being opened before the underlying route expires.
+    _nomad_announce_handler = HAnnounceHandler(
+        std::make_shared<NomadNetAnnounceHandler>(
+        [this](const Bytes& destination_hash, const Bytes& app_data) {
+            nomad_hear_node(destination_hash, app_data);
+        }));
+    {
+        RouterLock router_lock;
+        if (!router_lock.acquired()) return false;
+        Transport::register_announce_handler(_nomad_announce_handler);
+    }
 
     // Register LXST announce handler
     s_lxst_announce_handler = std::make_shared<LXSTAnnounceHandler>();
@@ -871,6 +921,7 @@ void UIManager::show_network() {
 }
 
 void UIManager::show_nomadnet() {
+    nomad_heap_checkpoint("show-enter");
     _nomad_history.clear();
     _nomad_directory_refresh_pending.store(true, std::memory_order_release);
     {
@@ -878,6 +929,7 @@ void UIManager::show_nomadnet() {
         _nomadnet_screen->show_start();
     }
     navigate(Route::NOMADNET);
+    nomad_heap_checkpoint("show-ready");
 }
 
 void UIManager::navigate(Route route) {
@@ -1816,7 +1868,18 @@ bool UIManager::nomad_save_library() {
     return true;
 }
 
+void UIManager::nomad_hear_node(const Bytes& destination_hash, const Bytes& app_data) {
+    const std::string name = app_data
+        ? NomadNet::sanitize_directory_name(app_data.data(), app_data.size()) : std::string{};
+    if (!_nomad_library.hear_node(destination_hash.toHex(), name,
+            static_cast<uint64_t>(RNS::Utilities::OS::time()),
+            Transport::hops_to(destination_hash))) return;
+    _nomad_library_dirty = true;
+    _nomad_directory_refresh_pending.store(true, std::memory_order_release);
+}
+
 void UIManager::nomad_refresh_nodes() {
+    nomad_heap_checkpoint("refresh-enter");
     bool changed = false;
     const auto& destinations = Transport::path_table();
     for (auto it = destinations.begin(); it != destinations.end(); ++it) {
@@ -1834,22 +1897,20 @@ void UIManager::nomad_refresh_nodes() {
         changed = _nomad_library.hear_node(destination_hash.toHex(), name,
             static_cast<uint64_t>(entry._timestamp), static_cast<uint8_t>(entry._hops)) || changed;
     }
-    std::vector<std::string> unroutable;
-    for (const auto& node : _nomad_library.nodes()) {
-        if (node.saved) continue;
-        Bytes destination_hash;
-        destination_hash.assignHex(node.destination_hex.c_str());
-        if (!Transport::has_path(destination_hash)) unroutable.push_back(node.destination_hex);
-    }
-    for (const auto& destination_hex : unroutable)
-        changed = _nomad_library.remove_heard_node(destination_hex) || changed;
+    nomad_heap_checkpoint("refresh-scanned");
     if (!changed) return;
     _nomad_library_dirty = true;
     LVGL_LOCK();
+    nomad_heap_checkpoint("refresh-before-library-copy");
     _nomadnet_screen->set_library(_nomad_library);
+    nomad_heap_checkpoint("refresh-after-library-copy");
 }
 
 void UIManager::nomad_update_library() {
+    // Filesystem persistence and directory scans are not required to complete
+    // an active Reticulum operation. Dirty/pending flags remain set and are
+    // serviced after terminal cleanup returns the state to IDLE.
+    if (nomad_operation_active()) return;
     const uint32_t now = millis();
     if (_navigation.current() == Route::NOMADNET && _nomadnet_screen->directory_visible() &&
         now - _nomad_last_directory_refresh_ms >= 10000) {
@@ -1868,18 +1929,21 @@ void UIManager::nomad_update_library() {
 }
 
 void UIManager::nomad_update_user_actions() {
-    NomadNet::UserAction action;
-    if (!_nomad_actions.pop(action)) return;
-    const std::string target = action.target();
-    switch (action.kind) {
-        case NomadNet::UserActionKind::OPEN: {
-            {
-                LVGL_LOCK();
-                _nomadnet_screen->begin_navigation(target);
-            }
+    // Back/Home is a terminal slot behind at most CAPACITY retained explicit
+    // Saves. Drain that bounded batch in one owner-loop pass so the terminal
+    // action cannot sit behind the synchronous library persistence below.
+    // Ordinary Open and standalone Save actions remain one-per-pass.
+    for (std::size_t serviced = 0; serviced < NomadNet::ActionMailbox::CAPACITY + 1; ++serviced) {
+        NomadNet::UserAction action;
+        if (!_nomad_actions.pop(action)) return;
+        nomad_heap_checkpoint("action-popped");
+        const std::string target = action.target();
+        nomad_heap_checkpoint("action-target-copied");
+        switch (action.kind) {
+        case NomadNet::UserActionKind::OPEN:
+            nomad_heap_checkpoint("action-before-open");
             nomad_open(target);
             break;
-        }
         case NomadNet::UserActionKind::SAVE: {
             const bool save = !_nomad_library.page_saved(target);
             if (!_nomad_library.set_page_saved(target, save)) break;
@@ -1898,8 +1962,53 @@ void UIManager::nomad_update_user_actions() {
             _nomad_actions.clear();
             home();
             break;
+        }
+        if (action.kind != NomadNet::UserActionKind::SAVE ||
+            !_nomad_actions.terminal_pending()) return;
     }
 }
+
+void UIManager::service_nomad_terminal_action() {
+    if (_nomad_actions.terminal_pending()) nomad_update_user_actions();
+}
+
+bool UIManager::nomad_link_pending() const {
+    return _nomad_state == NomadState::LINK && _nomad_link &&
+           _nomad_link.status() != RNS::Type::Link::ACTIVE &&
+           _nomad_link.status() != RNS::Type::Link::CLOSED;
+}
+
+bool UIManager::nomad_operation_active() const {
+    return _nomad_state.load(std::memory_order_acquire) != NomadState::IDLE;
+}
+
+#if defined(PYXIS_TEST_HOOKS) || defined(PYXIS_NOMAD_LINK_DIAGNOSTIC)
+bool UIManager::test_nomad_open(const std::string& address) {
+    return _nomad_actions.publish(NomadNet::UserActionKind::OPEN, address);
+}
+
+void UIManager::test_nomad_status() const {
+    const char* state = "IDLE";
+    switch (_nomad_state) {
+        case NomadState::PATH: state = "PATH"; break;
+        case NomadState::LINK: state = "LINK"; break;
+        case NomadState::REQUEST: state = "REQUEST"; break;
+        case NomadState::IDLE: break;
+    }
+    const bool path = _nomad_destination_hash && Transport::has_path(_nomad_destination_hash);
+    const bool identity = _nomad_destination_hash && Identity::recall(_nomad_destination_hash);
+    const int link = _nomad_link ? static_cast<int>(_nomad_link.status()) : -1;
+    const int request = _nomad_request ? static_cast<int>(_nomad_request.get_status()) : -1;
+    Serial.printf(
+        "T:OK state=%s path=%d identity=%d link=%d request=%d response=%u "
+        "free=%u largest=%u minimum=%u\n",
+        state, path ? 1 : 0, identity ? 1 : 0, link, request,
+        static_cast<unsigned>(_nomad_response.size()),
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)));
+}
+#endif
 
 void UIManager::nomad_release_request() {
     // request_timed_out() is the pinned dependency's only public pending-set
@@ -1918,22 +2027,46 @@ void UIManager::nomad_release_request() {
     }
 }
 
+void UIManager::nomad_finish_request_keep_link() {
+    // A RESPONSE event arrives only after the dependency marks the receipt
+    // READY and removes it from Link::pending_requests(). Seal callback delivery
+    // before dropping our concluded receipt, but retain the ACTIVE Link so a
+    // same-destination page can issue its next anonymous request directly.
+    _nomad_mailbox.seal();
+    _nomad_request = RequestReceipt(Type::NONE);
+    _nomad_state = NomadState::IDLE;
+    _nomad_deadline_ms = 0;
+    nomad_heap_checkpoint("request-finished");
+}
+
 void UIManager::nomad_stop_transport() {
+    // Link teardown can synchronously cancel an in-flight response Resource,
+    // update its shared RequestReceipt and invoke callbacks. Keep that mutation
+    // in the Reticulum serialization domain, and let teardown mark the receipt
+    // failed before the compatibility pending-set cleanup observes it.
+    RouterLock router_lock;
+    if (!router_lock.acquired()) return;
+    nomad_heap_checkpoint("stop-enter");
     _nomad_state = NomadState::IDLE;
     _nomad_deadline_ms = 0;
     _nomad_mailbox.seal();
-    nomad_release_request();
     if (_nomad_link && _nomad_link.status() != Type::Link::CLOSED) _nomad_link.teardown();
+    nomad_release_request();
+    nomad_heap_checkpoint("stop-request-released");
     _nomad_link = Link(Type::NONE);
+    nomad_heap_checkpoint("stop-link-released");
+    nomad_heap_checkpoint("stop-done");
 }
 
 bool UIManager::nomad_refresh_path_after_link_failure() {
     if (_nomad_request_policy.on_link_timeout() !=
         NomadNet::RequestPolicy::LinkTimeoutAction::REFRESH_PATH) return false;
+    nomad_heap_checkpoint("link-timeout-enter");
     _nomad_mailbox.seal();
     if (_nomad_link && _nomad_link.status() != Type::Link::CLOSED) _nomad_link.teardown();
+    nomad_release_request();
     _nomad_link = Link(Type::NONE);
-    _nomad_request = RequestReceipt(Type::NONE);
+    nomad_heap_checkpoint("link-timeout-released");
     Transport::expire_path(_nomad_destination_hash);
     if (!NomadNet::RequestPolicy::path_invalidation_succeeded(
             Transport::has_path(_nomad_destination_hash))) return false;
@@ -1946,6 +2079,7 @@ bool UIManager::nomad_refresh_path_after_link_failure() {
 }
 
 void UIManager::nomad_open(const std::string& address, bool add_history) {
+    nomad_heap_checkpoint("open-enter");
     NomadNet::Url parsed;
     std::string error;
     if (!NomadNet::Url::parse(address, parsed, error, _nomad_url.destination_hex)) {
@@ -1953,23 +2087,59 @@ void UIManager::nomad_open(const std::string& address, bool add_history) {
         _nomadnet_screen->set_status(error.c_str());
         return;
     }
+    nomad_heap_checkpoint("open-parsed");
 
-    _nomad_mailbox.clear();
-    nomad_release_request();
+    RouterLock router_lock;
+    if (!router_lock.acquired()) return;
+    nomad_heap_checkpoint("open-locked");
+    {
+        // Validation must precede destructive UI cleanup so a malformed manual
+        // address cannot discard the current page or directory. Keep cleanup
+        // before any retained-Link request or new transport construction.
+        LVGL_LOCK();
+        nomad_heap_checkpoint("action-before-navigation");
+        _nomadnet_screen->begin_navigation(parsed.str());
+        nomad_heap_checkpoint("action-after-navigation");
+    }
+    const bool same_destination = _nomad_state == NomadState::IDLE &&
+        _nomad_link && _nomad_link.status() == Type::Link::ACTIVE &&
+        !_nomad_url.destination_hex.empty() &&
+        parsed.destination_hex == _nomad_url.destination_hex;
+    if (same_destination) {
+        _nomad_response.clear();
+        _nomad_request_policy.reset();
+        _nomad_url = parsed;
+        _nomad_history.open(parsed.str(), add_history);
+        {
+            LVGL_LOCK();
+            _nomadnet_screen->set_address(parsed.str());
+            _nomadnet_screen->set_status("Requesting page...");
+        }
+        // Reopen only the bounded early-request callback window. The retained
+        // Link is already ACTIVE and remains owned by this owner task.
+        _nomad_mailbox.prepare();
+        nomad_send_request();
+        return;
+    }
+    _nomad_mailbox.seal();
     if (_nomad_link && _nomad_link.status() != Type::Link::CLOSED) _nomad_link.teardown();
+    nomad_release_request();
     _nomad_link = Link(Type::NONE);
     _nomad_request = RequestReceipt(Type::NONE);
     _nomad_response.clear();
+    nomad_heap_checkpoint("open-cleared");
     _nomad_request_policy.reset();
     _nomad_url = parsed;
     _nomad_history.open(parsed.str(), add_history);
     _nomad_destination_hash = Bytes();
     _nomad_destination_hash.assignHex(parsed.destination_hex.c_str());
+    nomad_heap_checkpoint("open-state-ready");
     {
         LVGL_LOCK();
         _nomadnet_screen->set_address(parsed.str());
         _nomadnet_screen->set_status("Discovering path...");
     }
+    nomad_heap_checkpoint("open-ui-ready");
     if (Transport::has_path(_nomad_destination_hash)) nomad_start_link();
     else {
         Transport::request_path(_nomad_destination_hash);
@@ -1988,6 +2158,7 @@ void UIManager::nomad_reload() {
 }
 
 void UIManager::nomad_start_link() {
+    nomad_heap_checkpoint("link-enter");
     Identity identity = Identity::recall(_nomad_destination_hash);
     if (!identity) {
         _nomad_state = NomadState::IDLE;
@@ -2004,7 +2175,9 @@ void UIManager::nomad_start_link() {
         return;
     }
     _nomad_mailbox.prepare();
+    nomad_heap_checkpoint("link-before-construct");
     _nomad_link = Link(destination, on_nomad_link_established, on_nomad_link_closed);
+    nomad_heap_checkpoint("link-after-construct");
     _nomad_mailbox.begin(token(_nomad_link.link_id()));
     _nomad_state = NomadState::LINK;
     _nomad_deadline_ms = millis() + NomadNet::RequestPolicy::LINK_WAIT_MS;
@@ -2014,17 +2187,16 @@ void UIManager::nomad_start_link() {
 
 void UIManager::nomad_send_request() {
     if (!_nomad_link || _nomad_link.status() != Type::Link::ACTIVE) return;
+    nomad_heap_checkpoint("request-enter");
+    _nomad_link.set_resource_started_callback(on_nomad_resource_started);
     const auto nil = NomadNet::no_form_request_data();
     _nomad_request = _nomad_link.request(
         Bytes(reinterpret_cast<const uint8_t*>(_nomad_url.path.data()), _nomad_url.path.size()),
         Bytes(nil.data(), nil.size()), on_nomad_response, on_nomad_failed,
         on_nomad_progress, 30.0, NomadNet::AsyncMailbox::MAX_WIRE_BYTES);
+    nomad_heap_checkpoint("request-created");
     if (!_nomad_request) {
-        _nomad_state = NomadState::IDLE;
-        _nomad_mailbox.seal();
-        if (_nomad_link) _nomad_link.teardown();
-        _nomad_link = Link(Type::NONE);
-        _nomad_request = RequestReceipt(Type::NONE);
+        nomad_stop_transport();
         LVGL_LOCK();
         _nomadnet_screen->set_status("Request could not be sent");
         return;
@@ -2037,18 +2209,15 @@ void UIManager::nomad_send_request() {
 }
 
 void UIManager::nomad_update() {
+    RouterLock router_lock;
+    if (!router_lock.acquired()) return;
     const uint32_t now = millis();
     if (_nomad_state == NomadState::PATH && Transport::has_path(_nomad_destination_hash)) {
         nomad_start_link();
     } else if (_nomad_state != NomadState::IDLE && _nomad_deadline_ms != 0 &&
                static_cast<int32_t>(now - _nomad_deadline_ms) >= 0) {
         if (_nomad_state == NomadState::LINK && nomad_refresh_path_after_link_failure()) return;
-        _nomad_state = NomadState::IDLE;
-        _nomad_mailbox.clear();
-        nomad_release_request();
-        if (_nomad_link) _nomad_link.teardown();
-        _nomad_link = Link(Type::NONE);
-        _nomad_request = RequestReceipt(Type::NONE);
+        nomad_stop_transport();
         LVGL_LOCK();
         _nomadnet_screen->set_status("NomadNet operation timed out");
         return;
@@ -2056,60 +2225,49 @@ void UIManager::nomad_update() {
 
     NomadNet::AsyncMailbox::Event event;
     if (!_nomad_mailbox.take(event)) return;
+    if (event.kind == NomadNet::AsyncMailbox::Kind::RESPONSE)
+        nomad_heap_checkpoint("response-taken");
     switch (event.kind) {
         case NomadNet::AsyncMailbox::Kind::LINK_ESTABLISHED:
             if (_nomad_state == NomadState::LINK) {
-                _nomad_link.identify(_router.identity());
                 nomad_send_request();
             }
             break;
         case NomadNet::AsyncMailbox::Kind::LINK_CLOSED:
             if (_nomad_state == NomadState::LINK && nomad_refresh_path_after_link_failure()) break;
-            _nomad_state = NomadState::IDLE;
-            _nomad_mailbox.clear();
-            nomad_release_request();
-            _nomad_link = Link(Type::NONE);
-            _nomad_request = RequestReceipt(Type::NONE);
+            nomad_stop_transport();
             { LVGL_LOCK(); _nomadnet_screen->set_status("NomadNet link closed"); }
             break;
         case NomadNet::AsyncMailbox::Kind::FAILED:
-            _nomad_state = NomadState::IDLE;
-            _nomad_mailbox.clear();
-            nomad_release_request();
-            if (_nomad_link) _nomad_link.teardown();
-            _nomad_link = Link(Type::NONE);
-            _nomad_request = RequestReceipt(Type::NONE);
+            nomad_stop_transport();
             { LVGL_LOCK(); _nomadnet_screen->set_status("Page request failed"); }
             break;
+        case NomadNet::AsyncMailbox::Kind::PROGRESS:
+            if (_nomad_state == NomadState::REQUEST) {
+                LVGL_LOCK();
+                _nomadnet_screen->set_status("Receiving page...");
+            }
+            break;
         case NomadNet::AsyncMailbox::Kind::OVERSIZED:
-            _nomad_state = NomadState::IDLE;
             _nomad_response.clear();
-            _nomad_mailbox.clear();
-            nomad_release_request();
-            if (_nomad_link) _nomad_link.teardown();
-            _nomad_link = Link(Type::NONE);
-            _nomad_request = RequestReceipt(Type::NONE);
+            nomad_stop_transport();
             { LVGL_LOCK(); _nomadnet_screen->set_status("Page exceeds 64 KiB limit"); }
             break;
         case NomadNet::AsyncMailbox::Kind::RESPONSE: {
-            _nomad_state = NomadState::IDLE;
-            // The callback payload has been moved into this local event. Each
-            // browser request uses a fresh Link, so release session state now;
-            // this also covers malformed responses. Clear callback tokens
-            // first so teardown cannot replace the terminal page status.
-            _nomad_mailbox.clear();
-            nomad_release_request();
-            if (_nomad_link) _nomad_link.teardown();
-            _nomad_link = Link(Type::NONE);
-            _nomad_request = RequestReceipt(Type::NONE);
+            // The dependency has already removed this successful request from
+            // Link::pending_requests(). Validate it before deciding whether the
+            // Link is safe to retain for same-destination navigation.
             if (!NomadNet::normalize_response(event.data.data(), event.data.size(), _nomad_response)) {
+                nomad_stop_transport();
                 LVGL_LOCK();
                 _nomadnet_screen->set_status("Malformed NomadNet response");
                 break;
             }
+            nomad_heap_checkpoint("response-normalized");
             const auto& bytes = _nomad_response.bytes();
             const NomadNet::Document document = _nomad_parser.parse(
                 reinterpret_cast<const char*>(bytes.data()), bytes.size());
+            nomad_heap_checkpoint("response-parsed");
             if (!(document.malformed && document.blocks.empty())) {
                 std::vector<std::string> heading_runs;
                 for (const auto& block : document.blocks) {
@@ -2123,12 +2281,34 @@ void UIManager::nomad_update() {
                     _nomad_library_dirty = true;
             }
             const bool page_saved = _nomad_library.page_saved(_nomad_url.str());
-            LVGL_LOCK();
-            if (document.malformed && document.blocks.empty())
+            if (document.malformed && document.blocks.empty()) {
+                nomad_stop_transport();
+                LVGL_LOCK();
                 _nomadnet_screen->set_status("Page is not valid UTF-8/Micron");
-            else {
+                break;
+            }
+            bool page_applied = false;
+            {
+                LVGL_LOCK();
                 _nomadnet_screen->set_library(_nomad_library);
-                _nomadnet_screen->set_page(document);
+                page_applied = _nomadnet_screen->set_page(document);
+            }
+            nomad_heap_checkpoint("response-page-applied");
+            if (!page_applied) {
+                nomad_stop_transport();
+                break;
+            }
+            // A close callback can race a terminal response and is deliberately
+            // suppressed so the valid page wins. Recheck the live Link after
+            // applying the page; retain only ACTIVE ownership, otherwise perform
+            // ordered full teardown instead of leaving a CLOSED Link attached.
+            if (_nomad_link && _nomad_link.status() == Type::Link::ACTIVE) {
+                nomad_finish_request_keep_link();
+            } else {
+                nomad_stop_transport();
+            }
+            {
+                LVGL_LOCK();
                 _nomadnet_screen->set_page_saved(page_saved);
                 _nomadnet_screen->set_status(document.truncated ? "Page loaded (truncated)" : "Page loaded");
             }
@@ -2150,10 +2330,6 @@ void UIManager::on_nomad_link_closed(Link& link) {
 void UIManager::on_nomad_response(const RequestReceipt& receipt) {
     if (!s_nomad_instance) return;
     const std::size_t transfer = receipt.response_transfer_size();
-    if (transfer > NomadNet::AsyncMailbox::MAX_WIRE_BYTES) {
-        s_nomad_instance->_nomad_mailbox.publish_progress(token(receipt.request_id()), transfer);
-        return;
-    }
     const Bytes response = receipt.get_response();
     s_nomad_instance->_nomad_mailbox.publish_response(
         token(receipt.request_id()), response ? response.data() : nullptr,
@@ -2163,8 +2339,8 @@ void UIManager::on_nomad_response(const RequestReceipt& receipt) {
 void UIManager::on_nomad_failed(const RequestReceipt& receipt) {
     if (!s_nomad_instance) return;
     if (receipt.response_size() > NomadNet::AsyncMailbox::MAX_WIRE_BYTES) {
-        s_nomad_instance->_nomad_mailbox.publish_progress(
-            token(receipt.request_id()), NomadNet::AsyncMailbox::MAX_WIRE_BYTES + 1);
+        s_nomad_instance->_nomad_mailbox.publish_oversized(
+            token(receipt.request_id()), receipt.response_size());
         return;
     }
     s_nomad_instance->_nomad_mailbox.publish_failed(token(receipt.request_id()));
@@ -2172,15 +2348,23 @@ void UIManager::on_nomad_failed(const RequestReceipt& receipt) {
 
 void UIManager::on_nomad_progress(const RequestReceipt& receipt) {
     if (!s_nomad_instance) return;
-    // Retain an aggregate transfer guard for split responses in addition to
-    // microReticulum's pre-allocation advertised decompressed-size limit.
     const std::size_t transfer = receipt.response_transfer_size();
     s_nomad_instance->_nomad_mailbox.publish_progress(token(receipt.request_id()), transfer);
-    if (transfer > NomadNet::AsyncMailbox::MAX_WIRE_BYTES) {
-        // Marking the receipt failed makes the pinned Resource progress path
-        // cancel on its next callback and erases it from the Link pending set.
-        const_cast<RequestReceipt&>(receipt).request_timed_out(PacketReceipt(Type::NONE));
-    }
+}
+
+void UIManager::on_nomad_resource_started(const Resource& resource) {
+    if (!s_nomad_instance || !resource.is_response() || !s_nomad_instance->_nomad_request) return;
+    const Bytes request_id = resource.request_id();
+    if (!request_id || token(request_id) != token(s_nomad_instance->_nomad_request.request_id())) return;
+    const_cast<Resource&>(resource).set_progress_callback(on_nomad_resource_progress);
+}
+
+void UIManager::on_nomad_resource_progress(const Resource& resource) {
+    if (!s_nomad_instance || !resource.is_response()) return;
+    const std::size_t transferred = static_cast<std::size_t>(
+        resource.get_progress() * static_cast<float>(resource.get_transfer_size()));
+    s_nomad_instance->_nomad_mailbox.publish_progress(
+        token(resource.request_id()), transferred);
 }
 
 // ── LXST Voice Call Implementation ──

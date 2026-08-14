@@ -10,6 +10,10 @@
 // ESP32 lwIP socket headers
 #include <lwip/sockets.h>
 #include <lwip/netdb.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <cstring>
+#include <esp_heap_caps.h>
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -28,6 +32,89 @@ using namespace RNS;
 static constexpr size_t MAX_TCP_BYTES_PER_LOOP = 4096;
 static constexpr size_t MAX_TCP_FRAMES_PER_LOOP = 32;
 static constexpr size_t MAX_TCP_FRAME_BUFFER = 16384;
+
+#ifdef PYXIS_TCP_LIVENESS_DIAGNOSTIC
+static const char* tcp_diag_state(uint8_t state) {
+    switch (state) {
+        case 0: return "DISCONNECTED";
+        case 1: return "CONNECTING";
+        case 2: return "CONNECTED";
+        default: return "UNKNOWN";
+    }
+}
+
+static void tcp_diag_socket_option(int fd, int level, int option, const char* name,
+                                   int configured, int set_result) {
+    int actual = -1;
+    socklen_t actual_size = sizeof(actual);
+    errno = 0;
+    int get_result = getsockopt(fd, level, option, &actual, &actual_size);
+    int get_errno = errno;
+    Serial.printf("T:TCP_SOCKET fd=%d option=%s wanted=%d set_rc=%d get_rc=%d actual=%d errno=%d\n",
+                  fd, name, configured, set_result, get_result, actual, get_errno);
+}
+
+#define TCP_DIAG_WORKER() do { \
+    static uint32_t last_log = 0; \
+    uint32_t now = millis(); \
+    if (now - last_log >= 5000) { \
+        last_log = now; \
+        Serial.printf("T:TCP_WORKER now=%lu state=%s running=%d done=%d since_attempt=%lu " \
+                      "free=%u largest=%u minimum=%u stack=%u\n", \
+                      static_cast<unsigned long>(now), tcp_diag_state(_conn_state.load()), \
+                      _task_running.load(), _task_done.load(), \
+                      static_cast<unsigned long>(now - _last_connect_attempt.load()), \
+                      static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)), \
+                      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)), \
+                      static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)), \
+                      static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr))); \
+    } \
+} while (0)
+
+#define TCP_DIAG_MAIN() do { \
+    static uint32_t last_log = 0; \
+    uint32_t now = millis(); \
+    if (now - last_log >= 5000) { \
+        last_log = now; \
+        Serial.printf("T:TCP_MAIN now=%lu state=%s online=%d fd=%d connected=%d avail=%d " \
+                      "running=%d done=%d wifi=%d free=%u largest=%u minimum=%u\n", \
+                      static_cast<unsigned long>(now), tcp_diag_state(_conn_state.load()), \
+                      static_cast<int>(_online), _client.fd(), static_cast<int>(_client.connected()), \
+                      _client.available(), _task_running.load(), _task_done.load(), \
+                      static_cast<int>(WiFi.status()), \
+                      static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)), \
+                      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)), \
+                      static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL))); \
+    } \
+} while (0)
+#else
+#define TCP_DIAG_WORKER() do { } while (0)
+#define TCP_DIAG_MAIN() do { } while (0)
+#endif
+
+#if defined(ARDUINO) && defined(PYXIS_NOMAD_LINK_DIAGNOSTIC)
+static const char* nomad_link_packet_kind(const RNS::Bytes& packet) {
+    if (packet.size() < Type::Reticulum::HEADER_MINSIZE) return nullptr;
+    if ((packet.data()[0] & 0x03) == Type::Packet::LINKREQUEST) return "LINKREQUEST";
+    const bool header_2 = (packet.data()[0] & 0x40) != 0;
+    const size_t context_offset = header_2 ? 34 : 18;
+    if (packet.size() > context_offset && packet.data()[context_offset] == Type::Packet::LRPROOF) {
+        return "LRPROOF";
+    }
+    return nullptr;
+}
+
+static void nomad_trace_packet(const char* direction, const RNS::Bytes& packet,
+                               size_t framed_size, size_t io_size) {
+    const char* kind = nomad_link_packet_kind(packet);
+    if (!kind) return;
+    Serial.printf("T:WIRE %s kind=%s raw=%u framed=%u io=%u hex=",
+                  direction, kind, static_cast<unsigned>(packet.size()),
+                  static_cast<unsigned>(framed_size), static_cast<unsigned>(io_size));
+    for (size_t i = 0; i < packet.size(); ++i) Serial.printf("%02x", packet.data()[i]);
+    Serial.println();
+}
+#endif
 
 static bool contains_complete_hdlc_frame(const RNS::Bytes& buffer) {
     bool saw_start = false;
@@ -71,6 +158,10 @@ TCPClientInterface::TCPClientInterface(const char* name /*= "TCPClientInterface"
     // RECONNECT_WAIT_MS. Unsigned wraparound keeps this correct when
     // millis() < RECONNECT_WAIT_MS.
     _last_connect_attempt = millis() - RECONNECT_WAIT_MS;
+    // stop() leaves the prior worker's completion latched. Runtime settings
+    // reuse this object, so re-arm the latch before publishing/running the next
+    // worker; otherwise a later stop can skip joining the replacement task.
+    _task_done = false;
     _task_running = true;
     BaseType_t r = xTaskCreatePinnedToCore(tcp_task, "tcp", 6144, this, 1, &_task_handle, 0);
     if (r != pdPASS) {
@@ -96,18 +187,101 @@ bool TCPClientInterface::connect() {
     TRACE("TCPClientInterface: Connecting to " + _target_host + ":" + std::to_string(_target_port));
 
 #ifdef ARDUINO
-    _client.setTimeout(CONNECT_TIMEOUT_MS);
-
-    // 3-arg connect bounds the blocking time (the 2-arg form ignores it and can
-    // block ~18.5s on an unreachable host). Runs on tcp_task, off the main loop.
-    if (!_client.connect(_target_host.c_str(), _target_port, CONNECT_TIMEOUT_MS)) {
-        DEBUG("TCPClientInterface: Connection failed");
+#ifdef PYXIS_TCP_LIVENESS_DIAGNOSTIC
+    Serial.printf("T:TCP_ATTEMPT phase=start now=%lu state=%s running=%d done=%d wifi=%d "
+                  "free=%u largest=%u minimum=%u stack=%u\n",
+                  static_cast<unsigned long>(millis()),
+                  tcp_diag_state(_conn_state.load()), _task_running.load(), _task_done.load(),
+                  static_cast<int>(WiFi.status()),
+                  static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+                  static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
+                  static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+#endif
+    IPAddress target;
+    if (!WiFi.hostByName(_target_host.c_str(), target)) {
+        record_connect_failure(TcpConnectStage::DNS, 0, false);
         return false;
     }
 
-    // Configure socket options
-    configure_socket();
+    errno = 0;
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        record_connect_failure(TcpConnectStage::SOCKET, errno, true);
+        return false;
+    }
+    auto fail_socket = [&](TcpConnectStage stage, int error, bool local) {
+        close(sockfd);
+        record_connect_failure(stage, error, local);
+        return false;
+    };
 
+    int flags = fcntl(sockfd, F_GETFL, 0);
+    if (flags < 0 || fcntl(sockfd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        return fail_socket(TcpConnectStage::SOCKET_OPTIONS, errno, true);
+    }
+
+    sockaddr_in server{};
+    server.sin_family = AF_INET;
+    uint32_t address = target;
+    std::memcpy(&server.sin_addr.s_addr, &address, sizeof(address));
+    server.sin_port = htons(_target_port);
+
+    errno = 0;
+    int result = ::connect(sockfd, reinterpret_cast<sockaddr*>(&server), sizeof(server));
+    if (result < 0 && errno != EINPROGRESS) {
+        int error = errno;
+        return fail_socket(TcpConnectStage::CONNECT, error, local_lwip_failure(error));
+    }
+
+    fd_set write_fds;
+    FD_ZERO(&write_fds);
+    FD_SET(sockfd, &write_fds);
+    timeval timeout{static_cast<long>(CONNECT_TIMEOUT_MS / 1000),
+                    static_cast<long>((CONNECT_TIMEOUT_MS % 1000) * 1000)};
+    errno = 0;
+    result = select(sockfd + 1, nullptr, &write_fds, nullptr, &timeout);
+    if (result == 0) return fail_socket(TcpConnectStage::SELECT_TIMEOUT, ETIMEDOUT, false);
+    if (result < 0) {
+        int error = errno;
+        return fail_socket(TcpConnectStage::SELECT_ERROR, error, local_lwip_failure(error));
+    }
+
+    int socket_error = 0;
+    socklen_t socket_error_size = sizeof(socket_error);
+    errno = 0;
+    if (getsockopt(sockfd, SOL_SOCKET, SO_ERROR, &socket_error, &socket_error_size) < 0) {
+        int error = errno;
+        return fail_socket(TcpConnectStage::SO_ERROR_READ, error, local_lwip_failure(error));
+    }
+    if (socket_error != 0) {
+        return fail_socket(TcpConnectStage::SOCKET_ERROR, socket_error,
+                           local_lwip_failure(socket_error));
+    }
+
+    timeval io_timeout{static_cast<long>(CONNECT_TIMEOUT_MS / 1000),
+                       static_cast<long>((CONNECT_TIMEOUT_MS % 1000) * 1000)};
+    if (setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &io_timeout, sizeof(io_timeout)) < 0 ||
+        setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &io_timeout, sizeof(io_timeout)) < 0 ||
+        fcntl(sockfd, F_SETFL, flags & ~O_NONBLOCK) < 0) {
+        return fail_socket(TcpConnectStage::SOCKET_OPTIONS, errno, true);
+    }
+
+    _client = WiFiClient(sockfd);
+    _client.setTimeout(CONNECT_TIMEOUT_MS);
+    if (!configure_socket()) {
+        int error = errno;
+        _client.stop();
+        record_connect_failure(TcpConnectStage::SOCKET_OPTIONS, error, true);
+        return false;
+    }
+    _consecutive_local_failures = 0;
+
+#ifdef PYXIS_TCP_LIVENESS_DIAGNOSTIC
+    Serial.printf("T:TCP_ATTEMPT phase=connected now=%lu fd=%d connected=%d\n",
+                  static_cast<unsigned long>(millis()), _client.fd(),
+                  static_cast<int>(_client.connected()));
+#endif
     INFO("TCPClientInterface: Connected to " + _target_host + ":" + std::to_string(_target_port));
     // task_loop() publishes the link state (_conn_state / _online / _reconnected)
     // after this returns; nothing else is touched here.
@@ -192,37 +366,64 @@ bool TCPClientInterface::connect() {
 #endif
 }
 
-void TCPClientInterface::configure_socket() {
+bool TCPClientInterface::configure_socket() {
 #ifdef ARDUINO
     // Get underlying socket fd for setsockopt
     int fd = _client.fd();
     if (fd < 0) {
         DEBUG("TCPClientInterface: Could not get socket fd for configuration");
-        return;
+        errno = EBADF;
+        return false;
     }
 
     // TCP_NODELAY - disable Nagle's algorithm
     int flag = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+    int first_error = 0;
+    int nodelay_result = setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+    if (nodelay_result < 0) first_error = errno;
 
     // Enable TCP keepalive
-    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
+    int keepalive_result = setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &flag, sizeof(flag));
+    if (keepalive_result < 0 && first_error == 0) first_error = errno;
+    bool configured = nodelay_result == 0 && keepalive_result == 0;
+
+#ifdef PYXIS_TCP_LIVENESS_DIAGNOSTIC
+    tcp_diag_socket_option(fd, IPPROTO_TCP, TCP_NODELAY, "TCP_NODELAY", flag, nodelay_result);
+    tcp_diag_socket_option(fd, SOL_SOCKET, SO_KEEPALIVE, "SO_KEEPALIVE", flag, keepalive_result);
+#endif
 
     // Keepalive parameters (may not all be available on ESP32 lwIP)
 #ifdef TCP_KEEPIDLE
     int keepidle = TCP_KEEPIDLE_SEC;
-    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
+    int keepidle_result = setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
+    if (keepidle_result < 0 && first_error == 0) first_error = errno;
+    configured = configured && keepidle_result == 0;
+#ifdef PYXIS_TCP_LIVENESS_DIAGNOSTIC
+    tcp_diag_socket_option(fd, IPPROTO_TCP, TCP_KEEPIDLE, "TCP_KEEPIDLE", keepidle, keepidle_result);
+#endif
 #endif
 #ifdef TCP_KEEPINTVL
     int keepintvl = TCP_KEEPINTVL_SEC;
-    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
+    int keepintvl_result = setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
+    if (keepintvl_result < 0 && first_error == 0) first_error = errno;
+    configured = configured && keepintvl_result == 0;
+#ifdef PYXIS_TCP_LIVENESS_DIAGNOSTIC
+    tcp_diag_socket_option(fd, IPPROTO_TCP, TCP_KEEPINTVL, "TCP_KEEPINTVL", keepintvl, keepintvl_result);
+#endif
 #endif
 #ifdef TCP_KEEPCNT
     int keepcnt = TCP_KEEPCNT_PROBES;
-    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
+    int keepcnt_result = setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
+    if (keepcnt_result < 0 && first_error == 0) first_error = errno;
+    configured = configured && keepcnt_result == 0;
+#ifdef PYXIS_TCP_LIVENESS_DIAGNOSTIC
+    tcp_diag_socket_option(fd, IPPROTO_TCP, TCP_KEEPCNT, "TCP_KEEPCNT", keepcnt, keepcnt_result);
+#endif
 #endif
 
     TRACE("TCPClientInterface: Socket configured with TCP_NODELAY and keepalive");
+    if (!configured) errno = first_error;
+    return configured;
 
 #else
     // TCP_NODELAY
@@ -247,6 +448,7 @@ void TCPClientInterface::configure_socket() {
 #endif
 
     TRACE("TCPClientInterface: Socket configured with TCP_NODELAY, keepalive, and timeouts");
+    return true;
 #endif
 }
 
@@ -270,6 +472,16 @@ void TCPClientInterface::handle_disconnect() {
 #ifdef ARDUINO
     // Called on the main loop while CONNECTED. Close the socket and hand it back
     // to tcp_task (DISCONNECTED) for a fresh connect.
+#ifdef PYXIS_TCP_LIVENESS_DIAGNOSTIC
+    Serial.printf("T:TCP_DROP now=%lu state=%s fd=%d connected=%d avail=%d running=%d done=%d wifi=%d "
+                  "free=%u largest=%u minimum=%u\n",
+                  static_cast<unsigned long>(millis()), tcp_diag_state(_conn_state.load()),
+                  _client.fd(), static_cast<int>(_client.connected()), _client.available(),
+                  _task_running.load(), _task_done.load(), static_cast<int>(WiFi.status()),
+                  static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+                  static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)));
+#endif
     INFO("TCPClientInterface: Connection lost, will attempt reconnection");
     disconnect();                     // _client.stop(), _online=false, clear buffer
     _last_connect_attempt = millis();
@@ -279,7 +491,7 @@ void TCPClientInterface::handle_disconnect() {
         INFO("TCPClientInterface: Connection lost, will attempt reconnection");
         disconnect();
         // Reset connect attempt timer to enforce wait before reconnection
-        _last_connect_attempt = millis();
+        _last_connect_attempt = static_cast<uint32_t>(Utilities::OS::time() * 1000);
     }
 #endif
 }
@@ -292,33 +504,107 @@ void TCPClientInterface::handle_disconnect() {
     vTaskDelete(nullptr);
 }
 
+/*static*/ const char* TCPClientInterface::connect_stage_name(TcpConnectStage stage) {
+    switch (stage) {
+        case TcpConnectStage::DNS: return "DNS";
+        case TcpConnectStage::SOCKET: return "SOCKET";
+        case TcpConnectStage::CONNECT: return "CONNECT";
+        case TcpConnectStage::SELECT_TIMEOUT: return "SELECT_TIMEOUT";
+        case TcpConnectStage::SELECT_ERROR: return "SELECT_ERROR";
+        case TcpConnectStage::SO_ERROR_READ: return "SO_ERROR_READ";
+        case TcpConnectStage::SOCKET_ERROR: return "SO_ERROR";
+        case TcpConnectStage::SOCKET_OPTIONS: return "SOCKET_OPTIONS";
+        case TcpConnectStage::NONE: return "NONE";
+    }
+    return "UNKNOWN";
+}
+
+/*static*/ bool TCPClientInterface::local_lwip_failure(int error) {
+    switch (error) {
+        case ENOMEM:
+        case ENOBUFS:
+        case EMFILE:
+        case ENFILE:
+        case EADDRNOTAVAIL:
+        case ENETDOWN:
+        case ENETUNREACH:
+            return true;
+        default:
+            return false;
+    }
+}
+
+void TCPClientInterface::record_connect_failure(TcpConnectStage stage, int error,
+                                                bool local_setup_failure) {
+    if (local_setup_failure) {
+        if (_consecutive_local_failures < UINT8_MAX) ++_consecutive_local_failures;
+    } else {
+        _consecutive_local_failures = 0;
+    }
+#ifdef PYXIS_TCP_LIVENESS_DIAGNOSTIC
+    Serial.printf("T:TCP_FAILURE stage=%s error=%d local=%d count=%u wifi=%d free=%u largest=%u\n",
+                  connect_stage_name(stage), error, static_cast<int>(local_setup_failure),
+                  static_cast<unsigned>(_consecutive_local_failures), static_cast<int>(WiFi.status()),
+                  static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                  static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
+#endif
+    WARNING("TCPClientInterface: connect failed at " + std::string(connect_stage_name(stage)) +
+            ", error " + std::to_string(error));
+}
+
+void TCPClientInterface::maybe_reassociate_wifi() {
+    if (_consecutive_local_failures < LOCAL_FAILURES_BEFORE_REASSOCIATE) return;
+    if (WiFi.status() != WL_CONNECTED) return;
+    if (_operation_active && _operation_active()) return;
+    const uint32_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    const uint32_t largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    if (free_internal < REASSOCIATE_MIN_INTERNAL_FREE ||
+        largest_internal < REASSOCIATE_MIN_LARGEST_BLOCK) return;
+    const uint32_t now = millis();
+    if (_last_reassociate_ms != 0 && now - _last_reassociate_ms < REASSOCIATE_COOLDOWN_MS) return;
+
+    _last_reassociate_ms = now;
+    _consecutive_local_failures = 0;
+    WARNING("TCPClientInterface: repeated local setup failures; requesting bounded WiFi reassociation");
+#ifdef PYXIS_TCP_LIVENESS_DIAGNOSTIC
+    Serial.printf("T:TCP_REASSOCIATE now=%lu free=%u largest=%u\n",
+                  static_cast<unsigned long>(now), static_cast<unsigned>(free_internal),
+                  static_cast<unsigned>(largest_internal));
+#endif
+    WiFi.reconnect();
+}
+
 // Owns _client ONLY while connecting. When the link is down it runs the blocking
 // connect() here (off the main loop); on success it publishes CONNECTED and the
 // main loop takes over all socket I/O. It never touches _client while CONNECTED.
 void TCPClientInterface::task_loop() {
     while (_task_running) {
+        TCP_DIAG_WORKER();
         if (_conn_state.load() == DISCONNECTED) {
             uint32_t now = millis();
             if (now - _last_connect_attempt >= RECONNECT_WAIT_MS) {
                 _last_connect_attempt = now;
-                if (ESP.getMaxAllocHeap() >= 20000) {  // skip under heap pressure
-                    _conn_state.store(CONNECTING);      // claim _client
-                    if (connect()) {
-                        _frame_buffer.clear();
-                        _last_data_received = millis();
-                        // _online is owned by the main loop (it sets it on
-                        // observing CONNECTED); writing it here would race with
-                        // loop()'s `_online = false` during the CONNECTING window.
-                        // Publish CONNECTED BEFORE _reconnected: seq-cst then
-                        // guarantees that whenever the main loop observes
-                        // _reconnected==true the interface is already CONNECTED,
-                        // so check_reconnected() can't fire the announce on an
-                        // offline interface (which would drop it).
-                        _conn_state.store(CONNECTED);   // hand _client to main loop
-                        _reconnected.store(true);       // main loop announces
-                    } else {
-                        _conn_state.store(DISCONNECTED);
-                    }
+                // connect() is bounded and runs off loopTask. Do not gate it on
+                // a fixed largest-free-block threshold: the complete UI remains
+                // healthy below 20 KiB, and such a gate can suppress every TCP
+                // attempt forever while persisted paths still target tcp0.
+                _conn_state.store(CONNECTING);      // claim _client
+                if (connect()) {
+                    _frame_buffer.clear();
+                    _last_data_received = millis();
+                    // _online is owned by the main loop (it sets it on
+                    // observing CONNECTED); writing it here would race with
+                    // loop()'s `_online = false` during the CONNECTING window.
+                    // Publish CONNECTED BEFORE _reconnected: seq-cst then
+                    // guarantees that whenever the main loop observes
+                    // _reconnected==true the interface is already CONNECTED,
+                    // so check_reconnected() can't fire the announce on an
+                    // offline interface (which would drop it).
+                    _conn_state.store(CONNECTED);   // hand _client to main loop
+                    _reconnected.store(true);       // main loop announces
+                } else {
+                    maybe_reassociate_wifi();
+                    _conn_state.store(DISCONNECTED);
                 }
             }
         }
@@ -376,6 +662,7 @@ void TCPClientInterface::task_loop() {
     // socket once CONNECTED. read/write/frame all happen here (same low-latency
     // path as before the task split). The legacy body below is unreachable on
     // ARDUINO.
+    TCP_DIAG_MAIN();
     if (_conn_state.load() != CONNECTED) {
         _online = false;
         return;
@@ -402,6 +689,10 @@ void TCPClientInterface::task_loop() {
     extract_and_process_frames();
     return;
 #endif
+    // This legacy diagnostic/reconnect body is unreachable on Arduino because
+    // the Arduino path returns above, but retain it there byte-for-byte so host
+    // portability does not alter the embedded image.
+#ifdef ARDUINO
     // Periodic status logging
     static uint32_t last_status_log = 0;
     static uint32_t loop_count = 0;
@@ -421,7 +712,7 @@ void TCPClientInterface::task_loop() {
         }
         loop_count = 0;
     }
-
+#endif
     // Handle reconnection if not connected
     if (!_online) {
         if (_initiator) {
@@ -432,6 +723,7 @@ void TCPClientInterface::task_loop() {
 #endif
             if (now - _last_connect_attempt >= RECONNECT_WAIT_MS) {
                 _last_connect_attempt = now;
+#ifdef ARDUINO
                 // Skip reconnection if memory is too low - prevents fragmentation
                 uint32_t max_block = ESP.getMaxAllocHeap();
                 if (max_block < 20000) {
@@ -440,6 +732,10 @@ void TCPClientInterface::task_loop() {
                     DEBUG("TCPClientInterface: Attempting reconnection...");
                     connect();
                 }
+#else
+                DEBUG("TCPClientInterface: Attempting reconnection...");
+                connect();
+#endif
             }
         }
         return;
@@ -497,14 +793,22 @@ void TCPClientInterface::extract_and_process_frames() {
 
         if (start < 0) {
             // No FLAG found, discard buffer (garbage data before any frame)
+#ifdef ARDUINO
             Serial.printf("[HDLC] No FLAG in %d bytes, clearing\n", (int)_frame_buffer.size());
+#else
+            DEBUG("TCPClientInterface: No HDLC flag in buffered data; clearing");
+#endif
             _frame_buffer.clear();
             break;
         }
 
         // Discard data before first FLAG
         if (start > 0) {
+#ifdef ARDUINO
             Serial.printf("[HDLC] Discarding %d bytes before FLAG\n", start);
+#else
+            DEBUG("TCPClientInterface: Discarding bytes before HDLC flag");
+#endif
             _frame_buffer = _frame_buffer.mid(start);
         }
 
@@ -526,7 +830,11 @@ void TCPClientInterface::extract_and_process_frames() {
         Bytes frame_content = _frame_buffer.mid(1, end - 1);
         frame_count++;
         if (RNS::loglevel() >= RNS::LOG_DEBUG) {
+#ifdef ARDUINO
             Serial.printf("[HDLC] Frame #%u: %d escaped bytes\n", frame_count, (int)frame_content.size());
+#else
+            DEBUG("TCPClientInterface: Received escaped HDLC frame");
+#endif
         }
 
         // Remove processed frame from buffer (keep data after end FLAG)
@@ -534,14 +842,20 @@ void TCPClientInterface::extract_and_process_frames() {
 
         // Skip empty frames (consecutive FLAGs)
         if (frame_content.size() == 0) {
+#ifdef ARDUINO
             if (RNS::loglevel() >= RNS::LOG_DEBUG) Serial.printf("[HDLC] Empty frame, skipping\n");
+#else
+            DEBUG("TCPClientInterface: Empty HDLC frame, skipping");
+#endif
             continue;
         }
 
         // Unescape frame
         Bytes unescaped = HDLC::unescape(frame_content);
         if (unescaped.size() == 0) {
+#ifdef ARDUINO
             if (RNS::loglevel() >= RNS::LOG_DEBUG) Serial.printf("[HDLC] Unescape failed!\n");
+#endif
             DEBUG("TCPClientInterface: HDLC unescape error, discarding frame");
             continue;
         }
@@ -552,9 +866,17 @@ void TCPClientInterface::extract_and_process_frames() {
             continue;
         }
 
+#if defined(ARDUINO) && defined(PYXIS_NOMAD_LINK_DIAGNOSTIC)
+        nomad_trace_packet("RX", unescaped, static_cast<size_t>(end + 1), frame_content.size());
+#endif
+
         // Pass to transport layer
         if (RNS::loglevel() >= RNS::LOG_DEBUG) {
+#ifdef ARDUINO
             Serial.printf("[TCP] Processing frame: %d bytes\n", (int)unescaped.size());
+#else
+            DEBUG("TCPClientInterface: Processing unescaped HDLC frame");
+#endif
         }
         DEBUG(toString() + ": Received frame, " + std::to_string(unescaped.size()) + " bytes");
         InterfaceImpl::handle_incoming(unescaped);
@@ -607,6 +929,9 @@ void TCPClientInterface::extract_and_process_frames() {
             return false;  // not connected; Reticulum will retry/route
         }
         size_t written = _client.write(framed.data(), framed.size());
+#ifdef PYXIS_NOMAD_LINK_DIAGNOSTIC
+        nomad_trace_packet("TX", data, framed.size(), written);
+#endif
         if (written != framed.size()) {
             ERROR("TCPClientInterface: Write incomplete, " + std::to_string(written) +
                   " of " + std::to_string(framed.size()) + " bytes");

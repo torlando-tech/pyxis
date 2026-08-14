@@ -10,6 +10,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <atomic>
+#include <functional>
 #else
 #include <netinet/in.h>
 #endif
@@ -49,6 +50,10 @@ public:
     // but still bound the timeout and back off so a dead host doesn't busy-retry.
     static const uint32_t RECONNECT_WAIT_MS = 15000; // 15s between reconnect attempts
     static const uint32_t CONNECT_TIMEOUT_MS = 3000;  // 3s connect timeout (task-side)
+    static const uint8_t LOCAL_FAILURES_BEFORE_REASSOCIATE = 3;
+    static const uint32_t REASSOCIATE_COOLDOWN_MS = 120000;
+    static const uint32_t REASSOCIATE_MIN_INTERNAL_FREE = 24 * 1024;
+    static const uint32_t REASSOCIATE_MIN_LARGEST_BLOCK = 12 * 1024;
 
     // TCP keepalive parameters (match Python RNS)
     static const int TCP_KEEPIDLE_SEC = 5;
@@ -62,6 +67,11 @@ public:
     // Configuration (call before start())
     void set_target_host(const std::string& host) { _target_host = host; }
     void set_target_port(int port) { _target_port = port; }
+#ifdef ARDUINO
+    void set_operation_active_callback(std::function<bool()> callback) {
+        _operation_active = std::move(callback);
+    }
+#endif
 
     // InterfaceImpl overrides
     virtual bool start();
@@ -79,7 +89,7 @@ private:
     // Connection management
     bool connect();
     void disconnect();
-    void configure_socket();
+    bool configure_socket();
     void handle_disconnect();
 
 #ifdef ARDUINO
@@ -90,12 +100,23 @@ private:
     //   DISCONNECTED -> CONNECTING (task owns _client) -> CONNECTED (main loop
     //   owns _client); main loop flips CONNECTED -> DISCONNECTED on a drop.
     enum ConnState : uint8_t { DISCONNECTED = 0, CONNECTING = 1, CONNECTED = 2 };
+    enum class TcpConnectStage : uint8_t {
+        NONE, DNS, SOCKET, CONNECT, SELECT_TIMEOUT, SELECT_ERROR,
+        SO_ERROR_READ, SOCKET_ERROR, SOCKET_OPTIONS
+    };
     static void tcp_task(void* arg);
     void task_loop();
+    void record_connect_failure(TcpConnectStage stage, int error, bool local_setup_failure);
+    void maybe_reassociate_wifi();
+    static const char* connect_stage_name(TcpConnectStage stage);
+    static bool local_lwip_failure(int error);
     TaskHandle_t _task_handle = nullptr;
     std::atomic<bool> _task_running{false};
     std::atomic<bool> _task_done{false};   // task sets this right before exit; stop() joins on it
     std::atomic<uint8_t> _conn_state{DISCONNECTED};
+    std::function<bool()> _operation_active;
+    uint8_t _consecutive_local_failures = 0;
+    uint32_t _last_reassociate_ms = 0;
 #endif
 
     // HDLC frame processing

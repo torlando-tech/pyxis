@@ -1,11 +1,14 @@
 #pragma once
 
 #include <string>
+#include <cstddef>
 
 #ifdef ARDUINO
 #include <lvgl.h>
 LV_FONT_DECLARE(nomadnet_font_12)
+LV_FONT_DECLARE(nomadnet_font_12_italic)
 LV_FONT_DECLARE(nomadnet_font_16)
+LV_FONT_DECLARE(nomadnet_font_16_italic)
 #endif
 
 namespace UI::LXMF::NomadNet {
@@ -16,5 +19,7 @@ namespace UI::LXMF::NomadNet {
 // live NomadNet pages. Other valid Unicode is replaced at the display boundary
 // so LVGL never draws its missing-glyph rectangle.
 std::string display_text(const std::string& utf8);
+using DisplayTextVisitor = void (*)(const char* bytes, std::size_t length, void* context);
+void visit_display_text(const std::string& utf8, DisplayTextVisitor visitor, void* context);
 
 } // namespace UI::LXMF::NomadNet
