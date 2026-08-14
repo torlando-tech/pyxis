@@ -9,6 +9,16 @@
 
 namespace UI::LXMF::NomadNet {
 
+inline bool layout_content_truncated(std::size_t fragment_count,
+                                     std::size_t fragment_limit,
+                                     bool content_remaining) {
+    return content_remaining && fragment_count >= fragment_limit;
+}
+
+inline bool block_has_layout_content(BlockType type, uint16_t run_count) {
+    return type == BlockType::DIVIDER || run_count != 0;
+}
+
 class CompactPage {
 public:
     static constexpr std::size_t MAX_BLOCKS = DocumentParser::MAX_BLOCKS;
@@ -17,8 +27,10 @@ public:
     // Text runs and link targets both originate in the bounded source, but a
     // link's target is also represented inside its visible run. Account for
     // that bounded duplication plus one terminator per retained record.
+    static constexpr std::size_t MAX_NOTICE_BYTES = 96;
     static constexpr std::size_t MAX_ARENA_BYTES =
-        DocumentParser::MAX_DOCUMENT_BYTES * 2 + MAX_RUNS + MAX_LINKS;
+        DocumentParser::MAX_DOCUMENT_BYTES * 2 + MAX_RUNS + MAX_LINKS +
+        MAX_NOTICE_BYTES + 1;
 
     enum Style : uint8_t {
         BOLD = 1 << 0,
