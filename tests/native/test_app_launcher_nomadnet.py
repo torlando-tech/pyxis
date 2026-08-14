@@ -436,35 +436,137 @@ def test_nomadnet_requests_are_anonymous_and_back_cleanup_is_serialized():
     assert "nomad_stop_transport();" in update
 
 
-def test_nomadnet_italic_uses_a_real_italic_font_not_letter_spacing():
+def test_nomadnet_uses_real_jetbrains_mono_nl_faces_at_each_size():
     glyphs_h = (INCLUDE / "NomadNetGlyphs.h").read_text()
     browser_cpp = (INCLUDE / "NomadNetScreen.cpp").read_text()
     fonts = INCLUDE.parent / "Fonts"
-    italic_12 = (fonts / "nomadnet_font_12_italic.c").read_text()
-    italic_16 = (fonts / "nomadnet_font_16_italic.c").read_text()
-    ofl = (fonts / "LICENSE-OFL-1.1.txt").read_text()
-    dejavu_license = (fonts / "LICENSE-DejaVu.txt").read_text()
+    faces = {
+        "regular": "",
+        "bold": "_bold",
+        "italic": "_italic",
+        "bold_italic": "_bold_italic",
+    }
 
-    assert "LV_FONT_DECLARE(nomadnet_font_12_italic)" in glyphs_h
-    assert "LV_FONT_DECLARE(nomadnet_font_16_italic)" in glyphs_h
-    assert "const lv_font_t* run_font" in browser_cpp
+    for size in (12, 16):
+        for style, suffix in faces.items():
+            symbol = f"nomadnet_font_{size}{suffix}"
+            generated = (fonts / f"{symbol}.c").read_text()
+            assert f"LV_FONT_DECLARE({symbol})" in glyphs_h
+            assert generated.count("/* U+") == 385
+            assert '/* U+00AD "­" */' in generated
+            assert '/* U+20BC "₼" */' in generated
+            assert "NomadNetFontCoverage.h" in generated
+            assert "nomadnet_font_has_codepoint" in generated
+            assert "JetBrains Mono NL" in generated
+            assert f"{style.replace('_', ' ').title()}" in generated
+            assert "Version 2.304" in generated
+            assert "LICENSE-JetBrains-Mono-OFL-1.1.txt" in generated
+
+    license_text = (fonts / "LICENSE-JetBrains-Mono-OFL-1.1.txt").read_text()
+    assert "Copyright 2020 The JetBrains Mono Project Authors" in license_text
+    assert "SIL OPEN FONT LICENSE Version 1.1" in license_text
+    noto_license = (fonts / "LICENSE-Noto-Sans-OFL-1.1.txt").read_text()
+    assert "Copyright 2022 The Noto Project Authors" in noto_license
+    assert "SIL OPEN FONT LICENSE Version 1.1" in noto_license
+
+    assert "const lv_font_t* page_run_font" in browser_cpp
+    assert "NomadNet::CompactPage::BOLD" in browser_cpp
     assert "NomadNet::CompactPage::ITALIC" in browser_cpp
+    assert "&nomadnet_font_12_bold" in browser_cpp
     assert "&nomadnet_font_12_italic" in browser_cpp
+    assert "&nomadnet_font_12_bold_italic" in browser_cpp
+    assert "&nomadnet_font_16_bold" in browser_cpp
     assert "&nomadnet_font_16_italic" in browser_cpp
-    assert "dsc.font=run_font(run, fragment.large_font);" in browser_cpp
+    assert "&nomadnet_font_16_bold_italic" in browser_cpp
+    assert "dsc.font=page_run_font(run, fragment.large_font);" in browser_cpp
     assert "dsc.letter_space=0;" in browser_cpp
     assert "?1:0,LV_TEXT_FLAG_NONE" not in browser_cpp
-    for font in (italic_12, italic_16):
-        assert font.count("/* U+") == 385
-        assert '/* U+00AD "­" */' in font
-        assert '/* U+20BC "₼" */' in font
-        assert "NomadNetFontCoverage.h" in font
-        assert "nomadnet_font_has_codepoint" in font
-        assert "LICENSE-OFL-1.1.txt" in font
-    assert "Copyright 2022 The Noto Project Authors" in ofl
-    assert "Copyright 2024 The Montserrat.Git Project Authors" in ofl
-    assert "SIL OPEN FONT LICENSE Version 1.1" in ofl
-    assert "Copyright (c) 2003 by Bitstream, Inc." in dejavu_license
+
+
+def test_nomadnet_page_fonts_do_not_leak_into_navigation_widgets():
+    browser_cpp = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    constructor = browser_cpp[
+        browser_cpp.index("NomadNetScreen::NomadNetScreen()") :
+        browser_cpp.index("NomadNetScreen::~NomadNetScreen()")
+    ]
+    directory = browser_cpp[
+        browser_cpp.index("void NomadNetScreen::render_directory(View view)") :
+        browser_cpp.index("void NomadNetScreen::detach_focusables(")
+    ]
+    layout = browser_cpp[
+        browser_cpp.index("void NomadNetScreen::layout_page()") :
+        browser_cpp.index("void NomadNetScreen::draw_page(")
+    ]
+    draw = browser_cpp[
+        browser_cpp.index("void NomadNetScreen::draw_page(") :
+        browser_cpp.index("void NomadNetScreen::select_link(")
+    ]
+
+    assert "nomadnet_font_" not in constructor
+    assert "nomadnet_font_" not in directory
+    assert "page_run_font(run,large)" in layout
+    assert "dsc.font=page_run_font(run, fragment.large_font);" in draw
+
+
+def test_nomadnet_navigation_keeps_theme_font_with_remote_glyph_fallback():
+    browser_cpp = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    selector = browser_cpp[
+        browser_cpp.index("const lv_font_t* navigation_font_12()") :
+        browser_cpp.index("const lv_font_t* page_run_font(")
+    ]
+    constructor = browser_cpp[
+        browser_cpp.index("NomadNetScreen::NomadNetScreen()") :
+        browser_cpp.index("NomadNetScreen::~NomadNetScreen()")
+    ]
+    directory = browser_cpp[
+        browser_cpp.index("void NomadNetScreen::render_directory(View view)") :
+        browser_cpp.index("void NomadNetScreen::detach_focusables(")
+    ]
+
+    assert "font=lv_font_montserrat_12" in selector
+    assert "font.fallback=&nomadnet_font_12" in selector
+    assert constructor.count("navigation_font_12()") == 2
+    assert directory.count("navigation_font_12()") == 3
+
+
+def test_nomadnet_bold_body_text_keeps_body_font_metrics():
+    browser_cpp = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    fonts = INCLUDE.parent / "Fonts"
+    layout = browser_cpp[browser_cpp.index("const bool large=") : browser_cpp.index(
+        "const lv_font_t* font=page_run_font", browser_cpp.index("const bool large=")
+    )]
+
+    assert "block.type==NomadNet::BlockType::HEADING" in layout
+    assert "NomadNet::CompactPage::BOLD" not in layout
+
+    for size in (12, 16):
+        metrics = set()
+        bitmaps = {}
+        for suffix in ("", "_bold", "_italic", "_bold_italic"):
+            source = (fonts / f"nomadnet_font_{size}{suffix}.c").read_text()
+            line_height_match = re.search(r"\.line_height = (\d+)", source)
+            base_line_match = re.search(r"\.base_line = (\d+)", source)
+            assert line_height_match is not None
+            assert base_line_match is not None
+            line_height = line_height_match.group(1)
+            base_line = base_line_match.group(1)
+            metrics.add((line_height, base_line))
+            bitmap = source[source.index("glyph_bitmap[]") : source.index("GLYPH DESCRIPTION")]
+            bitmaps[suffix] = bytes(int(value, 16) for value in re.findall(r"0x([0-9a-fA-F]{2})", bitmap))
+        assert len(metrics) == 1
+        assert bitmaps[""] != bitmaps["_bold"]
+        assert bitmaps["_italic"] != bitmaps["_bold_italic"]
+
+
+def test_nomadnet_font_generator_pins_sources_and_tools():
+    generator = (ROOT / "tools" / "fonts" / "generate_nomadnet_fonts.py").read_text()
+
+    assert "JetBrainsMono/releases/download/v2.304" in generator
+    assert "2984c575fdce412ee02b2baaba67672b9a9434d8" in generator
+    assert generator.count("require_digest(") >= 3
+    assert 'fontTools.__version__ != "4.63.0"' in generator
+    assert 'version != "1.5.3"' in generator
+    assert "require_noto_instance" in generator
 
 
 def test_nomadnet_same_destination_navigation_reuses_active_link():

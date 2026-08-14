@@ -28,9 +28,25 @@ void nomad_screen_heap_checkpoint(const char* phase) {
 void nomad_screen_heap_checkpoint(const char*) {}
 #endif
 
-const lv_font_t* run_font(const NomadNet::CompactPage::RunRecord& run, bool large) {
+const lv_font_t* navigation_font_12() {
+    static const lv_font_t font=[] {
+        lv_font_t font=lv_font_montserrat_12;
+        font.fallback=&nomadnet_font_12;
+        return font;
+    }();
+    return &font;
+}
+
+const lv_font_t* page_run_font(const NomadNet::CompactPage::RunRecord& run, bool large) {
+    const bool bold = run.style & NomadNet::CompactPage::BOLD;
     const bool italic = run.style & NomadNet::CompactPage::ITALIC;
-    if (large) return italic ? &nomadnet_font_16_italic : &nomadnet_font_16;
+    if (large) {
+        if (bold && italic) return &nomadnet_font_16_bold_italic;
+        if (bold) return &nomadnet_font_16_bold;
+        return italic ? &nomadnet_font_16_italic : &nomadnet_font_16;
+    }
+    if (bold && italic) return &nomadnet_font_12_bold_italic;
+    if (bold) return &nomadnet_font_12_bold;
     return italic ? &nomadnet_font_12_italic : &nomadnet_font_12;
 }
 }
@@ -60,13 +76,13 @@ NomadNetScreen::NomadNetScreen() {
     lv_obj_set_style_bg_color(_address_row,Theme::surface(),0);lv_obj_set_style_border_width(_address_row,0,0);lv_obj_set_style_pad_all(_address_row,3,0);
     _address=lv_textarea_create(_address_row);lv_obj_set_size(_address,270,30);lv_obj_align(_address,LV_ALIGN_LEFT_MID,0,0);
     lv_textarea_set_one_line(_address,true);lv_textarea_set_max_length(_address,511);lv_textarea_set_placeholder_text(_address,"destination:/page/path");
-    lv_obj_set_style_text_font(_address,&nomadnet_font_12,0);lv_obj_set_style_bg_color(_address,Theme::surfaceInput(),0);TextAreaHelper::enable_paste(_address);
+    lv_obj_set_style_text_font(_address,navigation_font_12(),0);lv_obj_set_style_bg_color(_address,Theme::surfaceInput(),0);TextAreaHelper::enable_paste(_address);
     _go_button=lv_btn_create(_address_row);lv_obj_set_size(_go_button,42,30);lv_obj_align(_go_button,LV_ALIGN_RIGHT_MID,0,0);
     lv_obj_set_style_bg_color(_go_button,Theme::primary(),0);lv_obj_set_style_radius(_go_button,8,0);
     lv_obj_t* gl=lv_label_create(_go_button);lv_label_set_text(gl,"Go");lv_obj_center(gl);
 
     _address_summary=lv_label_create(_address_row);lv_obj_set_size(_address_summary,266,24);lv_obj_align(_address_summary,LV_ALIGN_LEFT_MID,4,0);
-    lv_label_set_long_mode(_address_summary,LV_LABEL_LONG_DOT);lv_obj_set_style_text_font(_address_summary,&nomadnet_font_12,0);
+    lv_label_set_long_mode(_address_summary,LV_LABEL_LONG_DOT);lv_obj_set_style_text_font(_address_summary,navigation_font_12(),0);
     lv_obj_set_style_text_color(_address_summary,Theme::textSecondary(),0);
     _edit_button=lv_btn_create(_address_row);lv_obj_set_size(_edit_button,36,26);lv_obj_align(_edit_button,LV_ALIGN_RIGHT_MID,0,0);
     lv_obj_set_style_bg_color(_edit_button,Theme::surfaceContainer(),0);lv_obj_set_style_bg_color(_edit_button,Theme::primaryPressed(),LV_STATE_FOCUSED);
@@ -185,11 +201,11 @@ void NomadNetScreen::render_directory(View view){
         }
         const auto rendered_title=NomadNet::display_text(title);
         lv_obj_t* primary=lv_label_create(button);lv_label_set_text(primary,rendered_title.c_str());lv_label_set_long_mode(primary,LV_LABEL_LONG_DOT);
-        lv_obj_set_width(primary,title_width);lv_obj_set_style_text_font(primary,&nomadnet_font_12,0);lv_obj_align(primary,LV_ALIGN_TOP_LEFT,title_x,0);
+        lv_obj_set_width(primary,title_width);lv_obj_set_style_text_font(primary,navigation_font_12(),0);lv_obj_align(primary,LV_ALIGN_TOP_LEFT,title_x,0);
         if(!detail.empty()){
             const auto rendered_detail=NomadNet::display_text(detail);
             lv_obj_t* secondary=lv_label_create(button);lv_label_set_text(secondary,rendered_detail.c_str());lv_label_set_long_mode(secondary,LV_LABEL_LONG_DOT);
-            lv_obj_set_width(secondary,286);lv_obj_set_style_text_font(secondary,&nomadnet_font_12,0);lv_obj_set_style_text_color(secondary,Theme::textTertiary(),0);
+            lv_obj_set_width(secondary,286);lv_obj_set_style_text_font(secondary,navigation_font_12(),0);lv_obj_set_style_text_color(secondary,Theme::textTertiary(),0);
             lv_obj_align(secondary,LV_ALIGN_BOTTOM_LEFT,2,0);
         }
         lv_obj_set_user_data(button,reinterpret_cast<void*>(code));lv_obj_add_event_cb(button,clicked,LV_EVENT_CLICKED,this);
@@ -223,7 +239,7 @@ void NomadNetScreen::render_directory(View view){
     if(_directory_focusables.empty()){
         lv_obj_t* empty=lv_label_create(_directory);
         lv_label_set_text(empty,view==View::HEARD?"No NomadNet nodes heard yet":view==View::SAVED_NODES?"No saved nodes":view==View::SAVED_PAGES?"No saved pages":"No recent pages");
-        lv_obj_set_style_text_color(empty,Theme::textTertiary(),0);lv_obj_set_style_text_font(empty,&nomadnet_font_12,0);
+        lv_obj_set_style_text_color(empty,Theme::textTertiary(),0);lv_obj_set_style_text_font(empty,navigation_font_12(),0);
     }
     lv_group_set_default(previous_default_group);
     rebuild_focus();
@@ -362,8 +378,8 @@ void NomadNetScreen::layout_page(){
             const uint16_t run_index=static_cast<uint16_t>(block.first_run+r);
             const auto& run=_page.runs()[run_index];
             const auto text=_page.text(run);
-            const bool large=(run.style&NomadNet::CompactPage::BOLD)||block.type==NomadNet::BlockType::HEADING;
-            const lv_font_t* font=run_font(run,large);
+            const bool large=block.type==NomadNet::BlockType::HEADING;
+            const lv_font_t* font=page_run_font(run,large);
             const int16_t height=static_cast<int16_t>(font->line_height+3);
             line_h=std::max(line_h,height);
             std::size_t offset=0;
@@ -442,7 +458,7 @@ void NomadNetScreen::draw_page(lv_event_t* event){
             lv_draw_rect_dsc_t bg;lv_draw_rect_dsc_init(&bg);bg.bg_color=selected?Theme::primaryPressed():lv_color_hex(run.background);lv_draw_rect(draw_ctx,&bg,&area);
         }
         lv_draw_label_dsc_t dsc;lv_draw_label_dsc_init(&dsc);
-        dsc.font=run_font(run, fragment.large_font);
+        dsc.font=page_run_font(run, fragment.large_font);
         dsc.color=run.link_index>=0?Theme::primaryLight():(run.style&NomadNet::CompactPage::HAS_FOREGROUND)
             ?lv_color_hex(run.foreground):_page.has_foreground()?lv_color_hex(_page.foreground()):Theme::textPrimary();
         dsc.letter_space=0;
