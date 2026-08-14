@@ -15,6 +15,7 @@
 #include "NomadNetActionMailbox.h"
 #include "NomadNetMailbox.h"
 #include "NomadNetCompactPage.h"
+#include "NomadNetColors.h"
 #include "NomadNetProtocol.h"
 #include "NomadNetRequestPolicy.h"
 #include "NomadNetUrl.h"
@@ -35,6 +36,7 @@ using UI::LXMF::NomadNet::sanitize_directory_name;
 using UI::LXMF::NomadNet::page_title;
 using UI::LXMF::NomadNet::AsyncMailbox;
 using UI::LXMF::NomadNet::CompactPage;
+using UI::LXMF::NomadNet::resolve_foreground;
 using UI::LXMF::NomadNet::ResponseBuffer;
 using UI::LXMF::NomadNet::RequestPolicy;
 using UI::LXMF::NomadNet::Url;
@@ -165,6 +167,124 @@ int main(int argc, char** argv) {
     check("compact page preserves document presentation flags",
           compact.has_background() == doc.has_background && compact.background() == doc.background &&
           compact.has_foreground() == doc.has_foreground && compact.foreground() == doc.foreground);
+
+    auto color_doc = parser.parse(
+        "#!bg=123\n#!fg=abc\n"
+        "plain `Ff00inline`f `B0f0back`b "
+        "`F79d`_`[styled link`:/page/next.mu]`_`f\n");
+    CompactPage color_page;
+    check("Micron color fixture compacts", color_page.assign(color_doc) &&
+                                             color_page.has_background() &&
+                                             color_page.background() == 0x112233 &&
+                                             color_page.has_foreground() &&
+                                             color_page.foreground() == 0xaabbcc);
+    bool saw_plain = false;
+    bool saw_inline = false;
+    bool saw_colored_background = false;
+    bool saw_styled_link = false;
+    for (const auto& run : color_page.runs()) {
+        const auto view = color_page.text(run);
+        const std::string text(view.data(), view.size());
+        if (text == "plain ") {
+            saw_plain = resolve_foreground(color_page, run, 0xe8b4f0) == 0xaabbcc;
+        } else if (text == "inline") {
+            saw_inline = resolve_foreground(color_page, run, 0xe8b4f0) == 0xff0000;
+        } else if (text == "back") {
+            saw_colored_background = (run.style & CompactPage::HAS_BACKGROUND) &&
+                                     run.background == 0x00ff00;
+        } else if (text == "styled link") {
+            saw_styled_link = run.link_index >= 0 &&
+                              resolve_foreground(color_page, run, 0xe8b4f0) == 0x7799dd;
+        }
+    }
+    check("page foreground is the unstyled text default", saw_plain);
+    check("inline foreground overrides the page default", saw_inline);
+    check("inline background is preserved", saw_colored_background);
+    check("links preserve their authored Micron foreground", saw_styled_link);
+
+    auto truecolor_doc = parser.parse(
+        "#!fg=102030\n#!bg=405060\n"
+        "`FTa1b2c3true foreground`f `BTd4e5f6true background`b\n");
+    check("six-digit page truecolor parses",
+          truecolor_doc.has_foreground && truecolor_doc.foreground == 0x102030 &&
+              truecolor_doc.has_background && truecolor_doc.background == 0x405060);
+    bool saw_truecolor_foreground = false;
+    bool saw_truecolor_background = false;
+    for (const auto& run : truecolor_doc.blocks.front().runs) {
+        if (run.text == "true foreground") {
+            saw_truecolor_foreground = run.has_foreground && run.foreground == 0xa1b2c3;
+        } else if (run.text == "true background") {
+            saw_truecolor_background = run.has_background && run.background == 0xd4e5f6;
+        }
+    }
+    check("FT inline truecolor parses", saw_truecolor_foreground);
+    check("BT inline truecolor parses", saw_truecolor_background);
+
+    CompactPage::RunRecord light_background_run{};
+    light_background_run.style = CompactPage::HAS_BACKGROUND;
+    light_background_run.background = 0xe8b4f0;
+    check("focus border contrasts with a light authored inline background",
+          resolve_focus_border(color_page, light_background_run, 0x1d1a1e) == 0x000000);
+    CompactPage::RunRecord inherited_background_run{};
+    check("focus border contrasts with a dark authored page background",
+          resolve_focus_border(color_page, inherited_background_run, 0x1d1a1e) == 0xffffff);
+    CompactPage::RunRecord saturated_green_run{};
+    saturated_green_run.style = CompactPage::HAS_BACKGROUND;
+    saturated_green_run.background = 0x00da00;
+    check("focus border uses sRGB contrast for saturated green",
+          resolve_focus_border(color_page, saturated_green_run, 0x1d1a1e) == 0x000000);
+    CompactPage::RunRecord saturated_blue_run{};
+    saturated_blue_run.style = CompactPage::HAS_BACKGROUND;
+    saturated_blue_run.background = 0x0000ff;
+    check("focus border uses sRGB contrast for saturated blue",
+          resolve_focus_border(color_page, saturated_blue_run, 0x1d1a1e) == 0xffffff);
+
+    auto reset_color_doc = parser.parse(
+        "#!fg=abc\n`Ff00inline`fpage `[unstyled link`:/page/plain.mu]\n");
+    CompactPage reset_color_page;
+    bool saw_reset_page_color = false;
+    bool saw_unstyled_link_color = false;
+    check("foreground reset fixture compacts", reset_color_page.assign(reset_color_doc));
+    for (const auto& run : reset_color_page.runs()) {
+        const auto view = reset_color_page.text(run);
+        const std::string text(view.data(), view.size());
+        if (text == "page ") {
+            saw_reset_page_color = !(run.style & CompactPage::HAS_FOREGROUND) &&
+                                   resolve_foreground(reset_color_page, run, 0xe8b4f0) ==
+                                       0xaabbcc;
+        } else if (text == "unstyled link") {
+            saw_unstyled_link_color = run.link_index >= 0 &&
+                                      !(run.style & CompactPage::HAS_FOREGROUND) &&
+                                      resolve_foreground(reset_color_page, run, 0xe8b4f0) ==
+                                          0xaabbcc;
+        }
+    }
+    check("foreground reset returns to the page foreground", saw_reset_page_color);
+    check("unstyled links inherit the page foreground", saw_unstyled_link_color);
+
+    auto default_color_doc = parser.parse("plain\n");
+    CompactPage default_color_page;
+    check("unstyled Micron keeps the Pyxis fallback foreground",
+          default_color_page.assign(default_color_doc) &&
+          !default_color_page.runs().empty() &&
+          resolve_foreground(default_color_page, default_color_page.runs().front(), 0xe8b4f0) ==
+              0xe8b4f0);
+    auto background_only_doc = parser.parse("#!bg=abc\nplain\n");
+    CompactPage background_only_page;
+    check("page background does not replace the fallback foreground",
+          background_only_page.assign(background_only_doc) &&
+              background_only_page.has_background() &&
+              background_only_page.background() == 0xaabbcc &&
+              !background_only_page.has_foreground() &&
+              resolve_foreground(background_only_page, background_only_page.runs().front(),
+                                 0xe8b4f0) == 0xe8b4f0);
+    auto foreground_only_doc = parser.parse("#!fg=123\nplain\n");
+    CompactPage foreground_only_page;
+    check("page foreground does not invent a page background",
+          foreground_only_page.assign(foreground_only_doc) &&
+              foreground_only_page.has_foreground() &&
+              foreground_only_page.foreground() == 0x112233 &&
+              !foreground_only_page.has_background());
     compact.clear();
     check("compact page teardown releases every retained record", compact.empty() &&
           compact.arena_bytes() == 0 && compact.blocks().empty() && compact.runs().empty() && compact.links().empty());

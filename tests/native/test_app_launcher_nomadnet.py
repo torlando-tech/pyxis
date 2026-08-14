@@ -529,6 +529,21 @@ def test_nomadnet_navigation_keeps_theme_font_with_remote_glyph_fallback():
     assert directory.count("navigation_font_12()") == 3
 
 
+def test_nomadnet_draw_preserves_authored_colors_for_links_and_focus():
+    browser_cpp = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    draw = browser_cpp[
+        browser_cpp.index("void NomadNetScreen::draw_page(") :
+        browser_cpp.index("void NomadNetScreen::select_link(")
+    ]
+
+    assert "dsc.color=lv_color_hex(NomadNet::resolve_foreground(_page,run,Theme::TEXT_PRIMARY));" in draw
+    assert "run.link_index>=0?Theme::primaryLight()" not in draw
+    assert "selected?Theme::primaryPressed()" not in draw
+    assert "bg.bg_color=lv_color_hex(run.background)" in draw
+    assert "focus.bg_opa=LV_OPA_TRANSP" in draw
+    assert "focus.border_color=lv_color_hex(NomadNet::resolve_focus_border(" in draw
+
+
 def test_nomadnet_bold_body_text_keeps_body_font_metrics():
     browser_cpp = (INCLUDE / "NomadNetScreen.cpp").read_text()
     fonts = INCLUDE.parent / "Fonts"
