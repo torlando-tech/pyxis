@@ -1,7 +1,9 @@
 #include "NomadNetScreen.h"
 #ifdef ARDUINO
 #include "Theme.h"
+#include "NomadNetColors.h"
 #include "NomadNetDisplay.h"
+#include "NomadNetFocus.h"
 #include "NomadNetGlyphs.h"
 #include "../LVGL/LVGLInit.h"
 #include "../TextAreaHelper.h"
@@ -453,17 +455,29 @@ void NomadNetScreen::draw_page(lv_event_t* event){
         const auto text=_page.text(run);
         if(fragment.byte_offset+fragment.byte_length>text.size()||fragment.byte_length>=sizeof(scratch))continue;
         std::memcpy(scratch,text.data()+fragment.byte_offset,fragment.byte_length);scratch[fragment.byte_length]='\0';
-        const bool selected=fragment.link_index>=0&&fragment.link_index==_selected_link;
-        if((run.style&NomadNet::CompactPage::HAS_BACKGROUND)||selected){
-            lv_draw_rect_dsc_t bg;lv_draw_rect_dsc_init(&bg);bg.bg_color=selected?Theme::primaryPressed():lv_color_hex(run.background);lv_draw_rect(draw_ctx,&bg,&area);
+        if(run.style&NomadNet::CompactPage::HAS_BACKGROUND){
+            lv_draw_rect_dsc_t bg;lv_draw_rect_dsc_init(&bg);bg.bg_color=lv_color_hex(run.background);lv_draw_rect(draw_ctx,&bg,&area);
         }
         lv_draw_label_dsc_t dsc;lv_draw_label_dsc_init(&dsc);
         dsc.font=page_run_font(run, fragment.large_font);
-        dsc.color=run.link_index>=0?Theme::primaryLight():(run.style&NomadNet::CompactPage::HAS_FOREGROUND)
-            ?lv_color_hex(run.foreground):_page.has_foreground()?lv_color_hex(_page.foreground()):Theme::textPrimary();
+        dsc.color=lv_color_hex(NomadNet::resolve_foreground(_page,run,Theme::TEXT_PRIMARY));
         dsc.letter_space=0;
         dsc.decor=(run.style&NomadNet::CompactPage::UNDERLINE)||run.link_index>=0?LV_TEXT_DECOR_UNDERLINE:LV_TEXT_DECOR_NONE;
         lv_draw_label(draw_ctx,&dsc,&area,scratch,nullptr);
+    }
+    if(_selected_link>=0){
+        NomadNet::for_each_focus_span(_page_layout,_selected_link,[&](const NomadNet::FocusSpan& span){
+            if(span.run_index>=_page.runs().size())return;
+            const int16_t draw_y=static_cast<int16_t>(top+span.y-scroll);
+            if(draw_y+span.height<_content->coords.y1||draw_y>_content->coords.y2)return;
+            lv_area_t area{static_cast<lv_coord_t>(left+span.x),draw_y,
+                static_cast<lv_coord_t>(left+span.x+std::max<int16_t>(span.width,1)-1),
+                static_cast<lv_coord_t>(draw_y+std::max<int16_t>(span.height,1)-1)};
+            lv_draw_rect_dsc_t focus;lv_draw_rect_dsc_init(&focus);focus.bg_opa=LV_OPA_TRANSP;
+            focus.border_color=lv_color_hex(NomadNet::resolve_focus_border(
+                _page,_page.runs()[span.run_index],Theme::SURFACE));
+            focus.border_width=1;lv_draw_rect(draw_ctx,&focus,&area);
+        });
     }
 }
 
