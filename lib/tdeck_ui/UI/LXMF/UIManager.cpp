@@ -2189,10 +2189,10 @@ void UIManager::nomad_send_request() {
     if (!_nomad_link || _nomad_link.status() != Type::Link::ACTIVE) return;
     nomad_heap_checkpoint("request-enter");
     _nomad_link.set_resource_started_callback(on_nomad_resource_started);
-    const auto nil = NomadNet::no_form_request_data();
+    const auto request_data = NomadNet::request_data(_nomad_url.fields);
     _nomad_request = _nomad_link.request(
         Bytes(reinterpret_cast<const uint8_t*>(_nomad_url.path.data()), _nomad_url.path.size()),
-        Bytes(nil.data(), nil.size()), on_nomad_response, on_nomad_failed,
+        Bytes(request_data.data(), request_data.size()), on_nomad_response, on_nomad_failed,
         on_nomad_progress, 30.0, NomadNet::AsyncMailbox::MAX_WIRE_BYTES);
     nomad_heap_checkpoint("request-created");
     if (!_nomad_request) {

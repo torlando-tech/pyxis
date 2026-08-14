@@ -78,7 +78,7 @@ def test_ui_wiring_contract():
     assert "nomadnetwork\", \"node" in manager_cpp
     assert "Identity::recall" in manager_cpp
     assert "Transport::request_path" in manager_cpp
-    assert "no_form_request_data" in manager_cpp
+    assert "request_data(_nomad_url.fields)" in manager_cpp
     request_start = manager_cpp.index("void UIManager::nomad_send_request()")
     request = manager_cpp[request_start:manager_cpp.index("void UIManager::nomad_update()", request_start)]
     assert "30.0, NomadNet::AsyncMailbox::MAX_WIRE_BYTES" in request

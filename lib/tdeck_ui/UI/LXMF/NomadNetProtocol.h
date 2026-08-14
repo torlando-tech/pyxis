@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 #include "NomadNetMemory.h"
 
@@ -11,6 +12,62 @@ inline std::vector<uint8_t> no_form_request_data() {
     // Link::request splices already encoded msgpack data into its envelope.
     // NomadNet's no-form value is protocol-level nil, exactly one byte 0xc0.
     return {0xc0};
+}
+
+inline void append_msgpack_string(std::vector<uint8_t>& output, const std::string& value) {
+    const std::size_t size = value.size();
+    if (size <= 31) {
+        output.push_back(static_cast<uint8_t>(0xa0 | size));
+    } else if (size <= 0xff) {
+        output.push_back(0xd9);
+        output.push_back(static_cast<uint8_t>(size));
+    } else {
+        output.push_back(0xda);
+        output.push_back(static_cast<uint8_t>(size >> 8));
+        output.push_back(static_cast<uint8_t>(size));
+    }
+    output.insert(output.end(), value.begin(), value.end());
+}
+
+inline std::vector<uint8_t> request_data(const std::string& fields) {
+    if (fields.empty()) return no_form_request_data();
+
+    std::size_t variable_count = 0;
+    for (std::size_t start = 0; start <= fields.size();) {
+        const std::size_t end = fields.find('|', start);
+        const std::size_t length = (end == std::string::npos ? fields.size() : end) - start;
+        const std::string field = fields.substr(start, length);
+        const std::size_t equals = field.find('=');
+        if (equals != std::string::npos && field.find('=', equals + 1) == std::string::npos) {
+            ++variable_count;
+        }
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+
+    std::vector<uint8_t> output;
+    output.reserve(fields.size() + variable_count * 5 + 3);
+    if (variable_count <= 15) {
+        output.push_back(static_cast<uint8_t>(0x80 | variable_count));
+    } else {
+        output.push_back(0xde);
+        output.push_back(static_cast<uint8_t>(variable_count >> 8));
+        output.push_back(static_cast<uint8_t>(variable_count));
+    }
+
+    for (std::size_t start = 0; start <= fields.size();) {
+        const std::size_t end = fields.find('|', start);
+        const std::size_t length = (end == std::string::npos ? fields.size() : end) - start;
+        const std::string field = fields.substr(start, length);
+        const std::size_t equals = field.find('=');
+        if (equals != std::string::npos && field.find('=', equals + 1) == std::string::npos) {
+            append_msgpack_string(output, "var_" + field.substr(0, equals));
+            append_msgpack_string(output, field.substr(equals + 1));
+        }
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return output;
 }
 
 class ResponseBuffer {
