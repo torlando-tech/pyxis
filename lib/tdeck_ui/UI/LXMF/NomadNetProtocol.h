@@ -82,8 +82,10 @@ public:
     }
     const ExternalVector<uint8_t>& bytes() const { return _bytes; }
     std::size_t size() const { return _bytes.size(); }
+    std::size_t capacity() const { return _bytes.capacity(); }
     bool truncated() const { return false; }
     void clear() { _bytes.clear(); }
+    void release() { ExternalVector<uint8_t>().swap(_bytes); }
 
 private:
     ExternalVector<uint8_t> _bytes;

@@ -20,6 +20,7 @@
 #include "NomadNetProtocol.h"
 #include "NomadNetRequestPolicy.h"
 #include "NomadNetUrl.h"
+#include "NomadNetVirtualViewport.h"
 
 using UI::LXMF::NavigationStack;
 using UI::LXMF::Route;
@@ -42,6 +43,7 @@ using UI::LXMF::NomadNet::for_each_focus_span;
 using UI::LXMF::NomadNet::ResponseBuffer;
 using UI::LXMF::NomadNet::RequestPolicy;
 using UI::LXMF::NomadNet::Url;
+using UI::LXMF::NomadNet::VirtualViewport;
 
 int main(int argc, char** argv) {
     int passed = 0;
@@ -584,6 +586,35 @@ int main(int argc, char** argv) {
           !UI::LXMF::NomadNet::block_has_layout_content(BlockType::TEXT, 0));
     check("divider has layout content without a text run",
           UI::LXMF::NomadNet::block_has_layout_content(BlockType::DIVIDER, 0));
+
+    check("virtual viewport maps short pages without scaling",
+          VirtualViewport::logical_from_physical(640, 1200, 150, 1200) == 640 &&
+              VirtualViewport::physical_from_logical(640, 1200, 150, 1200) == 640);
+    check("virtual viewport maps tall pages through bounded LVGL coordinates",
+          VirtualViewport::logical_from_physical(14925, 60000, 150, 30000) == 29925 &&
+              VirtualViewport::physical_from_logical(29925, 60000, 150, 30000) == 14925);
+    check("virtual viewport clamps logical and physical scroll positions",
+          VirtualViewport::logical_from_physical(40000, 60000, 150, 30000) == 59850 &&
+              VirtualViewport::physical_from_logical(70000, 60000, 150, 30000) == 29850);
+    check("virtual viewport keeps bounded overscan around the visible region",
+          VirtualViewport::window_top(30000, 150) == 29700 &&
+              VirtualViewport::window_bottom(30000, 150, 60000) == 30450);
+    check("overscan window clamps at the document boundaries",
+          VirtualViewport::window_top(5,75)==0 &&
+              VirtualViewport::window_bottom(5,75,60000)==230);
+
+    std::vector<uint8_t> response_bytes(ResponseBuffer::MAX_BYTES,0x5a);
+    check("response buffer accepts the exact body limit",
+          response.assign(response_bytes.data(),response_bytes.size()) &&
+              response.capacity()>=response_bytes.size());
+    response.release();
+    check("response release returns the normalized PSRAM allocation",
+          response.size()==0 && response.capacity()==0);
+    check("coalescing accepts adjacent bytes from the same styled run",
+          VirtualViewport::can_coalesce(7, 12, 5, 7, 17));
+    check("coalescing preserves style and link run boundaries",
+          !VirtualViewport::can_coalesce(7, 12, 5, 8, 17) &&
+              !VirtualViewport::can_coalesce(7, 12, 5, 7, 18));
 
     check("compact address preserves short values", compact_address("node:/page/a.mu", 32) == "node:/page/a.mu");
     check("compact address abbreviates destination but preserves path",

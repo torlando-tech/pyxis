@@ -2293,6 +2293,7 @@ void UIManager::nomad_update() {
                 _nomadnet_screen->set_library(_nomad_library);
                 page_applied = _nomadnet_screen->set_page(document);
             }
+            if (page_applied) _nomad_response.release();
             nomad_heap_checkpoint("response-page-applied");
             if (!page_applied) {
                 nomad_stop_transport();
