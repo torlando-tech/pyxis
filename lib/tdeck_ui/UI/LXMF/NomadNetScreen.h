@@ -8,6 +8,7 @@
 #include "NomadNetCompactPage.h"
 #include "NomadNetDocument.h"
 #include "NomadNetLibrary.h"
+#include "NomadNetVirtualViewport.h"
 
 namespace UI::LXMF {
 class NomadNetScreen {
@@ -35,9 +36,11 @@ public:
     bool directory_visible() const { return _directory_visible.load(std::memory_order_acquire); }
     void show(); void hide();
 private:
-    // 1024 wrapped fragments remain below LVGL 8.x's signed 16-bit vertical
-    // coordinate range even at the 16 px heading font's 19 px line box.
-    static constexpr std::size_t MAX_LAYOUT_FRAGMENTS = 1024;
+    // Only the visible region plus bounded overscan is retained. The parser
+    // admits at most 1024 runs, so this also covers a pathological viewport
+    // containing every styled run plus bounded dividers.
+    static constexpr std::size_t MAX_WINDOW_FRAGMENTS = 1056;
+    static constexpr int32_t MAX_PHYSICAL_SCROLL_EXTENT = 30000;
     struct LayoutFragment {
         uint16_t run_index = 0;
         uint16_t byte_offset = 0;
@@ -56,6 +59,12 @@ private:
             : run_index(run), byte_offset(offset), byte_length(length), link_index(link),
               x(left), y(top), width(w), height(h), divider(is_divider), large_font(is_large) {}
     };
+    struct LayoutCheckpoint {
+        uint16_t block_index = 0;
+        int32_t y = 0;
+        LayoutCheckpoint() = default;
+        LayoutCheckpoint(uint16_t block, int32_t top) : block_index(block), y(top) {}
+    };
     lv_obj_t* _screen=nullptr; lv_obj_t* _back_button=nullptr; lv_obj_t* _home_button=nullptr;
     lv_obj_t* _reload_button=nullptr; lv_obj_t* _save_button=nullptr; lv_obj_t* _address_row=nullptr; lv_obj_t* _address=nullptr;
     lv_obj_t* _go_button=nullptr; lv_obj_t* _address_summary=nullptr; lv_obj_t* _edit_button=nullptr;
@@ -63,7 +72,15 @@ private:
     lv_obj_t* _directory=nullptr;
     NomadNet::CompactPage _page;
     NomadNet::ExternalVector<LayoutFragment> _page_layout;
+    NomadNet::ExternalVector<LayoutFragment> _line_layout;
+    NomadNet::ExternalVector<LayoutCheckpoint> _layout_checkpoints;
+    NomadNet::ExternalVector<int32_t> _link_y;
+    NomadNet::ExternalVector<int32_t> _link_bottom;
     int32_t _page_height = 0;
+    int32_t _physical_extent = 0;
+    int32_t _logical_scroll = 0;
+    int32_t _layout_window_top = 0;
+    int32_t _layout_window_bottom = 0;
     int16_t _selected_link = -1;
     std::vector<lv_obj_t*> _directory_focusables;
     std::vector<std::string> _directory_targets;
@@ -82,6 +99,17 @@ private:
     void clear_document();
     void clear_directory();
     bool layout_page();
+    bool layout_window(int32_t logical_scroll);
+    bool layout_from(std::size_t start_block, int32_t start_y,
+                     int32_t window_top, int32_t window_bottom,
+                     bool build_index);
+    bool append_line_fragment(const LayoutFragment& fragment);
+    bool commit_line(int32_t line_y, int16_t line_height,
+                     NomadNet::Alignment alignment, int16_t indent,
+                     int16_t available, int32_t window_top,
+                     int32_t window_bottom);
+    int32_t logical_scroll_from_widget() const;
+    void scroll_to_logical(int32_t logical, lv_anim_enable_t animation);
     void draw_page(lv_event_t* event);
     void select_link(int direction);
     void activate_selected_link();

@@ -133,10 +133,12 @@ def test_nomadnet_page_body_uses_one_compact_custom_viewport():
     assert "lv_label_create(_content)" not in set_page
     assert "LV_EVENT_DRAW_MAIN" in screen
     assert "lv_draw_label(" in screen
-    assert "align_line" in screen
+    assert "commit_line" in screen
     assert "NomadNet::truncation_notice(document)" in set_page
     assert "if(!_page.append_notice(notice))" in set_page
     assert "if(!layout_page())" in set_page
+    assert "catch(const std::bad_alloc&)" in set_page
+    assert "Page is too large for available memory" in set_page
     assert "[Page truncated to device safety limits]" not in set_page
     assert "[Unsupported Micron content]" in screen
     assert "lv_obj_set_scroll_dir(_content,LV_DIR_VER)" in screen
@@ -150,15 +152,34 @@ def test_nomadnet_page_body_uses_one_compact_custom_viewport():
     assert "const std::string rendered_text" not in compact_cpp
     assert "visit_display_text" in compact_cpp
     assert "lv_indev_get_type(indev)!=LV_INDEV_TYPE_POINTER" in screen
-    assert "const std::string layout_notice=\"[Page layout truncated: \"+" in screen
-    assert "std::to_string(content_fragment_limit)+\" fragments]\"" in screen
-    assert "fragment.run_index>=notice_run_index" in screen
-    assert "notice_run_index" in screen
-    assert "_page_layout.push_back(LayoutFragment(notice_run_index" in screen
+    assert "MAX_WINDOW_FRAGMENTS" in screen_h
+    assert "MAX_LAYOUT_FRAGMENTS" not in screen_h
+    assert "ExternalVector<LayoutCheckpoint> _layout_checkpoints" in screen_h
+    assert "_layout_window_top" in screen_h
+    assert "_logical_scroll" in screen_h
+    assert "ExternalVector<int32_t> _link_bottom" in screen_h
+    assert "_link_bottom[run.link_index]=std::max" in screen
+    assert "link_top+19" not in screen
+    assert "layout_window(" in screen
+    assert "VirtualViewport::logical_from_physical" in screen
+    assert "VirtualViewport::physical_from_logical" in screen
+    assert "lv_obj_get_content_coords(_content,&content_area)" in screen
+    assert "draw_ctx->clip_area=&content_clip" in screen
+    assert "_lv_area_is_point_on(&content_area,&point,0)" in screen
+    assert "[Page layout truncated:" not in screen
+    assert "content_fragment_limit" not in screen
     assert "whitespace&&x+fragment_w>indent+available" in screen
     assert "for(int attempt=0;attempt<count;++attempt)" in screen
-    assert "fragment.link_index==candidate" in screen
+    assert "_link_y[candidate]>=0" in screen
     assert "lv_group_set_editing(group,false)" in screen
+
+
+def test_successful_page_application_releases_normalized_response():
+    manager = (INCLUDE / "UIManager.cpp").read_text()
+    apply_start = manager.index("bool page_applied = false;")
+    apply_end = manager.index("nomad_heap_checkpoint(\"response-page-applied\")", apply_start)
+    applied = manager[apply_start:apply_end]
+    assert "_nomad_response.release();" in applied
 
 
 def test_directory_rebuild_has_one_final_focus_owner():

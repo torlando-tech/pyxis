@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdio>
+#include <new>
 #if defined(PYXIS_NOMAD_MEMORY_DIAGNOSTIC)
 #include <esp_heap_caps.h>
 #endif
@@ -133,7 +134,15 @@ void NomadNetScreen::clear_document(){
     }
     _page.clear();
     NomadNet::ExternalVector<LayoutFragment>().swap(_page_layout);
+    NomadNet::ExternalVector<LayoutFragment>().swap(_line_layout);
+    NomadNet::ExternalVector<LayoutCheckpoint>().swap(_layout_checkpoints);
+    NomadNet::ExternalVector<int32_t>().swap(_link_y);
+    NomadNet::ExternalVector<int32_t>().swap(_link_bottom);
     _page_height=0;
+    _physical_extent=0;
+    _logical_scroll=0;
+    _layout_window_top=0;
+    _layout_window_bottom=0;
     _selected_link=-1;
     lv_obj_refresh_self_size(_content);
     lv_obj_invalidate(_content);
@@ -335,48 +344,119 @@ bool NomadNetScreen::set_page(const NomadNet::Document& document) {
         set_status("Page is too large for available memory");
         return false;
     }
-    if(_page.truncated()){
-        const std::string notice=NomadNet::truncation_notice(document);
-        if(!_page.append_notice(notice)){
+    try {
+        if(_page.truncated()){
+            const std::string notice=NomadNet::truncation_notice(document);
+            if(!_page.append_notice(notice)){
+                clear_document();
+                set_status("Page truncation notice could not be retained");
+                return false;
+            }
+        }
+        else if(_page.unsupported()&&!_page.append_notice("[Unsupported Micron content]")){
             clear_document();
-            set_status("Page truncation notice could not be retained");
+            set_status("Unsupported-content notice could not be retained");
             return false;
         }
-    }
-    else if(_page.unsupported())_page.append_notice("[Unsupported Micron content]");
-    if(!layout_page()){
+        show_browser(false);
+        if(!layout_page()){
+            clear_document();
+            set_status("Page viewport could not be retained");
+            return false;
+        }
+        lv_obj_set_style_bg_color(_content,_page.has_background()
+            ?lv_color_hex(_page.background()):Theme::surface(),0);
+        _page_loaded=true;
+        lv_obj_scroll_to_y(_content,0,LV_ANIM_OFF);
+        lv_obj_refresh_self_size(_content);
+        lv_obj_invalidate(_content);
+        return true;
+    }catch(const std::bad_alloc&){
         clear_document();
-        set_status("Page layout notice could not be retained");
+        set_status("Page is too large for available memory");
         return false;
     }
-    lv_obj_set_style_bg_color(_content,_page.has_background()
-        ?lv_color_hex(_page.background()):Theme::surface(),0);
-    _page_loaded=true;
-    show_browser(false);
-    lv_obj_scroll_to_y(_content,0,LV_ANIM_OFF);
-    lv_obj_refresh_self_size(_content);
-    lv_obj_invalidate(_content);
-    return true;
 }
 
 bool NomadNetScreen::layout_page(){
     _page_layout.clear();
-    _page_layout.reserve(std::min<std::size_t>(_page.runs().size()*4,MAX_LAYOUT_FRAGMENTS));
-    constexpr std::size_t content_fragment_limit=MAX_LAYOUT_FRAGMENTS-1;
+    _line_layout.clear();
+    _layout_checkpoints.clear();
+    _link_y.assign(_page.links().size(),-1);
+    _link_bottom.assign(_page.links().size(),-1);
+    _page_layout.reserve(MAX_WINDOW_FRAGMENTS);
+    _line_layout.reserve(NomadNet::DocumentParser::MAX_RUNS_PER_LINE);
+    _layout_checkpoints.reserve(_page.blocks().size());
+    const int32_t viewport=std::max<int32_t>(1,lv_obj_get_content_height(_content));
+    if(!layout_from(0,0,0,viewport*3,true))return false;
+    _physical_extent=std::min<int32_t>(_page_height,MAX_PHYSICAL_SCROLL_EXTENT);
+    _logical_scroll=0;
+    _layout_window_top=0;
+    _layout_window_bottom=std::min<int32_t>(_page_height,viewport*3);
+    return true;
+}
+
+bool NomadNetScreen::append_line_fragment(const LayoutFragment& fragment){
+    if(!_line_layout.empty()){
+        auto& previous=_line_layout.back();
+        const uint32_t combined=static_cast<uint32_t>(previous.byte_length)+fragment.byte_length;
+        if(previous.link_index==fragment.link_index&&previous.large_font==fragment.large_font&&
+           combined<256&&NomadNet::VirtualViewport::can_coalesce(previous.run_index,
+               previous.byte_offset,previous.byte_length,fragment.run_index,fragment.byte_offset)){
+            previous.byte_length=static_cast<uint16_t>(combined);
+            previous.width=static_cast<int16_t>(previous.width+fragment.width);
+            return true;
+        }
+    }
+    if(_line_layout.size()>=NomadNet::DocumentParser::MAX_RUNS_PER_LINE)return false;
+    _line_layout.push_back(fragment);
+    return true;
+}
+
+bool NomadNetScreen::commit_line(int32_t line_y,int16_t line_height,
+                                 NomadNet::Alignment alignment,int16_t indent,
+                                 int16_t available,int32_t window_top,
+                                 int32_t window_bottom){
+    if(_line_layout.empty())return true;
+    int16_t line_width=0;
+    for(const auto& fragment:_line_layout)
+        line_width=std::max<int16_t>(line_width,fragment.x+fragment.width-indent);
+    const int16_t shift=alignment==NomadNet::Alignment::CENTER?(available-line_width)/2:
+        alignment==NomadNet::Alignment::RIGHT?available-line_width:0;
+    if(line_y+line_height>=window_top&&line_y<window_bottom){
+        for(auto fragment:_line_layout){
+            if(_page_layout.size()>=MAX_WINDOW_FRAGMENTS)return false;
+            if(shift>0)fragment.x=static_cast<int16_t>(fragment.x+shift);
+            const int32_t relative_y=line_y-window_top;
+            if(relative_y<INT16_MIN||relative_y>INT16_MAX)return false;
+            fragment.y=static_cast<int16_t>(relative_y);
+            _page_layout.push_back(fragment);
+        }
+    }
+    _line_layout.clear();
+    return true;
+}
+
+bool NomadNetScreen::layout_from(std::size_t start_block,int32_t start_y,
+                                 int32_t window_top,int32_t window_bottom,
+                                 bool build_index){
     constexpr int16_t width=304;
-    int16_t y=0;
-    bool content_remaining=false;
-    for(std::size_t block_index=0;block_index<_page.blocks().size();++block_index){
-        if(_page_layout.size()>=content_fragment_limit){
-            content_remaining=std::any_of(_page.blocks().begin()+block_index,_page.blocks().end(),
-                [](const NomadNet::CompactPage::BlockRecord& candidate){
-                    return NomadNet::block_has_layout_content(candidate.type,candidate.run_count);
-                });
-            break;
+    int32_t y=start_y;
+    for(std::size_t block_index=start_block;block_index<_page.blocks().size();++block_index){
+        if(!build_index&&y>=window_bottom)break;
+        if(build_index){
+            if(_layout_checkpoints.size()>=NomadNet::CompactPage::MAX_BLOCKS)return false;
+            _layout_checkpoints.push_back(LayoutCheckpoint{
+                static_cast<uint16_t>(block_index),y});
         }
         const auto& block=_page.blocks()[block_index];
         if(block.type==NomadNet::BlockType::DIVIDER){
-            _page_layout.push_back(LayoutFragment(0,0,0,-1,0,y,width,1,true));y+=9;continue;
+            if(y+1>=window_top&&y<window_bottom){
+                if(_page_layout.size()>=MAX_WINDOW_FRAGMENTS)return false;
+                _page_layout.push_back(LayoutFragment(0,0,0,-1,0,
+                    static_cast<int16_t>(y-window_top),width,1,true));
+            }
+            y+=9;continue;
         }
         if(block.run_count==0)continue;
         const int16_t indent=block.type==NomadNet::BlockType::HEADING?0:
@@ -384,20 +464,9 @@ bool NomadNetScreen::layout_page(){
         const int16_t available=width-indent;
         int16_t x=indent;
         int16_t line_h=16;
-        std::size_t line_first=_page_layout.size();
-        int16_t line_y=y;
-        auto align_line=[&](std::size_t begin,std::size_t end,int16_t current_y){
-            if(begin>=end||block.alignment==NomadNet::Alignment::LEFT)return;
-            int16_t line_width=0;
-            for(std::size_t i=begin;i<end;++i)if(_page_layout[i].y==current_y)
-                line_width=std::max<int16_t>(line_width,_page_layout[i].x+_page_layout[i].width-indent);
-            const int16_t shift=block.alignment==NomadNet::Alignment::CENTER
-                ?(available-line_width)/2:available-line_width;
-            if(shift>0)for(std::size_t i=begin;i<end;++i)
-                if(_page_layout[i].y==current_y)_page_layout[i].x+=shift;
-        };
+        int32_t line_y=y;
+        _line_layout.clear();
         for(uint16_t r=0;r<block.run_count&&block.first_run+r<_page.runs().size();++r){
-            if(_page_layout.size()>=content_fragment_limit){content_remaining=true;break;}
             const uint16_t run_index=static_cast<uint16_t>(block.first_run+r);
             const auto& run=_page.runs()[run_index];
             const auto text=_page.text(run);
@@ -407,7 +476,6 @@ bool NomadNetScreen::layout_page(){
             line_h=std::max(line_h,height);
             std::size_t offset=0;
             while(offset<text.size()){
-                if(_page_layout.size()>=content_fragment_limit){content_remaining=true;break;}
                 std::size_t end=offset;
                 const bool whitespace=text[offset]==' '||text[offset]=='\t';
                 while(end<text.size()&&((text[end]==' '||text[end]=='\t')==whitespace)&&end-offset<255)++end;
@@ -416,8 +484,9 @@ bool NomadNetScreen::layout_page(){
                     static_cast<uint32_t>(end-offset),font,0,LV_TEXT_FLAG_NONE));
                 if(whitespace&&x+fragment_w>indent+available){offset=end;continue;}
                 if(!whitespace&&x>indent&&x+fragment_w>indent+available){
-                    align_line(line_first,_page_layout.size(),line_y);
-                    y+=line_h;x=indent;line_h=height;line_first=_page_layout.size();line_y=y;
+                    if(!commit_line(line_y,line_h,block.alignment,indent,available,
+                                    window_top,window_bottom))return false;
+                    y+=line_h;x=indent;line_h=height;line_y=y;
                 }
                 if(fragment_w>available){
                     end=offset;
@@ -434,51 +503,82 @@ bool NomadNetScreen::layout_page(){
                     }
                 }
                 if(!(whitespace&&x==indent)){
-                    _page_layout.push_back(LayoutFragment(run_index,static_cast<uint16_t>(offset),
-                        static_cast<uint16_t>(end-offset),run.link_index,x,y,fragment_w,height,false,
-                        large));
+                    if(run.link_index>=0&&static_cast<std::size_t>(run.link_index)<_link_y.size()){
+                        if(_link_y[run.link_index]<0)_link_y[run.link_index]=line_y;
+                        _link_bottom[run.link_index]=std::max(_link_bottom[run.link_index],line_y+height);
+                    }
+                    if(!append_line_fragment(LayoutFragment(run_index,static_cast<uint16_t>(offset),
+                        static_cast<uint16_t>(end-offset),run.link_index,x,0,fragment_w,height,false,
+                        large)))return false;
                     x=static_cast<int16_t>(x+fragment_w);
                 }
                 offset=end;
             }
-            if(content_remaining)break;
         }
-        align_line(line_first,_page_layout.size(),line_y);
+        if(!commit_line(line_y,line_h,block.alignment,indent,available,
+                        window_top,window_bottom))return false;
         y+=line_h+3;
-        if(content_remaining)break;
     }
-    if(NomadNet::layout_content_truncated(_page_layout.size(),content_fragment_limit,
-                                         content_remaining)){
-        const std::string layout_notice="[Page layout truncated: "+
-            std::to_string(content_fragment_limit)+" fragments]";
-        if(!_page.append_notice(layout_notice))return false;
-        const uint16_t notice_run_index=static_cast<uint16_t>(_page.runs().size()-1);
-        _page_layout.erase(std::remove_if(_page_layout.begin(),_page_layout.end(),
-            [notice_run_index](const LayoutFragment& fragment){
-                return !fragment.divider&&fragment.run_index>=notice_run_index;
-            }),_page_layout.end());
-        const auto notice=_page.text(_page.runs()[notice_run_index]);
-        const int16_t notice_width=static_cast<int16_t>(std::min<lv_coord_t>(304,
-            lv_txt_get_width(notice.data(),static_cast<uint32_t>(notice.size()),
-                &nomadnet_font_12,0,LV_TEXT_FLAG_NONE)));
-        _page_layout.push_back(LayoutFragment(notice_run_index,0,
-            static_cast<uint16_t>(notice.size()),-1,0,y,notice_width,19,false));
-        y+=22;
-    }
-    _page_height=std::max<int32_t>(y,lv_obj_get_content_height(_content));
+    if(build_index)_page_height=std::max<int32_t>(y,lv_obj_get_content_height(_content));
     return true;
+}
+
+bool NomadNetScreen::layout_window(int32_t logical_scroll){
+    const int32_t viewport=std::max<int32_t>(1,lv_obj_get_content_height(_content));
+    const int32_t window_top=NomadNet::VirtualViewport::window_top(logical_scroll,viewport);
+    const int32_t window_bottom=NomadNet::VirtualViewport::window_bottom(
+        logical_scroll,viewport,_page_height);
+    if(window_top==_layout_window_top&&window_bottom==_layout_window_bottom)return true;
+    std::size_t start_block=0;
+    int32_t start_y=0;
+    for(const auto& checkpoint:_layout_checkpoints){
+        if(checkpoint.y>window_top)break;
+        start_block=checkpoint.block_index;
+        start_y=checkpoint.y;
+    }
+    _page_layout.clear();
+    if(!layout_from(start_block,start_y,window_top,window_bottom,false))return false;
+    _layout_window_top=window_top;
+    _layout_window_bottom=window_bottom;
+    return true;
+}
+
+int32_t NomadNetScreen::logical_scroll_from_widget()const{
+    return NomadNet::VirtualViewport::logical_from_physical(
+        lv_obj_get_scroll_y(_content),_page_height,
+        lv_obj_get_content_height(_content),_physical_extent);
+}
+
+void NomadNetScreen::scroll_to_logical(int32_t logical,lv_anim_enable_t animation){
+    const int32_t viewport=std::max<int32_t>(1,lv_obj_get_content_height(_content));
+    const int32_t logical_max=std::max<int32_t>(0,_page_height-viewport);
+    const int32_t target=std::max<int32_t>(0,std::min(logical,logical_max));
+    const int32_t physical=NomadNet::VirtualViewport::physical_from_logical(
+        target,_page_height,viewport,_physical_extent);
+    if(animation==LV_ANIM_OFF){
+        _logical_scroll=target;
+        layout_window(_logical_scroll);
+    }
+    lv_obj_scroll_to_y(_content,physical,animation);
+    lv_obj_invalidate(_content);
 }
 
 void NomadNetScreen::draw_page(lv_event_t* event){
     auto* draw_ctx=lv_event_get_draw_ctx(event);
-    const int16_t scroll=lv_obj_get_scroll_y(_content);
-    const int16_t top=_content->coords.y1+lv_obj_get_style_pad_top(_content,0);
-    const int16_t left=_content->coords.x1+lv_obj_get_style_pad_left(_content,0);
+    lv_area_t content_area;
+    lv_obj_get_content_coords(_content,&content_area);
+    lv_area_t content_clip;
+    if(!_lv_area_intersect(&content_clip,draw_ctx->clip_area,&content_area))return;
+    const lv_area_t* original_clip=draw_ctx->clip_area;
+    draw_ctx->clip_area=&content_clip;
+    const int16_t top=content_area.y1;
+    const int16_t left=content_area.x1;
     char scratch[256];
     for(const auto& fragment:_page_layout){
-        const int16_t draw_y=static_cast<int16_t>(top+fragment.y-scroll);
+        const int32_t logical_y=_layout_window_top+fragment.y;
+        const int32_t draw_y=top+logical_y-_logical_scroll;
         if(draw_y+fragment.height<_content->coords.y1||draw_y>_content->coords.y2)continue;
-        lv_area_t area{static_cast<lv_coord_t>(left+fragment.x),draw_y,
+        lv_area_t area{static_cast<lv_coord_t>(left+fragment.x),static_cast<lv_coord_t>(draw_y),
             static_cast<lv_coord_t>(left+fragment.x+std::max<int16_t>(fragment.width,1)-1),
             static_cast<lv_coord_t>(draw_y+std::max<int16_t>(fragment.height,1)-1)};
         if(fragment.divider){lv_draw_rect_dsc_t dsc;lv_draw_rect_dsc_init(&dsc);dsc.bg_color=Theme::border();lv_draw_rect(draw_ctx,&dsc,&area);continue;}
@@ -500,9 +600,9 @@ void NomadNetScreen::draw_page(lv_event_t* event){
     if(_selected_link>=0){
         NomadNet::for_each_focus_span(_page_layout,_selected_link,[&](const NomadNet::FocusSpan& span){
             if(span.run_index>=_page.runs().size())return;
-            const int16_t draw_y=static_cast<int16_t>(top+span.y-scroll);
+            const int32_t draw_y=top+_layout_window_top+span.y-_logical_scroll;
             if(draw_y+span.height<_content->coords.y1||draw_y>_content->coords.y2)return;
-            lv_area_t area{static_cast<lv_coord_t>(left+span.x),draw_y,
+            lv_area_t area{static_cast<lv_coord_t>(left+span.x),static_cast<lv_coord_t>(draw_y),
                 static_cast<lv_coord_t>(left+span.x+std::max<int16_t>(span.width,1)-1),
                 static_cast<lv_coord_t>(draw_y+std::max<int16_t>(span.height,1)-1)};
             lv_draw_rect_dsc_t focus;lv_draw_rect_dsc_init(&focus);focus.bg_opa=LV_OPA_TRANSP;
@@ -511,30 +611,28 @@ void NomadNetScreen::draw_page(lv_event_t* event){
             focus.border_width=1;lv_draw_rect(draw_ctx,&focus,&area);
         });
     }
+    draw_ctx->clip_area=original_clip;
 }
 
 void NomadNetScreen::select_link(int direction){
     if(_page.links().empty()){
-        const int next=std::max(0,lv_obj_get_scroll_y(_content)+direction*40);
-        lv_obj_scroll_to_y(_content,next,LV_ANIM_ON);
+        scroll_to_logical(_logical_scroll+direction*40,LV_ANIM_ON);
         return;
     }
     const int count=static_cast<int>(_page.links().size());
     int candidate=_selected_link;
     for(int attempt=0;attempt<count;++attempt){
         candidate=candidate<0?(direction>=0?0:count-1):(candidate+direction+count)%count;
-        bool rendered=false;
-        for(const auto& fragment:_page_layout)if(fragment.link_index==candidate){rendered=true;break;}
-        if(rendered){_selected_link=candidate;break;}
+        const bool laid_out=static_cast<std::size_t>(candidate)<_link_y.size()&&_link_y[candidate]>=0;
+        if(laid_out){_selected_link=candidate;break;}
     }
     if(_selected_link<0)return;
-    for(const auto& fragment:_page_layout)if(fragment.link_index==_selected_link){
-        const int top=fragment.y;const int bottom=fragment.y+fragment.height;
-        const int scroll=lv_obj_get_scroll_y(_content);const int visible=lv_obj_get_content_height(_content);
-        if(top<scroll)lv_obj_scroll_to_y(_content,top,LV_ANIM_ON);
-        else if(bottom>scroll+visible)lv_obj_scroll_to_y(_content,bottom-visible,LV_ANIM_ON);
-        break;
-    }
+    const int32_t link_top=_link_y[_selected_link];
+    const int32_t link_bottom=_link_bottom[_selected_link];
+    const int32_t visible=lv_obj_get_content_height(_content);
+    if(link_top<_logical_scroll)scroll_to_logical(link_top,LV_ANIM_ON);
+    else if(link_bottom>_logical_scroll+visible)
+        scroll_to_logical(link_bottom-visible,LV_ANIM_ON);
     lv_obj_invalidate(_content);
 }
 
@@ -549,7 +647,12 @@ void NomadNetScreen::page_event(lv_event_t* event){
     auto* self=static_cast<NomadNetScreen*>(lv_event_get_user_data(event));
     const auto code=lv_event_get_code(event);
     if(code==LV_EVENT_DRAW_MAIN)self->draw_page(event);
-    else if(code==LV_EVENT_GET_SELF_SIZE){auto* size=static_cast<lv_point_t*>(lv_event_get_param(event));size->y=std::max<lv_coord_t>(size->y,self->_page_height);}
+    else if(code==LV_EVENT_GET_SELF_SIZE){auto* size=static_cast<lv_point_t*>(lv_event_get_param(event));size->y=std::max<lv_coord_t>(size->y,static_cast<lv_coord_t>(self->_physical_extent));}
+    else if(code==LV_EVENT_SCROLL){
+        self->_logical_scroll=self->logical_scroll_from_widget();
+        if(!self->layout_window(self->_logical_scroll))self->set_status("Page viewport could not be retained");
+        lv_obj_invalidate(self->_content);
+    }
     else if(code==LV_EVENT_FOCUSED){
         auto* group=static_cast<lv_group_t*>(lv_obj_get_group(self->_content));
         if(group)lv_group_set_editing(group,true);
@@ -571,10 +674,19 @@ void NomadNetScreen::page_event(lv_event_t* event){
     else if(code==LV_EVENT_CLICKED){
         auto* indev=lv_indev_get_act();
         if(!indev||lv_indev_get_type(indev)!=LV_INDEV_TYPE_POINTER)return;
-        lv_point_t point;lv_indev_get_point(indev,&point);const int scroll=lv_obj_get_scroll_y(self->_content);
-        const int x=point.x-self->_content->coords.x1-lv_obj_get_style_pad_left(self->_content,0);
-        const int y=point.y-self->_content->coords.y1-lv_obj_get_style_pad_top(self->_content,0)+scroll;
-        for(const auto& fragment:self->_page_layout)if(fragment.link_index>=0&&x>=fragment.x&&x<fragment.x+fragment.width&&y>=fragment.y&&y<fragment.y+fragment.height){self->_selected_link=fragment.link_index;self->activate_selected_link();break;}
+        lv_point_t point;lv_indev_get_point(indev,&point);
+        lv_area_t content_area;
+        lv_obj_get_content_coords(self->_content,&content_area);
+        if(!_lv_area_is_point_on(&content_area,&point,0))return;
+        const int x=point.x-content_area.x1;
+        const int32_t y=point.y-content_area.y1+self->_logical_scroll;
+        for(const auto& fragment:self->_page_layout){
+            const int32_t fragment_y=self->_layout_window_top+fragment.y;
+            if(fragment.link_index>=0&&x>=fragment.x&&x<fragment.x+fragment.width&&
+               y>=fragment_y&&y<fragment_y+fragment.height){
+                self->_selected_link=fragment.link_index;self->activate_selected_link();break;
+            }
+        }
     }
 }
 void NomadNetScreen::show(){
