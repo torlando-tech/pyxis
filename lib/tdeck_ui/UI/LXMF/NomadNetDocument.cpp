@@ -133,7 +133,7 @@ void parse_inline(Document& doc, Block& block, const std::string& line, Style& s
             text.push_back(line[i + 1]); i += 2; continue;
         }
         if (line[i] != '`') { text.push_back(line[i++]); continue; }
-        if (i + 1 >= line.size()) { text.push_back('`'); ++i; continue; }
+        if (i + 1 >= line.size()) { ++i; continue; }
         add_run(doc, block, text, style);
         const char command = line[i + 1];
         i += 2;
@@ -192,8 +192,18 @@ void parse_inline(Document& doc, Block& block, const std::string& line, Style& s
             } else doc.mark_truncated(TruncationReason::LINKS);
             i = close + 1;
         } else {
-            // Unknown modifiers are harmless and visible rather than commands.
-            text.push_back('`'); text.push_back(command);
+            const auto lead = static_cast<unsigned char>(command);
+            const std::size_t continuation_count =
+                lead >= 0xc2 && lead <= 0xdf ? 1 :
+                lead >= 0xe0 && lead <= 0xef ? 2 :
+                lead >= 0xf0 && lead <= 0xf4 ? 3 : 0;
+            std::size_t consumed = 0;
+            while (consumed < continuation_count && i < line.size()) {
+                const auto next = static_cast<unsigned char>(line[i]);
+                if ((next & 0xc0) != 0x80) break;
+                ++i;
+                ++consumed;
+            }
         }
     }
     add_run(doc, block, text, style);

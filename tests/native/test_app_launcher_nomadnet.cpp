@@ -148,6 +148,42 @@ int main(int argc, char** argv) {
     check("downloads explicitly unsupported", !Url::parse("0123456789abcdef0123456789abcdef:/file/x", url, error));
 
     DocumentParser parser;
+    auto block_text = [](const UI::LXMF::NomadNet::Block& block) {
+        std::string value;
+        for (const auto& run : block.runs) value += run.text;
+        return value;
+    };
+    auto unknown_modifier = parser.parse("before `xafter");
+    check("unknown modifier is consumed like canonical NomadNet",
+          unknown_modifier.blocks.size() == 1 && block_text(unknown_modifier.blocks[0]) == "before after");
+
+    auto trailing_introducer = parser.parse("before `");
+    check("trailing formatting introducer is consumed",
+          trailing_introducer.blocks.size() == 1 && block_text(trailing_introducer.blocks[0]) == "before ");
+
+    auto escaped_backtick = parser.parse("before \\`after");
+    check("escaped backtick remains visible",
+          escaped_backtick.blocks.size() == 1 && block_text(escaped_backtick.blocks[0]) == "before `after");
+
+    auto consecutive_unknown = parser.parse("`x`ytext");
+    check("consecutive unknown modifiers are consumed independently",
+          consecutive_unknown.blocks.size() == 1 && block_text(consecutive_unknown.blocks[0]) == "text");
+
+    auto unicode_unknown = parser.parse(u8"`§two `☃three `🙂four");
+    check("unknown Unicode modifiers consume one complete codepoint",
+          unicode_unknown.blocks.size() == 1 && block_text(unicode_unknown.blocks[0]) == "two three four");
+
+    auto unknown_then_bold = parser.parse("`x`!bold`! plain");
+    bool unknown_preserves_formatting = false;
+    if (unknown_then_bold.blocks.size() == 1) {
+        for (const auto& run : unknown_then_bold.blocks[0].runs) {
+            if (run.text == "bold" && run.bold) unknown_preserves_formatting = true;
+        }
+    }
+    check("unknown modifier does not change formatting state",
+          unknown_then_bold.blocks.size() == 1 && block_text(unknown_then_bold.blocks[0]) == "bold plain" &&
+              unknown_preserves_formatting);
+
     auto doc = parser.parse(
         "#!c=60\n#!bg=123\n#!fg=abcdef\n>> Heading\n"
         "ordinary `!bold`! `*italic`* `_under`_ `Ff00red`f `B0f0back`b `ccentre\n"
