@@ -36,6 +36,7 @@ struct Block {
     BlockType type = BlockType::TEXT;
     uint8_t depth = 0;
     Alignment alignment = Alignment::LEFT;
+    uint32_t divider_codepoint = 0x2500;
     std::vector<Run> runs;
 };
 

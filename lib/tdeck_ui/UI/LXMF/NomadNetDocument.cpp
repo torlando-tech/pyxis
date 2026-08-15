@@ -31,6 +31,34 @@ bool valid_utf8(const std::string& value) {
     return true;
 }
 
+bool first_codepoint(const std::string& value, std::size_t offset,
+                     uint32_t& codepoint, std::size_t& length) {
+    if (offset >= value.size()) return false;
+    const uint8_t lead = static_cast<uint8_t>(value[offset]);
+    if (lead <= 0x7f) {
+        codepoint = lead;
+        length = 1;
+        return true;
+    }
+    std::size_t continuation = 0;
+    if (lead >= 0xc2 && lead <= 0xdf) {
+        codepoint = lead & 0x1f;
+        continuation = 1;
+    } else if (lead >= 0xe0 && lead <= 0xef) {
+        codepoint = lead & 0x0f;
+        continuation = 2;
+    } else if (lead >= 0xf0 && lead <= 0xf4) {
+        codepoint = lead & 0x07;
+        continuation = 3;
+    } else return false;
+    length = continuation + 1;
+    if (offset + length > value.size()) return false;
+    for (std::size_t i = 1; i <= continuation; ++i)
+        codepoint = (codepoint << 6) |
+            (static_cast<uint8_t>(value[offset + i]) & 0x3f);
+    return true;
+}
+
 bool color(const std::string& value, uint32_t& result) {
     if (value.size() != 3 && value.size() != 6) return false;
     if (!std::all_of(value.begin(), value.end(), [](unsigned char c) { return std::isxdigit(c); })) return false;
@@ -264,6 +292,12 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
             parse_inline(doc, block, line.substr(depth), style);
         } else if (line[0] == '-') {
             block.type = BlockType::DIVIDER;
+            uint32_t codepoint = 0;
+            std::size_t codepoint_bytes = 0;
+            if (first_codepoint(line, 1, codepoint, codepoint_bytes) &&
+                line.size() == 1 + codepoint_bytes && codepoint >= 32) {
+                block.divider_codepoint = codepoint;
+            }
         } else if (line.rfind("`t", 0) == 0 || line.rfind("`{", 0) == 0 || line.find("`<") != std::string::npos) {
             block.type = BlockType::UNSUPPORTED;
             Run run;

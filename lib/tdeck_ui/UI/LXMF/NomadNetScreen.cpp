@@ -451,12 +451,15 @@ bool NomadNetScreen::layout_from(std::size_t start_block,int32_t start_y,
         }
         const auto& block=_page.blocks()[block_index];
         if(block.type==NomadNet::BlockType::DIVIDER){
-            if(y+1>=window_top&&y<window_bottom){
+            const int16_t divider_height=static_cast<int16_t>(nomadnet_font_12.line_height);
+            if(y+divider_height>=window_top&&y<window_bottom){
                 if(_page_layout.size()>=MAX_WINDOW_FRAGMENTS)return false;
-                _page_layout.push_back(LayoutFragment(0,0,0,-1,0,
-                    static_cast<int16_t>(y-window_top),width,1,true));
+                LayoutFragment divider(0,0,0,-1,0,
+                    static_cast<int16_t>(y-window_top),width,divider_height,true);
+                divider.divider_codepoint=block.divider_codepoint;
+                _page_layout.push_back(divider);
             }
-            y+=9;continue;
+            y+=divider_height;continue;
         }
         if(block.run_count==0)continue;
         const int16_t indent=block.type==NomadNet::BlockType::HEADING?0:
@@ -581,7 +584,22 @@ void NomadNetScreen::draw_page(lv_event_t* event){
         lv_area_t area{static_cast<lv_coord_t>(left+fragment.x),static_cast<lv_coord_t>(draw_y),
             static_cast<lv_coord_t>(left+fragment.x+std::max<int16_t>(fragment.width,1)-1),
             static_cast<lv_coord_t>(draw_y+std::max<int16_t>(fragment.height,1)-1)};
-        if(fragment.divider){lv_draw_rect_dsc_t dsc;lv_draw_rect_dsc_init(&dsc);dsc.bg_color=Theme::border();lv_draw_rect(draw_ctx,&dsc,&area);continue;}
+        if(fragment.divider){
+            const std::size_t bytes=NomadNet::display_codepoint(fragment.divider_codepoint,scratch);
+            const lv_font_t* font=&nomadnet_font_12;
+            const int16_t glyph_width=static_cast<int16_t>(lv_txt_get_width(
+                scratch,static_cast<uint32_t>(bytes),font,0,LV_TEXT_FLAG_NONE));
+            if(glyph_width>0){
+                lv_draw_label_dsc_t dsc;lv_draw_label_dsc_init(&dsc);
+                dsc.font=font;dsc.color=Theme::border();dsc.letter_space=0;
+                for(int16_t x=0;x<fragment.width;x=static_cast<int16_t>(x+glyph_width)){
+                    lv_area_t glyph_area{static_cast<lv_coord_t>(area.x1+x),area.y1,
+                        static_cast<lv_coord_t>(std::min<int32_t>(area.x1+x+glyph_width-1,area.x2)),area.y2};
+                    lv_draw_label(draw_ctx,&dsc,&glyph_area,scratch,nullptr);
+                }
+            }
+            continue;
+        }
         if(fragment.run_index>=_page.runs().size())continue;
         const auto& run=_page.runs()[fragment.run_index];
         const auto text=_page.text(run);

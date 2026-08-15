@@ -89,6 +89,7 @@ bool CompactPage::assign(const Document& document) {
             block.type = source_block.type;
             block.depth = source_block.depth;
             block.alignment = source_block.alignment;
+            block.divider_codepoint = source_block.divider_codepoint;
             for (const auto& source_run : source_block.runs) {
                 if (_runs.size() >= run_limit || block.run_count == std::numeric_limits<uint16_t>::max()) {
                     _truncated = true;

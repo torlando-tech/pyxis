@@ -133,6 +133,8 @@ def test_nomadnet_page_body_uses_one_compact_custom_viewport():
     assert "lv_label_create(_content)" not in set_page
     assert "LV_EVENT_DRAW_MAIN" in screen
     assert "lv_draw_label(" in screen
+    assert "divider_height=static_cast<int16_t>(nomadnet_font_12.line_height)" in screen
+    assert "divider_height=16" not in screen
     assert "commit_line" in screen
     assert "NomadNet::truncation_notice(document)" in set_page
     assert "if(!_page.append_notice(notice))" in set_page

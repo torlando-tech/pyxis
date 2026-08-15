@@ -30,6 +30,7 @@ using UI::LXMF::NomadNet::DocumentParser;
 using UI::LXMF::NomadNet::compact_address;
 using UI::LXMF::NomadNet::PageHistory;
 using UI::LXMF::NomadNet::display_text;
+using UI::LXMF::NomadNet::display_codepoint;
 using UI::LXMF::NomadNet::Library;
 using UI::LXMF::NomadNet::ActionMailbox;
 using UI::LXMF::NomadNet::UserAction;
@@ -346,8 +347,37 @@ int main(int argc, char** argv) {
           std::string(link_fields_page.target(0).data(), link_fields_page.target(0).size()) ==
               ":/page/search.mu`q=pyxis");
     check("divider parsed", doc.blocks[3].type == BlockType::DIVIDER);
+    auto divider_doc = parser.parse("-\n-=\n-\x01\n-long\n-─\n-═\n-║\n-🙂");
+    check("canonical divider forms parse as bounded divider metadata",
+          divider_doc.blocks.size() == 8 &&
+              std::all_of(divider_doc.blocks.begin(), divider_doc.blocks.end(),
+                          [](const auto& block) { return block.type == BlockType::DIVIDER; }));
+    check("default and control-character dividers use the canonical line glyph",
+          divider_doc.blocks[0].divider_codepoint == 0x2500 &&
+              divider_doc.blocks[2].divider_codepoint == 0x2500);
+    check("exactly two-character divider forms preserve the authored character",
+          divider_doc.blocks[1].divider_codepoint == '=' &&
+          divider_doc.blocks[4].divider_codepoint == 0x2500 &&
+          divider_doc.blocks[5].divider_codepoint == 0x2550 &&
+          divider_doc.blocks[6].divider_codepoint == 0x2551 &&
+          divider_doc.blocks[7].divider_codepoint == 0x1f642);
+    check("long divider lines retain canonical default-glyph behavior",
+          divider_doc.blocks[3].divider_codepoint == 0x2500);
+    CompactPage divider_page;
+    check("compact page preserves divider glyph metadata without text runs",
+          divider_page.assign(divider_doc) && divider_page.runs().empty() &&
+              divider_page.blocks().size() == divider_doc.blocks.size() &&
+              divider_page.blocks()[1].divider_codepoint == '=' &&
+              divider_page.blocks()[5].divider_codepoint == 0x2550);
+    char divider_utf8[5]{};
+    const std::size_t divider_bytes = display_codepoint(0x2550, divider_utf8);
+    check("supported authored divider glyph is encoded for bounded drawing",
+          divider_bytes == 3 && std::string(divider_utf8, divider_bytes) == "═");
+    const std::size_t fallback_bytes = display_codepoint(0x1f642, divider_utf8);
+    check("unsupported authored divider glyph uses the display fallback",
+          fallback_bytes == 1 && divider_utf8[0] == '?');
     check("literal mode suppresses formatting", doc.blocks[4].runs.size() == 1 &&
-                                                 doc.blocks[4].runs[0].text == "`!literal");
+                                                  doc.blocks[4].runs[0].text == "`!literal");
     bool saw_unsupported = false;
     for (const auto& block : doc.blocks) saw_unsupported = saw_unsupported || block.type == BlockType::UNSUPPORTED;
     check("unsupported structured content has fallback", doc.unsupported && saw_unsupported);

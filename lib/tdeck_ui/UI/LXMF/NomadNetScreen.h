@@ -50,6 +50,7 @@ private:
         int16_t y = 0;
         int16_t width = 0;
         int16_t height = 0;
+        uint32_t divider_codepoint = 0x2500;
         bool divider = false;
         bool large_font = false;
         LayoutFragment() = default;

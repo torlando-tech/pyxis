@@ -57,6 +57,33 @@ bool decode_utf8(const std::string& value, std::size_t offset,
 
 } // namespace
 
+std::size_t display_codepoint(uint32_t codepoint, char utf8[5]) {
+    if (!nomadnet_font_has_codepoint(codepoint) || codepoint > 0x10ffff ||
+        (codepoint >= 0xd800 && codepoint <= 0xdfff)) {
+        utf8[0] = '?';
+        utf8[1] = '\0';
+        return 1;
+    }
+    std::size_t length = 0;
+    if (codepoint <= 0x7f) {
+        utf8[length++] = static_cast<char>(codepoint);
+    } else if (codepoint <= 0x7ff) {
+        utf8[length++] = static_cast<char>(0xc0 | (codepoint >> 6));
+        utf8[length++] = static_cast<char>(0x80 | (codepoint & 0x3f));
+    } else if (codepoint <= 0xffff) {
+        utf8[length++] = static_cast<char>(0xe0 | (codepoint >> 12));
+        utf8[length++] = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f));
+        utf8[length++] = static_cast<char>(0x80 | (codepoint & 0x3f));
+    } else {
+        utf8[length++] = static_cast<char>(0xf0 | (codepoint >> 18));
+        utf8[length++] = static_cast<char>(0x80 | ((codepoint >> 12) & 0x3f));
+        utf8[length++] = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f));
+        utf8[length++] = static_cast<char>(0x80 | (codepoint & 0x3f));
+    }
+    utf8[length] = '\0';
+    return length;
+}
+
 void visit_display_text(const std::string& utf8, DisplayTextVisitor visitor, void* context) {
     static const char replacement = '?';
     for (std::size_t offset = 0; offset < utf8.size();) {
