@@ -377,11 +377,19 @@ int main(int argc, char** argv) {
     auto huge_doc = parser.parse(huge);
     check("document bytes capped and truncation propagated", huge_doc.truncated &&
                                                              huge_doc.source_bytes == DocumentParser::MAX_DOCUMENT_BYTES);
+    check("document byte truncation reports its exact boundary",
+          huge_doc.has_truncation(UI::LXMF::NomadNet::TruncationReason::DOCUMENT_BYTES) &&
+          UI::LXMF::NomadNet::truncation_notice(huge_doc) ==
+              "[Page truncated: source exceeds 64 KiB]");
     check("parser never processes metadata beyond retained source", huge_doc.cache_seconds == 0);
     std::string long_line(DocumentParser::MAX_SOURCE_LINE_BYTES + 20, 'q');
     auto line_doc = parser.parse(long_line);
     check("source line capped", line_doc.truncated && !line_doc.blocks.empty() &&
                                 line_doc.blocks[0].runs[0].text.size() == DocumentParser::MAX_SOURCE_LINE_BYTES);
+    check("source line truncation reports its exact boundary",
+          line_doc.has_truncation(UI::LXMF::NomadNet::TruncationReason::SOURCE_LINE_BYTES) &&
+          UI::LXMF::NomadNet::truncation_notice(line_doc) ==
+              "[Page truncated: line exceeds 4096 bytes]");
     auto utf8_boundary = parser.parse(std::string(DocumentParser::MAX_SOURCE_LINE_BYTES - 1, 'x') + "\xe2\x82\xac");
     check("line truncation preserves UTF-8 boundaries", utf8_boundary.truncated && !utf8_boundary.malformed &&
                                                         utf8_boundary.blocks[0].runs[0].text.size() ==
@@ -389,26 +397,115 @@ int main(int argc, char** argv) {
     auto blank_lines = parser.parse("one\n\nthree\n");
     check("blank lines preserve vertical structure", blank_lines.blocks.size() == 4 &&
                                                       blank_lines.blocks[1].runs[0].text == " ");
+    std::string many_blocks;
+    for (std::size_t i = 0; i < DocumentParser::MAX_BLOCKS + 1; ++i) many_blocks += "\n";
+    auto blocks_doc = parser.parse(many_blocks);
+    check("block truncation reports its exact boundary",
+          blocks_doc.has_truncation(UI::LXMF::NomadNet::TruncationReason::BLOCKS) &&
+          UI::LXMF::NomadNet::truncation_notice(blocks_doc) ==
+              "[Page truncated: more than 1024 blocks]");
+    CompactPage blocks_page;
+    check("block-limit page reserves room for its truncation notice",
+          blocks_page.assign(blocks_doc) &&
+          blocks_page.append_notice(UI::LXMF::NomadNet::truncation_notice(blocks_doc)) &&
+          blocks_page.blocks().size() <= CompactPage::MAX_BLOCKS &&
+          blocks_page.runs().size() <= CompactPage::MAX_RUNS);
     std::string many_lines;
-    for (std::size_t i = 0; i < DocumentParser::MAX_SOURCE_LINES + 50; ++i) many_lines += "x\n";
+    for (std::size_t i = 0; i < DocumentParser::MAX_SOURCE_LINES + 50; ++i) many_lines += "#\n";
     auto lines_doc = parser.parse(many_lines);
     check("source line count capped", lines_doc.truncated &&
                                       lines_doc.source_lines <= DocumentParser::MAX_SOURCE_LINES);
+    check("source line-count truncation reports its exact boundary",
+          lines_doc.has_truncation(UI::LXMF::NomadNet::TruncationReason::SOURCE_LINES) &&
+          UI::LXMF::NomadNet::truncation_notice(lines_doc) ==
+              "[Page truncated: more than 4096 lines]");
     std::string many_runs;
     for (std::size_t i = 0; i < DocumentParser::MAX_RUNS_PER_LINE + 20; ++i) many_runs += "x`!";
     auto runs_doc = parser.parse(many_runs);
     check("runs per line capped", runs_doc.truncated &&
                                     runs_doc.blocks[0].runs.size() == DocumentParser::MAX_RUNS_PER_LINE);
+    check("per-line run truncation reports its exact boundary",
+          runs_doc.has_truncation(UI::LXMF::NomadNet::TruncationReason::RUNS_PER_LINE) &&
+          UI::LXMF::NomadNet::truncation_notice(runs_doc) ==
+              "[Page truncated: more than 128 styles on one line]");
     std::string global_runs;
     for (std::size_t i = 0; i < DocumentParser::MAX_TOTAL_RUNS; ++i) global_runs += "a`!b`!\n";
     auto global_runs_doc = parser.parse(global_runs);
     std::size_t retained_runs = 0;
     for (const auto& block : global_runs_doc.blocks) retained_runs += block.runs.size();
     check("runs are globally bounded", global_runs_doc.truncated && retained_runs <= DocumentParser::MAX_TOTAL_RUNS);
+    check("total-run truncation reports its exact boundary",
+          global_runs_doc.has_truncation(UI::LXMF::NomadNet::TruncationReason::TOTAL_RUNS) &&
+          UI::LXMF::NomadNet::truncation_notice(global_runs_doc) ==
+              "[Page truncated: more than 1024 styled runs]");
+    CompactPage runs_page;
+    check("run-limit page reserves room for its truncation notice",
+          runs_page.assign(global_runs_doc) &&
+          runs_page.append_notice(UI::LXMF::NomadNet::truncation_notice(global_runs_doc)) &&
+          runs_page.blocks().size() <= CompactPage::MAX_BLOCKS &&
+          runs_page.runs().size() <= CompactPage::MAX_RUNS);
+    std::string exact_blocks_and_runs;
+    for (std::size_t i = 0; i < DocumentParser::MAX_TOTAL_RUNS; ++i)
+        exact_blocks_and_runs += "x\n";
+    exact_blocks_and_runs += "# comment-only tail";
+    auto exact_doc = parser.parse(exact_blocks_and_runs);
+    check("comment tail does not falsely exceed exact block or run limits",
+          !exact_doc.truncated &&
+          !exact_doc.has_truncation(UI::LXMF::NomadNet::TruncationReason::BLOCKS) &&
+          !exact_doc.has_truncation(UI::LXMF::NomadNet::TruncationReason::TOTAL_RUNS));
+    std::string exact_runs_with_directive;
+    for (std::size_t i = 0; i < DocumentParser::MAX_TOTAL_RUNS; ++i)
+        exact_runs_with_directive += "x\n";
+    exact_runs_with_directive += "#!bg=fff";
+    auto directive_tail_doc = parser.parse(exact_runs_with_directive);
+    check("page directive after exact run limit is still applied",
+          !directive_tail_doc.truncated && directive_tail_doc.has_background &&
+          directive_tail_doc.background == 0xffffff);
+    std::string exact_runs_with_divider;
+    for (std::size_t i = 0; i < DocumentParser::MAX_TOTAL_RUNS / 2; ++i)
+        exact_runs_with_divider += "a`!b\n";
+    exact_runs_with_divider += "-";
+    auto divider_tail_doc = parser.parse(exact_runs_with_divider);
+    CompactPage divider_tail_page;
+    check("compact page retains divider after exact run limit",
+          !divider_tail_doc.truncated && divider_tail_page.assign(divider_tail_doc) &&
+          divider_tail_page.blocks().size() == divider_tail_doc.blocks.size() &&
+          !divider_tail_page.blocks().empty() &&
+          divider_tail_page.blocks().back().type == BlockType::DIVIDER);
+    check("run-cap notice eviction preserves trailing divider and record bounds",
+          divider_tail_page.append_notice("[Page layout truncated: 1023 fragments]") &&
+          divider_tail_page.blocks().size() >= 2 &&
+          divider_tail_page.blocks()[divider_tail_page.blocks().size() - 2].type ==
+              BlockType::DIVIDER &&
+          std::all_of(divider_tail_page.blocks().begin(), divider_tail_page.blocks().end(),
+              [&divider_tail_page](const CompactPage::BlockRecord& block) {
+                  return block.first_run <= divider_tail_page.runs().size() &&
+                      block.run_count <= divider_tail_page.runs().size() - block.first_run;
+              }));
+    CompactPage exact_page;
+    check("full valid compact page can replace tail content with a layout notice",
+          exact_page.assign(exact_doc) &&
+          exact_page.append_notice("[Page layout truncated: 1023 fragments]") &&
+          exact_page.blocks().size() <= CompactPage::MAX_BLOCKS &&
+          exact_page.runs().size() <= CompactPage::MAX_RUNS);
+    auto truncated_with_divider = parser.parse(
+        std::string(DocumentParser::MAX_SOURCE_LINE_BYTES + 1, 'q') + "\n-");
+    CompactPage truncated_divider_page;
+    check("appending notice preserves retained trailing divider",
+          truncated_with_divider.truncated && truncated_divider_page.assign(truncated_with_divider) &&
+          truncated_divider_page.append_notice(UI::LXMF::NomadNet::truncation_notice(
+              truncated_with_divider)) &&
+          truncated_divider_page.blocks().size() >= 2 &&
+          truncated_divider_page.blocks()[truncated_divider_page.blocks().size() - 2].type ==
+              BlockType::DIVIDER);
     std::string many_links;
     for (std::size_t i = 0; i < DocumentParser::MAX_LINKS + 10; ++i) many_links += "`[x`:/page/x]";
     auto links_doc = parser.parse(many_links);
     check("links are globally bounded", links_doc.truncated && links_doc.links.size() == DocumentParser::MAX_LINKS);
+    check("link truncation reports its exact boundary",
+          links_doc.has_truncation(UI::LXMF::NomadNet::TruncationReason::LINKS) &&
+          UI::LXMF::NomadNet::truncation_notice(links_doc) ==
+              "[Page truncated: more than 128 links]");
 
     auto malformed = parser.parse("#!c=not-a-number\n#!bg=xyz\n`F1broken\n[label`target\n`=\ntext");
     check("malformed micron remains bounded", malformed.blocks.size() <= DocumentParser::MAX_BLOCKS);
@@ -478,6 +575,15 @@ int main(int argc, char** argv) {
     check("oversize advertised payload is rejected before retention",
           !UI::LXMF::NomadNet::normalize_response(oversize_advertised, sizeof(oversize_advertised), response) && response.size() == 0);
     check("null and empty responses are rejected", !UI::LXMF::NomadNet::normalize_response(nullptr, 0, response));
+
+    check("exactly full layout is not truncated when no content remains",
+          !UI::LXMF::NomadNet::layout_content_truncated(1023, 1023, false));
+    check("exactly full layout is truncated when content remains",
+          UI::LXMF::NomadNet::layout_content_truncated(1023, 1023, true));
+    check("zero-run text block has no layout content",
+          !UI::LXMF::NomadNet::block_has_layout_content(BlockType::TEXT, 0));
+    check("divider has layout content without a text run",
+          UI::LXMF::NomadNet::block_has_layout_content(BlockType::DIVIDER, 0));
 
     check("compact address preserves short values", compact_address("node:/page/a.mu", 32) == "node:/page/a.mu");
     check("compact address abbreviates destination but preserves path",

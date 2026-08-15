@@ -57,7 +57,7 @@ struct Style {
 void add_run(Document& doc, Block& block, std::string& text, const Style& style, int link = -1) {
     if (text.empty()) return;
     if (block.runs.size() >= DocumentParser::MAX_RUNS_PER_LINE) {
-        doc.truncated = true;
+        doc.mark_truncated(TruncationReason::RUNS_PER_LINE);
         text.clear();
         return;
     }
@@ -137,7 +137,7 @@ void parse_inline(Document& doc, Block& block, const std::string& line, Style& s
                 doc.links.push_back({label, target, fields});
                 std::string link_text = label;
                 add_run(doc, block, link_text, style, static_cast<int>(doc.links.size() - 1));
-            } else doc.truncated = true;
+            } else doc.mark_truncated(TruncationReason::LINKS);
             i = close + 1;
         } else {
             // Unknown modifiers are harmless and visible rather than commands.
@@ -164,7 +164,7 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
     while (retained > 0 && retained < size &&
            (static_cast<uint8_t>(source[retained]) & 0xc0) == 0x80) --retained;
     doc.source_bytes = retained;
-    doc.truncated = size > retained;
+    if (size > retained) doc.mark_truncated(TruncationReason::DOCUMENT_BYTES);
     // Own an exact retained prefix so no find/substr operation can inspect
     // attacker-controlled bytes beyond the documented source cap.
     const std::string input(source ? source : "", retained);
@@ -185,7 +185,7 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
             length = MAX_SOURCE_LINE_BYTES;
             while (length > 0 && offset + length < input.size() &&
                    (static_cast<uint8_t>(input[offset + length]) & 0xc0) == 0x80) --length;
-            doc.truncated = true;
+            doc.mark_truncated(TruncationReason::SOURCE_LINE_BYTES);
         }
         std::string line = input.substr(offset, length);
         if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -220,13 +220,21 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
         }
         if (line == "`=") { literal = !literal; continue; }
         if (line.empty()) {
-            if (doc.blocks.size() >= MAX_BLOCKS) { doc.truncated = true; break; }
+            if (doc.blocks.size() >= MAX_BLOCKS) {
+                doc.mark_truncated(TruncationReason::BLOCKS);
+                break;
+            }
+            if (total_runs >= MAX_TOTAL_RUNS) {
+                doc.mark_truncated(TruncationReason::TOTAL_RUNS);
+                break;
+            }
             Block blank;
             blank.depth = section_depth;
             Run run;
             run.text = " ";
             blank.runs.push_back(std::move(run));
             doc.blocks.push_back(std::move(blank));
+            ++total_runs;
             continue;
         }
         while (!line.empty() && line[0] == '<') {
@@ -234,7 +242,11 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
             line.erase(0, 1);
         }
         if (line.empty()) continue;
-        if (doc.blocks.size() >= MAX_BLOCKS) { doc.truncated = true; break; }
+        if (!literal && line[0] == '#') continue;
+        if (doc.blocks.size() >= MAX_BLOCKS) {
+            doc.mark_truncated(TruncationReason::BLOCKS);
+            break;
+        }
 
         Block block;
         block.depth = section_depth;
@@ -243,8 +255,6 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
             Run run;
             run.text = line;
             block.runs.push_back(std::move(run));
-        } else if (line[0] == '#') {
-            continue;
         } else if (line[0] == '>') {
             block.type = BlockType::HEADING;
             std::size_t depth = 0;
@@ -263,17 +273,45 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
         } else {
             parse_inline(doc, block, line, style);
         }
-        if (total_runs + block.runs.size() > MAX_TOTAL_RUNS) {
+        const bool total_runs_exceeded =
+            total_runs + block.runs.size() > MAX_TOTAL_RUNS;
+        if (total_runs_exceeded) {
             block.runs.resize(MAX_TOTAL_RUNS - total_runs);
-            doc.truncated = true;
+            doc.mark_truncated(TruncationReason::TOTAL_RUNS);
         }
         total_runs += block.runs.size();
         doc.blocks.push_back(std::move(block));
-        if (total_runs >= MAX_TOTAL_RUNS) break;
+        if (total_runs_exceeded) break;
     }
-    if (offset <= retained) doc.truncated = true;
+    if (offset <= retained && doc.source_lines >= MAX_SOURCE_LINES)
+        doc.mark_truncated(TruncationReason::SOURCE_LINES);
     if (literal) doc.malformed = true;
     return doc;
+}
+
+std::string truncation_notice(const Document& document) {
+    if (document.has_truncation(TruncationReason::DOCUMENT_BYTES))
+        return "[Page truncated: source exceeds " +
+            std::to_string(DocumentParser::MAX_DOCUMENT_BYTES / 1024) + " KiB]";
+    if (document.has_truncation(TruncationReason::SOURCE_LINE_BYTES))
+        return "[Page truncated: line exceeds " +
+            std::to_string(DocumentParser::MAX_SOURCE_LINE_BYTES) + " bytes]";
+    if (document.has_truncation(TruncationReason::SOURCE_LINES))
+        return "[Page truncated: more than " +
+            std::to_string(DocumentParser::MAX_SOURCE_LINES) + " lines]";
+    if (document.has_truncation(TruncationReason::BLOCKS))
+        return "[Page truncated: more than " +
+            std::to_string(DocumentParser::MAX_BLOCKS) + " blocks]";
+    if (document.has_truncation(TruncationReason::RUNS_PER_LINE))
+        return "[Page truncated: more than " +
+            std::to_string(DocumentParser::MAX_RUNS_PER_LINE) + " styles on one line]";
+    if (document.has_truncation(TruncationReason::TOTAL_RUNS))
+        return "[Page truncated: more than " +
+            std::to_string(DocumentParser::MAX_TOTAL_RUNS) + " styled runs]";
+    if (document.has_truncation(TruncationReason::LINKS))
+        return "[Page truncated: more than " +
+            std::to_string(DocumentParser::MAX_LINKS) + " links]";
+    return "[Page truncated to device safety limits]";
 }
 
 } // namespace UI::LXMF::NomadNet

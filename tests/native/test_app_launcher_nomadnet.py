@@ -134,7 +134,10 @@ def test_nomadnet_page_body_uses_one_compact_custom_viewport():
     assert "LV_EVENT_DRAW_MAIN" in screen
     assert "lv_draw_label(" in screen
     assert "align_line" in screen
-    assert "[Page truncated to device safety limits]" in screen
+    assert "NomadNet::truncation_notice(document)" in set_page
+    assert "if(!_page.append_notice(notice))" in set_page
+    assert "if(!layout_page())" in set_page
+    assert "[Page truncated to device safety limits]" not in set_page
     assert "[Unsupported Micron content]" in screen
     assert "lv_obj_set_scroll_dir(_content,LV_DIR_VER)" in screen
     assert "CompactPage _page;" in screen_h
@@ -147,7 +150,9 @@ def test_nomadnet_page_body_uses_one_compact_custom_viewport():
     assert "const std::string rendered_text" not in compact_cpp
     assert "visit_display_text" in compact_cpp
     assert "lv_indev_get_type(indev)!=LV_INDEV_TYPE_POINTER" in screen
-    assert "_page.append_notice(\"[Page layout truncated to device safety limits]\")" in screen
+    assert "const std::string layout_notice=\"[Page layout truncated: \"+" in screen
+    assert "std::to_string(content_fragment_limit)+\" fragments]\"" in screen
+    assert "fragment.run_index>=notice_run_index" in screen
     assert "notice_run_index" in screen
     assert "_page_layout.push_back(LayoutFragment(notice_run_index" in screen
     assert "whitespace&&x+fragment_w>indent+available" in screen
@@ -494,7 +499,7 @@ def test_nomadnet_page_fonts_do_not_leak_into_navigation_widgets():
         browser_cpp.index("void NomadNetScreen::detach_focusables(")
     ]
     layout = browser_cpp[
-        browser_cpp.index("void NomadNetScreen::layout_page()") :
+        browser_cpp.index("bool NomadNetScreen::layout_page()") :
         browser_cpp.index("void NomadNetScreen::draw_page(")
     ]
     draw = browser_cpp[

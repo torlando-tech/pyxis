@@ -10,6 +10,16 @@ namespace UI::LXMF::NomadNet {
 enum class BlockType { TEXT, HEADING, DIVIDER, UNSUPPORTED };
 enum class Alignment { LEFT, CENTER, RIGHT };
 
+enum class TruncationReason : uint8_t {
+    DOCUMENT_BYTES = 1 << 0,
+    SOURCE_LINES = 1 << 1,
+    SOURCE_LINE_BYTES = 1 << 2,
+    BLOCKS = 1 << 3,
+    RUNS_PER_LINE = 1 << 4,
+    TOTAL_RUNS = 1 << 5,
+    LINKS = 1 << 6,
+};
+
 struct Run {
     std::string text;
     bool bold = false;
@@ -48,6 +58,15 @@ struct Document {
     bool unsupported = false;
     std::size_t source_bytes = 0;
     std::size_t source_lines = 0;
+    uint8_t truncation_reasons = 0;
+
+    void mark_truncated(TruncationReason reason) {
+        truncated = true;
+        truncation_reasons |= static_cast<uint8_t>(reason);
+    }
+    bool has_truncation(TruncationReason reason) const {
+        return (truncation_reasons & static_cast<uint8_t>(reason)) != 0;
+    }
 };
 
 class DocumentParser {
@@ -64,5 +83,7 @@ public:
     Document parse(const std::string& source) const;
     Document parse(const char* source, std::size_t size) const;
 };
+
+std::string truncation_notice(const Document& document);
 
 } // namespace UI::LXMF::NomadNet

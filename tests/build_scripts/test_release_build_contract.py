@@ -2,8 +2,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MICROSTORE_PIN = "https://github.com/attermann/microStore.git#c5fb69d68229e684c7fbd17692a67ae8193b84e2"
-MICRORETICULUM_PIN = "https://github.com/torlando-tech/microReticulum.git#6ac0d3232cf705d538f9c556f0f82d2d2cc753bc"
+MICROSTORE_PIN = "https://github.com/torlando-tech/microStore.git#2762f7606800ffb23f4a593947d4f58e259cda7a"
+MICRORETICULUM_PIN = "https://github.com/torlando-tech/microReticulum.git#572b5706f442be134f5a9c35a41e6368441b8fc1"
+MAX_RNS_PSRAM_POOL_BYTES = 1024 * 1024
 
 
 def test_microstore_pin_resolves_before_transitive_registry_requirement():
@@ -19,6 +20,21 @@ def test_release_auditor_expects_the_configured_microreticulum_pin():
     expected_revision = MICRORETICULUM_PIN.rsplit("#", 1)[1]
 
     assert f'"microReticulum": "{expected_revision}"' in audit
+
+
+def test_rns_psram_pool_leaves_workspace_for_python_level9_bz2_responses():
+    config = (ROOT / "platformio.ini").read_text()
+    prefix = "-DRNS_PSRAM_POOL_BUFFER_SIZE="
+    configured = next(
+        int(line.strip()[len(prefix) :])
+        for line in config.splitlines()
+        if line.strip().startswith(prefix)
+    )
+
+    # Python bz2.compress() defaults to level 9. libbz2's small decoder needs
+    # 2.25 MB for its two block arrays before output/state allocations. Keep the
+    # long-lived RNS container pool bounded so that workspace remains available.
+    assert configured == MAX_RNS_PSRAM_POOL_BYTES
 
 
 def test_tdeck_release_removes_diagnostic_flags():

@@ -36,13 +36,16 @@ bool CompactPage::append_display(const std::string& value, uint32_t& offset, uin
 bool CompactPage::assign(const Document& document) {
     clear();
     try {
-        const std::size_t block_count = std::min(document.blocks.size(), MAX_BLOCKS);
+        const bool reserve_notice = document.truncated;
+        const std::size_t block_limit = MAX_BLOCKS - (reserve_notice ? 1 : 0);
+        const std::size_t run_limit = MAX_RUNS - (reserve_notice ? 1 : 0);
+        const std::size_t block_count = std::min(document.blocks.size(), block_limit);
         const std::size_t link_count = std::min(document.links.size(), MAX_LINKS);
         std::size_t run_count = 0;
         std::size_t arena_size = 0;
         for (std::size_t i = 0; i < block_count; ++i) {
             const std::size_t retained = std::min(document.blocks[i].runs.size(),
-                MAX_RUNS - std::min(run_count, MAX_RUNS));
+                run_limit - std::min(run_count, run_limit));
             run_count += retained;
             for (std::size_t r = 0; r < retained; ++r) {
                 const std::size_t bytes = document.blocks[i].runs[r].text.size() + 1;
@@ -58,7 +61,7 @@ bool CompactPage::assign(const Document& document) {
         }
         _arena.reserve(arena_size);
         _blocks.reserve(block_count);
-        _runs.reserve(std::min(run_count, MAX_RUNS));
+        _runs.reserve(std::min(run_count, run_limit));
         _links.reserve(link_count);
 
         for (std::size_t i = 0; i < link_count; ++i) {
@@ -75,15 +78,19 @@ bool CompactPage::assign(const Document& document) {
             _links.push_back(link);
         }
 
-        for (std::size_t i = 0; i < block_count && _runs.size() < MAX_RUNS; ++i) {
+        for (std::size_t i = 0; i < block_count; ++i) {
             const auto& source_block = document.blocks[i];
+            if (!source_block.runs.empty() && _runs.size() >= run_limit) {
+                _truncated = true;
+                continue;
+            }
             BlockRecord block;
             block.first_run = static_cast<uint32_t>(_runs.size());
             block.type = source_block.type;
             block.depth = source_block.depth;
             block.alignment = source_block.alignment;
             for (const auto& source_run : source_block.runs) {
-                if (_runs.size() >= MAX_RUNS || block.run_count == std::numeric_limits<uint16_t>::max()) {
+                if (_runs.size() >= run_limit || block.run_count == std::numeric_limits<uint16_t>::max()) {
                     _truncated = true;
                     break;
                 }
@@ -136,7 +143,24 @@ void CompactPage::clear() {
 }
 
 bool CompactPage::append_notice(const std::string& value) {
-    if (_blocks.size() >= MAX_BLOCKS || _runs.size() >= MAX_RUNS) return false;
+    if (value.size() > MAX_NOTICE_BYTES ||
+        value.size() + 1 > MAX_ARENA_BYTES - std::min(_arena.size(), MAX_ARENA_BYTES))
+        return false;
+    if (_blocks.size() >= MAX_BLOCKS) {
+        const BlockRecord removed = _blocks.back();
+        const std::size_t first = std::min<std::size_t>(removed.first_run, _runs.size());
+        _runs.resize(first);
+        _blocks.pop_back();
+    }
+    if (_runs.size() >= MAX_RUNS) {
+        std::size_t owner = _blocks.size();
+        while (owner > 0 && _blocks[owner - 1].run_count == 0) --owner;
+        if (owner == 0) return false;
+        _runs.pop_back();
+        --_blocks[owner - 1].run_count;
+        for (std::size_t i = owner; i < _blocks.size(); ++i)
+            _blocks[i].first_run = static_cast<uint32_t>(_runs.size());
+    }
     try {
         RunRecord run;
         if (!append(value, run.text_offset, run.text_length)) return false;
@@ -148,6 +172,7 @@ bool CompactPage::append_notice(const std::string& value) {
         _blocks.push_back(block);
         return true;
     } catch (const std::bad_alloc&) {
+        clear();
         return false;
     }
 }

@@ -81,7 +81,7 @@ private:
     void show_browser(bool editing);
     void clear_document();
     void clear_directory();
-    void layout_page();
+    bool layout_page();
     void draw_page(lv_event_t* event);
     void select_link(int direction);
     void activate_selected_link();
