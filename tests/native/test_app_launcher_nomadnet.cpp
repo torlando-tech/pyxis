@@ -231,6 +231,52 @@ int main(int argc, char** argv) {
     check("FT inline truecolor parses", saw_truecolor_foreground);
     check("BT inline truecolor parses", saw_truecolor_background);
 
+    // Byte-exact Urwid 2.6.16 AttrSpec g00..g99 truecolor expansion.
+    static constexpr uint32_t grayscale_rgb[100] = {
+        0x000000, 0x000000, 0x080808, 0x080808, 0x080808, 0x121212, 0x121212, 0x121212, 0x121212, 0x1c1c1c,
+        0x1c1c1c, 0x1c1c1c, 0x1c1c1c, 0x262626, 0x262626, 0x262626, 0x262626, 0x303030, 0x303030, 0x303030,
+        0x303030, 0x3a3a3a, 0x3a3a3a, 0x3a3a3a, 0x3a3a3a, 0x444444, 0x444444, 0x444444, 0x444444, 0x4e4e4e,
+        0x4e4e4e, 0x4e4e4e, 0x4e4e4e, 0x585858, 0x585858, 0x585858, 0x585858, 0x626262, 0x626262, 0x626262,
+        0x626262, 0x6c6c6c, 0x6c6c6c, 0x6c6c6c, 0x6c6c6c, 0x767676, 0x767676, 0x767676, 0x767676, 0x808080,
+        0x808080, 0x848484, 0x848484, 0x848484, 0x848484, 0x949494, 0x949494, 0x949494, 0x949494, 0x949494,
+        0x9e9e9e, 0x9e9e9e, 0x9e9e9e, 0x9e9e9e, 0xa8a8a8, 0xa8a8a8, 0xa8a8a8, 0xa8a8a8, 0xb2b2b2, 0xb2b2b2,
+        0xb2b2b2, 0xb2b2b2, 0xbcbcbc, 0xbcbcbc, 0xbcbcbc, 0xbcbcbc, 0xc6c6c6, 0xc6c6c6, 0xc6c6c6, 0xc6c6c6,
+        0xd0d0d0, 0xd0d0d0, 0xd0d0d0, 0xd0d0d0, 0xdadada, 0xdadada, 0xdadada, 0xdadada, 0xe4e4e4, 0xe4e4e4,
+        0xe4e4e4, 0xe4e4e4, 0xeeeeee, 0xeeeeee, 0xeeeeee, 0xeeeeee, 0xeeeeee, 0xffffff, 0xffffff, 0xffffff,
+    };
+    for (std::size_t percent = 0; percent < 100; ++percent) {
+        std::string token = "g00";
+        token[1] = static_cast<char>('0' + percent / 10);
+        token[2] = static_cast<char>('0' + percent % 10);
+        const auto foreground_page = parser.parse(std::string("#!fg=") + token + "\ntext");
+        const auto background_page = parser.parse(std::string("#!bg=") + token + "\ntext");
+        const std::string name = std::string("page grayscale matches Urwid for ") + token;
+        check(name.c_str(),
+              foreground_page.has_foreground && foreground_page.foreground == grayscale_rgb[percent] &&
+                  background_page.has_background && background_page.background == grayscale_rgb[percent] &&
+                  !foreground_page.malformed && !background_page.malformed);
+    }
+    auto inline_grayscale = parser.parse("`Fg02dark`f `Bg51mid`b `Fg99light`f");
+    bool saw_dark_gray = false;
+    bool saw_mid_gray_background = false;
+    bool saw_light_gray = false;
+    for (const auto& run : inline_grayscale.blocks.front().runs) {
+        if (run.text == "dark")
+            saw_dark_gray = run.has_foreground && run.foreground == 0x080808;
+        else if (run.text == "mid")
+            saw_mid_gray_background = run.has_background && run.background == 0x848484;
+        else if (run.text == "light")
+            saw_light_gray = run.has_foreground && run.foreground == 0xffffff;
+    }
+    check("inline grayscale foreground and background match Urwid",
+          saw_dark_gray && saw_mid_gray_background && saw_light_gray);
+    for (const char* invalid : {"g0", "g100", "G50", "gx0", "g0x"}) {
+        const auto malformed_grayscale = parser.parse(std::string("#!fg=") + invalid + "\ntext");
+        const std::string name = std::string("malformed grayscale is rejected: ") + invalid;
+        check(name.c_str(),
+              malformed_grayscale.malformed && !malformed_grayscale.has_foreground);
+    }
+
     CompactPage::RunRecord light_background_run{};
     light_background_run.style = CompactPage::HAS_BACKGROUND;
     light_background_run.background = 0xe8b4f0;

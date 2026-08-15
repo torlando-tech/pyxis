@@ -59,7 +59,31 @@ bool first_codepoint(const std::string& value, std::size_t offset,
     return true;
 }
 
-bool color(const std::string& value, uint32_t& result) {
+bool parse_micron_color(const std::string& value, uint32_t& result) {
+    if (value.size() == 3 && value[0] == 'g') {
+        if (!std::isdigit(static_cast<unsigned char>(value[1])) ||
+            !std::isdigit(static_cast<unsigned char>(value[2]))) return false;
+        const uint32_t percent = static_cast<uint32_t>(value[1] - '0') * 10 +
+            static_cast<uint32_t>(value[2] - '0');
+        // Urwid first scales gNN to 0..255, then chooses the nearest xterm
+        // grayscale ramp entry. Preserve that quantization before RGB565.
+        const uint32_t scaled = (percent * 255 * 2 + 100) / 200;
+        static constexpr uint8_t levels[] = {
+            0, 8, 18, 28, 38, 48, 58, 68, 78, 88, 98, 108, 118,
+            128, 132, 148, 158, 168, 178, 188, 198, 208, 218, 228, 238, 255,
+        };
+        uint8_t gray = levels[sizeof(levels) - 1];
+        for (std::size_t i = 0; i + 1 < sizeof(levels); ++i) {
+            const uint32_t midpoint =
+                (static_cast<uint32_t>(levels[i]) + levels[i + 1] + 1) / 2;
+            if (scaled < midpoint) {
+                gray = levels[i];
+                break;
+            }
+        }
+        result = static_cast<uint32_t>(gray) * 0x010101;
+        return true;
+    }
     if (value.size() != 3 && value.size() != 6) return false;
     if (!std::all_of(value.begin(), value.end(), [](unsigned char c) { return std::isxdigit(c); })) return false;
     char* end = nullptr;
@@ -127,7 +151,7 @@ void parse_inline(Document& doc, Block& block, const std::string& line, Style& s
             if (i < line.size() && line[i] == 'T') { ++i; count = 6; }
             if (i + count <= line.size()) {
                 uint32_t value = 0;
-                if (color(line.substr(i, count), value)) {
+                if (parse_micron_color(line.substr(i, count), value)) {
                     style.has_foreground = true;
                     style.foreground = value;
                     i += count;
@@ -138,7 +162,7 @@ void parse_inline(Document& doc, Block& block, const std::string& line, Style& s
             if (i < line.size() && line[i] == 'T') { ++i; count = 6; }
             if (i + count <= line.size()) {
                 uint32_t value = 0;
-                if (color(line.substr(i, count), value)) {
+                if (parse_micron_color(line.substr(i, count), value)) {
                     style.has_background = true;
                     style.background = value;
                     i += count;
@@ -236,13 +260,13 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
         }
         if (line.rfind("#!bg=", 0) == 0) {
             uint32_t value = 0;
-            if (color(line.substr(5), value)) { doc.has_background = true; doc.background = value; }
+            if (parse_micron_color(line.substr(5), value)) { doc.has_background = true; doc.background = value; }
             else doc.malformed = true;
             continue;
         }
         if (line.rfind("#!fg=", 0) == 0) {
             uint32_t value = 0;
-            if (color(line.substr(5), value)) { doc.has_foreground = true; doc.foreground = value; }
+            if (parse_micron_color(line.substr(5), value)) { doc.has_foreground = true; doc.foreground = value; }
             else doc.malformed = true;
             continue;
         }
