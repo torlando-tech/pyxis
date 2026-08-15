@@ -2,7 +2,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MICROSTORE_PIN = "https://github.com/attermann/microStore.git#c5fb69d68229e684c7fbd17692a67ae8193b84e2"
+MICROSTORE_PIN = "git+file:///home/tyler/repos/microstore-compaction-fix#2762f7606800ffb23f4a593947d4f58e259cda7a"
 MICRORETICULUM_PIN = "git+file:///home/tyler/repos/microreticulum-bounded-tables#572b5706f442be134f5a9c35a41e6368441b8fc1"
 MAX_RNS_PSRAM_POOL_BYTES = 1024 * 1024
 
