@@ -6,6 +6,22 @@
 
 namespace UI::LXMF::NomadNet {
 
+inline uint32_t heading_foreground(uint8_t depth) {
+    switch (heading_display_level(depth)) {
+        case 1: return 0x222222;
+        case 2: return 0x111111;
+        default: return 0x000000;
+    }
+}
+
+inline uint32_t heading_background(uint8_t depth) {
+    switch (heading_display_level(depth)) {
+        case 1: return 0xbbbbbb;
+        case 2: return 0x999999;
+        default: return 0x777777;
+    }
+}
+
 inline uint32_t resolve_foreground(const CompactPage& page,
                                    const CompactPage::RunRecord& run,
                                    uint32_t fallback) {
@@ -15,11 +31,29 @@ inline uint32_t resolve_foreground(const CompactPage& page,
 }
 
 inline uint32_t resolve_background(const CompactPage& page,
-                                   const CompactPage::RunRecord& run,
-                                   uint32_t fallback) {
+                                    const CompactPage::RunRecord& run,
+                                    uint32_t fallback) {
     if (run.style & CompactPage::HAS_BACKGROUND) return run.background;
     if (page.has_background()) return page.background();
     return fallback;
+}
+
+inline uint32_t resolve_effective_foreground(const CompactPage& page,
+                                              const CompactPage::RunRecord& run,
+                                              uint8_t heading_level,
+                                              uint32_t fallback) {
+    if (run.style & CompactPage::HAS_FOREGROUND) return run.foreground;
+    if (heading_level != 0) return heading_foreground(heading_level);
+    return resolve_foreground(page, run, fallback);
+}
+
+inline uint32_t resolve_effective_background(const CompactPage& page,
+                                              const CompactPage::RunRecord& run,
+                                              uint8_t heading_level,
+                                              uint32_t fallback) {
+    if (run.style & CompactPage::HAS_BACKGROUND) return run.background;
+    if (heading_level != 0) return heading_background(heading_level);
+    return resolve_background(page, run, fallback);
 }
 
 // IEC 61966-2-1 sRGB channel values, linearised and scaled to 0..10000.
@@ -44,9 +78,11 @@ static constexpr uint16_t SRGB_LINEAR_10000[256] = {
 };
 
 inline uint32_t resolve_focus_border(const CompactPage& page,
-                                     const CompactPage::RunRecord& run,
-                                     uint32_t fallback_background) {
-    const uint32_t background = resolve_background(page, run, fallback_background);
+                                      const CompactPage::RunRecord& run,
+                                      uint32_t fallback_background,
+                                      uint8_t heading_level = 0) {
+    const uint32_t background = resolve_effective_background(
+        page, run, heading_level, fallback_background);
     const uint32_t red = SRGB_LINEAR_10000[(background >> 16) & 0xff];
     const uint32_t green = SRGB_LINEAR_10000[(background >> 8) & 0xff];
     const uint32_t blue = SRGB_LINEAR_10000[background & 0xff];

@@ -194,6 +194,86 @@ int main(int argc, char** argv) {
                                       doc.has_foreground && doc.foreground == 0xabcdef);
     check("heading depth parsed", doc.blocks.size() >= 5 &&
                                   doc.blocks[0].type == BlockType::HEADING && doc.blocks[0].depth == 2);
+    check("heading level one uses the large face",
+          UI::LXMF::NomadNet::heading_uses_large_font(1));
+    check("nested headings use the body-size faces",
+          !UI::LXMF::NomadNet::heading_uses_large_font(2) &&
+              !UI::LXMF::NomadNet::heading_uses_large_font(255));
+    check("empty headings remain layout content",
+          UI::LXMF::NomadNet::block_has_layout_content(BlockType::HEADING, 0));
+    check("dark heading one colors match NomadNet",
+          UI::LXMF::NomadNet::heading_foreground(1) == 0x222222 &&
+              UI::LXMF::NomadNet::heading_background(1) == 0xbbbbbb);
+    check("dark heading two colors match NomadNet",
+          UI::LXMF::NomadNet::heading_foreground(2) == 0x111111 &&
+              UI::LXMF::NomadNet::heading_background(2) == 0x999999);
+    check("dark heading three and deeper colors match NomadNet",
+          UI::LXMF::NomadNet::heading_foreground(3) == 0x000000 &&
+              UI::LXMF::NomadNet::heading_background(3) == 0x777777 &&
+              UI::LXMF::NomadNet::heading_foreground(255) == 0x000000 &&
+              UI::LXMF::NomadNet::heading_background(255) == 0x777777);
+    check("heading indentation follows depth with a bounded cap",
+          UI::LXMF::NomadNet::heading_indent_spaces(1) == 0 &&
+              UI::LXMF::NomadNet::heading_indent_spaces(2) == 2 &&
+              UI::LXMF::NomadNet::heading_indent_spaces(3) == 4 &&
+              UI::LXMF::NomadNet::heading_indent_spaces(255) == 14);
+    check("heading spacing distinguishes canonical levels",
+          UI::LXMF::NomadNet::heading_bottom_spacing(1) == 6 &&
+              UI::LXMF::NomadNet::heading_bottom_spacing(2) == 4 &&
+              UI::LXMF::NomadNet::heading_bottom_spacing(3) == 3 &&
+              UI::LXMF::NomadNet::heading_bottom_spacing(255) == 3);
+    auto authored_heading = parser.parse("> `F0f0green heading`f");
+    CompactPage authored_heading_page;
+    bool authored_heading_assigned = authored_heading_page.assign(authored_heading);
+    bool authored_heading_foreground = false;
+    for (const auto& run : authored_heading_page.runs()) {
+        authored_heading_foreground = authored_heading_foreground ||
+            ((run.style & CompactPage::HAS_FOREGROUND) && run.foreground == 0x00ff00);
+    }
+    check("heading treatment preserves authored foreground",
+          authored_heading_assigned && authored_heading_page.blocks().size() == 1 &&
+              authored_heading_foreground);
+    auto canonical_heading = parser.parse("#!fg=f00\n#!bg=00f\n> plain `F0f0green`f `Bf80orange background`b");
+    CompactPage canonical_heading_page;
+    bool heading_defaults_override_page = false;
+    bool authored_heading_fg_override = false;
+    bool authored_heading_bg_override = false;
+    if (canonical_heading_page.assign(canonical_heading)) {
+        for (const auto& run : canonical_heading_page.runs()) {
+            const auto run_text = canonical_heading_page.text(run);
+            const std::string run_string(run_text.data(), run_text.size());
+            if (run_string.find("plain") != std::string::npos) {
+                heading_defaults_override_page =
+                    UI::LXMF::NomadNet::resolve_effective_foreground(
+                        canonical_heading_page, run, 1, 0xffffff) == 0x222222 &&
+                    UI::LXMF::NomadNet::resolve_effective_background(
+                        canonical_heading_page, run, 1, 0x000000) == 0xbbbbbb;
+            }
+            if (run_string.find("green") != std::string::npos) {
+                authored_heading_fg_override =
+                    UI::LXMF::NomadNet::resolve_effective_foreground(
+                        canonical_heading_page, run, 1, 0xffffff) == 0x00ff00;
+            }
+            if (run_string.find("orange background") != std::string::npos) {
+                authored_heading_bg_override =
+                    UI::LXMF::NomadNet::resolve_effective_background(
+                        canonical_heading_page, run, 1, 0x000000) == 0xff8800;
+            }
+        }
+    }
+    check("heading defaults override page colors", heading_defaults_override_page);
+    check("authored heading foreground overrides heading default", authored_heading_fg_override);
+    check("authored heading background overrides heading default", authored_heading_bg_override);
+    CompactPage::RunRecord unstyled_heading_run{};
+    check("heading focus contrast uses heading background instead of page background",
+          UI::LXMF::NomadNet::resolve_focus_border(
+              canonical_heading_page, unstyled_heading_run, 0x000000, 1) == 0x000000);
+    auto empty_heading = parser.parse(">\nbody");
+    CompactPage empty_heading_page;
+    check("empty heading survives compact conversion for its solid band",
+          empty_heading_page.assign(empty_heading) && !empty_heading_page.blocks().empty() &&
+              empty_heading_page.blocks()[0].type == BlockType::HEADING &&
+              empty_heading_page.blocks()[0].run_count == 0);
     check("inline runs are styled", doc.blocks[1].runs.size() >= 6 &&
                                       doc.blocks[1].runs[1].bold && doc.blocks[1].runs[3].italic);
     bool saw_background = false;
@@ -339,6 +419,8 @@ int main(int argc, char** argv) {
         int16_t y;
         int16_t width;
         int16_t height;
+        uint8_t heading = 0;
+        uint8_t heading_level() const { return heading; }
     };
     const std::vector<FocusFragmentFixture> focus_fragments{
         {3, 7, 10, 20, 28, 16},

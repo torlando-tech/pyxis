@@ -16,7 +16,26 @@ inline bool layout_content_truncated(std::size_t fragment_count,
 }
 
 inline bool block_has_layout_content(BlockType type, uint16_t run_count) {
-    return type == BlockType::DIVIDER || run_count != 0;
+    return type == BlockType::DIVIDER || type == BlockType::HEADING || run_count != 0;
+}
+
+inline uint8_t heading_display_level(uint8_t depth) {
+    return depth <= 1 ? 1 : depth == 2 ? 2 : 3;
+}
+
+inline bool heading_uses_large_font(uint8_t depth) {
+    return heading_display_level(depth) == 1;
+}
+
+inline uint8_t heading_indent_spaces(uint8_t depth) {
+    if (depth <= 1) return 0;
+    const uint8_t bounded_levels = depth > 8 ? 7 : static_cast<uint8_t>(depth - 1);
+    return static_cast<uint8_t>(bounded_levels * 2);
+}
+
+inline uint8_t heading_bottom_spacing(uint8_t depth) {
+    const uint8_t level = heading_display_level(depth);
+    return level == 1 ? 6 : level == 2 ? 4 : 3;
 }
 
 class CompactPage {

@@ -511,6 +511,34 @@ def test_nomadnet_uses_real_jetbrains_mono_nl_faces_at_each_size():
     assert "?1:0,LV_TEXT_FLAG_NONE" not in browser_cpp
 
 
+def test_nomadnet_heading_layout_uses_retained_depth_without_overwriting_colors():
+    browser_cpp = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    layout = browser_cpp[
+        browser_cpp.index("bool NomadNetScreen::layout_page()") :
+        browser_cpp.index("void NomadNetScreen::draw_page(")
+    ]
+
+    assert "heading_uses_large_font(block.depth)" in layout
+    assert "heading_indent_spaces(block.depth)" in layout
+    assert "heading_bottom_spacing(block.depth)" in layout
+    assert "heading_display_level(block.depth)" in layout
+    assert "whitespace&&x==indent&&!heading" in layout
+    assert "run.foreground=" not in layout
+    assert "run.background=" not in layout
+
+    draw = browser_cpp[
+        browser_cpp.index("void NomadNetScreen::draw_page(") :
+        browser_cpp.index("void NomadNetScreen::select_link(")
+    ]
+    assert "fragment.heading_starts_band()" in draw
+    assert "content_area.x2" in draw
+    assert "heading_background(fragment.heading_level())" in draw
+    assert "resolve_effective_foreground(" in draw
+    assert draw.index("fragment.heading_starts_band()") < draw.index(
+        "run.style&NomadNet::CompactPage::HAS_BACKGROUND"
+    )
+
+
 def test_nomadnet_page_fonts_do_not_leak_into_navigation_widgets():
     browser_cpp = (INCLUDE / "NomadNetScreen.cpp").read_text()
     constructor = browser_cpp[
@@ -564,7 +592,8 @@ def test_nomadnet_draw_preserves_authored_colors_for_links_and_focus():
         browser_cpp.index("void NomadNetScreen::select_link(")
     ]
 
-    assert "dsc.color=lv_color_hex(NomadNet::resolve_foreground(_page,run,Theme::TEXT_PRIMARY));" in draw
+    assert "dsc.color=lv_color_hex(NomadNet::resolve_effective_foreground(" in draw
+    assert "_page,run,fragment.heading_level(),Theme::TEXT_PRIMARY" in draw
     assert "run.link_index>=0?Theme::primaryLight()" not in draw
     assert "selected?Theme::primaryPressed()" not in draw
     assert "bg.bg_color=lv_color_hex(run.background)" in draw
@@ -575,11 +604,13 @@ def test_nomadnet_draw_preserves_authored_colors_for_links_and_focus():
 def test_nomadnet_bold_body_text_keeps_body_font_metrics():
     browser_cpp = (INCLUDE / "NomadNetScreen.cpp").read_text()
     fonts = INCLUDE.parent / "Fonts"
-    layout = browser_cpp[browser_cpp.index("const bool large=") : browser_cpp.index(
-        "const lv_font_t* font=page_run_font", browser_cpp.index("const bool large=")
+    layout_start = browser_cpp.index("const bool heading=")
+    layout = browser_cpp[layout_start : browser_cpp.index(
+        "const lv_font_t* font=page_run_font", layout_start
     )]
 
     assert "block.type==NomadNet::BlockType::HEADING" in layout
+    assert "large_heading=heading&&NomadNet::heading_uses_large_font(block.depth)" in layout
     assert "NomadNet::CompactPage::BOLD" not in layout
 
     for size in (12, 16):
