@@ -2303,8 +2303,17 @@ void UIManager::nomad_update() {
             }
             nomad_heap_checkpoint("response-normalized");
             const auto& bytes = _nomad_response.bytes();
-            const NomadNet::Document document = _nomad_parser.parse(
-                reinterpret_cast<const char*>(bytes.data()), bytes.size());
+            NomadNet::Document document;
+            try {
+                document = _nomad_parser.parse(
+                    reinterpret_cast<const char*>(bytes.data()), bytes.size());
+            } catch (const std::bad_alloc&) {
+                _nomad_response.clear();
+                nomad_stop_transport();
+                LVGL_LOCK();
+                _nomadnet_screen->set_status("Page is too large for available memory");
+                break;
+            }
             nomad_heap_checkpoint("response-parsed");
             if (!(document.malformed && document.blocks.empty())) {
                 std::vector<std::string> heading_runs;

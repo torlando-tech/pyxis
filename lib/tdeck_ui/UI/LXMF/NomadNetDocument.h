@@ -7,7 +7,7 @@
 
 namespace UI::LXMF::NomadNet {
 
-enum class BlockType { TEXT, HEADING, DIVIDER, UNSUPPORTED };
+enum class BlockType { TEXT, HEADING, DIVIDER, TABLE, UNSUPPORTED };
 enum class Alignment { LEFT, CENTER, RIGHT };
 
 enum class TruncationReason : uint16_t {
@@ -20,6 +20,13 @@ enum class TruncationReason : uint16_t {
     LINKS = 1 << 6,
     ANCHORS = 1 << 7,
     ANCHOR_NAME_BYTES = 1 << 8,
+    TABLES = 1 << 9,
+    TABLE_ROWS = 1 << 10,
+    TABLE_COLUMNS = 1 << 11,
+    TABLE_CELL_BYTES = 1 << 12,
+    TABLE_BYTES = 1 << 13,
+    TABLE_CELLS = 1 << 14,
+    TABLE_FALLBACK_BYTES = 1 << 15,
 };
 
 struct Run {
@@ -34,11 +41,26 @@ struct Run {
     int link_index = -1;
 };
 
+struct TableCell {
+    uint32_t first_run = 0;
+    uint16_t run_count = 0;
+    Alignment alignment = Alignment::LEFT;
+};
+
+struct Table {
+    uint32_t first_cell = 0;
+    uint16_t row_count = 0;
+    uint8_t column_count = 0;
+    Alignment alignment = Alignment::LEFT;
+    uint16_t max_width = 100;
+};
+
 struct Block {
     BlockType type = BlockType::TEXT;
     uint8_t depth = 0;
     Alignment alignment = Alignment::LEFT;
     uint32_t divider_codepoint = 0x2500;
+    int16_t table_index = -1;
     std::vector<Run> runs;
 };
 
@@ -61,6 +83,9 @@ struct Document {
     std::vector<Block> blocks;
     std::vector<Link> links;
     std::vector<Anchor> anchors;
+    std::vector<Table> tables;
+    std::vector<TableCell> table_cells;
+    std::vector<Run> table_runs;
     uint32_t cache_seconds = 0;
     bool has_background = false;
     uint32_t background = 0;
@@ -93,6 +118,16 @@ public:
     static constexpr std::size_t MAX_LINKS = 128;
     static constexpr std::size_t MAX_ANCHORS = 128;
     static constexpr std::size_t MAX_ANCHOR_NAME_BYTES = 64;
+    static constexpr std::size_t MAX_TABLES = 16;
+    static constexpr std::size_t MAX_TABLE_ROWS = 32;
+    static constexpr std::size_t MAX_TABLE_COLUMNS = 8;
+    static constexpr std::size_t MAX_TABLE_CELLS = 256;
+    static constexpr std::size_t MAX_TOTAL_TABLE_CELLS = 512;
+    static constexpr std::size_t MAX_TABLE_CELL_BYTES = 512;
+    static constexpr std::size_t MAX_TABLE_FALLBACK_BYTES = 1024;
+    static constexpr std::size_t MAX_TABLE_BYTES = 16 * 1024;
+    static constexpr uint16_t DEFAULT_TABLE_WIDTH = 100;
+    static constexpr uint16_t MAX_TABLE_WIDTH = UINT16_MAX;
     static constexpr uint32_t MAX_CACHE_SECONDS = 7 * 24 * 60 * 60;
 
     Document parse(const std::string& source) const;

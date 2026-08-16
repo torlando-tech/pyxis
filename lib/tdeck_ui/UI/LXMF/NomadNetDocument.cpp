@@ -294,6 +294,177 @@ void parse_inline(Document& doc, Block& block, const std::string& line, Style& s
     block.alignment = style.alignment;
 }
 
+std::string trim_table_cell(const std::string& value) {
+    std::size_t first = 0;
+    while (first < value.size() && std::isspace(static_cast<unsigned char>(value[first]))) ++first;
+    std::size_t last = value.size();
+    while (last > first && std::isspace(static_cast<unsigned char>(value[last - 1]))) --last;
+    return value.substr(first, last - first);
+}
+
+std::vector<std::string> parse_table_row(const std::string& source) {
+    std::size_t first = 0;
+    std::size_t last = source.size();
+    while (first < last && std::isspace(static_cast<unsigned char>(source[first]))) ++first;
+    while (last > first && std::isspace(static_cast<unsigned char>(source[last - 1]))) --last;
+    if (first < last && source[first] == '|') ++first;
+    if (last > first && source[last - 1] == '|') --last;
+
+    std::vector<std::string> cells;
+    std::string current;
+    bool escaped = false;
+    for (std::size_t i = first; i < last; ++i) {
+        const char value = source[i];
+        if (escaped) {
+            current.push_back(value);
+            escaped = false;
+        } else if (value == '\\') {
+            escaped = true;
+        } else if (value == '|') {
+            cells.push_back(trim_table_cell(current));
+            current.clear();
+        } else {
+            current.push_back(value);
+        }
+    }
+    cells.push_back(trim_table_cell(current));
+    return cells;
+}
+
+Alignment table_cell_alignment(const std::string& source) {
+    const std::string value = trim_table_cell(source);
+    if (!value.empty() && value.front() == ':' && value.back() == ':') return Alignment::CENTER;
+    if (!value.empty() && value.back() == ':') return Alignment::RIGHT;
+    return Alignment::LEFT;
+}
+
+void append_malformed_table(Document& doc, const std::vector<std::string>& lines,
+                            std::size_t& total_runs) {
+    if (doc.blocks.size() >= DocumentParser::MAX_BLOCKS) {
+        doc.mark_truncated(TruncationReason::BLOCKS);
+        return;
+    }
+    if (total_runs >= DocumentParser::MAX_TOTAL_RUNS) {
+        doc.mark_truncated(TruncationReason::TOTAL_RUNS);
+        return;
+    }
+    Block block;
+    block.type = BlockType::UNSUPPORTED;
+    Run run;
+    run.text = "[Malformed table]";
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        const std::string separator = i == 0 ? " " : " | ";
+        const std::size_t remaining = DocumentParser::MAX_TABLE_FALLBACK_BYTES -
+            std::min(run.text.size(), DocumentParser::MAX_TABLE_FALLBACK_BYTES);
+        if (separator.size() + lines[i].size() <= remaining) {
+            run.text += separator;
+            run.text += lines[i];
+            continue;
+        }
+        if (remaining > separator.size()) {
+            run.text += separator;
+            std::size_t retained = remaining - separator.size();
+            retained = std::min(retained, lines[i].size());
+            while (retained > 0 && retained < lines[i].size() &&
+                   (static_cast<unsigned char>(lines[i][retained]) & 0xc0) == 0x80) --retained;
+            run.text.append(lines[i], 0, retained);
+        }
+        doc.mark_truncated(TruncationReason::TABLE_FALLBACK_BYTES);
+        break;
+    }
+    block.runs.push_back(std::move(run));
+    doc.blocks.push_back(std::move(block));
+    ++total_runs;
+    doc.malformed = true;
+}
+
+bool append_table(Document& doc, const std::vector<std::string>& lines,
+                  Alignment table_alignment, uint16_t max_width,
+                  Style& style, std::size_t& total_runs) {
+    if (lines.size() < 2) {
+        append_malformed_table(doc, lines, total_runs);
+        return false;
+    }
+    if (doc.tables.size() >= DocumentParser::MAX_TABLES) {
+        doc.mark_truncated(TruncationReason::TABLES);
+        return false;
+    }
+    if (doc.blocks.size() >= DocumentParser::MAX_BLOCKS) {
+        doc.mark_truncated(TruncationReason::BLOCKS);
+        return false;
+    }
+
+    const auto header = parse_table_row(lines.front());
+    const auto alignment_cells = parse_table_row(lines[1]);
+    const std::size_t columns = std::min(header.size(), DocumentParser::MAX_TABLE_COLUMNS);
+    if (header.size() > columns) doc.mark_truncated(TruncationReason::TABLE_COLUMNS);
+    if (columns == 0) {
+        append_malformed_table(doc, lines, total_runs);
+        return false;
+    }
+
+    Table table;
+    table.first_cell = static_cast<uint32_t>(doc.table_cells.size());
+    table.column_count = static_cast<uint8_t>(columns);
+    table.alignment = table_alignment;
+    table.max_width = max_width;
+    const std::size_t source_rows = lines.size() - 1;
+    std::size_t rows = std::min(source_rows, DocumentParser::MAX_TABLE_ROWS);
+    if (source_rows > rows) doc.mark_truncated(TruncationReason::TABLE_ROWS);
+    const std::size_t document_cells_left = DocumentParser::MAX_TOTAL_TABLE_CELLS -
+        std::min(doc.table_cells.size(), DocumentParser::MAX_TOTAL_TABLE_CELLS);
+    const std::size_t table_cells_left = std::min(DocumentParser::MAX_TABLE_CELLS, document_cells_left);
+    const std::size_t cell_bounded_rows = table_cells_left / columns;
+    if (rows > cell_bounded_rows) {
+        rows = cell_bounded_rows;
+        doc.mark_truncated(TruncationReason::TABLE_CELLS);
+    }
+    if (rows == 0) return false;
+
+    for (std::size_t row = 0; row < rows; ++row) {
+        const auto cells = row == 0 ? header : parse_table_row(lines[row + 1]);
+        for (std::size_t column = 0; column < columns; ++column) {
+            TableCell cell;
+            cell.first_run = static_cast<uint32_t>(doc.table_runs.size());
+            cell.alignment = row == 0 ? Alignment::LEFT :
+                (column < alignment_cells.size() ? table_cell_alignment(alignment_cells[column]) : Alignment::LEFT);
+            Block parsed;
+            if (column < cells.size()) {
+                std::string cell_source = cells[column];
+                const bool cell_truncated = cell_source.size() > DocumentParser::MAX_TABLE_CELL_BYTES;
+                const Style style_before_cell = style;
+                if (cell_truncated) {
+                    std::size_t retained = DocumentParser::MAX_TABLE_CELL_BYTES;
+                    while (retained > 0 && retained < cell_source.size() &&
+                           (static_cast<unsigned char>(cell_source[retained]) & 0xc0) == 0x80) --retained;
+                    cell_source.resize(retained);
+                    doc.mark_truncated(TruncationReason::TABLE_CELL_BYTES);
+                }
+                parse_inline(doc, parsed, cell_source, style);
+                style = style_before_cell;
+            }
+            if (total_runs + parsed.runs.size() > DocumentParser::MAX_TOTAL_RUNS) {
+                parsed.runs.resize(DocumentParser::MAX_TOTAL_RUNS - total_runs);
+                doc.mark_truncated(TruncationReason::TOTAL_RUNS);
+            }
+            for (auto& run : parsed.runs) doc.table_runs.push_back(std::move(run));
+            cell.run_count = static_cast<uint16_t>(doc.table_runs.size() - cell.first_run);
+            total_runs += cell.run_count;
+            doc.table_cells.push_back(cell);
+        }
+        ++table.row_count;
+        if (total_runs >= DocumentParser::MAX_TOTAL_RUNS) break;
+    }
+
+    doc.tables.push_back(table);
+    Block block;
+    block.type = BlockType::TABLE;
+    block.table_index = static_cast<int16_t>(doc.tables.size() - 1);
+    block.alignment = table_alignment;
+    doc.blocks.push_back(std::move(block));
+    return true;
+}
+
 } // namespace
 
 Document DocumentParser::parse(const std::string& source) const {
@@ -320,6 +491,12 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
     }
     Style style;
     bool literal = false;
+    bool table_mode = false;
+    bool table_alignment_explicit = false;
+    Alignment table_alignment = Alignment::LEFT;
+    uint16_t table_width = DEFAULT_TABLE_WIDTH;
+    std::size_t table_bytes = 0;
+    std::vector<std::string> table_lines;
     uint8_t section_depth = 0;
     std::size_t total_runs = 0;
     std::size_t offset = 0;
@@ -352,13 +529,13 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
             } else doc.malformed = true;
             continue;
         }
-        if (line.rfind("#!bg=", 0) == 0) {
+        if (!table_mode && line.rfind("#!bg=", 0) == 0) {
             uint32_t value = 0;
             if (parse_micron_color(line.substr(5), value)) { doc.has_background = true; doc.background = value; }
             else doc.malformed = true;
             continue;
         }
-        if (line.rfind("#!fg=", 0) == 0) {
+        if (!table_mode && line.rfind("#!fg=", 0) == 0) {
             uint32_t value = 0;
             if (parse_micron_color(line.substr(5), value)) { doc.has_foreground = true; doc.foreground = value; }
             else doc.malformed = true;
@@ -383,12 +560,71 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
             ++total_runs;
             continue;
         }
+        if (line.empty()) continue;
+        bool pre_escaped_table_line = false;
+        if (!literal && line[0] == '\\' &&
+                (table_mode || line.rfind("\\`t", 0) == 0)) {
+            line.erase(0, 1);
+            pre_escaped_table_line = true;
+        }
+        if (!literal && !pre_escaped_table_line && !line.empty() && line[0] == '#') continue;
+        if (!literal && line.rfind("`t", 0) == 0) {
+            if (table_mode) {
+                const bool canonical_table_rendered = table_lines.size() >= 2;
+                append_table(doc, table_lines, table_alignment, table_width, style, total_runs);
+                table_mode = false;
+                table_lines.clear();
+                table_bytes = 0;
+                if (table_alignment_explicit && canonical_table_rendered)
+                    style.alignment = Alignment::LEFT;
+                table_alignment_explicit = false;
+                table_alignment = style.alignment;
+                table_width = DEFAULT_TABLE_WIDTH;
+            } else {
+                table_mode = true;
+                table_lines.clear();
+                table_bytes = 0;
+                table_alignment_explicit = false;
+                table_alignment = style.alignment;
+                table_width = DEFAULT_TABLE_WIDTH;
+                std::size_t option = 2;
+                if (option < line.size() && (line[option] == 'l' || line[option] == 'c' || line[option] == 'r')) {
+                    table_alignment_explicit = true;
+                    table_alignment = line[option] == 'c' ? Alignment::CENTER :
+                        line[option] == 'r' ? Alignment::RIGHT : Alignment::LEFT;
+                    ++option;
+                }
+                if (option < line.size()) {
+                    const char* width_start = line.c_str() + option;
+                    char* width_end = nullptr;
+                    const long long parsed = std::strtoll(width_start, &width_end, 10);
+                    while (width_end && *width_end &&
+                           std::isspace(static_cast<unsigned char>(*width_end))) ++width_end;
+                    if (width_end && width_end != width_start && *width_end == '\0') {
+                        if (parsed < 0) table_width = 1;
+                        else if (parsed > 0) table_width = static_cast<uint16_t>(
+                            std::min<unsigned long long>(
+                                static_cast<unsigned long long>(parsed), MAX_TABLE_WIDTH));
+                    }
+                }
+            }
+            continue;
+        }
+        if (!literal && table_mode) {
+            const std::size_t row_bytes = line.size() + 1;
+            if (row_bytes <= MAX_TABLE_BYTES - std::min(table_bytes, MAX_TABLE_BYTES)) {
+                table_lines.push_back(line);
+                table_bytes += row_bytes;
+            } else {
+                doc.mark_truncated(TruncationReason::TABLE_BYTES);
+            }
+            continue;
+        }
         while (!line.empty() && line[0] == '<') {
             section_depth = 0;
             line.erase(0, 1);
         }
         if (line.empty()) continue;
-        if (!literal && line[0] == '#') continue;
         if (doc.blocks.size() >= MAX_BLOCKS) {
             doc.mark_truncated(TruncationReason::BLOCKS);
             break;
@@ -418,7 +654,7 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
                 line.size() == 1 + codepoint_bytes && codepoint >= 32) {
                 block.divider_codepoint = codepoint;
             }
-        } else if (line.rfind("`t", 0) == 0 || line.rfind("`{", 0) == 0 || line.find("`<") != std::string::npos) {
+        } else if (line.rfind("`{", 0) == 0 || line.find("`<") != std::string::npos) {
             block.type = BlockType::UNSUPPORTED;
             Run run;
             run.text = "[Unsupported Micron content]";
@@ -439,6 +675,7 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
     }
     if (offset <= retained && doc.source_lines >= MAX_SOURCE_LINES)
         doc.mark_truncated(TruncationReason::SOURCE_LINES);
+    if (table_mode) append_malformed_table(doc, table_lines, total_runs);
     if (literal) doc.malformed = true;
     return doc;
 }
@@ -471,6 +708,26 @@ std::string truncation_notice(const Document& document) {
     if (document.has_truncation(TruncationReason::ANCHORS))
         return "[Page truncated: more than " +
             std::to_string(DocumentParser::MAX_ANCHORS) + " anchors]";
+    if (document.has_truncation(TruncationReason::TABLE_FALLBACK_BYTES))
+        return "[Page truncated: malformed table fallback exceeds " +
+            std::to_string(DocumentParser::MAX_TABLE_FALLBACK_BYTES) + " bytes]";
+    if (document.has_truncation(TruncationReason::TABLE_CELL_BYTES))
+        return "[Page truncated: table cell exceeds " +
+            std::to_string(DocumentParser::MAX_TABLE_CELL_BYTES) + " bytes]";
+    if (document.has_truncation(TruncationReason::TABLE_BYTES))
+        return "[Page truncated: table exceeds " +
+            std::to_string(DocumentParser::MAX_TABLE_BYTES / 1024) + " KiB]";
+    if (document.has_truncation(TruncationReason::TABLE_COLUMNS))
+        return "[Page truncated: more than " +
+            std::to_string(DocumentParser::MAX_TABLE_COLUMNS) + " table columns]";
+    if (document.has_truncation(TruncationReason::TABLE_ROWS))
+        return "[Page truncated: more than " +
+            std::to_string(DocumentParser::MAX_TABLE_ROWS) + " table rows]";
+    if (document.has_truncation(TruncationReason::TABLE_CELLS))
+        return "[Page truncated: too many table cells]";
+    if (document.has_truncation(TruncationReason::TABLES))
+        return "[Page truncated: more than " +
+            std::to_string(DocumentParser::MAX_TABLES) + " tables]";
     return "[Page truncated to device safety limits]";
 }
 
