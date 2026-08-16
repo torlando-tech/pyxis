@@ -118,6 +118,60 @@ def test_ui_wiring_contract():
     assert "set_save_callback" in manager_cpp
 
 
+def test_nomadnet_anchor_navigation_stays_local_and_uses_layout_checkpoints():
+    document_h = (INCLUDE / "NomadNetDocument.h").read_text()
+    document = (INCLUDE / "NomadNetDocument.cpp").read_text()
+    compact_h = (INCLUDE / "NomadNetCompactPage.h").read_text()
+    screen_h = (INCLUDE / "NomadNetScreen.h").read_text()
+    screen = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    manager_h = (INCLUDE / "UIManager.h").read_text()
+    manager = (INCLUDE / "UIManager.cpp").read_text()
+
+    assert "MAX_ANCHORS = 128" in document_h
+    assert "MAX_ANCHOR_NAME_BYTES = 64" in document_h
+    assert "add_anchor(doc, line.substr(name_start" in document
+    assert "add_anchor(doc, heading_slug(heading)" in document
+    assert "const ExternalVector<AnchorRecord>& anchors()" in compact_h
+    assert "bool find_anchor(" in compact_h
+
+    assert "bool jump_to_anchor(const std::string& name);" in screen_h
+    assert "int32_t logical_scroll() const" in screen_h
+    jump = screen[screen.index("bool NomadNetScreen::jump_to_anchor("):
+                  screen.index("void NomadNetScreen::draw_page")]
+    assert "_page.find_anchor(name,block_index)" in jump
+    assert "_layout_checkpoints" in jump
+    assert "scroll_to_logical(target,LV_ANIM_OFF)" in jump
+
+    open_page = manager[manager.index("void UIManager::nomad_open("):
+                        manager.index("void UIManager::nomad_reload()")]
+    assert "_nomad_url.path,_nomad_url.fields" in open_page
+    assert "NomadNet::should_jump_locally" in open_page
+    local = open_page[open_page.index("NomadNet::should_jump_locally"):
+                      open_page.index("RouterLock router_lock")]
+    assert "_nomadnet_screen->jump_to_anchor(parsed.fragment)" in local
+    assert "if(!resolved&&parsed.fragment.empty())return;" in local
+    assert "_nomad_history.open(parsed.str(),add_history,current_scroll)" in local
+    assert "nomad_send_request" not in local
+    assert "begin_navigation" not in local
+
+    request = manager[manager.index("void UIManager::nomad_send_request()"):
+                      manager.index("void UIManager::nomad_update()")]
+    assert "_nomad_url.path.data()" in request
+    assert "fragment" not in request
+
+    response = manager[manager.index("case NomadNet::AsyncMailbox::Kind::RESPONSE:"):
+                       manager.index("case NomadNet::AsyncMailbox::Kind::NONE:")]
+    assert "_nomadnet_screen->set_page(document)" in response
+    assert "_nomadnet_screen->jump_to_anchor(_nomad_url.fragment)" in response
+    assert "_nomadnet_screen->restore_logical_scroll(_nomad_pending_scroll)" in response
+    assert "if(page_applied&&_nomad_pending_scroll>=0)" in response
+    assert "else if(page_applied&&_nomad_url.has_fragment)" in response
+    assert (response.index("_nomadnet_screen->restore_logical_scroll(_nomad_pending_scroll)") <
+            response.index("_nomadnet_screen->jump_to_anchor(_nomad_url.fragment)"))
+    assert "Unknown anchor: #" in response
+    assert "int32_t _nomad_pending_scroll" in manager_h
+
+
 def test_nomadnet_page_body_uses_one_compact_custom_viewport():
     screen_h = (INCLUDE / "NomadNetScreen.h").read_text()
     screen = (INCLUDE / "NomadNetScreen.cpp").read_text()

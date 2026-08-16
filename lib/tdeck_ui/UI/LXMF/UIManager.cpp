@@ -954,7 +954,7 @@ void UIManager::replace_route(Route route) {
 
 void UIManager::back() {
     if (_navigation.current() == Route::NOMADNET && _nomad_history.back()) {
-        nomad_open(_nomad_history.current(), false);
+        nomad_open(_nomad_history.current(), false, _nomad_history.current_scroll());
         return;
     }
     if (_navigation.current() == Route::NOMADNET) {
@@ -2049,6 +2049,7 @@ void UIManager::nomad_stop_transport() {
     nomad_heap_checkpoint("stop-enter");
     _nomad_state = NomadState::IDLE;
     _nomad_deadline_ms = 0;
+    _nomad_pending_scroll = -1;
     _nomad_mailbox.seal();
     if (_nomad_link && _nomad_link.status() != Type::Link::CLOSED) _nomad_link.teardown();
     nomad_release_request();
@@ -2078,19 +2079,56 @@ bool UIManager::nomad_refresh_path_after_link_failure() {
     return true;
 }
 
-void UIManager::nomad_open(const std::string& address, bool add_history) {
+void UIManager::nomad_open(const std::string& address, bool add_history,
+                           int32_t restore_logical_scroll) {
     nomad_heap_checkpoint("open-enter");
     NomadNet::Url parsed;
     std::string error;
-    if (!NomadNet::Url::parse(address, parsed, error, _nomad_url.destination_hex)) {
+    if (!NomadNet::Url::parse(address, parsed, error, _nomad_url.destination_hex,
+            _nomad_url.path,_nomad_url.fields)) {
         LVGL_LOCK();
         _nomadnet_screen->set_status(error.c_str());
         return;
     }
     nomad_heap_checkpoint("open-parsed");
 
+    int32_t current_scroll=0;
+    bool page_loaded=false;
+    {
+        LVGL_LOCK();
+        current_scroll=_nomadnet_screen->logical_scroll();
+        page_loaded=_nomadnet_screen->page_loaded();
+    }
+    const bool restoring_history=restore_logical_scroll>=0;
+    if(NomadNet::should_jump_locally(_nomad_url,parsed,page_loaded,restoring_history)){
+        bool resolved=true;
+        {
+            LVGL_LOCK();
+            if(restoring_history)
+                _nomadnet_screen->restore_logical_scroll(restore_logical_scroll);
+            else
+                resolved=_nomadnet_screen->jump_to_anchor(parsed.fragment);
+            if(!resolved&&parsed.fragment.empty())return;
+            if(!resolved){
+                const std::string status="Unknown anchor: #"+parsed.fragment;
+                _nomadnet_screen->set_status(status.c_str());
+            }
+        }
+        if(!resolved)return;
+        _nomad_history.open(parsed.str(),add_history,current_scroll);
+        _nomad_url=parsed;
+        _nomad_pending_scroll=-1;
+        {
+            LVGL_LOCK();
+            _nomadnet_screen->set_address(parsed.str());
+            _nomadnet_screen->set_status("Page loaded");
+        }
+        return;
+    }
+
     RouterLock router_lock;
     if (!router_lock.acquired()) return;
+    _nomad_pending_scroll=restore_logical_scroll;
     nomad_heap_checkpoint("open-locked");
     {
         // Validation must precede destructive UI cleanup so a malformed manual
@@ -2109,7 +2147,7 @@ void UIManager::nomad_open(const std::string& address, bool add_history) {
         _nomad_response.clear();
         _nomad_request_policy.reset();
         _nomad_url = parsed;
-        _nomad_history.open(parsed.str(), add_history);
+        _nomad_history.open(parsed.str(), add_history, current_scroll);
         {
             LVGL_LOCK();
             _nomadnet_screen->set_address(parsed.str());
@@ -2130,7 +2168,7 @@ void UIManager::nomad_open(const std::string& address, bool add_history) {
     nomad_heap_checkpoint("open-cleared");
     _nomad_request_policy.reset();
     _nomad_url = parsed;
-    _nomad_history.open(parsed.str(), add_history);
+    _nomad_history.open(parsed.str(), add_history, current_scroll);
     _nomad_destination_hash = Bytes();
     _nomad_destination_hash.assignHex(parsed.destination_hex.c_str());
     nomad_heap_checkpoint("open-state-ready");
@@ -2288,11 +2326,17 @@ void UIManager::nomad_update() {
                 break;
             }
             bool page_applied = false;
+            bool anchor_resolved = true;
             {
                 LVGL_LOCK();
                 _nomadnet_screen->set_library(_nomad_library);
                 page_applied = _nomadnet_screen->set_page(document);
+                if(page_applied&&_nomad_pending_scroll>=0)
+                    _nomadnet_screen->restore_logical_scroll(_nomad_pending_scroll);
+                else if(page_applied&&_nomad_url.has_fragment)
+                    anchor_resolved=_nomadnet_screen->jump_to_anchor(_nomad_url.fragment);
             }
+            _nomad_pending_scroll=-1;
             if (page_applied) _nomad_response.release();
             nomad_heap_checkpoint("response-page-applied");
             if (!page_applied) {
@@ -2311,7 +2355,12 @@ void UIManager::nomad_update() {
             {
                 LVGL_LOCK();
                 _nomadnet_screen->set_page_saved(page_saved);
-                _nomadnet_screen->set_status(document.truncated ? "Page loaded (truncated)" : "Page loaded");
+                if(!anchor_resolved&&!_nomad_url.fragment.empty()){
+                    const std::string status="Unknown anchor: #"+_nomad_url.fragment;
+                    _nomadnet_screen->set_status(status.c_str());
+                }else{
+                    _nomadnet_screen->set_status(document.truncated ? "Page loaded (truncated)" : "Page loaded");
+                }
             }
             break;
         }

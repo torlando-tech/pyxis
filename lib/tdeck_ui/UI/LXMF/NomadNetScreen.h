@@ -28,6 +28,10 @@ public:
     std::string address() const;
     void set_status(const char* status);
     bool set_page(const NomadNet::Document& document);
+    bool jump_to_anchor(const std::string& name);
+    void restore_logical_scroll(int32_t logical);
+    int32_t logical_scroll() const { return _logical_scroll; }
+    bool page_loaded() const { return _page_loaded; }
     void set_library(const NomadNet::Library& library);
     void set_page_saved(bool saved);
     void begin_navigation(const std::string& target);

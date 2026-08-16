@@ -95,6 +95,86 @@ bool parse_micron_color(const std::string& value, uint32_t& result) {
     return end && *end == '\0';
 }
 
+bool anchor_char(unsigned char c) {
+    return c < 0x80 && (std::isalnum(c) != 0 || c == '_' || c == '-');
+}
+
+void add_anchor(Document& doc, const std::string& name, std::size_t block_index) {
+    if (name.empty()) return;
+    if (name.size() > DocumentParser::MAX_ANCHOR_NAME_BYTES) {
+        doc.mark_truncated(TruncationReason::ANCHOR_NAME_BYTES);
+        return;
+    }
+    for (const auto& anchor : doc.anchors)
+        if (anchor.name == name) return;
+    if (doc.anchors.size() >= DocumentParser::MAX_ANCHORS) {
+        doc.mark_truncated(TruncationReason::ANCHORS);
+        return;
+    }
+    doc.anchors.push_back({name, static_cast<uint16_t>(block_index)});
+}
+
+bool modifier_without_arguments(char command) {
+    switch (command) {
+        case '!': case '*': case '_': case '=': case 'f': case 'b':
+        case 'a': case 'c': case 'r': case 'l': case '`': case '<':
+        case '>': case '{': case '}': return true;
+        default: return false;
+    }
+}
+
+std::string heading_slug(const std::string& line) {
+    std::string slug;
+    slug.reserve(DocumentParser::MAX_ANCHOR_NAME_BYTES + 1);
+    bool pending_separator = false;
+    for (std::size_t i = 0; i < line.size();) {
+        if (line[i] == '`' && i + 1 < line.size()) {
+            const char command = line[i + 1];
+            if (command == ':') {
+                i += 2;
+                while (i < line.size() && anchor_char(static_cast<unsigned char>(line[i]))) ++i;
+                continue;
+            }
+            if (command == 'F' || command == 'B') {
+                std::size_t value_start = i + 2;
+                std::size_t count = 3;
+                if (value_start < line.size() && line[value_start] == 'T') {
+                    ++value_start;
+                    count = 6;
+                }
+                uint32_t ignored = 0;
+                if (value_start + count <= line.size() &&
+                    parse_micron_color(line.substr(value_start, count), ignored)) {
+                    i = value_start + count;
+                    continue;
+                }
+            }
+            if (modifier_without_arguments(command)) {
+                i += 2;
+                continue;
+            }
+        }
+
+        const unsigned char c = static_cast<unsigned char>(line[i]);
+        if (c < 0x80 && std::isalnum(c) != 0) {
+            if (pending_separator && !slug.empty() &&
+                slug.size() <= DocumentParser::MAX_ANCHOR_NAME_BYTES)
+                slug.push_back('-');
+            if (slug.size() <= DocumentParser::MAX_ANCHOR_NAME_BYTES)
+                slug.push_back(static_cast<char>(std::tolower(c)));
+            pending_separator = false;
+            ++i;
+        } else {
+            pending_separator = !slug.empty();
+            if (c < 0x80) ++i;
+            else if (c <= 0xdf) i += 2;
+            else if (c <= 0xef) i += 3;
+            else i += 4;
+        }
+    }
+    return slug;
+}
+
 struct Style {
     bool bold = false;
     bool italic = false;
@@ -170,6 +250,10 @@ void parse_inline(Document& doc, Block& block, const std::string& line, Style& s
             } else doc.malformed = true;
         } else if (command == '`') {
             style = Style{};
+        } else if (command == ':') {
+            const std::size_t name_start = i;
+            while (i < line.size() && anchor_char(static_cast<unsigned char>(line[i]))) ++i;
+            add_anchor(doc, line.substr(name_start, i - name_start), doc.blocks.size());
         } else if (command == '[') {
             const auto close = line.find(']', i);
             if (close == std::string::npos) { doc.malformed = true; text += "`["; continue; }
@@ -323,7 +407,9 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
             while (depth < line.size() && line[depth] == '>') ++depth;
             block.depth = static_cast<uint8_t>(std::min<std::size_t>(depth, 255));
             section_depth = block.depth;
-            parse_inline(doc, block, line.substr(depth), style);
+            const std::string heading = line.substr(depth);
+            parse_inline(doc, block, heading, style);
+            add_anchor(doc, heading_slug(heading), doc.blocks.size());
         } else if (line[0] == '-') {
             block.type = BlockType::DIVIDER;
             uint32_t codepoint = 0;
@@ -379,6 +465,12 @@ std::string truncation_notice(const Document& document) {
     if (document.has_truncation(TruncationReason::LINKS))
         return "[Page truncated: more than " +
             std::to_string(DocumentParser::MAX_LINKS) + " links]";
+    if (document.has_truncation(TruncationReason::ANCHOR_NAME_BYTES))
+        return "[Page truncated: anchor name exceeds " +
+            std::to_string(DocumentParser::MAX_ANCHOR_NAME_BYTES) + " bytes]";
+    if (document.has_truncation(TruncationReason::ANCHORS))
+        return "[Page truncated: more than " +
+            std::to_string(DocumentParser::MAX_ANCHORS) + " anchors]";
     return "[Page truncated to device safety limits]";
 }
 

@@ -424,12 +424,14 @@ private:
     enum class NomadState { IDLE, PATH, LINK, REQUEST };
     std::atomic<NomadState> _nomad_state{NomadState::IDLE};
     uint32_t _nomad_deadline_ms = 0;
+    int32_t _nomad_pending_scroll = -1;
     static UIManager* s_nomad_instance;
 
     void render_route(Route route);
     void replace_route(Route route);
     void hide_all_screens();
-    void nomad_open(const std::string& address, bool add_history = true);
+    void nomad_open(const std::string& address, bool add_history = true,
+                    int32_t restore_logical_scroll = -1);
     void nomad_reload();
     void nomad_update();
     void nomad_start_link();

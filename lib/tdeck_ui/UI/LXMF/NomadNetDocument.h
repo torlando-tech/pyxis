@@ -10,7 +10,7 @@ namespace UI::LXMF::NomadNet {
 enum class BlockType { TEXT, HEADING, DIVIDER, UNSUPPORTED };
 enum class Alignment { LEFT, CENTER, RIGHT };
 
-enum class TruncationReason : uint8_t {
+enum class TruncationReason : uint16_t {
     DOCUMENT_BYTES = 1 << 0,
     SOURCE_LINES = 1 << 1,
     SOURCE_LINE_BYTES = 1 << 2,
@@ -18,6 +18,8 @@ enum class TruncationReason : uint8_t {
     RUNS_PER_LINE = 1 << 4,
     TOTAL_RUNS = 1 << 5,
     LINKS = 1 << 6,
+    ANCHORS = 1 << 7,
+    ANCHOR_NAME_BYTES = 1 << 8,
 };
 
 struct Run {
@@ -46,9 +48,19 @@ struct Link {
     std::string fields;
 };
 
+struct Anchor {
+    Anchor() = default;
+    Anchor(const std::string& value, uint16_t block)
+        : name(value), block_index(block) {}
+
+    std::string name;
+    uint16_t block_index = 0;
+};
+
 struct Document {
     std::vector<Block> blocks;
     std::vector<Link> links;
+    std::vector<Anchor> anchors;
     uint32_t cache_seconds = 0;
     bool has_background = false;
     uint32_t background = 0;
@@ -59,14 +71,14 @@ struct Document {
     bool unsupported = false;
     std::size_t source_bytes = 0;
     std::size_t source_lines = 0;
-    uint8_t truncation_reasons = 0;
+    uint16_t truncation_reasons = 0;
 
     void mark_truncated(TruncationReason reason) {
         truncated = true;
-        truncation_reasons |= static_cast<uint8_t>(reason);
+        truncation_reasons |= static_cast<uint16_t>(reason);
     }
     bool has_truncation(TruncationReason reason) const {
-        return (truncation_reasons & static_cast<uint8_t>(reason)) != 0;
+        return (truncation_reasons & static_cast<uint16_t>(reason)) != 0;
     }
 };
 
@@ -79,6 +91,8 @@ public:
     static constexpr std::size_t MAX_TOTAL_RUNS = 1024;
     static constexpr std::size_t MAX_SOURCE_LINE_BYTES = 4096;
     static constexpr std::size_t MAX_LINKS = 128;
+    static constexpr std::size_t MAX_ANCHORS = 128;
+    static constexpr std::size_t MAX_ANCHOR_NAME_BYTES = 64;
     static constexpr uint32_t MAX_CACHE_SECONDS = 7 * 24 * 60 * 60;
 
     Document parse(const std::string& source) const;

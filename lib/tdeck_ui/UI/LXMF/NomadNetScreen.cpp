@@ -588,6 +588,32 @@ void NomadNetScreen::scroll_to_logical(int32_t logical,lv_anim_enable_t animatio
     lv_obj_invalidate(_content);
 }
 
+bool NomadNetScreen::jump_to_anchor(const std::string& name){
+    if(!_page_loaded)return false;
+    uint16_t block_index=0;
+    int32_t target=-1;
+    if(!name.empty()){
+        if(!_page.find_anchor(name,block_index))return false;
+        for(const auto& checkpoint:_layout_checkpoints){
+            if(checkpoint.block_index==block_index){target=checkpoint.y;break;}
+        }
+    }else{
+        for(const auto& checkpoint:_layout_checkpoints){
+            if(checkpoint.y<=_logical_scroll||checkpoint.block_index>=_page.blocks().size())continue;
+            if(_page.blocks()[checkpoint.block_index].type==NomadNet::BlockType::HEADING){
+                target=checkpoint.y;break;
+            }
+        }
+    }
+    if(target<0)return false;
+    scroll_to_logical(target,LV_ANIM_OFF);
+    return true;
+}
+
+void NomadNetScreen::restore_logical_scroll(int32_t logical){
+    if(_page_loaded)scroll_to_logical(logical,LV_ANIM_OFF);
+}
+
 void NomadNetScreen::draw_page(lv_event_t* event){
     auto* draw_ctx=lv_event_get_draw_ctx(event);
     lv_area_t content_area;

@@ -27,6 +27,7 @@ using UI::LXMF::Route;
 using UI::LXMF::NomadNet::Alignment;
 using UI::LXMF::NomadNet::BlockType;
 using UI::LXMF::NomadNet::DocumentParser;
+using UI::LXMF::NomadNet::TruncationReason;
 using UI::LXMF::NomadNet::compact_address;
 using UI::LXMF::NomadNet::PageHistory;
 using UI::LXMF::NomadNet::display_text;
@@ -78,10 +79,20 @@ int main(int argc, char** argv) {
 
     PageHistory history;
     history.open("a");
-    history.open("b");
+    history.open("b", true, 84);
     history.reload();
     check("reload does not add browser history", history.current() == "b" && history.depth() == 1);
-    check("browser back restores prior page", history.back() && history.current() == "a" && history.depth() == 0);
+    check("browser back restores prior page and logical scroll",
+          history.back() && history.current() == "a" && history.current_scroll() == 84 &&
+              history.depth() == 0);
+    history.clear();
+    history.open("node:/page/a.mu");
+    history.open("node:/page/a.mu#details", true, 137);
+    check("anchor navigation creates meaningful history entry",
+          history.depth() == 1 && history.current() == "node:/page/a.mu#details");
+    check("anchor back restores exact prior position",
+          history.back() && history.current() == "node:/page/a.mu" &&
+              history.current_scroll() == 137);
     for (std::size_t i = 0; i < PageHistory::MAX_DEPTH + 4; ++i) history.open(std::to_string(i));
     check("browser history is bounded", history.depth() == PageHistory::MAX_DEPTH);
 
@@ -142,6 +153,45 @@ int main(int argc, char** argv) {
           url.path == "/page/repo.mu" && url.fields == "g=reticulum|r=lxmf");
     check("canonical URL preserves link fields for history and reload",
           url.str() == "fedcba9876543210fedcba9876543210:/page/repo.mu`g=reticulum|r=lxmf");
+    check("page fragment is separated from transport request path",
+          Url::parse("fedcba9876543210fedcba9876543210:/page/guide.mu#anchors`mode=full",
+                     url, error) &&
+              url.path == "/page/guide.mu" && url.has_fragment &&
+              url.fragment == "anchors" && url.fields == "mode=full");
+    check("canonical URL retains fragment before link fields",
+          url.str() == "fedcba9876543210fedcba9876543210:/page/guide.mu#anchors`mode=full");
+    Url current_url = url;
+    Url fragment_url;
+    check("fragment-only target inherits the complete current resource",
+          Url::parse("#next-section", fragment_url, error, current_url.destination_hex,
+                     current_url.path, current_url.fields) &&
+              fragment_url.destination_hex == current_url.destination_hex &&
+              fragment_url.path == current_url.path &&
+              fragment_url.fields == current_url.fields && fragment_url.has_fragment &&
+              fragment_url.fragment == "next-section");
+    check("empty fragment is retained for canonical next-heading navigation",
+          Url::parse("#", fragment_url, error, current_url.destination_hex,
+                     current_url.path, current_url.fields) &&
+              fragment_url.has_fragment && fragment_url.fragment.empty());
+    check("fragment navigation keeps transport resource identity",
+          current_url.same_resource(fragment_url));
+    check("fragment navigation is local only with a loaded matching resource",
+          UI::LXMF::NomadNet::should_jump_locally(current_url, fragment_url, true, false) &&
+              !UI::LXMF::NomadNet::should_jump_locally(current_url, fragment_url, false, false));
+    Url other_page;
+    check("fragment on another path still requires transport",
+          Url::parse(":/page/other.mu#next-section", other_page, error,
+                     current_url.destination_hex, current_url.path, current_url.fields) &&
+              !UI::LXMF::NomadNet::should_jump_locally(current_url, other_page, true, false));
+    check("history restoration may reuse the loaded matching resource",
+          UI::LXMF::NomadNet::should_jump_locally(current_url, current_url, true, true));
+    check("fragment names reject non-anchor grammar",
+          !Url::parse("#bad/name", fragment_url, error, current_url.destination_hex,
+                      current_url.path, current_url.fields));
+    check("fragment names are bounded",
+          !Url::parse("#" + std::string(Url::MAX_FRAGMENT_BYTES + 1, 'a'),
+                      fragment_url, error, current_url.destination_hex,
+                      current_url.path, current_url.fields));
     check("wrong destination length rejected", !Url::parse("abcd:/page/index.mu", url, error));
     check("nonhex destination rejected", !Url::parse("zz23456789abcdef0123456789abcdef:/page/index.mu", url, error));
     check("control characters rejected", !Url::parse("0123456789abcdef0123456789abcdef:/page/a\nb", url, error));
@@ -294,6 +344,81 @@ int main(int argc, char** argv) {
     check("compact page preserves document presentation flags",
           compact.has_background() == doc.has_background && compact.background() == doc.background &&
           compact.has_foreground() == doc.has_foreground && compact.foreground() == doc.foreground);
+
+    const auto anchor_doc = parser.parse(
+        "First\n"
+        "`:spot Second\n"
+        "`:spot Duplicate\n"
+        "> Styled `!Heading`! Caf\xC3\xA9\n"
+        "`:only\n"
+        "`:mark!Visible punctuation\n");
+    check("explicit anchors are retained at their zero-width block",
+          anchor_doc.anchors.size() == 4 && anchor_doc.anchors[0].name == "spot" &&
+              anchor_doc.anchors[0].block_index == 1);
+    check("first duplicate anchor declaration wins",
+          anchor_doc.anchors[0].block_index == 1);
+    check("explicit anchor declaration does not render",
+          anchor_doc.blocks[1].runs.size() == 1 && anchor_doc.blocks[1].runs[0].text == " Second");
+    check("anchor grammar stops without consuming punctuation",
+          anchor_doc.blocks[5].runs.size() == 1 &&
+              anchor_doc.blocks[5].runs[0].text == "!Visible punctuation");
+    check("anchor-only declaration remains zero width",
+          anchor_doc.anchors[2].name == "only" && anchor_doc.anchors[2].block_index == 4 &&
+              anchor_doc.blocks[4].runs.empty());
+    check("heading slug strips Micron formatting and non-ASCII text",
+          anchor_doc.anchors[1].name == "styled-heading-caf" &&
+              anchor_doc.anchors[1].block_index == 3);
+    const auto canonical_slug_doc = parser.parse(
+        "> Hello, World!\n> A___B---C\n> A\xC3\xA9" "B\n"
+        "> `[Label`:/page/target.mu] Link\n"
+        "> `FabcRed `BT123456Blue\n> Bad `Fzzzx Color\n"
+        "> `Fg50Gray`f `Bg25Shade`b\n");
+    check("generated slugs collapse canonical separator runs",
+          canonical_slug_doc.anchors[0].name == "hello-world" &&
+              canonical_slug_doc.anchors[1].name == "a-b-c");
+    check("generated slugs replace a Unicode run with one separator",
+          canonical_slug_doc.anchors[2].name == "a-b");
+    check("generated slugs include canonical link label and target text",
+          canonical_slug_doc.anchors[3].name == "label-page-target-mu-link");
+    check("generated slugs strip valid colors but retain malformed color text",
+          canonical_slug_doc.anchors[4].name == "red-blue" &&
+              canonical_slug_doc.anchors[5].name == "bad-fzzzx-color");
+    check("generated slugs strip grayscale foreground and background modifiers",
+          canonical_slug_doc.anchors[6].name == "gray-shade");
+    check("explicit anchor names preserve canonical case sensitivity",
+          parser.parse("`:Mixed_Name-2 target\n").anchors.front().name == "Mixed_Name-2");
+    const auto empty_anchor_doc = parser.parse("`: visible\n");
+    check("empty anchor declarations are ignored and remain zero width",
+          empty_anchor_doc.anchors.empty() && empty_anchor_doc.blocks.front().runs.front().text == " visible");
+    const std::string long_anchor(DocumentParser::MAX_ANCHOR_NAME_BYTES + 1, 'a');
+    const auto long_anchor_doc = parser.parse("`:" + long_anchor + " visible\n");
+    check("overlong anchors are consumed without retaining a false prefix",
+          long_anchor_doc.anchors.empty() && long_anchor_doc.blocks.front().runs.front().text == " visible" &&
+              long_anchor_doc.has_truncation(TruncationReason::ANCHOR_NAME_BYTES));
+    const auto long_heading_anchor_doc = parser.parse("> " + long_anchor + "\n");
+    check("overlong generated heading slugs do not retain a false prefix",
+          long_heading_anchor_doc.anchors.empty() &&
+              long_heading_anchor_doc.has_truncation(TruncationReason::ANCHOR_NAME_BYTES));
+    std::string many_anchors_source;
+    for (std::size_t i = 0; i <= DocumentParser::MAX_ANCHORS; ++i)
+        many_anchors_source += "`:a" + std::to_string(i) + " x\n";
+    const auto many_anchors_doc = parser.parse(many_anchors_source);
+    check("anchor count is independently bounded",
+          many_anchors_doc.anchors.size() == DocumentParser::MAX_ANCHORS &&
+              many_anchors_doc.has_truncation(TruncationReason::ANCHORS));
+    const auto duplicate_slug_doc = parser.parse(
+        "`:same-heading explicit\n> Same `!Heading`!\n");
+    check("explicit declaration wins over a later generated heading slug",
+          duplicate_slug_doc.anchors.size() == 1 &&
+              duplicate_slug_doc.anchors.front().block_index == 0);
+    CompactPage anchor_page;
+    uint16_t anchor_block = 0;
+    check("compact page retains bounded anchor records",
+          anchor_page.assign(anchor_doc) && anchor_page.anchors().size() == anchor_doc.anchors.size());
+    check("compact anchor lookup resolves exact name to block",
+          anchor_page.find_anchor("styled-heading-caf", anchor_block) && anchor_block == 3);
+    check("compact anchor lookup is case-sensitive and allocation-free",
+          !anchor_page.find_anchor("Styled-Heading-Caf", anchor_block));
 
     auto color_doc = parser.parse(
         "#!bg=123\n#!fg=abc\n"
