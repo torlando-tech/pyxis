@@ -231,6 +231,20 @@ bool Library::set_node_saved(const std::string& destination_hex, bool saved) {
     return true;
 }
 
+bool Library::set_node_identified(const std::string& destination_hex, bool identified) {
+    if (!is_hex32(destination_hex)) return false;
+    const std::string normalized = lower_hex(destination_hex);
+    for (auto& node : _nodes) {
+        if (node.destination_hex != normalized) continue;
+        node.identify_on_connect = identified;
+        return true;
+    }
+    if (!identified || !make_room(_nodes, MAX_NODES)) return false;
+    _nodes.insert(_nodes.begin(), NodeRecord{normalized, {}, 0, 0, false, true});
+    sort_nodes(_nodes);
+    return true;
+}
+
 bool Library::set_page_saved(const std::string& url, bool saved) {
     if (!valid_page_url(url)) return false;
     const std::string normalized = lower_hex(url.substr(0, 32)) + url.substr(32);
@@ -283,6 +297,14 @@ bool Library::node_saved(const std::string& destination_hex) const {
     });
 }
 
+bool Library::node_identified(const std::string& destination_hex) const {
+    if (!is_hex32(destination_hex)) return false;
+    const std::string normalized = lower_hex(destination_hex);
+    return std::any_of(_nodes.begin(), _nodes.end(), [&](const NodeRecord& node) {
+        return node.destination_hex == normalized && node.identify_on_connect;
+    });
+}
+
 bool Library::page_saved(const std::string& url) const {
     if (!valid_page_url(url)) return false;
     const std::string normalized = lower_hex(url.substr(0, 32)) + url.substr(32);
@@ -297,11 +319,12 @@ ExternalVector<uint8_t> Library::encode() const {
     const auto append = [&](const std::string& value) {
         output.insert(output.end(), value.begin(), value.end());
     };
-    append("PXNN1\n");
+    append("PXNN2\n");
     for (const auto& node : _nodes) {
         append("N\t" + node.destination_hex + "\t" + hex_encode(node.name) + "\t" +
                std::to_string(node.last_heard) + "\t" + std::to_string(node.hops) + "\t" +
-               (node.saved ? "1\n" : "0\n"));
+               (node.saved ? "1\t" : "0\t") +
+               (node.identify_on_connect ? "1\n" : "0\n"));
         if (output.size() > MAX_ENCODED_BYTES) return {};
     }
     for (const auto& page : _pages) {
@@ -314,7 +337,11 @@ ExternalVector<uint8_t> Library::encode() const {
 
 bool Library::decode(const uint8_t* data, std::size_t size) {
     if (!data || size < 6 || size > MAX_ENCODED_BYTES) return false;
-    if (!std::equal(data, data + 6, reinterpret_cast<const uint8_t*>("PXNN1\n")) || data[size - 1] != '\n') return false;
+    const bool legacy = std::equal(data, data + 6,
+        reinterpret_cast<const uint8_t*>("PXNN1\n"));
+    const bool current = std::equal(data, data + 6,
+        reinterpret_cast<const uint8_t*>("PXNN2\n"));
+    if ((!legacy && !current) || data[size - 1] != '\n') return false;
 
     Library candidate;
     std::size_t start = 6;
@@ -327,8 +354,10 @@ bool Library::decode(const uint8_t* data, std::size_t size) {
         if (line.empty()) continue;
         const auto fields = split_tabs(line);
         if (fields[0] == "N") {
-            if (fields.size() != 6 || candidate._nodes.size() >= MAX_NODES ||
-                !is_hex32(fields[1]) || (fields[5] != "0" && fields[5] != "1")) return false;
+            const std::size_t expected_fields = legacy ? 6 : 7;
+            if (fields.size() != expected_fields || candidate._nodes.size() >= MAX_NODES ||
+                !is_hex32(fields[1]) || (fields[5] != "0" && fields[5] != "1") ||
+                (!legacy && fields[6] != "0" && fields[6] != "1")) return false;
             std::string name;
             uint64_t timestamp = 0, hops = 0;
             if (!hex_decode(fields[2], name, MAX_NAME_BYTES) ||
@@ -340,7 +369,7 @@ bool Library::decode(const uint8_t* data, std::size_t size) {
                 reinterpret_cast<const uint8_t*>(name.data()), name.size());
             if (canonical_name != name) return false;
             candidate._nodes.push_back(NodeRecord{destination, canonical_name, timestamp,
-                static_cast<uint8_t>(hops), fields[5] == "1"});
+                static_cast<uint8_t>(hops), fields[5] == "1", !legacy && fields[6] == "1"});
         } else if (fields[0] == "P") {
             if (fields.size() != 5 || candidate._pages.size() >= MAX_PAGES ||
                 (fields[4] != "0" && fields[4] != "1")) return false;

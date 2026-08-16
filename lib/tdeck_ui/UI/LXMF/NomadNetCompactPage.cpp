@@ -42,6 +42,7 @@ bool CompactPage::assign(const Document& document) {
         const std::size_t run_limit = MAX_RUNS - (reserve_notice ? 1 : 0);
         const std::size_t block_count = std::min(document.blocks.size(), block_limit);
         const std::size_t link_count = std::min(document.links.size(), MAX_LINKS);
+        const std::size_t field_count = std::min(document.fields.size(), MAX_FIELDS);
         const std::size_t table_count = std::min(document.tables.size(), MAX_TABLES);
         std::size_t table_cell_count = 0;
         for (std::size_t i = 0; i < table_count; ++i) {
@@ -79,7 +80,13 @@ bool CompactPage::assign(const Document& document) {
         run_count += table_run_count;
         for (std::size_t i = 0; i < link_count; ++i) {
             const std::size_t bytes = document.links[i].target.size() +
-                (document.links[i].fields.empty() ? 0 : document.links[i].fields.size() + 1) + 1;
+                (document.links[i].has_fields ? document.links[i].fields.size() + 1 : 0) + 1;
+            if (bytes > MAX_ARENA_BYTES - std::min(arena_size, MAX_ARENA_BYTES)) return false;
+            arena_size += bytes;
+        }
+        for (std::size_t i = 0; i < field_count; ++i) {
+            const auto& field = document.fields[i];
+            const std::size_t bytes = field.name.size() + field.value.size() + field.label.size() + 3;
             if (bytes > MAX_ARENA_BYTES - std::min(arena_size, MAX_ARENA_BYTES)) return false;
             arena_size += bytes;
         }
@@ -97,6 +104,7 @@ bool CompactPage::assign(const Document& document) {
         _blocks.reserve(block_count);
         _runs.reserve(std::min(run_count, run_limit));
         _links.reserve(link_count);
+        _fields.reserve(field_count);
         _anchors.reserve(anchor_count);
         _tables.reserve(table_count);
         _table_cells.reserve(table_cell_count);
@@ -104,7 +112,7 @@ bool CompactPage::assign(const Document& document) {
         for (std::size_t i = 0; i < link_count; ++i) {
             LinkRecord link;
             std::string navigation_target = document.links[i].target;
-            if (!document.links[i].fields.empty()) {
+            if (document.links[i].has_fields) {
                 navigation_target += '`';
                 navigation_target += document.links[i].fields;
             }
@@ -113,6 +121,22 @@ bool CompactPage::assign(const Document& document) {
                 return false;
             }
             _links.push_back(link);
+        }
+
+        for (std::size_t i = 0; i < field_count; ++i) {
+            const auto& source = document.fields[i];
+            FieldRecord field;
+            if (!append(source.name, field.name_offset, field.name_length) ||
+                !append(source.value, field.value_offset, field.value_length) ||
+                !append(source.label, field.label_offset, field.label_length)) {
+                clear();
+                return false;
+            }
+            field.width = source.width;
+            field.type = source.type;
+            field.checked = source.checked;
+            field.masked = source.masked;
+            _fields.push_back(field);
         }
 
         for (const auto& source_anchor : document.anchors) {
@@ -156,6 +180,9 @@ bool CompactPage::assign(const Document& document) {
                 run.link_index = source_run.link_index >= 0 &&
                     static_cast<std::size_t>(source_run.link_index) < _links.size()
                         ? static_cast<int16_t>(source_run.link_index) : -1;
+                run.field_index = source_run.field_index >= 0 &&
+                    static_cast<std::size_t>(source_run.field_index) < _fields.size()
+                        ? static_cast<int16_t>(source_run.field_index) : -1;
                 if (source_run.bold) run.style |= BOLD;
                 if (source_run.italic) run.style |= ITALIC;
                 if (source_run.underline) run.style |= UNDERLINE;
@@ -209,6 +236,9 @@ bool CompactPage::assign(const Document& document) {
                     run.link_index = source_run.link_index >= 0 &&
                         static_cast<std::size_t>(source_run.link_index) < _links.size()
                             ? static_cast<int16_t>(source_run.link_index) : -1;
+                    run.field_index = source_run.field_index >= 0 &&
+                        static_cast<std::size_t>(source_run.field_index) < _fields.size()
+                            ? static_cast<int16_t>(source_run.field_index) : -1;
                     if (source_run.bold) run.style |= BOLD;
                     if (source_run.italic) run.style |= ITALIC;
                     if (source_run.underline) run.style |= UNDERLINE;
@@ -233,7 +263,8 @@ bool CompactPage::assign(const Document& document) {
         _foreground = document.foreground;
         _truncated = _truncated || document.truncated || document.blocks.size() > block_count ||
             document.links.size() > link_count || document.anchors.size() > anchor_count ||
-            document.tables.size() > table_count || document.table_cells.size() > table_cell_count ||
+            document.fields.size() > field_count || document.tables.size() > table_count ||
+            document.table_cells.size() > table_cell_count ||
             document.table_runs.size() > table_run_count;
         _unsupported = document.unsupported;
         return true;
@@ -251,6 +282,7 @@ void CompactPage::clear() {
     ExternalVector<AnchorRecord>().swap(_anchors);
     ExternalVector<TableRecord>().swap(_tables);
     ExternalVector<TableCellRecord>().swap(_table_cells);
+    ExternalVector<FieldRecord>().swap(_fields);
     _has_background = false;
     _background = 0;
     _has_foreground = false;
@@ -307,6 +339,27 @@ CompactPage::TextView CompactPage::target(std::size_t index) const {
     const auto& link = _links[index];
     if (link.target_offset > _arena.size() || link.target_length > _arena.size() - link.target_offset) return {};
     return {_arena.data() + link.target_offset, link.target_length};
+}
+
+CompactPage::TextView CompactPage::field_name(std::size_t index) const {
+    if (index >= _fields.size()) return {};
+    const auto& field = _fields[index];
+    if (field.name_offset > _arena.size() || field.name_length > _arena.size() - field.name_offset) return {};
+    return {_arena.data() + field.name_offset, field.name_length};
+}
+
+CompactPage::TextView CompactPage::field_value(std::size_t index) const {
+    if (index >= _fields.size()) return {};
+    const auto& field = _fields[index];
+    if (field.value_offset > _arena.size() || field.value_length > _arena.size() - field.value_offset) return {};
+    return {_arena.data() + field.value_offset, field.value_length};
+}
+
+CompactPage::TextView CompactPage::field_label(std::size_t index) const {
+    if (index >= _fields.size()) return {};
+    const auto& field = _fields[index];
+    if (field.label_offset > _arena.size() || field.label_length > _arena.size() - field.label_offset) return {};
+    return {_arena.data() + field.label_offset, field.label_length};
 }
 
 bool CompactPage::find_anchor(const std::string& name, uint16_t& block_index) const {

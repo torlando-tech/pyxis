@@ -15,11 +15,12 @@ struct NodeRecord {
     uint64_t last_heard = 0;
     uint8_t hops = 0;
     bool saved = false;
+    bool identify_on_connect = false;
     NodeRecord() = default;
     NodeRecord(std::string destination, std::string display_name, uint64_t heard,
-               uint8_t hop_count, bool is_saved)
+               uint8_t hop_count, bool is_saved, bool identify = false)
         : destination_hex(std::move(destination)), name(std::move(display_name)),
-          last_heard(heard), hops(hop_count), saved(is_saved) {}
+          last_heard(heard), hops(hop_count), saved(is_saved), identify_on_connect(identify) {}
 };
 
 struct PageRecord {
@@ -49,9 +50,11 @@ public:
                    uint64_t timestamp, uint8_t hops);
     bool record_page(const std::string& url, const std::string& title, uint64_t timestamp);
     bool set_node_saved(const std::string& destination_hex, bool saved);
+    bool set_node_identified(const std::string& destination_hex, bool identified);
     bool set_page_saved(const std::string& url, bool saved);
     bool remove_heard_node(const std::string& destination_hex);
     bool node_saved(const std::string& destination_hex) const;
+    bool node_identified(const std::string& destination_hex) const;
     bool page_saved(const std::string& url) const;
 
     ExternalVector<uint8_t> encode() const;

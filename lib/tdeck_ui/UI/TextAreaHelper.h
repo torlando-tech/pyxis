@@ -26,8 +26,8 @@ public:
      * When the user long-presses the textarea, a paste dialog
      * will appear if the clipboard has content.
      */
-    static void enable_paste(lv_obj_t* textarea) {
-        lv_obj_add_event_cb(textarea, on_long_pressed, LV_EVENT_LONG_PRESSED, nullptr);
+    static bool enable_paste(lv_obj_t* textarea) {
+        return lv_obj_add_event_cb(textarea, on_long_pressed, LV_EVENT_LONG_PRESSED, nullptr) != nullptr;
     }
 
 private:

@@ -52,6 +52,14 @@ const lv_font_t* page_run_font(const NomadNet::CompactPage::RunRecord& run, bool
     if (bold) return &nomadnet_font_12_bold;
     return italic ? &nomadnet_font_12_italic : &nomadnet_font_12;
 }
+
+std::size_t safe_utf8_prefix(const char* value,std::size_t size,std::size_t limit){
+    if(!value)return 0;
+    if(size<=limit)return size;
+    std::size_t retained=limit;
+    while(retained>0&&(static_cast<unsigned char>(value[retained])&0xc0)==0x80)--retained;
+    return retained;
+}
 }
 
 NomadNetScreen::NomadNetScreen() {
@@ -68,7 +76,9 @@ NomadNetScreen::NomadNetScreen() {
     lv_obj_t* rl=lv_label_create(_reload_button);lv_label_set_text(rl,LV_SYMBOL_REFRESH);lv_obj_center(rl);
     _save_button=lv_btn_create(header);lv_obj_set_size(_save_button,36,28);lv_obj_align(_save_button,LV_ALIGN_RIGHT_MID,-40,0);
     lv_obj_t* sl=lv_label_create(_save_button);lv_label_set_text(sl,LV_SYMBOL_SAVE);lv_obj_center(sl);
-    for(auto* button:{_back_button,_home_button,_reload_button,_save_button}) {
+    _identify_button=lv_btn_create(header);lv_obj_set_size(_identify_button,36,28);lv_obj_align(_identify_button,LV_ALIGN_RIGHT_MID,-80,0);
+    lv_obj_t* il=lv_label_create(_identify_button);lv_label_set_text(il,"ID");lv_obj_center(il);
+    for(auto* button:{_back_button,_home_button,_reload_button,_save_button,_identify_button}) {
         lv_obj_set_style_bg_color(button,Theme::surfaceContainer(),0);
         lv_obj_set_style_bg_color(button,Theme::primaryPressed(),LV_STATE_FOCUSED);
         lv_obj_set_style_border_width(button,0,0);
@@ -102,16 +112,22 @@ NomadNetScreen::NomadNetScreen() {
     lv_obj_set_scroll_dir(_content,LV_DIR_VER);lv_obj_set_scrollbar_mode(_content,LV_SCROLLBAR_MODE_AUTO);
     lv_obj_add_flag(_content,LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(_content,page_event,LV_EVENT_ALL,this);
+
     _directory=lv_obj_create(_screen);lv_obj_set_size(_directory,320,206);lv_obj_align(_directory,LV_ALIGN_BOTTOM_MID,0,0);
     lv_obj_set_style_bg_color(_directory,Theme::surface(),0);lv_obj_set_style_border_width(_directory,0,0);lv_obj_set_style_pad_all(_directory,7,0);
     lv_obj_set_flex_flow(_directory,LV_FLEX_FLOW_COLUMN);lv_obj_set_flex_align(_directory,LV_FLEX_ALIGN_START,LV_FLEX_ALIGN_START,LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_row(_directory,4,0);lv_obj_set_scroll_dir(_directory,LV_DIR_VER);lv_obj_set_scrollbar_mode(_directory,LV_SCROLLBAR_MODE_AUTO);
-    for(auto* o:{_back_button,_home_button,_reload_button,_save_button,_go_button,_edit_button})lv_obj_add_event_cb(o,clicked,LV_EVENT_CLICKED,this);
+    for(auto* o:{_back_button,_home_button,_reload_button,_save_button,_identify_button,_go_button,_edit_button})lv_obj_add_event_cb(o,clicked,LV_EVENT_CLICKED,this);
     lv_obj_add_event_cb(_address,clicked,LV_EVENT_READY,this);
     lv_obj_add_flag(_save_button,LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(_identify_button,LV_OBJ_FLAG_HIDDEN);
     set_status("Enter a NomadNet address");show_start();hide();
 }
-NomadNetScreen::~NomadNetScreen(){if(_screen)lv_obj_del(_screen);}
+NomadNetScreen::~NomadNetScreen(){
+    finish_field_edit(false);
+    if(_field_editor)lv_textarea_set_text(_field_editor,"");
+    if(_screen)lv_obj_del(_screen);
+}
 void NomadNetScreen::set_address(const std::string& value){
     lv_textarea_set_text(_address,value.c_str());
     const auto summary=NomadNet::display_text(NomadNet::compact_address(value));
@@ -124,9 +140,21 @@ void NomadNetScreen::set_library(const NomadNet::Library& library){
 }
 void NomadNetScreen::set_page_saved(bool saved){
     lv_obj_set_style_bg_color(_save_button,saved?Theme::primary():Theme::surfaceContainer(),0);
+    if(_page_loaded)lv_obj_clear_flag(_save_button,LV_OBJ_FLAG_HIDDEN);
+}
+void NomadNetScreen::set_identify_enabled(bool enabled){
+    _identify_enabled=enabled;
+    lv_obj_set_style_bg_color(_identify_button,enabled?Theme::primary():Theme::surfaceContainer(),0);
+    if(_page_loaded){
+        lv_obj_clear_flag(_identify_button,LV_OBJ_FLAG_HIDDEN);
+        rebuild_focus();
+    }
 }
 void NomadNetScreen::clear_document(){
     nomad_screen_heap_checkpoint("clear-before");
+    finish_field_edit(false);
+    ++_form_generation;
+    _form_state.clear();
     auto* group=LVGL::LVGLInit::get_default_group();
     if(group){
         if(lv_group_get_editing(group)&&lv_group_get_focused(group)==_content)lv_group_set_editing(group,false);
@@ -138,16 +166,24 @@ void NomadNetScreen::clear_document(){
     NomadNet::ExternalVector<LayoutCheckpoint>().swap(_layout_checkpoints);
     NomadNet::ExternalVector<int32_t>().swap(_link_y);
     NomadNet::ExternalVector<int32_t>().swap(_link_bottom);
+    NomadNet::ExternalVector<int32_t>().swap(_field_y);
+    NomadNet::ExternalVector<int32_t>().swap(_field_bottom);
+    NomadNet::ExternalVector<FocusTarget>().swap(_focus_order);
     _page_height=0;
     _physical_extent=0;
     _logical_scroll=0;
     _layout_window_top=0;
     _layout_window_bottom=0;
     _selected_link=-1;
+    _selected_field=-1;
+    _selected_focus=-1;
+    _editing_field=-1;
     lv_obj_refresh_self_size(_content);
     lv_obj_invalidate(_content);
     _page_loaded=false;
     set_page_saved(false);
+    lv_obj_add_flag(_save_button,LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(_identify_button,LV_OBJ_FLAG_HIDDEN);
     nomad_screen_heap_checkpoint("clear-after");
 }
 void NomadNetScreen::clear_directory(){
@@ -178,7 +214,13 @@ void NomadNetScreen::show_browser(bool editing){
     _directory_visible.store(false,std::memory_order_release);
     lv_obj_add_flag(_directory,LV_OBJ_FLAG_HIDDEN);
     for(auto* object:{_address_row,_status,_content,_reload_button})lv_obj_clear_flag(object,LV_OBJ_FLAG_HIDDEN);
-    if(_page_loaded)lv_obj_clear_flag(_save_button,LV_OBJ_FLAG_HIDDEN);else lv_obj_add_flag(_save_button,LV_OBJ_FLAG_HIDDEN);
+    if(_page_loaded){
+        lv_obj_clear_flag(_save_button,LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(_identify_button,LV_OBJ_FLAG_HIDDEN);
+    }else{
+        lv_obj_add_flag(_save_button,LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(_identify_button,LV_OBJ_FLAG_HIDDEN);
+    }
     set_address_editing(editing);
     rebuild_focus();
 }
@@ -260,7 +302,7 @@ void NomadNetScreen::detach_focusables(lv_group_t* group){
     auto* focused=lv_group_get_focused(group);
     auto owned_focusable=[&](lv_obj_t* candidate){
         if(!candidate)return false;
-        for(auto* object:{_back_button,_home_button,_reload_button,_save_button,_address,_go_button,_edit_button})
+        for(auto* object:{_back_button,_home_button,_reload_button,_save_button,_identify_button,_address,_go_button,_edit_button})
             if(candidate==object)return true;
         if(candidate==_content)return true;
         for(auto* object:_directory_focusables)if(candidate==object)return true;
@@ -269,7 +311,7 @@ void NomadNetScreen::detach_focusables(lv_group_t* group){
     auto detach_non_owner=[&](lv_obj_t* object){
         if(object&&object!=focused)lv_group_remove_obj(object);
     };
-    for(auto* object:{_back_button,_home_button,_reload_button,_save_button,_address,_go_button,_edit_button})detach_non_owner(object);
+    for(auto* object:{_back_button,_home_button,_reload_button,_save_button,_identify_button,_address,_go_button,_edit_button})detach_non_owner(object);
     detach_non_owner(_content);
     for(auto* object:_directory_focusables)detach_non_owner(object);
     if(focused&&owned_focusable(focused))lv_group_remove_obj(focused);
@@ -291,6 +333,7 @@ void NomadNetScreen::rebuild_focus(){
     }
     lv_group_add_obj(group,_reload_button);
     if(!lv_obj_has_flag(_save_button,LV_OBJ_FLAG_HIDDEN))lv_group_add_obj(group,_save_button);
+    if(!lv_obj_has_flag(_identify_button,LV_OBJ_FLAG_HIDDEN))lv_group_add_obj(group,_identify_button);
     if(_editing){lv_group_add_obj(group,_address);lv_group_add_obj(group,_go_button);}
     else lv_group_add_obj(group,_edit_button);
     if(!_page.empty())lv_group_add_obj(group,_content);
@@ -339,7 +382,10 @@ void NomadNetScreen::set_status(const char* value){
 bool NomadNetScreen::set_page(const NomadNet::Document& document) {
     auto* group=LVGL::LVGLInit::get_default_group();
     if(group)lv_group_remove_obj(_content);
-    if(!_page.assign(document)) {
+    finish_field_edit(false);
+    ++_form_generation;
+    _form_state.clear();
+    if(!_page.assign(document) || !_form_state.assign(_page)) {
         clear_document();
         set_status("Page is too large for available memory");
         return false;
@@ -384,11 +430,38 @@ bool NomadNetScreen::layout_page(){
     _layout_checkpoints.clear();
     _link_y.assign(_page.links().size(),-1);
     _link_bottom.assign(_page.links().size(),-1);
+    _field_y.assign(_page.fields().size(),-1);
+    _field_bottom.assign(_page.fields().size(),-1);
+    _focus_order.clear();
     _page_layout.reserve(MAX_WINDOW_FRAGMENTS);
     _line_layout.reserve(NomadNet::DocumentParser::MAX_RUNS_PER_LINE);
     _layout_checkpoints.reserve(_page.blocks().size());
     const int32_t viewport=std::max<int32_t>(1,lv_obj_get_content_height(_content));
     if(!layout_from(0,0,0,viewport*3,true))return false;
+    _focus_order.reserve(_page.links().size()+_page.fields().size());
+    NomadNet::ExternalVector<uint16_t> link_order(_page.links().size(),UINT16_MAX);
+    NomadNet::ExternalVector<uint16_t> field_order(_page.fields().size(),UINT16_MAX);
+    uint16_t source_order=0;
+    for(const auto& run:_page.runs()){
+        if(run.link_index>=0&&static_cast<std::size_t>(run.link_index)<link_order.size()&&
+           link_order[run.link_index]==UINT16_MAX)link_order[run.link_index]=source_order++;
+        if(run.field_index>=0&&static_cast<std::size_t>(run.field_index)<field_order.size()&&
+           field_order[run.field_index]==UINT16_MAX)field_order[run.field_index]=source_order++;
+    }
+    for(std::size_t i=0;i<_link_y.size();++i)
+        if(_link_y[i]>=0)_focus_order.push_back(FocusTarget{
+            static_cast<uint16_t>(i),_link_y[i],_link_bottom[i],false,link_order[i]});
+    for(std::size_t i=0;i<_field_y.size();++i)
+        if(_field_y[i]>=0)_focus_order.push_back(FocusTarget{
+            static_cast<uint16_t>(i),_field_y[i],_field_bottom[i],true,field_order[i]});
+    std::stable_sort(_focus_order.begin(),_focus_order.end(),
+        [](const FocusTarget& left,const FocusTarget& right){
+            if(left.y!=right.y)return left.y<right.y;
+            if(left.order!=right.order)return left.order<right.order;
+            if(left.field!=right.field)return left.field;
+            return left.index<right.index;
+        });
+    _selected_focus=-1;_selected_link=-1;_selected_field=-1;
     _physical_extent=std::min<int32_t>(_page_height,MAX_PHYSICAL_SCROLL_EXTENT);
     _logical_scroll=0;
     _layout_window_top=0;
@@ -400,8 +473,8 @@ bool NomadNetScreen::append_line_fragment(const LayoutFragment& fragment){
     if(!_line_layout.empty()){
         auto& previous=_line_layout.back();
         const uint32_t combined=static_cast<uint32_t>(previous.byte_length)+fragment.byte_length;
-        if(previous.link_index==fragment.link_index&&previous.large_font==fragment.large_font&&
-           combined<256&&NomadNet::VirtualViewport::can_coalesce(previous.run_index,
+        if(previous.link_index==fragment.link_index&&previous.field_index==fragment.field_index&&
+           previous.large_font==fragment.large_font&&combined<256&&NomadNet::VirtualViewport::can_coalesce(previous.run_index,
                previous.byte_offset,previous.byte_length,fragment.run_index,fragment.byte_offset)){
             previous.byte_length=static_cast<uint16_t>(combined);
             previous.width=static_cast<int16_t>(previous.width+fragment.width);
@@ -476,6 +549,35 @@ bool NomadNetScreen::layout_table_cell(const NomadNet::CompactPage::TableCellRec
         const auto text=_page.text(run);
         const lv_font_t* font=page_run_font(run,false);
         const int16_t run_h=static_cast<int16_t>(font->line_height+3);
+        if(run.field_index>=0&&static_cast<std::size_t>(run.field_index)<_page.fields().size()){
+            const auto& field=_page.fields()[run.field_index];
+            const int16_t space_width=std::max<int16_t>(1,static_cast<int16_t>(
+                lv_txt_get_width(" ",1,font,0,LV_TEXT_FLAG_NONE)));
+            int32_t requested=0;
+            if(field.type==NomadNet::FormFieldType::TEXT||field.type==NomadNet::FormFieldType::PASSWORD){
+                requested=std::max<int32_t>(48,static_cast<int32_t>(field.width)*space_width+8);
+            }else{
+                const auto label=_page.field_label(run.field_index);
+                requested=26+lv_txt_get_width(label.data(),static_cast<uint32_t>(label.size()),
+                    font,0,LV_TEXT_FLAG_NONE);
+            }
+            const int16_t field_width=static_cast<int16_t>(std::max<int32_t>(1,
+                std::min<int32_t>(available,requested)));
+            const int16_t field_height=std::max<int16_t>(20,run_h+4);
+            if(x>left&&x+field_width>left+available){if(!finish_line())return false;}
+            line_h=std::max(line_h,field_height);
+            if(emit&&static_cast<std::size_t>(run.field_index)<_field_y.size()){
+                if(_field_y[run.field_index]<0)_field_y[run.field_index]=line_y;
+                _field_bottom[run.field_index]=std::max(_field_bottom[run.field_index],line_y+field_height);
+            }
+            if(emit){
+                LayoutFragment field_fragment(run_index,0,0,-1,x,0,field_width,field_height,false);
+                field_fragment.field_index=run.field_index;
+                if(!append_line_fragment(field_fragment))return false;
+            }
+            x=static_cast<int16_t>(x+field_width);line_started=true;
+            continue;
+        }
         line_h=std::max(line_h,run_h);
         std::size_t offset=0;
         while(offset<text.size()){
@@ -633,9 +735,22 @@ bool NomadNetScreen::layout_table(const NomadNet::CompactPage::BlockRecord& bloc
             int32_t measured=8;
             for(uint16_t r=0;r<cell.run_count;++r){
                 const auto& run=_page.runs()[cell.first_run+r];
-                const auto text=_page.text(run);
-                measured+=lv_txt_get_width(text.data(),static_cast<uint32_t>(text.size()),
-                    page_run_font(run,false),0,LV_TEXT_FLAG_NONE);
+                if(run.field_index>=0&&static_cast<std::size_t>(run.field_index)<_page.fields().size()){
+                    const auto& field=_page.fields()[run.field_index];
+                    const auto* font=page_run_font(run,false);
+                    const int32_t field_width=field.type==NomadNet::FormFieldType::TEXT||
+                        field.type==NomadNet::FormFieldType::PASSWORD?
+                        std::max<int32_t>(48,static_cast<int32_t>(field.width)*
+                            std::max<int32_t>(1,lv_txt_get_width(" ",1,font,0,LV_TEXT_FLAG_NONE))+8):
+                        26+lv_txt_get_width(_page.field_label(run.field_index).data(),
+                            static_cast<uint32_t>(_page.field_label(run.field_index).size()),
+                            font,0,LV_TEXT_FLAG_NONE);
+                    measured+=field_width;
+                }else{
+                    const auto text=_page.text(run);
+                    measured+=lv_txt_get_width(text.data(),static_cast<uint32_t>(text.size()),
+                        page_run_font(run,false),0,LV_TEXT_FLAG_NONE);
+                }
                 measured=std::min<int32_t>(measured,INT16_MAX);
             }
             column_widths[column]=std::max<int16_t>(column_widths[column],
@@ -714,6 +829,38 @@ bool NomadNetScreen::layout_from(std::size_t start_block,int32_t start_y,
             const bool large=large_heading;
             const lv_font_t* font=page_run_font(run,large);
             const int16_t height=static_cast<int16_t>(font->line_height+3);
+            if(run.field_index>=0&&static_cast<std::size_t>(run.field_index)<_page.fields().size()){
+                const auto& field=_page.fields()[run.field_index];
+                const int16_t space_width=std::max<int16_t>(1,static_cast<int16_t>(
+                    lv_txt_get_width(" ",1,font,0,LV_TEXT_FLAG_NONE)));
+                int32_t requested=0;
+                if(field.type==NomadNet::FormFieldType::TEXT||field.type==NomadNet::FormFieldType::PASSWORD){
+                    requested=static_cast<int32_t>(field.width)*space_width+8;
+                    requested=std::max<int32_t>(48,requested);
+                }else{
+                    const auto label=_page.field_label(run.field_index);
+                    requested=26+lv_txt_get_width(label.data(),static_cast<uint32_t>(label.size()),
+                        font,0,LV_TEXT_FLAG_NONE);
+                }
+                const int16_t field_width=static_cast<int16_t>(std::max<int32_t>(1,
+                    std::min<int32_t>(available,requested)));
+                const int16_t field_height=std::max<int16_t>(20,height+4);
+                if(x>indent&&x+field_width>indent+available){
+                    if(!commit_line(line_y,line_h,block.alignment,indent,available,
+                                    heading_level,window_top,window_bottom))return false;
+                    y+=line_h;x=indent;line_h=field_height;line_y=y;
+                }
+                line_h=std::max(line_h,field_height);
+                if(static_cast<std::size_t>(run.field_index)<_field_y.size()){
+                    if(_field_y[run.field_index]<0)_field_y[run.field_index]=line_y;
+                    _field_bottom[run.field_index]=std::max(_field_bottom[run.field_index],line_y+field_height);
+                }
+                LayoutFragment field_fragment(run_index,0,0,-1,x,0,field_width,field_height,false,large);
+                field_fragment.field_index=run.field_index;
+                if(!append_line_fragment(field_fragment))return false;
+                x=static_cast<int16_t>(x+field_width);
+                continue;
+            }
             line_h=std::max(line_h,height);
             std::size_t offset=0;
             while(offset<text.size()){
@@ -879,6 +1026,44 @@ void NomadNetScreen::draw_page(lv_event_t* event){
             band.bg_color=lv_color_hex(NomadNet::heading_background(fragment.heading_level()));
             lv_draw_rect(draw_ctx,&band,&band_area);
         }
+        if(fragment.field_index>=0&&
+           static_cast<std::size_t>(fragment.field_index)<_page.fields().size()&&
+           static_cast<std::size_t>(fragment.field_index)<_form_state.fields().size()){
+            const auto& field=_page.fields()[fragment.field_index];
+            const auto& state=_form_state.fields()[fragment.field_index];
+            lv_draw_rect_dsc_t box;lv_draw_rect_dsc_init(&box);
+            box.bg_color=Theme::surfaceInput();box.radius=3;
+            box.border_width=fragment.field_index==_selected_field?2:1;
+            box.border_color=fragment.field_index==_selected_field?Theme::primary():Theme::border();
+            lv_draw_rect(draw_ctx,&box,&area);
+            std::size_t used=0;
+            if(field.type==NomadNet::FormFieldType::CHECKBOX||field.type==NomadNet::FormFieldType::RADIO){
+                const char* prefix=field.type==NomadNet::FormFieldType::RADIO?
+                    (state.checked?"(*) ":"( ) "):(state.checked?"[x] ":"[ ] ");
+                used=4;std::memcpy(scratch,prefix,used);
+                const auto label=_page.field_label(fragment.field_index);
+                const std::size_t retained=safe_utf8_prefix(
+                    label.data(),label.size(),sizeof(scratch)-used-1);
+                if(retained!=0)std::memcpy(scratch+used,label.data(),retained);
+                used+=retained;
+            }else{
+                used=field.type==NomadNet::FormFieldType::PASSWORD?
+                    std::min<std::size_t>(state.value_length,sizeof(scratch)-1):
+                    safe_utf8_prefix(state.value.data(),state.value_length,sizeof(scratch)-1);
+                if(field.type==NomadNet::FormFieldType::PASSWORD)
+                    std::memset(scratch,'*',used);
+                else if(used!=0)std::memcpy(scratch,state.value.data(),used);
+            }
+            scratch[used]='\0';
+            lv_area_t text_area=area;text_area.x1=static_cast<lv_coord_t>(text_area.x1+4);
+            text_area.y1=static_cast<lv_coord_t>(text_area.y1+2);
+            lv_draw_label_dsc_t field_text;lv_draw_label_dsc_init(&field_text);
+            field_text.font=&nomadnet_font_12;
+            field_text.color=lv_color_hex(NomadNet::resolve_effective_foreground(
+                _page,_page.runs()[fragment.run_index],fragment.heading_level(),Theme::TEXT_PRIMARY));
+            lv_draw_label(draw_ctx,&field_text,&text_area,scratch,nullptr);
+            continue;
+        }
         if(fragment.run_index>=_page.runs().size())continue;
         const auto& run=_page.runs()[fragment.run_index];
         const auto text=_page.text(run);
@@ -913,32 +1098,192 @@ void NomadNetScreen::draw_page(lv_event_t* event){
 }
 
 void NomadNetScreen::select_link(int direction){
-    if(_page.links().empty()){
+    if(_focus_order.empty()){
         scroll_to_logical(_logical_scroll+direction*40,LV_ANIM_ON);
         return;
     }
-    const int count=static_cast<int>(_page.links().size());
-    int candidate=_selected_link;
+    const int count=static_cast<int>(_focus_order.size());
     for(int attempt=0;attempt<count;++attempt){
-        candidate=candidate<0?(direction>=0?0:count-1):(candidate+direction+count)%count;
-        const bool laid_out=static_cast<std::size_t>(candidate)<_link_y.size()&&_link_y[candidate]>=0;
-        if(laid_out){_selected_link=candidate;break;}
+        _selected_focus=_selected_focus<0?(direction>=0?0:count-1):
+            static_cast<int16_t>((_selected_focus+direction+count)%count);
+        const auto& choice=_focus_order[_selected_focus];
+        if(choice.field)break;
+        const int candidate=choice.index;
+        if(candidate>=0&&static_cast<std::size_t>(candidate)<_link_y.size()&&_link_y[candidate]>=0)break;
     }
-    if(_selected_link<0)return;
-    const int32_t link_top=_link_y[_selected_link];
-    const int32_t link_bottom=_link_bottom[_selected_link];
+    const auto& selected=_focus_order[_selected_focus];
+    _selected_link=selected.field?-1:static_cast<int16_t>(selected.index);
+    _selected_field=selected.field?static_cast<int16_t>(selected.index):-1;
     const int32_t visible=lv_obj_get_content_height(_content);
-    if(link_top<_logical_scroll)scroll_to_logical(link_top,LV_ANIM_ON);
-    else if(link_bottom>_logical_scroll+visible)
-        scroll_to_logical(link_bottom-visible,LV_ANIM_ON);
+    if(selected.y<_logical_scroll)scroll_to_logical(selected.y,LV_ANIM_ON);
+    else if(selected.bottom>_logical_scroll+visible)
+        scroll_to_logical(selected.bottom-visible,LV_ANIM_ON);
     lv_obj_invalidate(_content);
 }
 
+void NomadNetScreen::begin_field_edit(uint16_t field_id){
+    if(field_id>=_form_state.fields().size()||field_id>=_page.fields().size())return;
+    const auto& state=_form_state.fields()[field_id];
+    const auto type=_page.fields()[field_id].type;
+    if(type!=NomadNet::FormFieldType::TEXT&&type!=NomadNet::FormFieldType::PASSWORD)return;
+    if(_field_editor)finish_field_edit(false);
+    auto* previous_default_group=lv_group_get_default();
+    lv_group_set_default(nullptr);
+    _field_editor=lv_textarea_create(_screen);
+    lv_group_set_default(previous_default_group);
+    if(!_field_editor){
+        _editing_field=-1;
+        set_status("Field editor is unavailable");
+        return;
+    }
+    auto discard_editor=[&](){
+        if(!_field_editor)return;
+        if(const char* value=lv_textarea_get_text(_field_editor)){
+            volatile char* bytes=const_cast<char*>(value);
+            const std::size_t wipe_length=std::strlen(value);
+            for(std::size_t i=0;i<wipe_length;++i)bytes[i]=0;
+        }
+        if(type==NomadNet::FormFieldType::PASSWORD)
+            lv_textarea_set_password_mode(_field_editor,false);
+        lv_obj_del(_field_editor);
+        _field_editor=nullptr;
+        _editing_field=-1;
+    };
+    lv_obj_set_size(_field_editor,312,38);
+    lv_obj_align(_field_editor,LV_ALIGN_BOTTOM_MID,0,-4);
+    lv_textarea_set_one_line(_field_editor,true);
+    lv_textarea_set_max_length(_field_editor,NomadNet::DocumentParser::MAX_FIELD_VALUE_BYTES);
+    lv_obj_set_style_bg_color(_field_editor,Theme::surfaceInput(),0);
+    if(!TextAreaHelper::enable_paste(_field_editor)||
+       !lv_obj_add_event_cb(_field_editor,field_editor_event,LV_EVENT_ALL,this)){
+        discard_editor();
+        set_status("Field editor is unavailable");
+        return;
+    }
+    _editing_field=static_cast<int16_t>(field_id);
+    if(type==NomadNet::FormFieldType::PASSWORD){
+        // Enable password mode while the editor is empty. The patched LVGL
+        // constructor and setter leave the editor unchanged on allocation failure.
+        lv_textarea_set_password_mode(_field_editor,true);
+        if(type==NomadNet::FormFieldType::PASSWORD&&
+       !lv_textarea_get_password_mode(_field_editor)){
+            discard_editor();
+            set_status("Field editor is unavailable");
+            return;
+        }
+        if(lv_textarea_get_text(_field_editor)==nullptr){
+            discard_editor();
+            set_status("Field editor is unavailable");
+            return;
+        }
+    }
+    lv_textarea_set_text(_field_editor,state.value.data());
+    const char* loaded_value=lv_textarea_get_text(_field_editor);
+    if(!loaded_value||std::strcmp(loaded_value,state.value.data())!=0){
+        discard_editor();
+        set_status("Field editor is unavailable");
+        return;
+    }
+    lv_obj_clear_flag(_field_editor,LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(_field_editor);
+    auto* group=LVGL::LVGLInit::get_default_group();
+    if(group){
+        lv_group_add_obj(group,_field_editor);
+        if(lv_obj_get_group(_field_editor)!=group){
+            discard_editor();
+            set_status("Field editor is unavailable");
+            return;
+        }
+        lv_group_remove_obj(_content);
+        lv_group_focus_obj(_field_editor);
+        lv_group_set_editing(group,true);
+    }
+}
+
+void NomadNetScreen::finish_field_edit(bool accept){
+    if(!_field_editor)return;
+    if(_editing_field>=0&&accept){
+        const char* value=lv_textarea_get_text(_field_editor);
+        const std::size_t length=value?std::strlen(value):0;
+        if(!_form_state.set_value(static_cast<uint16_t>(_editing_field),value,length))
+            set_status("Field value exceeds device limit");
+    }
+    if(const char* value=lv_textarea_get_text(_field_editor)){
+        volatile char* bytes=const_cast<char*>(value);
+        const std::size_t length=std::strlen(value);
+        for(std::size_t i=0;i<length;++i)bytes[i]=0;
+    }
+    auto* group=LVGL::LVGLInit::get_default_group();
+    if(group)lv_group_remove_obj(_field_editor);
+    lv_textarea_set_password_mode(_field_editor,false);
+    lv_textarea_set_text(_field_editor,"");
+    lv_obj_del(_field_editor);
+    _field_editor=nullptr;
+    _editing_field=-1;
+    if(_visible&&_view==View::BROWSER&&group){
+        lv_group_add_obj(group,_content);
+        lv_group_focus_obj(_content);
+        lv_group_set_editing(group,true);
+    }
+    if(_content)lv_obj_invalidate(_content);
+}
+
 void NomadNetScreen::activate_selected_link(){
-    if(_selected_link<0||static_cast<std::size_t>(_selected_link)>=_page.links().size()||!_link)return;
+    if(_selected_field>=0&&static_cast<std::size_t>(_selected_field)<_page.fields().size()){
+        const auto type=_page.fields()[_selected_field].type;
+        if(type==NomadNet::FormFieldType::CHECKBOX){
+            const bool checked=!_form_state.fields()[_selected_field].checked;
+            _form_state.set_checked(static_cast<uint16_t>(_selected_field),checked);
+            lv_obj_invalidate(_content);
+        }else if(type==NomadNet::FormFieldType::RADIO){
+            _form_state.set_checked(static_cast<uint16_t>(_selected_field),true);
+            lv_obj_invalidate(_content);
+        }else begin_field_edit(static_cast<uint16_t>(_selected_field));
+        return;
+    }
+    if(_selected_link<0||static_cast<std::size_t>(_selected_link)>=_page.links().size())return;
     const auto target_view=_page.target(static_cast<std::size_t>(_selected_link));
     const std::string target(target_view.data(),target_view.size());
-    if(!_link(target))set_status("Browser action queue is busy");
+    const bool submitted=target.find('`')!=std::string::npos;
+    if(submitted){
+        if(!_submit||!_submit(static_cast<uint16_t>(_selected_link),_form_generation))
+            set_status("Browser action queue is busy");
+    }else if(!_link||!_link(target))set_status("Browser action queue is busy");
+}
+
+bool NomadNetScreen::prepare_submission(uint16_t link_id,uint32_t generation,
+                                        std::string& target,
+                                        NomadNet::ExternalVector<uint8_t>& request_data,
+                                        NomadNet::FormEncodeResult& result)const{
+    target.clear();NomadNet::clear_encoded_form(request_data);
+    result=NomadNet::FormEncodeResult::INVALID_STATE;
+    if(generation!=_form_generation||link_id>=_page.links().size())return false;
+    const auto view=_page.target(link_id);
+    if(!view.data())return false;
+    try{
+        target.assign(view.data(),view.size());
+        const std::size_t separator=target.find('`');
+        if(separator==std::string::npos)return false;
+        result=_form_state.encode(target.substr(separator+1),request_data);
+        return result==NomadNet::FormEncodeResult::OK;
+    }catch(const std::bad_alloc&){
+        if(!target.empty()){
+            volatile char* bytes=&target[0];
+            for(std::size_t i=0;i<target.size();++i)bytes[i]=0;
+        }
+        std::string().swap(target);
+        NomadNet::clear_encoded_form(request_data);
+        result=NomadNet::FormEncodeResult::ALLOCATION_FAILED;
+        return false;
+    }
+}
+
+void NomadNetScreen::field_editor_event(lv_event_t* event){
+    auto* self=static_cast<NomadNetScreen*>(lv_event_get_user_data(event));
+    const auto code=lv_event_get_code(event);
+    if(code==LV_EVENT_READY)self->finish_field_edit(true);
+    else if(code==LV_EVENT_CANCEL)self->finish_field_edit(false);
+    else if(code==LV_EVENT_KEY&&lv_event_get_key(event)==LV_KEY_ESC)self->finish_field_edit(false);
 }
 
 void NomadNetScreen::page_event(lv_event_t* event){
@@ -954,7 +1299,7 @@ void NomadNetScreen::page_event(lv_event_t* event){
     else if(code==LV_EVENT_FOCUSED){
         auto* group=static_cast<lv_group_t*>(lv_obj_get_group(self->_content));
         if(group)lv_group_set_editing(group,true);
-        if(self->_selected_link<0&&!self->_page.links().empty())self->select_link(1);
+        if(self->_selected_focus<0&&!self->_focus_order.empty())self->select_link(1);
     }
     else if(code==LV_EVENT_DEFOCUSED){
         auto* group=static_cast<lv_group_t*>(lv_obj_get_group(self->_content));
@@ -980,9 +1325,21 @@ void NomadNetScreen::page_event(lv_event_t* event){
         const int32_t y=point.y-content_area.y1+self->_logical_scroll;
         for(const auto& fragment:self->_page_layout){
             const int32_t fragment_y=self->_layout_window_top+fragment.y;
-            if(fragment.link_index>=0&&x>=fragment.x&&x<fragment.x+fragment.width&&
-               y>=fragment_y&&y<fragment_y+fragment.height){
-                self->_selected_link=fragment.link_index;self->activate_selected_link();break;
+            if(x<fragment.x||x>=fragment.x+fragment.width||
+               y<fragment_y||y>=fragment_y+fragment.height)continue;
+            if(fragment.field_index>=0){
+                self->_selected_field=fragment.field_index;self->_selected_link=-1;
+                for(std::size_t i=0;i<self->_focus_order.size();++i)
+                    if(self->_focus_order[i].field&&self->_focus_order[i].index==fragment.field_index)
+                        self->_selected_focus=static_cast<int16_t>(i);
+                self->activate_selected_link();break;
+            }
+            if(fragment.link_index>=0){
+                self->_selected_link=fragment.link_index;self->_selected_field=-1;
+                for(std::size_t i=0;i<self->_focus_order.size();++i)
+                    if(!self->_focus_order[i].field&&self->_focus_order[i].index==fragment.link_index)
+                        self->_selected_focus=static_cast<int16_t>(i);
+                self->activate_selected_link();break;
             }
         }
     }
@@ -992,10 +1349,11 @@ void NomadNetScreen::show(){
     rebuild_focus();
 }
 void NomadNetScreen::hide(){
+    finish_field_edit(false);
     _visible=false;auto* group=LVGL::LVGLInit::get_default_group();
     if(group){
         if(lv_group_get_editing(group)&&lv_group_get_focused(group)==_content)lv_group_set_editing(group,false);
-        for(auto* object:{_back_button,_home_button,_reload_button,_save_button,_address,_go_button,_edit_button})lv_group_remove_obj(object);
+        for(auto* object:{_back_button,_home_button,_reload_button,_save_button,_identify_button,_address,_go_button,_edit_button})lv_group_remove_obj(object);
         lv_group_remove_obj(_content);
         for(auto* object:_directory_focusables)lv_group_remove_obj(object);
     }
@@ -1007,6 +1365,7 @@ void NomadNetScreen::clicked(lv_event_t* event){
     else if(target==self->_home_button&&self->_home)self->_home();
     else if(target==self->_reload_button&&self->_reload){const std::string address=self->address();if(!self->_reload(address))self->set_status("Browser action queue is busy");}
     else if(target==self->_save_button&&self->_save){if(!self->_save(self->address()))self->set_status("Browser action queue is busy");}
+    else if(target==self->_identify_button&&self->_identify){if(!self->_identify(self->address(),!self->_identify_enabled))self->set_status("Browser action queue is busy");}
     else if(target==self->_edit_button){self->set_address_editing(true);self->set_status("Edit destination or page path");}
     else if((target==self->_go_button||target==self->_address)&&self->_open){const std::string address=self->address();if(!self->_open(address))self->set_status("Browser action queue is busy");}
     else{

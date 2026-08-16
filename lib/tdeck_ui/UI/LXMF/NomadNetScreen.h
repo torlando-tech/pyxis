@@ -7,6 +7,7 @@
 #include <lvgl.h>
 #include "NomadNetCompactPage.h"
 #include "NomadNetDocument.h"
+#include "NomadNetForm.h"
 #include "NomadNetLibrary.h"
 #include "NomadNetVirtualViewport.h"
 
@@ -16,24 +17,33 @@ public:
     using Callback = std::function<void()>;
     using OpenCallback = std::function<bool(const std::string&)>;
     using LinkCallback = std::function<bool(const std::string&)>;
+    using SubmitCallback = std::function<bool(uint16_t, uint32_t)>;
     using SaveCallback = std::function<bool(const std::string&)>;
+    using IdentifyCallback = std::function<bool(const std::string&, bool)>;
     NomadNetScreen(); ~NomadNetScreen();
     void set_back_callback(Callback cb) { _back = std::move(cb); }
     void set_home_callback(Callback cb) { _home = std::move(cb); }
     void set_reload_callback(OpenCallback cb) { _reload = std::move(cb); }
     void set_open_callback(OpenCallback cb) { _open = std::move(cb); }
     void set_link_callback(LinkCallback cb) { _link = std::move(cb); }
+    void set_submit_callback(SubmitCallback cb) { _submit = std::move(cb); }
     void set_save_callback(SaveCallback cb) { _save = std::move(cb); }
+    void set_identify_callback(IdentifyCallback cb) { _identify = std::move(cb); }
     void set_address(const std::string& address);
     std::string address() const;
     void set_status(const char* status);
     bool set_page(const NomadNet::Document& document);
+    bool prepare_submission(uint16_t link_id, uint32_t generation,
+                            std::string& target,
+                            NomadNet::ExternalVector<uint8_t>& request_data,
+                            NomadNet::FormEncodeResult& result) const;
     bool jump_to_anchor(const std::string& name);
     void restore_logical_scroll(int32_t logical);
     int32_t logical_scroll() const { return _logical_scroll; }
     bool page_loaded() const { return _page_loaded; }
     void set_library(const NomadNet::Library& library);
     void set_page_saved(bool saved);
+    void set_identify_enabled(bool enabled);
     void begin_navigation(const std::string& target);
     void show_start();
     bool handle_library_back();
@@ -50,6 +60,7 @@ private:
         uint16_t byte_offset = 0;
         uint16_t byte_length = 0;
         int16_t link_index = -1;
+        int16_t field_index = -1;
         int16_t x = 0;
         int16_t y = 0;
         int16_t width = 0;
@@ -78,23 +89,42 @@ private:
         LayoutCheckpoint() = default;
         LayoutCheckpoint(uint16_t block, int32_t top) : block_index(block), y(top) {}
     };
+    struct FocusTarget {
+        uint16_t index = 0;
+        int32_t y = 0;
+        int32_t bottom = 0;
+        uint16_t order = UINT16_MAX;
+        bool field = false;
+        FocusTarget() = default;
+        FocusTarget(uint16_t item_index, int32_t top, int32_t lower, bool is_field,
+                    uint16_t source_order = UINT16_MAX)
+            : index(item_index), y(top), bottom(lower), order(source_order), field(is_field) {}
+    };
     lv_obj_t* _screen=nullptr; lv_obj_t* _back_button=nullptr; lv_obj_t* _home_button=nullptr;
-    lv_obj_t* _reload_button=nullptr; lv_obj_t* _save_button=nullptr; lv_obj_t* _address_row=nullptr; lv_obj_t* _address=nullptr;
+    lv_obj_t* _reload_button=nullptr; lv_obj_t* _save_button=nullptr; lv_obj_t* _identify_button=nullptr; lv_obj_t* _address_row=nullptr; lv_obj_t* _address=nullptr;
     lv_obj_t* _go_button=nullptr; lv_obj_t* _address_summary=nullptr; lv_obj_t* _edit_button=nullptr;
-    lv_obj_t* _status=nullptr; lv_obj_t* _content=nullptr;
+    lv_obj_t* _status=nullptr; lv_obj_t* _content=nullptr; lv_obj_t* _field_editor=nullptr;
     lv_obj_t* _directory=nullptr;
     NomadNet::CompactPage _page;
+    NomadNet::FormState _form_state;
     NomadNet::ExternalVector<LayoutFragment> _page_layout;
     NomadNet::ExternalVector<LayoutFragment> _line_layout;
     NomadNet::ExternalVector<LayoutCheckpoint> _layout_checkpoints;
     NomadNet::ExternalVector<int32_t> _link_y;
     NomadNet::ExternalVector<int32_t> _link_bottom;
+    NomadNet::ExternalVector<int32_t> _field_y;
+    NomadNet::ExternalVector<int32_t> _field_bottom;
+    NomadNet::ExternalVector<FocusTarget> _focus_order;
     int32_t _page_height = 0;
     int32_t _physical_extent = 0;
     int32_t _logical_scroll = 0;
     int32_t _layout_window_top = 0;
     int32_t _layout_window_bottom = 0;
     int16_t _selected_link = -1;
+    int16_t _selected_field = -1;
+    int16_t _selected_focus = -1;
+    int16_t _editing_field = -1;
+    uint32_t _form_generation = 0;
     std::vector<lv_obj_t*> _directory_focusables;
     std::vector<std::string> _directory_targets;
     NomadNet::Library _library;
@@ -104,7 +134,9 @@ private:
     bool _visible = false;
     bool _editing = true;
     bool _page_loaded = false;
-    Callback _back,_home; OpenCallback _reload,_open; LinkCallback _link; SaveCallback _save;
+    bool _identify_enabled = false;
+    Callback _back,_home; OpenCallback _reload,_open; LinkCallback _link;
+    SubmitCallback _submit; SaveCallback _save; IdentifyCallback _identify;
     void set_address_editing(bool editing);
     void apply_browser_layout(bool show_status);
     void render_directory(View view);
@@ -137,10 +169,13 @@ private:
     void draw_page(lv_event_t* event);
     void select_link(int direction);
     void activate_selected_link();
+    void begin_field_edit(uint16_t field_id);
+    void finish_field_edit(bool accept);
     void detach_focusables(lv_group_t* group);
     void rebuild_focus();
     static void clicked(lv_event_t* event);
     static void page_event(lv_event_t* event);
+    static void field_editor_event(lv_event_t* event);
 };
 }
 #endif

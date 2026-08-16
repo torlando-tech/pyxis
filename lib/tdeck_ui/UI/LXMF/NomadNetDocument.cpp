@@ -206,6 +206,119 @@ void add_run(Document& doc, Block& block, std::string& text, const Style& style,
     block.runs.push_back(std::move(run));
 }
 
+uint16_t form_width(const std::string& flags) {
+    std::string digits;
+    digits.reserve(flags.size());
+    for (char c : flags)
+        if (c != '^' && c != '?' && c != '!') digits.push_back(c);
+    if (digits.empty()) return DocumentParser::DEFAULT_FIELD_WIDTH;
+    char* end = nullptr;
+    const long parsed = std::strtol(digits.c_str(), &end, 10);
+    if (!end || end == digits.c_str() || *end != '\0') return DocumentParser::DEFAULT_FIELD_WIDTH;
+    if (parsed <= 0) return 1;
+    return static_cast<uint16_t>(std::min<long>(parsed, DocumentParser::MAX_FIELD_WIDTH));
+}
+
+std::vector<std::string> split_form_descriptor(const std::string& value) {
+    std::vector<std::string> parts;
+    std::size_t start = 0;
+    while (true) {
+        const std::size_t separator = value.find('|', start);
+        parts.push_back(value.substr(start, separator == std::string::npos
+            ? std::string::npos : separator - start));
+        if (separator == std::string::npos) break;
+        start = separator + 1;
+    }
+    return parts;
+}
+
+bool add_form_field(Document& doc, Block& block, const std::string& descriptor,
+                    const std::string& data, const Style& style) {
+    const auto parts = split_form_descriptor(descriptor);
+    std::string flags;
+    std::string name = descriptor;
+    std::string submitted_value;
+    bool prechecked = false;
+    if (parts.size() > 1) {
+        flags = parts[0];
+        name = parts[1];
+        if (parts.size() > 2) submitted_value = parts[2];
+        if (parts.size() > 3) prechecked = parts[3] == "*";
+    }
+
+    FormFieldType type = FormFieldType::TEXT;
+    bool masked = false;
+    if (flags.find('^') != std::string::npos) type = FormFieldType::RADIO;
+    else if (flags.find('?') != std::string::npos) type = FormFieldType::CHECKBOX;
+    else if (flags.find('!') != std::string::npos) {
+        type = FormFieldType::PASSWORD;
+        masked = true;
+    }
+    const bool selection = type == FormFieldType::CHECKBOX || type == FormFieldType::RADIO;
+    std::string value = selection ? (submitted_value.empty() ? data : submitted_value) : data;
+    const std::string label = selection ? data : std::string();
+
+    if (name.size() > DocumentParser::MAX_FIELD_NAME_BYTES) {
+        doc.mark_truncated(TruncationReason::FORM_NAME_BYTES);
+        return false;
+    }
+    if (value.size() > DocumentParser::MAX_FIELD_VALUE_BYTES) {
+        doc.mark_truncated(TruncationReason::FORM_VALUE_BYTES);
+        return false;
+    }
+    if (label.size() > DocumentParser::MAX_FIELD_LABEL_BYTES) {
+        doc.mark_truncated(TruncationReason::FORM_LABEL_BYTES);
+        return false;
+    }
+    if (doc.fields.size() >= DocumentParser::MAX_FIELDS) {
+        doc.mark_truncated(TruncationReason::FORM_FIELDS);
+        return false;
+    }
+    const std::size_t bytes = name.size() + value.size() + label.size();
+    if (bytes > DocumentParser::MAX_FORM_BYTES -
+                    std::min(doc.form_bytes, DocumentParser::MAX_FORM_BYTES)) {
+        doc.mark_truncated(TruncationReason::FORM_BYTES);
+        return false;
+    }
+    if (block.runs.size() >= DocumentParser::MAX_RUNS_PER_LINE) {
+        doc.mark_truncated(TruncationReason::RUNS_PER_LINE);
+        return false;
+    }
+
+    if (type == FormFieldType::RADIO && prechecked) {
+        for (auto& existing : doc.fields)
+            if (existing.type == FormFieldType::RADIO && existing.name == name)
+                existing.checked = false;
+    }
+    FormField field;
+    field.id = static_cast<uint16_t>(doc.fields.size());
+    field.type = type;
+    field.name = name;
+    field.value = value;
+    field.label = label;
+    std::string width_flags = flags;
+    width_flags.erase(std::remove_if(width_flags.begin(), width_flags.end(),
+        [](char value) { return value == '^' || value == '?' || value == '!'; }),
+        width_flags.end());
+    field.width = selection ? DocumentParser::DEFAULT_FIELD_WIDTH : form_width(width_flags);
+    field.checked = selection && prechecked;
+    field.masked = masked;
+    doc.form_bytes += bytes;
+    doc.fields.push_back(std::move(field));
+
+    Run placeholder;
+    placeholder.bold = style.bold;
+    placeholder.italic = style.italic;
+    placeholder.underline = style.underline;
+    placeholder.has_foreground = style.has_foreground;
+    placeholder.foreground = style.foreground;
+    placeholder.has_background = style.has_background;
+    placeholder.background = style.background;
+    placeholder.field_index = static_cast<int>(doc.fields.size() - 1);
+    block.runs.push_back(std::move(placeholder));
+    return true;
+}
+
 void parse_inline(Document& doc, Block& block, const std::string& line, Style& style) {
     std::string text;
     for (std::size_t i = 0; i < line.size();) {
@@ -254,6 +367,20 @@ void parse_inline(Document& doc, Block& block, const std::string& line, Style& s
             const std::size_t name_start = i;
             while (i < line.size() && anchor_char(static_cast<unsigned char>(line[i]))) ++i;
             add_anchor(doc, line.substr(name_start, i - name_start), doc.blocks.size());
+        } else if (command == '<') {
+            const std::size_t descriptor_end = line.find('`', i);
+            if (descriptor_end == std::string::npos) {
+                doc.malformed = true;
+                continue;
+            }
+            const std::size_t field_end = line.find('>', descriptor_end + 1);
+            if (field_end == std::string::npos) {
+                doc.malformed = true;
+                continue;
+            }
+            add_form_field(doc, block, line.substr(i, descriptor_end - i),
+                           line.substr(descriptor_end + 1, field_end - descriptor_end - 1), style);
+            i = field_end + 1;
         } else if (command == '[') {
             const auto close = line.find(']', i);
             if (close == std::string::npos) { doc.malformed = true; text += "`["; continue; }
@@ -267,10 +394,14 @@ void parse_inline(Document& doc, Block& block, const std::string& line, Style& s
                     ? std::string::npos : fields_separator - separator - 1);
             std::string fields = fields_separator == std::string::npos
                 ? std::string() : value.substr(fields_separator + 1);
-            if (target.empty()) { doc.malformed = true; }
+            const bool has_third_component = fields_separator != std::string::npos;
+            const bool has_fields = has_third_component && !fields.empty();
+            const bool too_many_components = has_third_component &&
+                value.find('`', fields_separator + 1) != std::string::npos;
+            if (target.empty() || too_many_components) { doc.malformed = true; }
             else if (doc.links.size() < DocumentParser::MAX_LINKS) {
                 if (label.empty()) label = target;
-                doc.links.push_back({label, target, fields});
+                doc.links.push_back({label, target, fields, has_fields});
                 std::string link_text = label;
                 add_run(doc, block, link_text, style, static_cast<int>(doc.links.size() - 1));
             } else doc.mark_truncated(TruncationReason::LINKS);
@@ -625,6 +756,12 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
             line.erase(0, 1);
         }
         if (line.empty()) continue;
+        if (!literal && line[0] == '>' && line.find("`<") != std::string::npos) {
+            const auto first_non_heading = line.find_first_not_of('>');
+            line.erase(0, first_non_heading == std::string::npos
+                ? line.size() : first_non_heading);
+            if (line.empty()) continue;
+        }
         if (doc.blocks.size() >= MAX_BLOCKS) {
             doc.mark_truncated(TruncationReason::BLOCKS);
             break;
@@ -654,7 +791,7 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
                 line.size() == 1 + codepoint_bytes && codepoint >= 32) {
                 block.divider_codepoint = codepoint;
             }
-        } else if (line.rfind("`{", 0) == 0 || line.find("`<") != std::string::npos) {
+        } else if (line.rfind("`{", 0) == 0) {
             block.type = BlockType::UNSUPPORTED;
             Run run;
             run.text = "[Unsupported Micron content]";
@@ -728,6 +865,21 @@ std::string truncation_notice(const Document& document) {
     if (document.has_truncation(TruncationReason::TABLES))
         return "[Page truncated: more than " +
             std::to_string(DocumentParser::MAX_TABLES) + " tables]";
+    if (document.has_truncation(TruncationReason::FORM_NAME_BYTES))
+        return "[Page truncated: form field name exceeds " +
+            std::to_string(DocumentParser::MAX_FIELD_NAME_BYTES) + " bytes]";
+    if (document.has_truncation(TruncationReason::FORM_VALUE_BYTES))
+        return "[Page truncated: form field value exceeds " +
+            std::to_string(DocumentParser::MAX_FIELD_VALUE_BYTES) + " bytes]";
+    if (document.has_truncation(TruncationReason::FORM_LABEL_BYTES))
+        return "[Page truncated: form field label exceeds " +
+            std::to_string(DocumentParser::MAX_FIELD_LABEL_BYTES) + " bytes]";
+    if (document.has_truncation(TruncationReason::FORM_BYTES))
+        return "[Page truncated: form data exceeds " +
+            std::to_string(DocumentParser::MAX_FORM_BYTES / 1024) + " KiB]";
+    if (document.has_truncation(TruncationReason::FORM_FIELDS))
+        return "[Page truncated: more than " +
+            std::to_string(DocumentParser::MAX_FIELDS) + " form fields]";
     return "[Page truncated to device safety limits]";
 }
 

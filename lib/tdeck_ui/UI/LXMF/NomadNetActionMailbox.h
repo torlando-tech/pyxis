@@ -10,13 +10,15 @@
 
 namespace UI::LXMF::NomadNet {
 
-enum class UserActionKind : uint8_t { OPEN, SAVE, BACK, HOME };
+enum class UserActionKind : uint8_t { OPEN, SUBMIT, SAVE, IDENTIFY, BACK, HOME };
 
 struct UserAction {
     static constexpr std::size_t MAX_TARGET_BYTES = 511;
     UserActionKind kind = UserActionKind::BACK;
     std::array<char, MAX_TARGET_BYTES + 1> target_bytes{};
     std::size_t target_length = 0;
+    uint16_t item_id = 0;
+    uint32_t generation = 0;
 
     std::string target() const { return std::string(target_bytes.data(), target_length); }
 };
@@ -35,7 +37,9 @@ public:
             std::size_t retained_count = 0;
             for (std::size_t i = 0; i < _count && retained_count < CAPACITY; ++i) {
                 const UserAction& pending = _queue[(_head + i) % CAPACITY];
-                if (pending.kind == UserActionKind::SAVE) retained[retained_count++] = pending;
+                if (pending.kind == UserActionKind::SAVE ||
+                    pending.kind == UserActionKind::IDENTIFY)
+                    retained[retained_count++] = pending;
             }
             _queue = retained;
             _head = 0;
@@ -61,6 +65,50 @@ public:
         slot.target_length = target.size();
         if (!target.empty()) std::memcpy(slot.target_bytes.data(), target.data(), target.size());
         slot.target_bytes[target.size()] = '\0';
+        ++_count;
+        return true;
+    }
+
+    bool publish_submit(uint16_t link_id, uint32_t generation) {
+        Guard guard(_lock);
+        if (_terminal_pending) return false;
+        for (std::size_t i = 0; i < _count; ++i) {
+            const UserAction& pending = _queue[(_head + i) % CAPACITY];
+            if (pending.kind != UserActionKind::SUBMIT) continue;
+            return pending.item_id == link_id && pending.generation == generation;
+        }
+        if (_count == CAPACITY) return false;
+        UserAction& slot = _queue[(_head + _count) % CAPACITY];
+        slot = UserAction{};
+        slot.kind = UserActionKind::SUBMIT;
+        slot.item_id = link_id;
+        slot.generation = generation;
+        ++_count;
+        return true;
+    }
+
+    bool publish_identify(const std::string& destination, bool identified) {
+        if (destination.size() > UserAction::MAX_TARGET_BYTES) return false;
+        Guard guard(_lock);
+        if (_terminal_pending) return false;
+        for (std::size_t i = 0; i < _count; ++i) {
+            UserAction& pending = _queue[(_head + i) % CAPACITY];
+            if (pending.kind == UserActionKind::IDENTIFY &&
+                pending.target_length == destination.size() &&
+                std::memcmp(pending.target_bytes.data(), destination.data(), destination.size()) == 0) {
+                pending.item_id = identified ? 1 : 0;
+                return true;
+            }
+        }
+        if (_count == CAPACITY) return false;
+        UserAction& slot = _queue[(_head + _count) % CAPACITY];
+        slot = UserAction{};
+        slot.kind = UserActionKind::IDENTIFY;
+        slot.target_length = destination.size();
+        if (!destination.empty())
+            std::memcpy(slot.target_bytes.data(), destination.data(), destination.size());
+        slot.target_bytes[destination.size()] = '\0';
+        slot.item_id = identified ? 1 : 0;
         ++_count;
         return true;
     }

@@ -6,6 +6,8 @@
 
 #include "NomadNetActionMailbox.h"
 #include "NomadNetDocument.h"
+#include "NomadNetCompactPage.h"
+#include "NomadNetForm.h"
 #include "NomadNetLibrary.h"
 #include "NomadNetMailbox.h"
 #include "NomadNetProtocol.h"
@@ -24,6 +26,7 @@ static TCPClientInterface* tcp_interface = nullptr;
 static RNS::Destination destination({RNS::Type::NONE});
 static RNS::Link active_link({RNS::Type::NONE});
 static RNS::RequestReceipt receipt({RNS::Type::NONE});
+static RNS::Identity local_identity({RNS::Type::NONE});
 static NN::AsyncMailbox mailbox;
 static NN::ActionMailbox actions;
 static std::string scenario;
@@ -49,6 +52,20 @@ static bool link_closed = false;
 static int link_callbacks = 0;
 static int reuse_requests = 0;
 
+static bool prepare_form_request(NN::ExternalVector<uint8_t>& output) {
+    NN::DocumentParser parser;
+    const auto document = parser.parse(
+        "`<name`Initial> `<!|password`Initial> "
+        "`<?|color|red|*`Red> `<?|color|blue|*`Blue>");
+    NN::CompactPage page;
+    NN::FormState state;
+    if (!page.assign(document) || !state.assign(page) ||
+        !state.set_value(0, "Example User") ||
+        !state.set_value(1, "example-pass")) return false;
+    return state.encode("name|password|color|fixed=yes", output) ==
+        NN::FormEncodeResult::OK;
+}
+
 static std::vector<uint8_t> bytes_vector(const RNS::Bytes& bytes) {
     if (bytes.size() == 0) return {};
     return std::vector<uint8_t>(bytes.data(), bytes.data() + bytes.size());
@@ -72,7 +89,9 @@ static bool validate_page(const RNS::Bytes& response, bool expect_large) {
         fail("Micron parse");
         return false;
     }
-    const char* marker = expect_large ? "Resource-backed page" : "Immediate page";
+    const bool form_scenario = scenario == "form-anonymous" || scenario == "form-identified";
+    const char* marker = form_scenario ? "Form response" :
+        (expect_large ? "Resource-backed page" : "Immediate page");
     std::string lan_heading;
     if (scenario == "lan") {
         for (const auto& block : document.blocks) {
@@ -93,7 +112,8 @@ static bool validate_page(const RNS::Bytes& response, bool expect_large) {
         return false;
     }
 
-    const std::string path = scenario == "lan" ? "/page/index.mu" :
+    const std::string path = form_scenario ? "/page/form.mu" :
+                             scenario == "lan" ? "/page/index.mu" :
                              scenario == "near-limit" ? "/page/near-limit.mu" :
                              (expect_large ? "/page/resource.mu" : "/page/immediate.mu");
     const std::string url = destination_hex + ":" + path;
@@ -211,14 +231,28 @@ static void on_link_established(RNS::Link& established_link) {
     else if (scenario == "near-limit") path = "/page/near-limit.mu";
     else if (scenario == "oversized") path = "/page/oversized.mu";
     else if (scenario == "cancel") path = "/page/cancel.mu";
+    else if (scenario == "form-anonymous" || scenario == "form-identified")
+        path = "/page/form.mu";
     else {
         path = "/page/missing.mu";
         timeout = 1.5;
     }
-    const auto nil = NN::no_form_request_data();
-    receipt = established_link.request(RNS::Bytes(path), RNS::Bytes(nil.data(), nil.size()),
+    NN::ExternalVector<uint8_t> request_data;
+    if (scenario == "form-anonymous" || scenario == "form-identified") {
+        if (!prepare_form_request(request_data)) {
+            fail("form request encoding");
+            return;
+        }
+        if (scenario == "form-identified") established_link.identify(local_identity);
+    } else {
+        const auto nil = NN::no_form_request_data();
+        request_data.assign(nil.begin(), nil.end());
+    }
+    receipt = established_link.request(RNS::Bytes(path),
+                                       RNS::Bytes(request_data.data(), request_data.size()),
                                        on_response, on_failed, on_progress, timeout,
                                        NN::AsyncMailbox::MAX_WIRE_BYTES);
+    NN::clear_encoded_form(request_data);
     if (!receipt) {
         fail("request creation");
         return;
@@ -365,13 +399,14 @@ static bool cleanup_complete() {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::fprintf(stderr, "usage: %s immediate|resource|near-limit|oversized|timeout|cancel|reuse | lan host port destination\n", argv[0]);
+        std::fprintf(stderr, "usage: %s immediate|resource|near-limit|oversized|timeout|cancel|reuse|form-anonymous|form-identified | lan host port destination\n", argv[0]);
         return 2;
     }
     scenario = argv[1];
     if (scenario != "immediate" && scenario != "resource" && scenario != "near-limit" &&
         scenario != "oversized" &&
-        scenario != "timeout" && scenario != "cancel" && scenario != "reuse" && scenario != "lan") return 2;
+        scenario != "timeout" && scenario != "cancel" && scenario != "reuse" &&
+        scenario != "form-anonymous" && scenario != "form-identified" && scenario != "lan") return 2;
     if ((scenario == "lan" && argc != 5) || (scenario != "lan" && argc != 2)) return 2;
 
     microStore::FileSystem filesystem{microStore::Adapters::UniversalFileSystem(".")};
@@ -392,6 +427,7 @@ int main(int argc, char** argv) {
     reticulum = RNS::Reticulum();
     reticulum.transport_enabled(false);
     reticulum.start();
+    local_identity = RNS::Identity();
     RNS::Transport::register_announce_handler(announce_handler);
     if (scenario == "lan") {
         RNS::Bytes target;

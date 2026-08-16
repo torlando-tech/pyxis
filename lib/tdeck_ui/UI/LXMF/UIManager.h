@@ -410,6 +410,8 @@ private:
     NomadNet::PageHistory _nomad_history;
     NomadNet::AsyncMailbox _nomad_mailbox;
     NomadNet::ActionMailbox _nomad_actions;
+    NomadNet::ExternalVector<uint8_t> _nomad_submission_data;
+    bool _nomad_submission_ready = false;
     NomadNet::Library _nomad_library;
     NomadNet::RequestPolicy _nomad_request_policy;
     RNS::HAnnounceHandler _nomad_announce_handler;
@@ -420,6 +422,7 @@ private:
     uint32_t _nomad_last_directory_refresh_ms = 0;
     RNS::Bytes _nomad_destination_hash;
     RNS::Link _nomad_link{RNS::Type::NONE};
+    bool _nomad_link_identified = false;
     RNS::RequestReceipt _nomad_request{RNS::Type::NONE};
     enum class NomadState { IDLE, PATH, LINK, REQUEST };
     std::atomic<NomadState> _nomad_state{NomadState::IDLE};
@@ -431,14 +434,17 @@ private:
     void replace_route(Route route);
     void hide_all_screens();
     void nomad_open(const std::string& address, bool add_history = true,
-                    int32_t restore_logical_scroll = -1);
+                    int32_t restore_logical_scroll = -1,
+                    bool preserve_submission = false);
     void nomad_reload();
+    bool nomad_restore_history_submission();
     void nomad_update();
     void nomad_start_link();
+    void nomad_identify_link_if_configured();
     void nomad_send_request();
     void nomad_finish_request_keep_link();
     void nomad_release_request();
-    void nomad_stop_transport();
+    bool nomad_stop_transport();
     bool nomad_refresh_path_after_link_failure();
     void nomad_hear_node(const RNS::Bytes& destination_hash,
                          const RNS::Bytes& app_data);

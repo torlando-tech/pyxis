@@ -406,8 +406,14 @@ bool UIManager::init() {
     _nomadnet_screen->set_link_callback([this](const std::string& target) {
         return _nomad_actions.publish(NomadNet::UserActionKind::OPEN, target);
     });
+    _nomadnet_screen->set_submit_callback([this](uint16_t link_id, uint32_t generation) {
+        return _nomad_actions.publish_submit(link_id, generation);
+    });
     _nomadnet_screen->set_save_callback([this](const std::string& target) {
         return _nomad_actions.publish(NomadNet::UserActionKind::SAVE, target);
+    });
+    _nomadnet_screen->set_identify_callback([this](const std::string& target, bool identified) {
+        return _nomad_actions.publish_identify(target, identified);
     });
     _nomadnet_screen->set_library(_nomad_library);
 
@@ -954,7 +960,13 @@ void UIManager::replace_route(Route route) {
 
 void UIManager::back() {
     if (_navigation.current() == Route::NOMADNET && _nomad_history.back()) {
-        nomad_open(_nomad_history.current(), false, _nomad_history.current_scroll());
+        if (!nomad_restore_history_submission()) {
+            LVGL_LOCK();
+            _nomadnet_screen->set_status("Saved form request exceeds available memory");
+            return;
+        }
+        nomad_open(_nomad_history.current(), false, _nomad_history.current_scroll(),
+                   _nomad_history.current_has_request_data());
         return;
     }
     if (_navigation.current() == Route::NOMADNET) {
@@ -1944,6 +1956,33 @@ void UIManager::nomad_update_user_actions() {
             nomad_heap_checkpoint("action-before-open");
             nomad_open(target);
             break;
+        case NomadNet::UserActionKind::SUBMIT: {
+            std::string submit_target;
+            NomadNet::ExternalVector<uint8_t> submission_data;
+            NomadNet::FormEncodeResult result = NomadNet::FormEncodeResult::INVALID_STATE;
+            bool prepared = false;
+            {
+                LVGL_LOCK();
+                prepared = _nomadnet_screen->prepare_submission(
+                    action.item_id, action.generation, submit_target,
+                    submission_data, result);
+            }
+            if (!prepared) {
+                LVGL_LOCK();
+                _nomadnet_screen->set_status(
+                    result == NomadNet::FormEncodeResult::INVALID_STATE
+                        ? "Form changed before submission"
+                        : result == NomadNet::FormEncodeResult::ALLOCATION_FAILED
+                            ? "Form submission exceeds available memory"
+                            : "Form submission exceeds device limits");
+                break;
+            }
+            NomadNet::clear_encoded_form(_nomad_submission_data);
+            _nomad_submission_data.swap(submission_data);
+            _nomad_submission_ready = true;
+            nomad_open(submit_target, true, -1, true);
+            break;
+        }
         case NomadNet::UserActionKind::SAVE: {
             const bool save = !_nomad_library.page_saved(target);
             if (!_nomad_library.set_page_saved(target, save)) break;
@@ -1952,6 +1991,31 @@ void UIManager::nomad_update_user_actions() {
             LVGL_LOCK();
             _nomadnet_screen->set_library(_nomad_library);
             if (current_page) _nomadnet_screen->set_page_saved(save);
+            break;
+        }
+        case NomadNet::UserActionKind::IDENTIFY: {
+            if (_nomad_url.destination_hex.empty() || target != _nomad_url.str()) break;
+            const bool identified = action.item_id != 0;
+            if (!identified && _nomad_link_identified && !nomad_stop_transport()) {
+                LVGL_LOCK();
+                _nomadnet_screen->set_status("Could not switch active link to anonymous browsing");
+                break;
+            }
+            if (!_nomad_library.set_node_identified(_nomad_url.destination_hex, identified)) break;
+            _nomad_library_dirty = true;
+            if (identified && !_nomad_link_identified && _nomad_link &&
+                       _nomad_link.status() == Type::Link::ACTIVE) {
+                RouterLock router_lock;
+                if (router_lock.acquired()) {
+                    _nomad_link.identify(_router.identity());
+                    _nomad_link_identified = true;
+                }
+            }
+            LVGL_LOCK();
+            _nomadnet_screen->set_library(_nomad_library);
+            _nomadnet_screen->set_identify_enabled(identified);
+            _nomadnet_screen->set_status(identified
+                ? "Identity enabled for this node" : "Anonymous browsing enabled for this node");
             break;
         }
         case NomadNet::UserActionKind::BACK:
@@ -1963,7 +2027,8 @@ void UIManager::nomad_update_user_actions() {
             home();
             break;
         }
-        if (action.kind != NomadNet::UserActionKind::SAVE ||
+        if ((action.kind != NomadNet::UserActionKind::SAVE &&
+             action.kind != NomadNet::UserActionKind::IDENTIFY) ||
             !_nomad_actions.terminal_pending()) return;
     }
 }
@@ -2039,13 +2104,15 @@ void UIManager::nomad_finish_request_keep_link() {
     nomad_heap_checkpoint("request-finished");
 }
 
-void UIManager::nomad_stop_transport() {
+bool UIManager::nomad_stop_transport() {
+    NomadNet::clear_encoded_form(_nomad_submission_data);
+    _nomad_submission_ready = false;
     // Link teardown can synchronously cancel an in-flight response Resource,
     // update its shared RequestReceipt and invoke callbacks. Keep that mutation
     // in the Reticulum serialization domain, and let teardown mark the receipt
     // failed before the compatibility pending-set cleanup observes it.
     RouterLock router_lock;
-    if (!router_lock.acquired()) return;
+    if (!router_lock.acquired()) return false;
     nomad_heap_checkpoint("stop-enter");
     _nomad_state = NomadState::IDLE;
     _nomad_deadline_ms = 0;
@@ -2055,8 +2122,10 @@ void UIManager::nomad_stop_transport() {
     nomad_release_request();
     nomad_heap_checkpoint("stop-request-released");
     _nomad_link = Link(Type::NONE);
+    _nomad_link_identified = false;
     nomad_heap_checkpoint("stop-link-released");
     nomad_heap_checkpoint("stop-done");
+    return true;
 }
 
 bool UIManager::nomad_refresh_path_after_link_failure() {
@@ -2067,6 +2136,7 @@ bool UIManager::nomad_refresh_path_after_link_failure() {
     if (_nomad_link && _nomad_link.status() != Type::Link::CLOSED) _nomad_link.teardown();
     nomad_release_request();
     _nomad_link = Link(Type::NONE);
+    _nomad_link_identified = false;
     nomad_heap_checkpoint("link-timeout-released");
     Transport::expire_path(_nomad_destination_hash);
     if (!NomadNet::RequestPolicy::path_invalidation_succeeded(
@@ -2080,12 +2150,18 @@ bool UIManager::nomad_refresh_path_after_link_failure() {
 }
 
 void UIManager::nomad_open(const std::string& address, bool add_history,
-                           int32_t restore_logical_scroll) {
+                           int32_t restore_logical_scroll, bool preserve_submission) {
+    if (!preserve_submission) {
+        NomadNet::clear_encoded_form(_nomad_submission_data);
+        _nomad_submission_ready = false;
+    }
     nomad_heap_checkpoint("open-enter");
     NomadNet::Url parsed;
     std::string error;
     if (!NomadNet::Url::parse(address, parsed, error, _nomad_url.destination_hex,
             _nomad_url.path,_nomad_url.fields)) {
+        NomadNet::clear_encoded_form(_nomad_submission_data);
+        _nomad_submission_ready = false;
         LVGL_LOCK();
         _nomadnet_screen->set_status(error.c_str());
         return;
@@ -2100,7 +2176,7 @@ void UIManager::nomad_open(const std::string& address, bool add_history,
         page_loaded=_nomadnet_screen->page_loaded();
     }
     const bool restoring_history=restore_logical_scroll>=0;
-    if(NomadNet::should_jump_locally(_nomad_url,parsed,page_loaded,restoring_history)){
+    if(!preserve_submission&&NomadNet::should_jump_locally(_nomad_url,parsed,page_loaded,restoring_history)){
         bool resolved=true;
         {
             LVGL_LOCK();
@@ -2115,7 +2191,17 @@ void UIManager::nomad_open(const std::string& address, bool add_history,
             }
         }
         if(!resolved)return;
-        _nomad_history.open(parsed.str(),add_history,current_scroll);
+        const auto& current_request = _nomad_history.current_request_data();
+        const uint8_t* request_bytes = _nomad_history.current_has_request_data()
+            ? current_request.data() : nullptr;
+        const std::size_t request_size = _nomad_history.current_has_request_data()
+            ? current_request.size() : 0;
+        if (!_nomad_history.open(parsed.str(), add_history, current_scroll,
+                request_bytes, request_size)) {
+            LVGL_LOCK();
+            _nomadnet_screen->set_status("Form history exceeds available memory");
+            return;
+        }
         _nomad_url=parsed;
         _nomad_pending_scroll=-1;
         {
@@ -2127,9 +2213,25 @@ void UIManager::nomad_open(const std::string& address, bool add_history,
     }
 
     RouterLock router_lock;
-    if (!router_lock.acquired()) return;
+    if (!router_lock.acquired()) {
+        NomadNet::clear_encoded_form(_nomad_submission_data);
+        _nomad_submission_ready = false;
+        return;
+    }
     _nomad_pending_scroll=restore_logical_scroll;
     nomad_heap_checkpoint("open-locked");
+    const uint8_t* history_request = _nomad_submission_ready
+        ? _nomad_submission_data.data() : nullptr;
+    const std::size_t history_request_size = _nomad_submission_ready
+        ? _nomad_submission_data.size() : 0;
+    if (!_nomad_history.open(parsed.str(), add_history, current_scroll,
+            history_request, history_request_size)) {
+        NomadNet::clear_encoded_form(_nomad_submission_data);
+        _nomad_submission_ready = false;
+        LVGL_LOCK();
+        _nomadnet_screen->set_status("Form history exceeds available memory");
+        return;
+    }
     {
         // Validation must precede destructive UI cleanup so a malformed manual
         // address cannot discard the current page or directory. Keep cleanup
@@ -2147,7 +2249,7 @@ void UIManager::nomad_open(const std::string& address, bool add_history,
         _nomad_response.clear();
         _nomad_request_policy.reset();
         _nomad_url = parsed;
-        _nomad_history.open(parsed.str(), add_history, current_scroll);
+
         {
             LVGL_LOCK();
             _nomadnet_screen->set_address(parsed.str());
@@ -2163,12 +2265,13 @@ void UIManager::nomad_open(const std::string& address, bool add_history,
     if (_nomad_link && _nomad_link.status() != Type::Link::CLOSED) _nomad_link.teardown();
     nomad_release_request();
     _nomad_link = Link(Type::NONE);
+    _nomad_link_identified = false;
     _nomad_request = RequestReceipt(Type::NONE);
     _nomad_response.clear();
     nomad_heap_checkpoint("open-cleared");
     _nomad_request_policy.reset();
     _nomad_url = parsed;
-    _nomad_history.open(parsed.str(), add_history, current_scroll);
+
     _nomad_destination_hash = Bytes();
     _nomad_destination_hash.assignHex(parsed.destination_hex.c_str());
     nomad_heap_checkpoint("open-state-ready");
@@ -2192,7 +2295,28 @@ void UIManager::nomad_reload() {
         _nomadnet_screen->set_status("Enter a NomadNet address");
         return;
     }
-    nomad_open(_nomad_history.current(), false);
+    if (!nomad_restore_history_submission()) {
+        LVGL_LOCK();
+        _nomadnet_screen->set_status("Saved form request exceeds available memory");
+        return;
+    }
+    nomad_open(_nomad_history.current(), false, -1,
+               _nomad_history.current_has_request_data());
+}
+
+bool UIManager::nomad_restore_history_submission() {
+    NomadNet::clear_encoded_form(_nomad_submission_data);
+    _nomad_submission_ready = false;
+    if (!_nomad_history.current_has_request_data()) return true;
+    try {
+        const auto& request = _nomad_history.current_request_data();
+        _nomad_submission_data.assign(request.begin(), request.end());
+        _nomad_submission_ready = true;
+        return true;
+    } catch (const std::bad_alloc&) {
+        NomadNet::clear_encoded_form(_nomad_submission_data);
+        return false;
+    }
 }
 
 void UIManager::nomad_start_link() {
@@ -2200,6 +2324,8 @@ void UIManager::nomad_start_link() {
     Identity identity = Identity::recall(_nomad_destination_hash);
     if (!identity) {
         _nomad_state = NomadState::IDLE;
+        NomadNet::clear_encoded_form(_nomad_submission_data);
+        _nomad_submission_ready = false;
         LVGL_LOCK();
         _nomadnet_screen->set_status("Node identity is not known");
         return;
@@ -2208,6 +2334,8 @@ void UIManager::nomad_start_link() {
                             Type::Destination::SINGLE, "nomadnetwork", "node");
     if (destination.hash() != _nomad_destination_hash) {
         _nomad_state = NomadState::IDLE;
+        NomadNet::clear_encoded_form(_nomad_submission_data);
+        _nomad_submission_ready = false;
         LVGL_LOCK();
         _nomadnet_screen->set_status("Identity does not match node address");
         return;
@@ -2223,15 +2351,55 @@ void UIManager::nomad_start_link() {
     _nomadnet_screen->set_status("Establishing encrypted link...");
 }
 
+void UIManager::nomad_identify_link_if_configured() {
+    if (_nomad_link_identified) return;
+    if (_nomad_library.node_identified(_nomad_url.destination_hex)) {
+        _nomad_link.identify(_router.identity());
+        _nomad_link_identified = true;
+    }
+}
+
 void UIManager::nomad_send_request() {
     if (!_nomad_link || _nomad_link.status() != Type::Link::ACTIVE) return;
+    nomad_identify_link_if_configured();
     nomad_heap_checkpoint("request-enter");
     _nomad_link.set_resource_started_callback(on_nomad_resource_started);
-    const auto request_data = NomadNet::request_data(_nomad_url.fields);
-    _nomad_request = _nomad_link.request(
-        Bytes(reinterpret_cast<const uint8_t*>(_nomad_url.path.data()), _nomad_url.path.size()),
-        Bytes(request_data.data(), request_data.size()), on_nomad_response, on_nomad_failed,
-        on_nomad_progress, 30.0, NomadNet::AsyncMailbox::MAX_WIRE_BYTES);
+    RNS::Bytes packed_request_data;
+    try {
+        if (_nomad_submission_ready) {
+            packed_request_data = Bytes(_nomad_submission_data.data(), _nomad_submission_data.size());
+        } else {
+            const auto request_data = NomadNet::request_data(_nomad_url.fields);
+            if (request_data.size() > NomadNet::FormState::MAX_ENCODED_BYTES) {
+                nomad_stop_transport();
+                LVGL_LOCK();
+                _nomadnet_screen->set_status("Request data exceeds device limit");
+                return;
+            }
+            packed_request_data = Bytes(request_data.data(), request_data.size());
+        }
+        _nomad_request = _nomad_link.request(
+            Bytes(reinterpret_cast<const uint8_t*>(_nomad_url.path.data()), _nomad_url.path.size()),
+            packed_request_data, on_nomad_response, on_nomad_failed,
+            on_nomad_progress, 30.0, NomadNet::AsyncMailbox::MAX_WIRE_BYTES, true);
+    } catch (const std::bad_alloc&) {
+        if (packed_request_data) {
+            volatile uint8_t* bytes = packed_request_data.writable(0);
+            for (std::size_t i = 0; i < packed_request_data.size(); ++i) bytes[i] = 0;
+        }
+        NomadNet::clear_encoded_form(_nomad_submission_data);
+        _nomad_submission_ready = false;
+        nomad_stop_transport();
+        LVGL_LOCK();
+        _nomadnet_screen->set_status("Request exceeds available internal memory");
+        return;
+    }
+    if (packed_request_data) {
+        volatile uint8_t* bytes = packed_request_data.writable(0);
+        for (std::size_t i = 0; i < packed_request_data.size(); ++i) bytes[i] = 0;
+    }
+    NomadNet::clear_encoded_form(_nomad_submission_data);
+    _nomad_submission_ready = false;
     nomad_heap_checkpoint("request-created");
     if (!_nomad_request) {
         nomad_stop_transport();
@@ -2364,6 +2532,8 @@ void UIManager::nomad_update() {
             {
                 LVGL_LOCK();
                 _nomadnet_screen->set_page_saved(page_saved);
+                _nomadnet_screen->set_identify_enabled(
+                    _nomad_library.node_identified(_nomad_url.destination_hex));
                 if(!anchor_resolved&&!_nomad_url.fragment.empty()){
                     const std::string status="Unknown anchor: #"+_nomad_url.fragment;
                     _nomadnet_screen->set_status(status.c_str());

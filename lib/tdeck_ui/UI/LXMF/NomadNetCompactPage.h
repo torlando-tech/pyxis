@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <string>
 
 #include "NomadNetDocument.h"
@@ -94,12 +95,14 @@ public:
     static constexpr std::size_t MAX_ANCHORS = DocumentParser::MAX_ANCHORS;
     static constexpr std::size_t MAX_TABLES = DocumentParser::MAX_TABLES;
     static constexpr std::size_t MAX_TABLE_CELLS = DocumentParser::MAX_TOTAL_TABLE_CELLS;
+    static constexpr std::size_t MAX_FIELDS = DocumentParser::MAX_FIELDS;
     // Text runs, link targets, and anchor names originate in the bounded source.
     // Link targets also remain visible in runs, while anchor declarations are
     // zero-width. Account for both bounded copies and one terminator per record.
     static constexpr std::size_t MAX_NOTICE_BYTES = 96;
     static constexpr std::size_t MAX_ARENA_BYTES =
         DocumentParser::MAX_DOCUMENT_BYTES * 2 +
+        DocumentParser::MAX_FORM_BYTES + MAX_FIELDS * 3 +
         MAX_ANCHORS * (DocumentParser::MAX_ANCHOR_NAME_BYTES + 1) +
         MAX_RUNS + MAX_LINKS + MAX_NOTICE_BYTES + 1;
 
@@ -125,6 +128,7 @@ public:
         uint32_t text_offset = 0;
         uint16_t text_length = 0;
         int16_t link_index = -1;
+        int16_t field_index = -1;
         uint8_t style = 0;
         uint32_t foreground = 0;
         uint32_t background = 0;
@@ -155,6 +159,19 @@ public:
         Alignment alignment = Alignment::LEFT;
     };
 
+    struct FieldRecord {
+        uint32_t name_offset = 0;
+        uint32_t value_offset = 0;
+        uint32_t label_offset = 0;
+        uint16_t name_length = 0;
+        uint16_t value_length = 0;
+        uint16_t label_length = 0;
+        uint16_t width = DocumentParser::DEFAULT_FIELD_WIDTH;
+        FormFieldType type = FormFieldType::TEXT;
+        bool checked = false;
+        bool masked = false;
+    };
+
     struct TextView {
         const char* value = nullptr;
         std::size_t length = 0;
@@ -164,6 +181,10 @@ public:
         std::size_t size() const { return length; }
         bool empty() const { return length == 0; }
         char operator[](std::size_t index) const { return value[index]; }
+        bool operator==(const char* text) const {
+            return text && std::strlen(text) == length &&
+                std::memcmp(value, text, length) == 0;
+        }
     };
 
     bool assign(const Document& document);
@@ -177,8 +198,12 @@ public:
     const ExternalVector<AnchorRecord>& anchors() const { return _anchors; }
     const ExternalVector<TableRecord>& tables() const { return _tables; }
     const ExternalVector<TableCellRecord>& table_cells() const { return _table_cells; }
+    const ExternalVector<FieldRecord>& fields() const { return _fields; }
     TextView text(const RunRecord& run) const;
     TextView target(std::size_t index) const;
+    TextView field_name(std::size_t index) const;
+    TextView field_value(std::size_t index) const;
+    TextView field_label(std::size_t index) const;
     bool find_anchor(const std::string& name, uint16_t& block_index) const;
 
     bool has_background() const { return _has_background; }
@@ -200,6 +225,7 @@ private:
     ExternalVector<AnchorRecord> _anchors;
     ExternalVector<TableRecord> _tables;
     ExternalVector<TableCellRecord> _table_cells;
+    ExternalVector<FieldRecord> _fields;
     bool _has_background = false;
     uint32_t _background = 0;
     bool _has_foreground = false;

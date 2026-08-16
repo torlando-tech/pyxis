@@ -1,8 +1,10 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 #include "NomadNetMemory.h"
 
@@ -32,40 +34,39 @@ inline void append_msgpack_string(std::vector<uint8_t>& output, const std::strin
 inline std::vector<uint8_t> request_data(const std::string& fields) {
     if (fields.empty()) return no_form_request_data();
 
-    std::size_t variable_count = 0;
+    std::vector<std::pair<std::string, std::string>> variables;
     for (std::size_t start = 0; start <= fields.size();) {
         const std::size_t end = fields.find('|', start);
         const std::size_t length = (end == std::string::npos ? fields.size() : end) - start;
         const std::string field = fields.substr(start, length);
         const std::size_t equals = field.find('=');
         if (equals != std::string::npos && field.find('=', equals + 1) == std::string::npos) {
-            ++variable_count;
+            const std::string name = field.substr(0, equals);
+            const std::string value = field.substr(equals + 1);
+            auto existing = std::find_if(variables.begin(), variables.end(),
+                [&](const std::pair<std::string, std::string>& variable) {
+                    return variable.first == name;
+                });
+            if (existing == variables.end()) variables.emplace_back(name, value);
+            else existing->second = value;
         }
         if (end == std::string::npos) break;
         start = end + 1;
     }
 
     std::vector<uint8_t> output;
-    output.reserve(fields.size() + variable_count * 5 + 3);
-    if (variable_count <= 15) {
-        output.push_back(static_cast<uint8_t>(0x80 | variable_count));
+    output.reserve(fields.size() + variables.size() * 5 + 3);
+    if (variables.size() <= 15) {
+        output.push_back(static_cast<uint8_t>(0x80 | variables.size()));
     } else {
         output.push_back(0xde);
-        output.push_back(static_cast<uint8_t>(variable_count >> 8));
-        output.push_back(static_cast<uint8_t>(variable_count));
+        output.push_back(static_cast<uint8_t>(variables.size() >> 8));
+        output.push_back(static_cast<uint8_t>(variables.size()));
     }
 
-    for (std::size_t start = 0; start <= fields.size();) {
-        const std::size_t end = fields.find('|', start);
-        const std::size_t length = (end == std::string::npos ? fields.size() : end) - start;
-        const std::string field = fields.substr(start, length);
-        const std::size_t equals = field.find('=');
-        if (equals != std::string::npos && field.find('=', equals + 1) == std::string::npos) {
-            append_msgpack_string(output, "var_" + field.substr(0, equals));
-            append_msgpack_string(output, field.substr(equals + 1));
-        }
-        if (end == std::string::npos) break;
-        start = end + 1;
+    for (const auto& variable : variables) {
+        append_msgpack_string(output, "var_" + variable.first);
+        append_msgpack_string(output, variable.second);
     }
     return output;
 }
