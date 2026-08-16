@@ -441,7 +441,7 @@ bool append_table(Document& doc, const std::vector<std::string>& lines,
                     doc.mark_truncated(TruncationReason::TABLE_CELL_BYTES);
                 }
                 parse_inline(doc, parsed, cell_source, style);
-                if (cell_truncated) style = style_before_cell;
+                style = style_before_cell;
             }
             if (total_runs + parsed.runs.size() > DocumentParser::MAX_TOTAL_RUNS) {
                 parsed.runs.resize(DocumentParser::MAX_TOTAL_RUNS - total_runs);

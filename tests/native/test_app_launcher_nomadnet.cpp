@@ -544,6 +544,15 @@ int main(int argc, char** argv) {
     check("truncated formatting cannot bleed into the following table cell",
           bounded_style_table.tables.size() == 1 && plain_cell.run_count == 1 &&
               !bounded_style_table.table_runs[plain_cell.first_run].bold);
+    const auto isolated_style_table = parser.parse(
+        "`t\nStyled|Plain\n---|---\n`!bold|plain\n`t\nafter");
+    const auto& isolated_plain_cell = isolated_style_table.table_cells[3];
+    check("non-truncated formatting cannot bleed into the following table cell",
+          isolated_style_table.tables.size() == 1 && isolated_plain_cell.run_count == 1 &&
+              !isolated_style_table.table_runs[isolated_plain_cell.first_run].bold);
+    check("table-cell formatting cannot bleed into post-table content",
+          !isolated_style_table.blocks.back().runs.empty() &&
+              !isolated_style_table.blocks.back().runs.front().bold);
 
     std::string wide_header;
     std::string wide_separator;
@@ -608,6 +617,17 @@ int main(int argc, char** argv) {
           bounded_table_cells.tables.size() == 1 &&
               bounded_table_cells.table_cells.size() == DocumentParser::MAX_TABLE_CELLS &&
               bounded_table_cells.has_truncation(TruncationReason::TABLE_ROWS));
+
+    const auto two_full_tables = parser.parse(cell_bounded_source + "\n" + cell_bounded_source);
+    CompactPage two_full_tables_page;
+    check("two parser-valid full tables fit the aggregate compact cell budget",
+          two_full_tables.tables.size() == 2 &&
+              two_full_tables.table_cells.size() == DocumentParser::MAX_TOTAL_TABLE_CELLS &&
+              two_full_tables_page.assign(two_full_tables) &&
+              two_full_tables_page.tables().size() == 2 &&
+              two_full_tables_page.table_cells().size() == CompactPage::MAX_TABLE_CELLS &&
+              two_full_tables_page.tables()[0].row_count > 0 &&
+              two_full_tables_page.tables()[1].row_count > 0);
 
     const auto anchor_doc = parser.parse(
         "First\n"
