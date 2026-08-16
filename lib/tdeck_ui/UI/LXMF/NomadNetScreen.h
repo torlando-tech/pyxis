@@ -28,6 +28,10 @@ public:
     std::string address() const;
     void set_status(const char* status);
     bool set_page(const NomadNet::Document& document);
+    bool jump_to_anchor(const std::string& name);
+    void restore_logical_scroll(int32_t logical);
+    int32_t logical_scroll() const { return _logical_scroll; }
+    bool page_loaded() const { return _page_loaded; }
     void set_library(const NomadNet::Library& library);
     void set_page_saved(bool saved);
     void begin_navigation(const std::string& target);
@@ -50,14 +54,21 @@ private:
         int16_t y = 0;
         int16_t width = 0;
         int16_t height = 0;
+        uint32_t divider_codepoint = 0x2500;
         bool divider = false;
         bool large_font = false;
+        uint8_t heading_style = 0;
         LayoutFragment() = default;
         LayoutFragment(uint16_t run, uint16_t offset, uint16_t length, int16_t link,
                        int16_t left, int16_t top, int16_t w, int16_t h,
                        bool is_divider, bool is_large = false)
             : run_index(run), byte_offset(offset), byte_length(length), link_index(link),
               x(left), y(top), width(w), height(h), divider(is_divider), large_font(is_large) {}
+        void set_heading(uint8_t level, bool starts_band) {
+            heading_style = static_cast<uint8_t>((level & 0x03u) | (starts_band ? 0x80u : 0u));
+        }
+        uint8_t heading_level() const { return static_cast<uint8_t>(heading_style & 0x03u); }
+        bool heading_starts_band() const { return (heading_style & 0x80u) != 0; }
     };
     struct LayoutCheckpoint {
         uint16_t block_index = 0;
@@ -106,8 +117,8 @@ private:
     bool append_line_fragment(const LayoutFragment& fragment);
     bool commit_line(int32_t line_y, int16_t line_height,
                      NomadNet::Alignment alignment, int16_t indent,
-                     int16_t available, int32_t window_top,
-                     int32_t window_bottom);
+                     int16_t available, uint8_t heading_level,
+                     int32_t window_top, int32_t window_bottom);
     int32_t logical_scroll_from_widget() const;
     void scroll_to_logical(int32_t logical, lv_anim_enable_t animation);
     void draw_page(lv_event_t* event);

@@ -118,6 +118,60 @@ def test_ui_wiring_contract():
     assert "set_save_callback" in manager_cpp
 
 
+def test_nomadnet_anchor_navigation_stays_local_and_uses_layout_checkpoints():
+    document_h = (INCLUDE / "NomadNetDocument.h").read_text()
+    document = (INCLUDE / "NomadNetDocument.cpp").read_text()
+    compact_h = (INCLUDE / "NomadNetCompactPage.h").read_text()
+    screen_h = (INCLUDE / "NomadNetScreen.h").read_text()
+    screen = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    manager_h = (INCLUDE / "UIManager.h").read_text()
+    manager = (INCLUDE / "UIManager.cpp").read_text()
+
+    assert "MAX_ANCHORS = 128" in document_h
+    assert "MAX_ANCHOR_NAME_BYTES = 64" in document_h
+    assert "add_anchor(doc, line.substr(name_start" in document
+    assert "add_anchor(doc, heading_slug(heading)" in document
+    assert "const ExternalVector<AnchorRecord>& anchors()" in compact_h
+    assert "bool find_anchor(" in compact_h
+
+    assert "bool jump_to_anchor(const std::string& name);" in screen_h
+    assert "int32_t logical_scroll() const" in screen_h
+    jump = screen[screen.index("bool NomadNetScreen::jump_to_anchor("):
+                  screen.index("void NomadNetScreen::draw_page")]
+    assert "_page.find_anchor(name,block_index)" in jump
+    assert "_layout_checkpoints" in jump
+    assert "scroll_to_logical(target,LV_ANIM_OFF)" in jump
+
+    open_page = manager[manager.index("void UIManager::nomad_open("):
+                        manager.index("void UIManager::nomad_reload()")]
+    assert "_nomad_url.path,_nomad_url.fields" in open_page
+    assert "NomadNet::should_jump_locally" in open_page
+    local = open_page[open_page.index("NomadNet::should_jump_locally"):
+                      open_page.index("RouterLock router_lock")]
+    assert "_nomadnet_screen->jump_to_anchor(parsed.fragment)" in local
+    assert "if(!resolved&&parsed.fragment.empty())return;" in local
+    assert "_nomad_history.open(parsed.str(),add_history,current_scroll)" in local
+    assert "nomad_send_request" not in local
+    assert "begin_navigation" not in local
+
+    request = manager[manager.index("void UIManager::nomad_send_request()"):
+                      manager.index("void UIManager::nomad_update()")]
+    assert "_nomad_url.path.data()" in request
+    assert "fragment" not in request
+
+    response = manager[manager.index("case NomadNet::AsyncMailbox::Kind::RESPONSE:"):
+                       manager.index("case NomadNet::AsyncMailbox::Kind::NONE:")]
+    assert "_nomadnet_screen->set_page(document)" in response
+    assert "_nomadnet_screen->jump_to_anchor(_nomad_url.fragment)" in response
+    assert "_nomadnet_screen->restore_logical_scroll(_nomad_pending_scroll)" in response
+    assert "if(page_applied&&_nomad_pending_scroll>=0)" in response
+    assert "else if(page_applied&&_nomad_url.has_fragment)" in response
+    assert (response.index("_nomadnet_screen->restore_logical_scroll(_nomad_pending_scroll)") <
+            response.index("_nomadnet_screen->jump_to_anchor(_nomad_url.fragment)"))
+    assert "Unknown anchor: #" in response
+    assert "int32_t _nomad_pending_scroll" in manager_h
+
+
 def test_nomadnet_page_body_uses_one_compact_custom_viewport():
     screen_h = (INCLUDE / "NomadNetScreen.h").read_text()
     screen = (INCLUDE / "NomadNetScreen.cpp").read_text()
@@ -133,6 +187,8 @@ def test_nomadnet_page_body_uses_one_compact_custom_viewport():
     assert "lv_label_create(_content)" not in set_page
     assert "LV_EVENT_DRAW_MAIN" in screen
     assert "lv_draw_label(" in screen
+    assert "divider_height=static_cast<int16_t>(nomadnet_font_12.line_height)" in screen
+    assert "divider_height=16" not in screen
     assert "commit_line" in screen
     assert "NomadNet::truncation_notice(document)" in set_page
     assert "if(!_page.append_notice(notice))" in set_page
@@ -509,6 +565,34 @@ def test_nomadnet_uses_real_jetbrains_mono_nl_faces_at_each_size():
     assert "?1:0,LV_TEXT_FLAG_NONE" not in browser_cpp
 
 
+def test_nomadnet_heading_layout_uses_retained_depth_without_overwriting_colors():
+    browser_cpp = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    layout = browser_cpp[
+        browser_cpp.index("bool NomadNetScreen::layout_page()") :
+        browser_cpp.index("void NomadNetScreen::draw_page(")
+    ]
+
+    assert "heading_uses_large_font(block.depth)" in layout
+    assert "heading_indent_spaces(block.depth)" in layout
+    assert "heading_bottom_spacing(block.depth)" in layout
+    assert "heading_display_level(block.depth)" in layout
+    assert "whitespace&&x==indent&&!heading" in layout
+    assert "run.foreground=" not in layout
+    assert "run.background=" not in layout
+
+    draw = browser_cpp[
+        browser_cpp.index("void NomadNetScreen::draw_page(") :
+        browser_cpp.index("void NomadNetScreen::select_link(")
+    ]
+    assert "fragment.heading_starts_band()" in draw
+    assert "content_area.x2" in draw
+    assert "heading_background(fragment.heading_level())" in draw
+    assert "resolve_effective_foreground(" in draw
+    assert draw.index("fragment.heading_starts_band()") < draw.index(
+        "run.style&NomadNet::CompactPage::HAS_BACKGROUND"
+    )
+
+
 def test_nomadnet_page_fonts_do_not_leak_into_navigation_widgets():
     browser_cpp = (INCLUDE / "NomadNetScreen.cpp").read_text()
     constructor = browser_cpp[
@@ -562,7 +646,8 @@ def test_nomadnet_draw_preserves_authored_colors_for_links_and_focus():
         browser_cpp.index("void NomadNetScreen::select_link(")
     ]
 
-    assert "dsc.color=lv_color_hex(NomadNet::resolve_foreground(_page,run,Theme::TEXT_PRIMARY));" in draw
+    assert "dsc.color=lv_color_hex(NomadNet::resolve_effective_foreground(" in draw
+    assert "_page,run,fragment.heading_level(),Theme::TEXT_PRIMARY" in draw
     assert "run.link_index>=0?Theme::primaryLight()" not in draw
     assert "selected?Theme::primaryPressed()" not in draw
     assert "bg.bg_color=lv_color_hex(run.background)" in draw
@@ -573,11 +658,13 @@ def test_nomadnet_draw_preserves_authored_colors_for_links_and_focus():
 def test_nomadnet_bold_body_text_keeps_body_font_metrics():
     browser_cpp = (INCLUDE / "NomadNetScreen.cpp").read_text()
     fonts = INCLUDE.parent / "Fonts"
-    layout = browser_cpp[browser_cpp.index("const bool large=") : browser_cpp.index(
-        "const lv_font_t* font=page_run_font", browser_cpp.index("const bool large=")
+    layout_start = browser_cpp.index("const bool heading=")
+    layout = browser_cpp[layout_start : browser_cpp.index(
+        "const lv_font_t* font=page_run_font", layout_start
     )]
 
     assert "block.type==NomadNet::BlockType::HEADING" in layout
+    assert "large_heading=heading&&NomadNet::heading_uses_large_font(block.depth)" in layout
     assert "NomadNet::CompactPage::BOLD" not in layout
 
     for size in (12, 16):

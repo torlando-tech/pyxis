@@ -12,12 +12,14 @@ struct FocusSpan {
     int16_t width = 0;
     int16_t height = 0;
     uint16_t run_index = 0;
+    uint8_t heading_level = 0;
 
     FocusSpan() = default;
     constexpr FocusSpan(int16_t x_value, int16_t y_value, int16_t width_value,
-                        int16_t height_value, uint16_t run_index_value)
+                        int16_t height_value, uint16_t run_index_value,
+                        uint8_t heading_level_value = 0)
         : x(x_value), y(y_value), width(width_value), height(height_value),
-          run_index(run_index_value) {}
+          run_index(run_index_value), heading_level(heading_level_value) {}
 };
 
 template <typename FragmentRange, typename Callback>
@@ -54,6 +56,7 @@ void for_each_focus_span(const FragmentRange& fragments, int16_t selected_link,
             static_cast<int16_t>(right - left),
             static_cast<int16_t>(bottom - top),
             first.run_index,
+            first.heading_level(),
         });
         index = end;
     }

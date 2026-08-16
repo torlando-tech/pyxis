@@ -27,9 +27,11 @@ using UI::LXMF::Route;
 using UI::LXMF::NomadNet::Alignment;
 using UI::LXMF::NomadNet::BlockType;
 using UI::LXMF::NomadNet::DocumentParser;
+using UI::LXMF::NomadNet::TruncationReason;
 using UI::LXMF::NomadNet::compact_address;
 using UI::LXMF::NomadNet::PageHistory;
 using UI::LXMF::NomadNet::display_text;
+using UI::LXMF::NomadNet::display_codepoint;
 using UI::LXMF::NomadNet::Library;
 using UI::LXMF::NomadNet::ActionMailbox;
 using UI::LXMF::NomadNet::UserAction;
@@ -77,10 +79,20 @@ int main(int argc, char** argv) {
 
     PageHistory history;
     history.open("a");
-    history.open("b");
+    history.open("b", true, 84);
     history.reload();
     check("reload does not add browser history", history.current() == "b" && history.depth() == 1);
-    check("browser back restores prior page", history.back() && history.current() == "a" && history.depth() == 0);
+    check("browser back restores prior page and logical scroll",
+          history.back() && history.current() == "a" && history.current_scroll() == 84 &&
+              history.depth() == 0);
+    history.clear();
+    history.open("node:/page/a.mu");
+    history.open("node:/page/a.mu#details", true, 137);
+    check("anchor navigation creates meaningful history entry",
+          history.depth() == 1 && history.current() == "node:/page/a.mu#details");
+    check("anchor back restores exact prior position",
+          history.back() && history.current() == "node:/page/a.mu" &&
+              history.current_scroll() == 137);
     for (std::size_t i = 0; i < PageHistory::MAX_DEPTH + 4; ++i) history.open(std::to_string(i));
     check("browser history is bounded", history.depth() == PageHistory::MAX_DEPTH);
 
@@ -141,12 +153,87 @@ int main(int argc, char** argv) {
           url.path == "/page/repo.mu" && url.fields == "g=reticulum|r=lxmf");
     check("canonical URL preserves link fields for history and reload",
           url.str() == "fedcba9876543210fedcba9876543210:/page/repo.mu`g=reticulum|r=lxmf");
+    check("page fragment is separated from transport request path",
+          Url::parse("fedcba9876543210fedcba9876543210:/page/guide.mu#anchors`mode=full",
+                     url, error) &&
+              url.path == "/page/guide.mu" && url.has_fragment &&
+              url.fragment == "anchors" && url.fields == "mode=full");
+    check("canonical URL retains fragment before link fields",
+          url.str() == "fedcba9876543210fedcba9876543210:/page/guide.mu#anchors`mode=full");
+    Url current_url = url;
+    Url fragment_url;
+    check("fragment-only target inherits the complete current resource",
+          Url::parse("#next-section", fragment_url, error, current_url.destination_hex,
+                     current_url.path, current_url.fields) &&
+              fragment_url.destination_hex == current_url.destination_hex &&
+              fragment_url.path == current_url.path &&
+              fragment_url.fields == current_url.fields && fragment_url.has_fragment &&
+              fragment_url.fragment == "next-section");
+    check("empty fragment is retained for canonical next-heading navigation",
+          Url::parse("#", fragment_url, error, current_url.destination_hex,
+                     current_url.path, current_url.fields) &&
+              fragment_url.has_fragment && fragment_url.fragment.empty());
+    check("fragment navigation keeps transport resource identity",
+          current_url.same_resource(fragment_url));
+    check("fragment navigation is local only with a loaded matching resource",
+          UI::LXMF::NomadNet::should_jump_locally(current_url, fragment_url, true, false) &&
+              !UI::LXMF::NomadNet::should_jump_locally(current_url, fragment_url, false, false));
+    Url other_page;
+    check("fragment on another path still requires transport",
+          Url::parse(":/page/other.mu#next-section", other_page, error,
+                     current_url.destination_hex, current_url.path, current_url.fields) &&
+              !UI::LXMF::NomadNet::should_jump_locally(current_url, other_page, true, false));
+    check("history restoration may reuse the loaded matching resource",
+          UI::LXMF::NomadNet::should_jump_locally(current_url, current_url, true, true));
+    check("fragment names reject non-anchor grammar",
+          !Url::parse("#bad/name", fragment_url, error, current_url.destination_hex,
+                      current_url.path, current_url.fields));
+    check("fragment names are bounded",
+          !Url::parse("#" + std::string(Url::MAX_FRAGMENT_BYTES + 1, 'a'),
+                      fragment_url, error, current_url.destination_hex,
+                      current_url.path, current_url.fields));
     check("wrong destination length rejected", !Url::parse("abcd:/page/index.mu", url, error));
     check("nonhex destination rejected", !Url::parse("zz23456789abcdef0123456789abcdef:/page/index.mu", url, error));
     check("control characters rejected", !Url::parse("0123456789abcdef0123456789abcdef:/page/a\nb", url, error));
     check("downloads explicitly unsupported", !Url::parse("0123456789abcdef0123456789abcdef:/file/x", url, error));
 
     DocumentParser parser;
+    auto block_text = [](const UI::LXMF::NomadNet::Block& block) {
+        std::string value;
+        for (const auto& run : block.runs) value += run.text;
+        return value;
+    };
+    auto unknown_modifier = parser.parse("before `xafter");
+    check("unknown modifier is consumed like canonical NomadNet",
+          unknown_modifier.blocks.size() == 1 && block_text(unknown_modifier.blocks[0]) == "before after");
+
+    auto trailing_introducer = parser.parse("before `");
+    check("trailing formatting introducer is consumed",
+          trailing_introducer.blocks.size() == 1 && block_text(trailing_introducer.blocks[0]) == "before ");
+
+    auto escaped_backtick = parser.parse("before \\`after");
+    check("escaped backtick remains visible",
+          escaped_backtick.blocks.size() == 1 && block_text(escaped_backtick.blocks[0]) == "before `after");
+
+    auto consecutive_unknown = parser.parse("`x`ytext");
+    check("consecutive unknown modifiers are consumed independently",
+          consecutive_unknown.blocks.size() == 1 && block_text(consecutive_unknown.blocks[0]) == "text");
+
+    auto unicode_unknown = parser.parse(u8"`§two `☃three `🙂four");
+    check("unknown Unicode modifiers consume one complete codepoint",
+          unicode_unknown.blocks.size() == 1 && block_text(unicode_unknown.blocks[0]) == "two three four");
+
+    auto unknown_then_bold = parser.parse("`x`!bold`! plain");
+    bool unknown_preserves_formatting = false;
+    if (unknown_then_bold.blocks.size() == 1) {
+        for (const auto& run : unknown_then_bold.blocks[0].runs) {
+            if (run.text == "bold" && run.bold) unknown_preserves_formatting = true;
+        }
+    }
+    check("unknown modifier does not change formatting state",
+          unknown_then_bold.blocks.size() == 1 && block_text(unknown_then_bold.blocks[0]) == "bold plain" &&
+              unknown_preserves_formatting);
+
     auto doc = parser.parse(
         "#!c=60\n#!bg=123\n#!fg=abcdef\n>> Heading\n"
         "ordinary `!bold`! `*italic`* `_under`_ `Ff00red`f `B0f0back`b `ccentre\n"
@@ -157,6 +244,86 @@ int main(int argc, char** argv) {
                                       doc.has_foreground && doc.foreground == 0xabcdef);
     check("heading depth parsed", doc.blocks.size() >= 5 &&
                                   doc.blocks[0].type == BlockType::HEADING && doc.blocks[0].depth == 2);
+    check("heading level one uses the large face",
+          UI::LXMF::NomadNet::heading_uses_large_font(1));
+    check("nested headings use the body-size faces",
+          !UI::LXMF::NomadNet::heading_uses_large_font(2) &&
+              !UI::LXMF::NomadNet::heading_uses_large_font(255));
+    check("empty headings remain layout content",
+          UI::LXMF::NomadNet::block_has_layout_content(BlockType::HEADING, 0));
+    check("dark heading one colors match NomadNet",
+          UI::LXMF::NomadNet::heading_foreground(1) == 0x222222 &&
+              UI::LXMF::NomadNet::heading_background(1) == 0xbbbbbb);
+    check("dark heading two colors match NomadNet",
+          UI::LXMF::NomadNet::heading_foreground(2) == 0x111111 &&
+              UI::LXMF::NomadNet::heading_background(2) == 0x999999);
+    check("dark heading three and deeper colors match NomadNet",
+          UI::LXMF::NomadNet::heading_foreground(3) == 0x000000 &&
+              UI::LXMF::NomadNet::heading_background(3) == 0x777777 &&
+              UI::LXMF::NomadNet::heading_foreground(255) == 0x000000 &&
+              UI::LXMF::NomadNet::heading_background(255) == 0x777777);
+    check("heading indentation follows depth with a bounded cap",
+          UI::LXMF::NomadNet::heading_indent_spaces(1) == 0 &&
+              UI::LXMF::NomadNet::heading_indent_spaces(2) == 2 &&
+              UI::LXMF::NomadNet::heading_indent_spaces(3) == 4 &&
+              UI::LXMF::NomadNet::heading_indent_spaces(255) == 14);
+    check("heading spacing distinguishes canonical levels",
+          UI::LXMF::NomadNet::heading_bottom_spacing(1) == 6 &&
+              UI::LXMF::NomadNet::heading_bottom_spacing(2) == 4 &&
+              UI::LXMF::NomadNet::heading_bottom_spacing(3) == 3 &&
+              UI::LXMF::NomadNet::heading_bottom_spacing(255) == 3);
+    auto authored_heading = parser.parse("> `F0f0green heading`f");
+    CompactPage authored_heading_page;
+    bool authored_heading_assigned = authored_heading_page.assign(authored_heading);
+    bool authored_heading_foreground = false;
+    for (const auto& run : authored_heading_page.runs()) {
+        authored_heading_foreground = authored_heading_foreground ||
+            ((run.style & CompactPage::HAS_FOREGROUND) && run.foreground == 0x00ff00);
+    }
+    check("heading treatment preserves authored foreground",
+          authored_heading_assigned && authored_heading_page.blocks().size() == 1 &&
+              authored_heading_foreground);
+    auto canonical_heading = parser.parse("#!fg=f00\n#!bg=00f\n> plain `F0f0green`f `Bf80orange background`b");
+    CompactPage canonical_heading_page;
+    bool heading_defaults_override_page = false;
+    bool authored_heading_fg_override = false;
+    bool authored_heading_bg_override = false;
+    if (canonical_heading_page.assign(canonical_heading)) {
+        for (const auto& run : canonical_heading_page.runs()) {
+            const auto run_text = canonical_heading_page.text(run);
+            const std::string run_string(run_text.data(), run_text.size());
+            if (run_string.find("plain") != std::string::npos) {
+                heading_defaults_override_page =
+                    UI::LXMF::NomadNet::resolve_effective_foreground(
+                        canonical_heading_page, run, 1, 0xffffff) == 0x222222 &&
+                    UI::LXMF::NomadNet::resolve_effective_background(
+                        canonical_heading_page, run, 1, 0x000000) == 0xbbbbbb;
+            }
+            if (run_string.find("green") != std::string::npos) {
+                authored_heading_fg_override =
+                    UI::LXMF::NomadNet::resolve_effective_foreground(
+                        canonical_heading_page, run, 1, 0xffffff) == 0x00ff00;
+            }
+            if (run_string.find("orange background") != std::string::npos) {
+                authored_heading_bg_override =
+                    UI::LXMF::NomadNet::resolve_effective_background(
+                        canonical_heading_page, run, 1, 0x000000) == 0xff8800;
+            }
+        }
+    }
+    check("heading defaults override page colors", heading_defaults_override_page);
+    check("authored heading foreground overrides heading default", authored_heading_fg_override);
+    check("authored heading background overrides heading default", authored_heading_bg_override);
+    CompactPage::RunRecord unstyled_heading_run{};
+    check("heading focus contrast uses heading background instead of page background",
+          UI::LXMF::NomadNet::resolve_focus_border(
+              canonical_heading_page, unstyled_heading_run, 0x000000, 1) == 0x000000);
+    auto empty_heading = parser.parse(">\nbody");
+    CompactPage empty_heading_page;
+    check("empty heading survives compact conversion for its solid band",
+          empty_heading_page.assign(empty_heading) && !empty_heading_page.blocks().empty() &&
+              empty_heading_page.blocks()[0].type == BlockType::HEADING &&
+              empty_heading_page.blocks()[0].run_count == 0);
     check("inline runs are styled", doc.blocks[1].runs.size() >= 6 &&
                                       doc.blocks[1].runs[1].bold && doc.blocks[1].runs[3].italic);
     bool saw_background = false;
@@ -177,6 +344,81 @@ int main(int argc, char** argv) {
     check("compact page preserves document presentation flags",
           compact.has_background() == doc.has_background && compact.background() == doc.background &&
           compact.has_foreground() == doc.has_foreground && compact.foreground() == doc.foreground);
+
+    const auto anchor_doc = parser.parse(
+        "First\n"
+        "`:spot Second\n"
+        "`:spot Duplicate\n"
+        "> Styled `!Heading`! Caf\xC3\xA9\n"
+        "`:only\n"
+        "`:mark!Visible punctuation\n");
+    check("explicit anchors are retained at their zero-width block",
+          anchor_doc.anchors.size() == 4 && anchor_doc.anchors[0].name == "spot" &&
+              anchor_doc.anchors[0].block_index == 1);
+    check("first duplicate anchor declaration wins",
+          anchor_doc.anchors[0].block_index == 1);
+    check("explicit anchor declaration does not render",
+          anchor_doc.blocks[1].runs.size() == 1 && anchor_doc.blocks[1].runs[0].text == " Second");
+    check("anchor grammar stops without consuming punctuation",
+          anchor_doc.blocks[5].runs.size() == 1 &&
+              anchor_doc.blocks[5].runs[0].text == "!Visible punctuation");
+    check("anchor-only declaration remains zero width",
+          anchor_doc.anchors[2].name == "only" && anchor_doc.anchors[2].block_index == 4 &&
+              anchor_doc.blocks[4].runs.empty());
+    check("heading slug strips Micron formatting and non-ASCII text",
+          anchor_doc.anchors[1].name == "styled-heading-caf" &&
+              anchor_doc.anchors[1].block_index == 3);
+    const auto canonical_slug_doc = parser.parse(
+        "> Hello, World!\n> A___B---C\n> A\xC3\xA9" "B\n"
+        "> `[Label`:/page/target.mu] Link\n"
+        "> `FabcRed `BT123456Blue\n> Bad `Fzzzx Color\n"
+        "> `Fg50Gray`f `Bg25Shade`b\n");
+    check("generated slugs collapse canonical separator runs",
+          canonical_slug_doc.anchors[0].name == "hello-world" &&
+              canonical_slug_doc.anchors[1].name == "a-b-c");
+    check("generated slugs replace a Unicode run with one separator",
+          canonical_slug_doc.anchors[2].name == "a-b");
+    check("generated slugs include canonical link label and target text",
+          canonical_slug_doc.anchors[3].name == "label-page-target-mu-link");
+    check("generated slugs strip valid colors but retain malformed color text",
+          canonical_slug_doc.anchors[4].name == "red-blue" &&
+              canonical_slug_doc.anchors[5].name == "bad-fzzzx-color");
+    check("generated slugs strip grayscale foreground and background modifiers",
+          canonical_slug_doc.anchors[6].name == "gray-shade");
+    check("explicit anchor names preserve canonical case sensitivity",
+          parser.parse("`:Mixed_Name-2 target\n").anchors.front().name == "Mixed_Name-2");
+    const auto empty_anchor_doc = parser.parse("`: visible\n");
+    check("empty anchor declarations are ignored and remain zero width",
+          empty_anchor_doc.anchors.empty() && empty_anchor_doc.blocks.front().runs.front().text == " visible");
+    const std::string long_anchor(DocumentParser::MAX_ANCHOR_NAME_BYTES + 1, 'a');
+    const auto long_anchor_doc = parser.parse("`:" + long_anchor + " visible\n");
+    check("overlong anchors are consumed without retaining a false prefix",
+          long_anchor_doc.anchors.empty() && long_anchor_doc.blocks.front().runs.front().text == " visible" &&
+              long_anchor_doc.has_truncation(TruncationReason::ANCHOR_NAME_BYTES));
+    const auto long_heading_anchor_doc = parser.parse("> " + long_anchor + "\n");
+    check("overlong generated heading slugs do not retain a false prefix",
+          long_heading_anchor_doc.anchors.empty() &&
+              long_heading_anchor_doc.has_truncation(TruncationReason::ANCHOR_NAME_BYTES));
+    std::string many_anchors_source;
+    for (std::size_t i = 0; i <= DocumentParser::MAX_ANCHORS; ++i)
+        many_anchors_source += "`:a" + std::to_string(i) + " x\n";
+    const auto many_anchors_doc = parser.parse(many_anchors_source);
+    check("anchor count is independently bounded",
+          many_anchors_doc.anchors.size() == DocumentParser::MAX_ANCHORS &&
+              many_anchors_doc.has_truncation(TruncationReason::ANCHORS));
+    const auto duplicate_slug_doc = parser.parse(
+        "`:same-heading explicit\n> Same `!Heading`!\n");
+    check("explicit declaration wins over a later generated heading slug",
+          duplicate_slug_doc.anchors.size() == 1 &&
+              duplicate_slug_doc.anchors.front().block_index == 0);
+    CompactPage anchor_page;
+    uint16_t anchor_block = 0;
+    check("compact page retains bounded anchor records",
+          anchor_page.assign(anchor_doc) && anchor_page.anchors().size() == anchor_doc.anchors.size());
+    check("compact anchor lookup resolves exact name to block",
+          anchor_page.find_anchor("styled-heading-caf", anchor_block) && anchor_block == 3);
+    check("compact anchor lookup is case-sensitive and allocation-free",
+          !anchor_page.find_anchor("Styled-Heading-Caf", anchor_block));
 
     auto color_doc = parser.parse(
         "#!bg=123\n#!fg=abc\n"
@@ -230,6 +472,52 @@ int main(int argc, char** argv) {
     check("FT inline truecolor parses", saw_truecolor_foreground);
     check("BT inline truecolor parses", saw_truecolor_background);
 
+    // Byte-exact Urwid 2.6.16 AttrSpec g00..g99 truecolor expansion.
+    static constexpr uint32_t grayscale_rgb[100] = {
+        0x000000, 0x000000, 0x080808, 0x080808, 0x080808, 0x121212, 0x121212, 0x121212, 0x121212, 0x1c1c1c,
+        0x1c1c1c, 0x1c1c1c, 0x1c1c1c, 0x262626, 0x262626, 0x262626, 0x262626, 0x303030, 0x303030, 0x303030,
+        0x303030, 0x3a3a3a, 0x3a3a3a, 0x3a3a3a, 0x3a3a3a, 0x444444, 0x444444, 0x444444, 0x444444, 0x4e4e4e,
+        0x4e4e4e, 0x4e4e4e, 0x4e4e4e, 0x585858, 0x585858, 0x585858, 0x585858, 0x626262, 0x626262, 0x626262,
+        0x626262, 0x6c6c6c, 0x6c6c6c, 0x6c6c6c, 0x6c6c6c, 0x767676, 0x767676, 0x767676, 0x767676, 0x808080,
+        0x808080, 0x848484, 0x848484, 0x848484, 0x848484, 0x949494, 0x949494, 0x949494, 0x949494, 0x949494,
+        0x9e9e9e, 0x9e9e9e, 0x9e9e9e, 0x9e9e9e, 0xa8a8a8, 0xa8a8a8, 0xa8a8a8, 0xa8a8a8, 0xb2b2b2, 0xb2b2b2,
+        0xb2b2b2, 0xb2b2b2, 0xbcbcbc, 0xbcbcbc, 0xbcbcbc, 0xbcbcbc, 0xc6c6c6, 0xc6c6c6, 0xc6c6c6, 0xc6c6c6,
+        0xd0d0d0, 0xd0d0d0, 0xd0d0d0, 0xd0d0d0, 0xdadada, 0xdadada, 0xdadada, 0xdadada, 0xe4e4e4, 0xe4e4e4,
+        0xe4e4e4, 0xe4e4e4, 0xeeeeee, 0xeeeeee, 0xeeeeee, 0xeeeeee, 0xeeeeee, 0xffffff, 0xffffff, 0xffffff,
+    };
+    for (std::size_t percent = 0; percent < 100; ++percent) {
+        std::string token = "g00";
+        token[1] = static_cast<char>('0' + percent / 10);
+        token[2] = static_cast<char>('0' + percent % 10);
+        const auto foreground_page = parser.parse(std::string("#!fg=") + token + "\ntext");
+        const auto background_page = parser.parse(std::string("#!bg=") + token + "\ntext");
+        const std::string name = std::string("page grayscale matches Urwid for ") + token;
+        check(name.c_str(),
+              foreground_page.has_foreground && foreground_page.foreground == grayscale_rgb[percent] &&
+                  background_page.has_background && background_page.background == grayscale_rgb[percent] &&
+                  !foreground_page.malformed && !background_page.malformed);
+    }
+    auto inline_grayscale = parser.parse("`Fg02dark`f `Bg51mid`b `Fg99light`f");
+    bool saw_dark_gray = false;
+    bool saw_mid_gray_background = false;
+    bool saw_light_gray = false;
+    for (const auto& run : inline_grayscale.blocks.front().runs) {
+        if (run.text == "dark")
+            saw_dark_gray = run.has_foreground && run.foreground == 0x080808;
+        else if (run.text == "mid")
+            saw_mid_gray_background = run.has_background && run.background == 0x848484;
+        else if (run.text == "light")
+            saw_light_gray = run.has_foreground && run.foreground == 0xffffff;
+    }
+    check("inline grayscale foreground and background match Urwid",
+          saw_dark_gray && saw_mid_gray_background && saw_light_gray);
+    for (const char* invalid : {"g0", "g100", "G50", "gx0", "g0x"}) {
+        const auto malformed_grayscale = parser.parse(std::string("#!fg=") + invalid + "\ntext");
+        const std::string name = std::string("malformed grayscale is rejected: ") + invalid;
+        check(name.c_str(),
+              malformed_grayscale.malformed && !malformed_grayscale.has_foreground);
+    }
+
     CompactPage::RunRecord light_background_run{};
     light_background_run.style = CompactPage::HAS_BACKGROUND;
     light_background_run.background = 0xe8b4f0;
@@ -256,6 +544,8 @@ int main(int argc, char** argv) {
         int16_t y;
         int16_t width;
         int16_t height;
+        uint8_t heading = 0;
+        uint8_t heading_level() const { return heading; }
     };
     const std::vector<FocusFragmentFixture> focus_fragments{
         {3, 7, 10, 20, 28, 16},
@@ -346,8 +636,37 @@ int main(int argc, char** argv) {
           std::string(link_fields_page.target(0).data(), link_fields_page.target(0).size()) ==
               ":/page/search.mu`q=pyxis");
     check("divider parsed", doc.blocks[3].type == BlockType::DIVIDER);
+    auto divider_doc = parser.parse("-\n-=\n-\x01\n-long\n-─\n-═\n-║\n-🙂");
+    check("canonical divider forms parse as bounded divider metadata",
+          divider_doc.blocks.size() == 8 &&
+              std::all_of(divider_doc.blocks.begin(), divider_doc.blocks.end(),
+                          [](const auto& block) { return block.type == BlockType::DIVIDER; }));
+    check("default and control-character dividers use the canonical line glyph",
+          divider_doc.blocks[0].divider_codepoint == 0x2500 &&
+              divider_doc.blocks[2].divider_codepoint == 0x2500);
+    check("exactly two-character divider forms preserve the authored character",
+          divider_doc.blocks[1].divider_codepoint == '=' &&
+          divider_doc.blocks[4].divider_codepoint == 0x2500 &&
+          divider_doc.blocks[5].divider_codepoint == 0x2550 &&
+          divider_doc.blocks[6].divider_codepoint == 0x2551 &&
+          divider_doc.blocks[7].divider_codepoint == 0x1f642);
+    check("long divider lines retain canonical default-glyph behavior",
+          divider_doc.blocks[3].divider_codepoint == 0x2500);
+    CompactPage divider_page;
+    check("compact page preserves divider glyph metadata without text runs",
+          divider_page.assign(divider_doc) && divider_page.runs().empty() &&
+              divider_page.blocks().size() == divider_doc.blocks.size() &&
+              divider_page.blocks()[1].divider_codepoint == '=' &&
+              divider_page.blocks()[5].divider_codepoint == 0x2550);
+    char divider_utf8[5]{};
+    const std::size_t divider_bytes = display_codepoint(0x2550, divider_utf8);
+    check("supported authored divider glyph is encoded for bounded drawing",
+          divider_bytes == 3 && std::string(divider_utf8, divider_bytes) == "═");
+    const std::size_t fallback_bytes = display_codepoint(0x1f642, divider_utf8);
+    check("unsupported authored divider glyph uses the display fallback",
+          fallback_bytes == 1 && divider_utf8[0] == '?');
     check("literal mode suppresses formatting", doc.blocks[4].runs.size() == 1 &&
-                                                 doc.blocks[4].runs[0].text == "`!literal");
+                                                  doc.blocks[4].runs[0].text == "`!literal");
     bool saw_unsupported = false;
     for (const auto& block : doc.blocks) saw_unsupported = saw_unsupported || block.type == BlockType::UNSUPPORTED;
     check("unsupported structured content has fallback", doc.unsupported && saw_unsupported);

@@ -2,6 +2,7 @@
 #include "NomadNetGlyphs.h"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 
 namespace UI::LXMF::NomadNet {
@@ -41,6 +42,13 @@ bool CompactPage::assign(const Document& document) {
         const std::size_t run_limit = MAX_RUNS - (reserve_notice ? 1 : 0);
         const std::size_t block_count = std::min(document.blocks.size(), block_limit);
         const std::size_t link_count = std::min(document.links.size(), MAX_LINKS);
+        std::size_t anchor_count = 0;
+        for (const auto& anchor : document.anchors) {
+            if (anchor_count >= MAX_ANCHORS) break;
+            if (anchor.block_index < block_count &&
+                anchor.name.size() <= DocumentParser::MAX_ANCHOR_NAME_BYTES)
+                ++anchor_count;
+        }
         std::size_t run_count = 0;
         std::size_t arena_size = 0;
         for (std::size_t i = 0; i < block_count; ++i) {
@@ -59,10 +67,21 @@ bool CompactPage::assign(const Document& document) {
             if (bytes > MAX_ARENA_BYTES - std::min(arena_size, MAX_ARENA_BYTES)) return false;
             arena_size += bytes;
         }
+        std::size_t anchors_accounted = 0;
+        for (const auto& anchor : document.anchors) {
+            if (anchors_accounted >= anchor_count) break;
+            if (anchor.block_index >= block_count ||
+                anchor.name.size() > DocumentParser::MAX_ANCHOR_NAME_BYTES) continue;
+            const std::size_t bytes = anchor.name.size() + 1;
+            if (bytes > MAX_ARENA_BYTES - std::min(arena_size, MAX_ARENA_BYTES)) return false;
+            arena_size += bytes;
+            ++anchors_accounted;
+        }
         _arena.reserve(arena_size);
         _blocks.reserve(block_count);
         _runs.reserve(std::min(run_count, run_limit));
         _links.reserve(link_count);
+        _anchors.reserve(anchor_count);
 
         for (std::size_t i = 0; i < link_count; ++i) {
             LinkRecord link;
@@ -78,6 +97,19 @@ bool CompactPage::assign(const Document& document) {
             _links.push_back(link);
         }
 
+        for (const auto& source_anchor : document.anchors) {
+            if (_anchors.size() >= anchor_count) break;
+            if (source_anchor.block_index >= block_count ||
+                source_anchor.name.size() > DocumentParser::MAX_ANCHOR_NAME_BYTES) continue;
+            AnchorRecord anchor;
+            if (!append(source_anchor.name, anchor.name_offset, anchor.name_length)) {
+                clear();
+                return false;
+            }
+            anchor.block_index = source_anchor.block_index;
+            _anchors.push_back(anchor);
+        }
+
         for (std::size_t i = 0; i < block_count; ++i) {
             const auto& source_block = document.blocks[i];
             if (!source_block.runs.empty() && _runs.size() >= run_limit) {
@@ -89,6 +121,7 @@ bool CompactPage::assign(const Document& document) {
             block.type = source_block.type;
             block.depth = source_block.depth;
             block.alignment = source_block.alignment;
+            block.divider_codepoint = source_block.divider_codepoint;
             for (const auto& source_run : source_block.runs) {
                 if (_runs.size() >= run_limit || block.run_count == std::numeric_limits<uint16_t>::max()) {
                     _truncated = true;
@@ -120,7 +153,7 @@ bool CompactPage::assign(const Document& document) {
         _has_foreground = document.has_foreground;
         _foreground = document.foreground;
         _truncated = _truncated || document.truncated || document.blocks.size() > block_count ||
-            document.links.size() > link_count;
+            document.links.size() > link_count || document.anchors.size() > anchor_count;
         _unsupported = document.unsupported;
         return true;
     } catch (const std::bad_alloc&) {
@@ -134,6 +167,7 @@ void CompactPage::clear() {
     ExternalVector<BlockRecord>().swap(_blocks);
     ExternalVector<RunRecord>().swap(_runs);
     ExternalVector<LinkRecord>().swap(_links);
+    ExternalVector<AnchorRecord>().swap(_anchors);
     _has_background = false;
     _background = 0;
     _has_foreground = false;
@@ -161,6 +195,9 @@ bool CompactPage::append_notice(const std::string& value) {
         for (std::size_t i = owner; i < _blocks.size(); ++i)
             _blocks[i].first_run = static_cast<uint32_t>(_runs.size());
     }
+    _anchors.erase(std::remove_if(_anchors.begin(),_anchors.end(),
+        [this](const AnchorRecord& anchor){return anchor.block_index>=_blocks.size();}),
+        _anchors.end());
     try {
         RunRecord run;
         if (!append(value, run.text_offset, run.text_length)) return false;
@@ -187,6 +224,20 @@ CompactPage::TextView CompactPage::target(std::size_t index) const {
     const auto& link = _links[index];
     if (link.target_offset > _arena.size() || link.target_length > _arena.size() - link.target_offset) return {};
     return {_arena.data() + link.target_offset, link.target_length};
+}
+
+bool CompactPage::find_anchor(const std::string& name, uint16_t& block_index) const {
+    if (name.size() > DocumentParser::MAX_ANCHOR_NAME_BYTES) return false;
+    for (const auto& anchor : _anchors) {
+        if (anchor.name_offset > _arena.size() ||
+            anchor.name_length > _arena.size() - anchor.name_offset) continue;
+        if (anchor.name_length == name.size() &&
+            std::memcmp(_arena.data() + anchor.name_offset, name.data(), name.size()) == 0) {
+            block_index = anchor.block_index;
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace UI::LXMF::NomadNet

@@ -2,6 +2,7 @@
 
 #include <string>
 #include <cstddef>
+#include <cstdint>
 
 #ifdef ARDUINO
 #include <lvgl.h>
@@ -25,5 +26,6 @@ namespace UI::LXMF::NomadNet {
 std::string display_text(const std::string& utf8);
 using DisplayTextVisitor = void (*)(const char* bytes, std::size_t length, void* context);
 void visit_display_text(const std::string& utf8, DisplayTextVisitor visitor, void* context);
+std::size_t display_codepoint(uint32_t codepoint, char utf8[5]);
 
 } // namespace UI::LXMF::NomadNet

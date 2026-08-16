@@ -415,22 +415,33 @@ bool NomadNetScreen::append_line_fragment(const LayoutFragment& fragment){
 
 bool NomadNetScreen::commit_line(int32_t line_y,int16_t line_height,
                                  NomadNet::Alignment alignment,int16_t indent,
-                                 int16_t available,int32_t window_top,
-                                 int32_t window_bottom){
-    if(_line_layout.empty())return true;
+                                 int16_t available,uint8_t heading_level,
+                                 int32_t window_top,int32_t window_bottom){
+    if(_line_layout.empty()&&heading_level==0)return true;
     int16_t line_width=0;
     for(const auto& fragment:_line_layout)
         line_width=std::max<int16_t>(line_width,fragment.x+fragment.width-indent);
     const int16_t shift=alignment==NomadNet::Alignment::CENTER?(available-line_width)/2:
         alignment==NomadNet::Alignment::RIGHT?available-line_width:0;
     if(line_y+line_height>=window_top&&line_y<window_bottom){
-        for(auto fragment:_line_layout){
+        const int32_t relative_y=line_y-window_top;
+        if(relative_y<INT16_MIN||relative_y>INT16_MAX)return false;
+        if(_line_layout.empty()){
             if(_page_layout.size()>=MAX_WINDOW_FRAGMENTS)return false;
-            if(shift>0)fragment.x=static_cast<int16_t>(fragment.x+shift);
-            const int32_t relative_y=line_y-window_top;
-            if(relative_y<INT16_MIN||relative_y>INT16_MAX)return false;
-            fragment.y=static_cast<int16_t>(relative_y);
-            _page_layout.push_back(fragment);
+            LayoutFragment band(UINT16_MAX,0,0,-1,0,static_cast<int16_t>(relative_y),
+                                0,line_height,false,heading_level==1);
+            band.set_heading(heading_level,true);
+            _page_layout.push_back(band);
+        }else{
+            bool starts_band=true;
+            for(auto fragment:_line_layout){
+                if(_page_layout.size()>=MAX_WINDOW_FRAGMENTS)return false;
+                if(shift>0)fragment.x=static_cast<int16_t>(fragment.x+shift);
+                fragment.y=static_cast<int16_t>(relative_y);
+                if(heading_level!=0)fragment.set_heading(heading_level,starts_band);
+                starts_band=false;
+                _page_layout.push_back(fragment);
+            }
         }
     }
     _line_layout.clear();
@@ -451,26 +462,40 @@ bool NomadNetScreen::layout_from(std::size_t start_block,int32_t start_y,
         }
         const auto& block=_page.blocks()[block_index];
         if(block.type==NomadNet::BlockType::DIVIDER){
-            if(y+1>=window_top&&y<window_bottom){
+            const int16_t divider_height=static_cast<int16_t>(nomadnet_font_12.line_height);
+            if(y+divider_height>=window_top&&y<window_bottom){
                 if(_page_layout.size()>=MAX_WINDOW_FRAGMENTS)return false;
-                _page_layout.push_back(LayoutFragment(0,0,0,-1,0,
-                    static_cast<int16_t>(y-window_top),width,1,true));
+                LayoutFragment divider(0,0,0,-1,0,
+                    static_cast<int16_t>(y-window_top),width,divider_height,true);
+                divider.divider_codepoint=block.divider_codepoint;
+                _page_layout.push_back(divider);
             }
-            y+=9;continue;
+            y+=divider_height;continue;
         }
-        if(block.run_count==0)continue;
-        const int16_t indent=block.type==NomadNet::BlockType::HEADING?0:
-            static_cast<int16_t>(std::min<unsigned>(block.depth,8)*4);
+        const bool heading=block.type==NomadNet::BlockType::HEADING;
+        const bool has_runs=block.run_count!=0&&block.first_run<_page.runs().size();
+        if(!heading&&!has_runs)continue;
+        const uint8_t heading_level=heading?NomadNet::heading_display_level(block.depth):0;
+        const bool large_heading=heading&&NomadNet::heading_uses_large_font(block.depth);
+        int16_t indent=static_cast<int16_t>(std::min<unsigned>(block.depth,8)*4);
+        NomadNet::CompactPage::RunRecord default_run{};
+        const auto& first_run=has_runs?_page.runs()[block.first_run]:default_run;
+        if(heading){
+            const lv_font_t* indent_font=page_run_font(first_run,large_heading);
+            const int16_t space_width=static_cast<int16_t>(lv_txt_get_width(
+                " ",1,indent_font,0,LV_TEXT_FLAG_NONE));
+            indent=static_cast<int16_t>(NomadNet::heading_indent_spaces(block.depth)*space_width);
+        }
         const int16_t available=width-indent;
         int16_t x=indent;
-        int16_t line_h=16;
+        int16_t line_h=heading?static_cast<int16_t>(page_run_font(first_run,large_heading)->line_height+3):16;
         int32_t line_y=y;
         _line_layout.clear();
         for(uint16_t r=0;r<block.run_count&&block.first_run+r<_page.runs().size();++r){
             const uint16_t run_index=static_cast<uint16_t>(block.first_run+r);
             const auto& run=_page.runs()[run_index];
             const auto text=_page.text(run);
-            const bool large=block.type==NomadNet::BlockType::HEADING;
+            const bool large=large_heading;
             const lv_font_t* font=page_run_font(run,large);
             const int16_t height=static_cast<int16_t>(font->line_height+3);
             line_h=std::max(line_h,height);
@@ -485,7 +510,7 @@ bool NomadNetScreen::layout_from(std::size_t start_block,int32_t start_y,
                 if(whitespace&&x+fragment_w>indent+available){offset=end;continue;}
                 if(!whitespace&&x>indent&&x+fragment_w>indent+available){
                     if(!commit_line(line_y,line_h,block.alignment,indent,available,
-                                    window_top,window_bottom))return false;
+                                    heading_level,window_top,window_bottom))return false;
                     y+=line_h;x=indent;line_h=height;line_y=y;
                 }
                 if(fragment_w>available){
@@ -502,7 +527,7 @@ bool NomadNetScreen::layout_from(std::size_t start_block,int32_t start_y,
                         fragment_w=candidate;
                     }
                 }
-                if(!(whitespace&&x==indent)){
+                if(!(whitespace&&x==indent&&!heading)){
                     if(run.link_index>=0&&static_cast<std::size_t>(run.link_index)<_link_y.size()){
                         if(_link_y[run.link_index]<0)_link_y[run.link_index]=line_y;
                         _link_bottom[run.link_index]=std::max(_link_bottom[run.link_index],line_y+height);
@@ -516,8 +541,8 @@ bool NomadNetScreen::layout_from(std::size_t start_block,int32_t start_y,
             }
         }
         if(!commit_line(line_y,line_h,block.alignment,indent,available,
-                        window_top,window_bottom))return false;
-        y+=line_h+3;
+                        heading_level,window_top,window_bottom))return false;
+        y+=line_h+(heading?NomadNet::heading_bottom_spacing(block.depth):3);
     }
     if(build_index)_page_height=std::max<int32_t>(y,lv_obj_get_content_height(_content));
     return true;
@@ -563,6 +588,32 @@ void NomadNetScreen::scroll_to_logical(int32_t logical,lv_anim_enable_t animatio
     lv_obj_invalidate(_content);
 }
 
+bool NomadNetScreen::jump_to_anchor(const std::string& name){
+    if(!_page_loaded)return false;
+    uint16_t block_index=0;
+    int32_t target=-1;
+    if(!name.empty()){
+        if(!_page.find_anchor(name,block_index))return false;
+        for(const auto& checkpoint:_layout_checkpoints){
+            if(checkpoint.block_index==block_index){target=checkpoint.y;break;}
+        }
+    }else{
+        for(const auto& checkpoint:_layout_checkpoints){
+            if(checkpoint.y<=_logical_scroll||checkpoint.block_index>=_page.blocks().size())continue;
+            if(_page.blocks()[checkpoint.block_index].type==NomadNet::BlockType::HEADING){
+                target=checkpoint.y;break;
+            }
+        }
+    }
+    if(target<0)return false;
+    scroll_to_logical(target,LV_ANIM_OFF);
+    return true;
+}
+
+void NomadNetScreen::restore_logical_scroll(int32_t logical){
+    if(_page_loaded)scroll_to_logical(logical,LV_ANIM_OFF);
+}
+
 void NomadNetScreen::draw_page(lv_event_t* event){
     auto* draw_ctx=lv_event_get_draw_ctx(event);
     lv_area_t content_area;
@@ -581,7 +632,29 @@ void NomadNetScreen::draw_page(lv_event_t* event){
         lv_area_t area{static_cast<lv_coord_t>(left+fragment.x),static_cast<lv_coord_t>(draw_y),
             static_cast<lv_coord_t>(left+fragment.x+std::max<int16_t>(fragment.width,1)-1),
             static_cast<lv_coord_t>(draw_y+std::max<int16_t>(fragment.height,1)-1)};
-        if(fragment.divider){lv_draw_rect_dsc_t dsc;lv_draw_rect_dsc_init(&dsc);dsc.bg_color=Theme::border();lv_draw_rect(draw_ctx,&dsc,&area);continue;}
+        if(fragment.divider){
+            const std::size_t bytes=NomadNet::display_codepoint(fragment.divider_codepoint,scratch);
+            const lv_font_t* font=&nomadnet_font_12;
+            const int16_t glyph_width=static_cast<int16_t>(lv_txt_get_width(
+                scratch,static_cast<uint32_t>(bytes),font,0,LV_TEXT_FLAG_NONE));
+            if(glyph_width>0){
+                lv_draw_label_dsc_t dsc;lv_draw_label_dsc_init(&dsc);
+                dsc.font=font;dsc.color=Theme::border();dsc.letter_space=0;
+                for(int16_t x=0;x<fragment.width;x=static_cast<int16_t>(x+glyph_width)){
+                    lv_area_t glyph_area{static_cast<lv_coord_t>(area.x1+x),area.y1,
+                        static_cast<lv_coord_t>(std::min<int32_t>(area.x1+x+glyph_width-1,area.x2)),area.y2};
+                    lv_draw_label(draw_ctx,&dsc,&glyph_area,scratch,nullptr);
+                }
+            }
+            continue;
+        }
+        if(fragment.heading_starts_band()){
+            lv_area_t band_area{content_area.x1,static_cast<lv_coord_t>(draw_y),content_area.x2,
+                static_cast<lv_coord_t>(draw_y+std::max<int16_t>(fragment.height,1)-1)};
+            lv_draw_rect_dsc_t band;lv_draw_rect_dsc_init(&band);
+            band.bg_color=lv_color_hex(NomadNet::heading_background(fragment.heading_level()));
+            lv_draw_rect(draw_ctx,&band,&band_area);
+        }
         if(fragment.run_index>=_page.runs().size())continue;
         const auto& run=_page.runs()[fragment.run_index];
         const auto text=_page.text(run);
@@ -592,7 +665,8 @@ void NomadNetScreen::draw_page(lv_event_t* event){
         }
         lv_draw_label_dsc_t dsc;lv_draw_label_dsc_init(&dsc);
         dsc.font=page_run_font(run, fragment.large_font);
-        dsc.color=lv_color_hex(NomadNet::resolve_foreground(_page,run,Theme::TEXT_PRIMARY));
+        dsc.color=lv_color_hex(NomadNet::resolve_effective_foreground(
+            _page,run,fragment.heading_level(),Theme::TEXT_PRIMARY));
         dsc.letter_space=0;
         dsc.decor=(run.style&NomadNet::CompactPage::UNDERLINE)||run.link_index>=0?LV_TEXT_DECOR_UNDERLINE:LV_TEXT_DECOR_NONE;
         lv_draw_label(draw_ctx,&dsc,&area,scratch,nullptr);
@@ -607,7 +681,7 @@ void NomadNetScreen::draw_page(lv_event_t* event){
                 static_cast<lv_coord_t>(draw_y+std::max<int16_t>(span.height,1)-1)};
             lv_draw_rect_dsc_t focus;lv_draw_rect_dsc_init(&focus);focus.bg_opa=LV_OPA_TRANSP;
             focus.border_color=lv_color_hex(NomadNet::resolve_focus_border(
-                _page,_page.runs()[span.run_index],Theme::SURFACE));
+                _page,_page.runs()[span.run_index],Theme::SURFACE,span.heading_level));
             focus.border_width=1;lv_draw_rect(draw_ctx,&focus,&area);
         });
     }
