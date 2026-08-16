@@ -118,6 +118,37 @@ def test_ui_wiring_contract():
     assert "set_save_callback" in manager_cpp
 
 
+def test_nomadnet_table_renderer_is_bounded_and_virtualized():
+    document_h = (INCLUDE / "NomadNetDocument.h").read_text()
+    compact_h = (INCLUDE / "NomadNetCompactPage.h").read_text()
+    screen_h = (INCLUDE / "NomadNetScreen.h").read_text()
+    screen = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    manager = (INCLUDE / "UIManager.cpp").read_text()
+
+    for bound in ("MAX_TABLES", "MAX_TABLE_ROWS", "MAX_TABLE_COLUMNS",
+                  "MAX_TABLE_CELLS", "MAX_TOTAL_TABLE_CELLS", "MAX_TABLE_CELL_BYTES",
+                  "MAX_TABLE_FALLBACK_BYTES", "MAX_TABLE_BYTES"):
+        assert bound in document_h
+    assert "const ExternalVector<TableRecord>& tables()" in compact_h
+    assert "const ExternalVector<TableCellRecord>& table_cells()" in compact_h
+    assert "bool layout_table(" in screen_h
+    assert "table_fit_width" in screen
+    assert "layout_table_reflow" in screen
+    assert "fragment.table_cell" in screen
+    assert "bool line_started=false" in screen
+    assert "if(line_started||line_y==top)" in screen
+    layout = screen[screen.index("bool NomadNetScreen::layout_table("):
+                    screen.index("bool NomadNetScreen::layout_from(")]
+    assert "lv_obj_create" not in layout
+    assert "lv_label_create" not in layout
+    parse_call = manager.index("_nomad_parser.parse(")
+    parse_guard = manager[parse_call - 300:parse_call + 500]
+    assert "try {" in parse_guard
+    assert "catch (const std::bad_alloc&)" in parse_guard
+    assert "Page is too large for available memory" in parse_guard
+    assert "_nomad_response.clear()" in parse_guard
+
+
 def test_nomadnet_anchor_navigation_stays_local_and_uses_layout_checkpoints():
     document_h = (INCLUDE / "NomadNetDocument.h").read_text()
     document = (INCLUDE / "NomadNetDocument.cpp").read_text()

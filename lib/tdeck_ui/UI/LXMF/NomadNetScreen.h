@@ -43,7 +43,7 @@ private:
     // Only the visible region plus bounded overscan is retained. The parser
     // admits at most 1024 runs, so this also covers a pathological viewport
     // containing every styled run plus bounded dividers.
-    static constexpr std::size_t MAX_WINDOW_FRAGMENTS = 1056;
+    static constexpr std::size_t MAX_WINDOW_FRAGMENTS = 1600;
     static constexpr int32_t MAX_PHYSICAL_SCROLL_EXTENT = 30000;
     struct LayoutFragment {
         uint16_t run_index = 0;
@@ -57,6 +57,8 @@ private:
         uint32_t divider_codepoint = 0x2500;
         bool divider = false;
         bool large_font = false;
+        bool table_cell = false;
+        bool table_header = false;
         uint8_t heading_style = 0;
         LayoutFragment() = default;
         LayoutFragment(uint16_t run, uint16_t offset, uint16_t length, int16_t link,
@@ -111,6 +113,17 @@ private:
     void clear_directory();
     bool layout_page();
     bool layout_window(int32_t logical_scroll);
+    bool layout_table(const NomadNet::CompactPage::BlockRecord& block,
+                      int32_t& y, int32_t window_top, int32_t window_bottom);
+    bool layout_table_fit(const NomadNet::CompactPage::TableRecord& table,
+                          const int16_t* column_widths, int16_t table_fit_width,
+                          int32_t& y, int32_t window_top, int32_t window_bottom);
+    bool layout_table_reflow(const NomadNet::CompactPage::TableRecord& table,
+                             int32_t& y, int32_t window_top, int32_t window_bottom);
+    bool layout_table_cell(const NomadNet::CompactPage::TableCellRecord& cell,
+                           int16_t left, int16_t available, int32_t top,
+                           int32_t window_top, int32_t window_bottom,
+                           bool emit, int32_t& height);
     bool layout_from(std::size_t start_block, int32_t start_y,
                      int32_t window_top, int32_t window_bottom,
                      bool build_index);

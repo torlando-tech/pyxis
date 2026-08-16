@@ -37,11 +37,19 @@ bool CompactPage::append_display(const std::string& value, uint32_t& offset, uin
 bool CompactPage::assign(const Document& document) {
     clear();
     try {
-        const bool reserve_notice = document.truncated;
+        const bool reserve_notice = document.truncated || document.unsupported;
         const std::size_t block_limit = MAX_BLOCKS - (reserve_notice ? 1 : 0);
         const std::size_t run_limit = MAX_RUNS - (reserve_notice ? 1 : 0);
         const std::size_t block_count = std::min(document.blocks.size(), block_limit);
         const std::size_t link_count = std::min(document.links.size(), MAX_LINKS);
+        const std::size_t table_count = std::min(document.tables.size(), MAX_TABLES);
+        std::size_t table_cell_count = 0;
+        for (std::size_t i = 0; i < table_count; ++i) {
+            const std::size_t cells = static_cast<std::size_t>(document.tables[i].row_count) *
+                                      document.tables[i].column_count;
+            table_cell_count += std::min(cells,
+                MAX_TABLE_CELLS - std::min(table_cell_count, MAX_TABLE_CELLS));
+        }
         std::size_t anchor_count = 0;
         for (const auto& anchor : document.anchors) {
             if (anchor_count >= MAX_ANCHORS) break;
@@ -61,6 +69,14 @@ bool CompactPage::assign(const Document& document) {
                 arena_size += bytes;
             }
         }
+        const std::size_t table_run_count = std::min(document.table_runs.size(),
+            run_limit - std::min(run_count, run_limit));
+        for (std::size_t r = 0; r < table_run_count; ++r) {
+            const std::size_t bytes = document.table_runs[r].text.size() + 1;
+            if (bytes > MAX_ARENA_BYTES - std::min(arena_size, MAX_ARENA_BYTES)) return false;
+            arena_size += bytes;
+        }
+        run_count += table_run_count;
         for (std::size_t i = 0; i < link_count; ++i) {
             const std::size_t bytes = document.links[i].target.size() +
                 (document.links[i].fields.empty() ? 0 : document.links[i].fields.size() + 1) + 1;
@@ -82,6 +98,8 @@ bool CompactPage::assign(const Document& document) {
         _runs.reserve(std::min(run_count, run_limit));
         _links.reserve(link_count);
         _anchors.reserve(anchor_count);
+        _tables.reserve(table_count);
+        _table_cells.reserve(table_cell_count);
 
         for (std::size_t i = 0; i < link_count; ++i) {
             LinkRecord link;
@@ -122,6 +140,9 @@ bool CompactPage::assign(const Document& document) {
             block.depth = source_block.depth;
             block.alignment = source_block.alignment;
             block.divider_codepoint = source_block.divider_codepoint;
+            block.table_index = source_block.table_index >= 0 &&
+                static_cast<std::size_t>(source_block.table_index) < table_count
+                    ? source_block.table_index : -1;
             for (const auto& source_run : source_block.runs) {
                 if (_runs.size() >= run_limit || block.run_count == std::numeric_limits<uint16_t>::max()) {
                     _truncated = true;
@@ -148,12 +169,72 @@ bool CompactPage::assign(const Document& document) {
             _blocks.push_back(block);
         }
 
+        for (std::size_t i = 0; i < table_count; ++i) {
+            const auto& source_table = document.tables[i];
+            const std::size_t source_cells = static_cast<std::size_t>(source_table.row_count) *
+                                             source_table.column_count;
+            if (source_table.first_cell > document.table_cells.size() ||
+                source_cells > document.table_cells.size() - source_table.first_cell) {
+                clear();
+                return false;
+            }
+            TableRecord table;
+            table.first_cell = static_cast<uint32_t>(_table_cells.size());
+            table.column_count = source_table.column_count;
+            table.alignment = source_table.alignment;
+            table.max_width = source_table.max_width;
+            const std::size_t cells_left = MAX_TABLE_CELLS - std::min(_table_cells.size(), MAX_TABLE_CELLS);
+            const std::size_t retained_cells = std::min(source_cells, cells_left);
+            for (std::size_t c = 0; c < retained_cells; ++c) {
+                const auto& source_cell = document.table_cells[source_table.first_cell + c];
+                if (source_cell.first_run > document.table_runs.size() ||
+                    source_cell.run_count > document.table_runs.size() - source_cell.first_run) {
+                    clear();
+                    return false;
+                }
+                TableCellRecord cell;
+                cell.first_run = static_cast<uint32_t>(_runs.size());
+                cell.alignment = source_cell.alignment;
+                for (std::size_t r = 0; r < source_cell.run_count; ++r) {
+                    if (_runs.size() >= run_limit) {
+                        _truncated = true;
+                        break;
+                    }
+                    const auto& source_run = document.table_runs[source_cell.first_run + r];
+                    RunRecord run;
+                    if (!append_display(source_run.text, run.text_offset, run.text_length)) {
+                        clear();
+                        return false;
+                    }
+                    run.link_index = source_run.link_index >= 0 &&
+                        static_cast<std::size_t>(source_run.link_index) < _links.size()
+                            ? static_cast<int16_t>(source_run.link_index) : -1;
+                    if (source_run.bold) run.style |= BOLD;
+                    if (source_run.italic) run.style |= ITALIC;
+                    if (source_run.underline) run.style |= UNDERLINE;
+                    if (source_run.has_foreground) run.style |= HAS_FOREGROUND;
+                    if (source_run.has_background) run.style |= HAS_BACKGROUND;
+                    run.foreground = source_run.foreground;
+                    run.background = source_run.background;
+                    _runs.push_back(run);
+                    ++cell.run_count;
+                }
+                _table_cells.push_back(cell);
+            }
+            table.row_count = table.column_count == 0 ? 0 :
+                static_cast<uint16_t>(retained_cells / table.column_count);
+            if (retained_cells != source_cells) _truncated = true;
+            _tables.push_back(table);
+        }
+
         _has_background = document.has_background;
         _background = document.background;
         _has_foreground = document.has_foreground;
         _foreground = document.foreground;
         _truncated = _truncated || document.truncated || document.blocks.size() > block_count ||
-            document.links.size() > link_count || document.anchors.size() > anchor_count;
+            document.links.size() > link_count || document.anchors.size() > anchor_count ||
+            document.tables.size() > table_count || document.table_cells.size() > table_cell_count ||
+            document.table_runs.size() > table_run_count;
         _unsupported = document.unsupported;
         return true;
     } catch (const std::bad_alloc&) {
@@ -168,6 +249,8 @@ void CompactPage::clear() {
     ExternalVector<RunRecord>().swap(_runs);
     ExternalVector<LinkRecord>().swap(_links);
     ExternalVector<AnchorRecord>().swap(_anchors);
+    ExternalVector<TableRecord>().swap(_tables);
+    ExternalVector<TableCellRecord>().swap(_table_cells);
     _has_background = false;
     _background = 0;
     _has_foreground = false;

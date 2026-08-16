@@ -345,6 +345,270 @@ int main(int argc, char** argv) {
           compact.has_background() == doc.has_background && compact.background() == doc.background &&
           compact.has_foreground() == doc.has_foreground && compact.foreground() == doc.foreground);
 
+    const auto table_doc = parser.parse(
+        "`tc30\n"
+        "| Name | Price | Qty |\n"
+        "| ---- | :---: | --: |\n"
+        "| `F3a3Apple`f | Free | `!5`! |\n"
+        "| Orange | Ask, nicely | 3 |\n"
+        "`t\n"
+        "After table");
+    check("bounded Micron table syntax produces one semantic table block",
+          table_doc.tables.size() == 1 && table_doc.blocks.size() == 2 &&
+              table_doc.blocks[0].type == BlockType::TABLE && table_doc.blocks[0].table_index == 0);
+    check("table metadata preserves rows columns alignment and maximum width",
+          table_doc.tables[0].row_count == 3 && table_doc.tables[0].column_count == 3 &&
+              table_doc.tables[0].alignment == Alignment::CENTER && table_doc.tables[0].max_width == 30);
+    check("separator alignment applies only to data cells",
+          table_doc.table_cells.size() == 9 &&
+              table_doc.table_cells[0].alignment == Alignment::LEFT &&
+              table_doc.table_cells[3].alignment == Alignment::LEFT &&
+              table_doc.table_cells[4].alignment == Alignment::CENTER &&
+              table_doc.table_cells[5].alignment == Alignment::RIGHT);
+    bool saw_table_color = false;
+    bool saw_table_bold = false;
+    for (const auto& run : table_doc.table_runs) {
+        if (run.text == "Apple") saw_table_color = run.has_foreground && run.foreground == 0x33aa33;
+        if (run.text == "5") saw_table_bold = run.bold;
+    }
+    check("table cells preserve inline formatting", saw_table_color && saw_table_bold);
+    check("content after a closed table remains ordinary page content",
+          table_doc.blocks[1].runs.size() == 1 && table_doc.blocks[1].runs[0].text == "After table");
+    const auto inherited_table_alignment = parser.parse(
+        "`c\n`t\nH\n---\nV\n`t\nAfter");
+    check("bare table tags preserve the active canonical alignment",
+          inherited_table_alignment.tables.size() == 1 &&
+              inherited_table_alignment.tables[0].alignment == Alignment::CENTER &&
+              inherited_table_alignment.blocks.back().alignment == Alignment::CENTER);
+    const auto explicit_table_alignment = parser.parse(
+        "`r\n`tl\nH\n---\nV\n`t\nAfter");
+    check("explicit table alignment resets following content to canonical left alignment",
+          explicit_table_alignment.tables.size() == 1 &&
+              explicit_table_alignment.tables[0].alignment == Alignment::LEFT &&
+              explicit_table_alignment.blocks.back().alignment == Alignment::LEFT);
+    const auto spaced_table_width = parser.parse("`tc 30\nH\n---\nV\n`t");
+    const auto signed_table_width = parser.parse("`tc+30\nH\n---\nV\n`t");
+    const auto negative_table_width = parser.parse("`tc-30\nH\n---\nV\n`t");
+    const auto zero_table_width = parser.parse("`tc0\nH\n---\nV\n`t");
+    const auto malformed_table_width = parser.parse("`tc30x\nH\n---\nV\n`t");
+    const auto huge_table_width = parser.parse(
+        "`tc999999999999999999999999999999999999\nH\n---\nV\n`t");
+    check("canonical table width conversion is accepted before bounded normalization",
+          spaced_table_width.tables.size() == 1 && spaced_table_width.tables[0].max_width == 30 &&
+              signed_table_width.tables.size() == 1 && signed_table_width.tables[0].max_width == 30 &&
+              negative_table_width.tables[0].max_width == 1 &&
+              zero_table_width.tables[0].max_width == DocumentParser::DEFAULT_TABLE_WIDTH &&
+              malformed_table_width.tables[0].max_width == DocumentParser::DEFAULT_TABLE_WIDTH &&
+              huge_table_width.tables[0].max_width == DocumentParser::MAX_TABLE_WIDTH);
+    const auto malformed_aligned_table = parser.parse(
+        "`r\n`tc\nonly one row\n`t\nAfter");
+    check("malformed explicit tables preserve the prior canonical alignment",
+          malformed_aligned_table.tables.empty() && malformed_aligned_table.malformed &&
+              malformed_aligned_table.blocks.back().alignment == Alignment::RIGHT);
+    const auto blank_comment_table = parser.parse(
+        "`t\nH\n---\n# ignored\n\nV\n`t");
+    check("comments are discarded and blank source lines remain outside the canonical table buffer",
+          blank_comment_table.tables.size() == 1 && blank_comment_table.tables[0].row_count == 2 &&
+              blank_comment_table.blocks.size() == 2 &&
+              blank_comment_table.blocks.front().type == BlockType::TEXT &&
+              blank_comment_table.blocks.back().type == BlockType::TABLE);
+    const auto table_page_directives = parser.parse(
+        "`t\nH\n---\n#!bg=f00\n#!fg=0f0\nV\n`t");
+    check("page color directives inside tables remain canonical comments",
+          table_page_directives.tables.size() == 1 &&
+              table_page_directives.tables[0].row_count == 2 &&
+              !table_page_directives.has_background && !table_page_directives.has_foreground);
+    const auto linked_table = parser.parse(
+        "`t\nAction\n---\n`[Open`:/page/details.mu]\n`t");
+    check("links inside table cells retain normal link semantics",
+          linked_table.tables.size() == 1 && linked_table.links.size() == 1 &&
+              linked_table.table_runs.size() == 2 && linked_table.table_runs.back().link_index == 0 &&
+              linked_table.links[0].target == ":/page/details.mu");
+    CompactPage linked_table_page;
+    const bool linked_table_assigned = linked_table_page.assign(linked_table);
+    const auto linked_target = linked_table_page.target(0);
+    check("compact table storage preserves cell-link targets",
+          linked_table_assigned && linked_table_page.links().size() == 1 &&
+              std::string(linked_target.data(), linked_target.size()) == ":/page/details.mu" &&
+              !linked_table_page.runs().empty() && linked_table_page.runs().back().link_index == 0);
+    check("table blocks remain virtual-layout content without ordinary runs",
+          block_has_layout_content(BlockType::TABLE, 0));
+    CompactPage table_page;
+    check("compact page retains bounded table and cell records",
+          table_page.assign(table_doc) && table_page.tables().size() == 1 &&
+              table_page.table_cells().size() == 9 && table_page.blocks()[0].table_index == 0);
+    const auto& compact_apple_cell = table_page.table_cells()[3];
+    check("compact table cells address formatted runs in the shared arena",
+          compact_apple_cell.run_count != 0 &&
+              std::string(table_page.text(table_page.runs()[compact_apple_cell.first_run]).data(),
+                          table_page.text(table_page.runs()[compact_apple_cell.first_run]).size()) == "Apple");
+
+    UI::LXMF::NomadNet::Document unsupported_full_table;
+    unsupported_full_table.unsupported = true;
+    UI::LXMF::NomadNet::Table full_table;
+    full_table.first_cell = 0;
+    full_table.row_count = 1;
+    full_table.column_count = 1;
+    unsupported_full_table.tables.push_back(full_table);
+    UI::LXMF::NomadNet::TableCell full_cell;
+    full_cell.first_run = 0;
+    full_cell.run_count = CompactPage::MAX_RUNS;
+    unsupported_full_table.table_cells.push_back(full_cell);
+    unsupported_full_table.table_runs.resize(CompactPage::MAX_RUNS);
+    UI::LXMF::NomadNet::Block full_table_block;
+    full_table_block.type = BlockType::TABLE;
+    full_table_block.table_index = 0;
+    unsupported_full_table.blocks.push_back(full_table_block);
+    CompactPage unsupported_full_page;
+    check("unsupported pages reserve notice capacity when table runs fill the global budget",
+          unsupported_full_page.assign(unsupported_full_table) && unsupported_full_page.truncated() &&
+              unsupported_full_page.append_notice("[Unsupported Micron content]"));
+
+    const auto uneven_table = parser.parse(
+        "`t\nA|B|C\n---|:---:|---:\none|two\nx|y|z|ignored\n`t");
+    check("uneven rows are padded or truncated to the header width",
+          uneven_table.tables.size() == 1 && uneven_table.tables[0].row_count == 3 &&
+              uneven_table.tables[0].column_count == 3 && uneven_table.table_cells.size() == 9 &&
+              uneven_table.table_cells[5].run_count == 0);
+    const auto escaped_table = parser.parse(
+        "`t\nA\\|B|C\n---|---\nx\\|y|z\n`t");
+    check("escaped table separators remain cell text",
+          escaped_table.tables.size() == 1 && !escaped_table.table_runs.empty() &&
+              escaped_table.table_runs[0].text == "A|B");
+    const auto preescaped_row_table = parser.parse(
+        "`t\nLeft|Right\n---|---\n\\|A|B\n`t");
+    check("canonical leading pre-escape is removed before table-row parsing",
+          preescaped_row_table.tables.size() == 1 && preescaped_row_table.table_runs.size() == 4 &&
+              preescaped_row_table.table_runs[2].text == "A" &&
+              preescaped_row_table.table_runs[3].text == "B");
+    const auto section_marker_table = parser.parse(
+        "`t\n<Lead|Other\n---|---\nvalue|second\n`t");
+    check("table rows retain leading section-marker characters",
+          section_marker_table.tables.size() == 1 && !section_marker_table.table_runs.empty() &&
+              section_marker_table.table_runs[0].text == "<Lead");
+    const auto trailing_escape_table = parser.parse("`t\nA\\\n---\nvalue\n`t");
+    check("canonical table row parsing drops a trailing escape marker",
+          trailing_escape_table.tables.size() == 1 && !trailing_escape_table.table_runs.empty() &&
+              trailing_escape_table.table_runs[0].text == "A");
+    const auto escaped_closer_table = parser.parse("`t\nH\n---\nvalue\n\\`t\nafter");
+    check("an escaped table delimiter still toggles canonical table mode",
+          escaped_closer_table.tables.size() == 1 && escaped_closer_table.blocks.size() == 2 &&
+              block_text(escaped_closer_table.blocks.back()) == "after");
+
+    const auto short_table = parser.parse("`t\nonly one row\n`t\nafter");
+    check("too-short tables fall back readably and parsing resumes",
+          short_table.tables.empty() && short_table.malformed && short_table.blocks.size() == 2 &&
+              block_text(short_table.blocks[0]).find("only one row") != std::string::npos &&
+              block_text(short_table.blocks[1]) == "after");
+    const auto unterminated_table = parser.parse("before\n`t\nA|B\n---|---\nx|y");
+    check("unterminated tables use a bounded readable fallback",
+          unterminated_table.tables.empty() && unterminated_table.malformed &&
+              block_text(unterminated_table.blocks.back()).find("A|B") != std::string::npos);
+    std::string oversized_fallback_source = "`t\n";
+    oversized_fallback_source += std::string(DocumentParser::MAX_TABLE_FALLBACK_BYTES + 100, 'm');
+    const auto bounded_fallback = parser.parse(oversized_fallback_source);
+    check("malformed-table fallback text has an independent byte bound",
+          bounded_fallback.blocks.size() == 1 &&
+              block_text(bounded_fallback.blocks.front()).size() <= DocumentParser::MAX_TABLE_FALLBACK_BYTES &&
+              bounded_fallback.has_truncation(TruncationReason::TABLE_FALLBACK_BYTES));
+    std::string utf8_fallback_source = "`t\n";
+    for (std::size_t i = 0; i < DocumentParser::MAX_TABLE_FALLBACK_BYTES; ++i)
+        utf8_fallback_source += "€";
+    const auto utf8_fallback = parser.parse(utf8_fallback_source);
+    const std::string retained_fallback = block_text(utf8_fallback.blocks.front());
+    check("malformed-table fallback clipping preserves complete UTF-8 codepoints",
+          retained_fallback.size() <= DocumentParser::MAX_TABLE_FALLBACK_BYTES &&
+              !parser.parse(retained_fallback).malformed);
+
+    std::string long_cell(DocumentParser::MAX_TABLE_CELL_BYTES + 8, 'x');
+    const auto bounded_cell_table = parser.parse(
+        "`t\nH\n---\n" + long_cell + "\n`t\nafter");
+    check("table cell bytes are independently bounded without losing following content",
+          bounded_cell_table.tables.size() == 1 &&
+              bounded_cell_table.has_truncation(TruncationReason::TABLE_CELL_BYTES) &&
+              !bounded_cell_table.table_runs.empty() &&
+              bounded_cell_table.table_runs.back().text.size() == DocumentParser::MAX_TABLE_CELL_BYTES &&
+              block_text(bounded_cell_table.blocks.back()) == "after");
+    std::string utf8_cell(DocumentParser::MAX_TABLE_CELL_BYTES - 1, 'u');
+    utf8_cell += "€";
+    const auto bounded_utf8_cell = parser.parse("`t\nH\n---\n" + utf8_cell + "\n`t");
+    const std::string retained_cell = bounded_utf8_cell.table_runs.back().text;
+    check("table-cell clipping preserves complete UTF-8 codepoints",
+          retained_cell.size() == DocumentParser::MAX_TABLE_CELL_BYTES - 1 &&
+              !parser.parse(retained_cell).malformed);
+    const std::string unterminated_bold_cell = "`!" +
+        std::string(DocumentParser::MAX_TABLE_CELL_BYTES + 20, 'b');
+    const auto bounded_style_table = parser.parse(
+        "`t\nStyled|Plain\n---|---\n" + unterminated_bold_cell + "|plain\n`t");
+    const auto& plain_cell = bounded_style_table.table_cells[3];
+    check("truncated formatting cannot bleed into the following table cell",
+          bounded_style_table.tables.size() == 1 && plain_cell.run_count == 1 &&
+              !bounded_style_table.table_runs[plain_cell.first_run].bold);
+
+    std::string wide_header;
+    std::string wide_separator;
+    for (std::size_t i = 0; i <= DocumentParser::MAX_TABLE_COLUMNS; ++i) {
+        if (i != 0) { wide_header += '|'; wide_separator += '|'; }
+        wide_header += "C" + std::to_string(i);
+        wide_separator += "---";
+    }
+    const auto bounded_column_table = parser.parse(
+        "`t\n" + wide_header + "\n" + wide_separator + "\n`t");
+    check("table columns retain a deterministic prefix",
+          bounded_column_table.tables.size() == 1 &&
+              bounded_column_table.tables[0].column_count == DocumentParser::MAX_TABLE_COLUMNS &&
+              bounded_column_table.has_truncation(TruncationReason::TABLE_COLUMNS));
+
+    std::string tall_table_source = "`t\nH\n---\n";
+    for (std::size_t i = 0; i < DocumentParser::MAX_TABLE_ROWS; ++i)
+        tall_table_source += std::to_string(i) + "\n";
+    tall_table_source += "`t";
+    const auto bounded_row_table = parser.parse(tall_table_source);
+    check("table rows retain a deterministic prefix",
+          bounded_row_table.tables.size() == 1 &&
+              bounded_row_table.tables[0].row_count == DocumentParser::MAX_TABLE_ROWS &&
+              bounded_row_table.has_truncation(TruncationReason::TABLE_ROWS));
+    check("table truncation notices identify the governing row bound",
+          truncation_notice(bounded_row_table).find("table rows") != std::string::npos);
+    check("table truncation notices identify the governing cell-byte bound",
+          truncation_notice(bounded_cell_table).find("table cell") != std::string::npos);
+
+    std::string table_byte_source = "`t\nH\n---\n";
+    for (int i = 0; i < 5; ++i)
+        table_byte_source += std::string(DocumentParser::MAX_SOURCE_LINE_BYTES, 'q') + "\n";
+    table_byte_source += "`t\nafter";
+    const auto bounded_table_bytes = parser.parse(table_byte_source);
+    check("total table source bytes are independently bounded",
+          bounded_table_bytes.tables.size() == 1 &&
+              bounded_table_bytes.has_truncation(TruncationReason::TABLE_BYTES) &&
+              block_text(bounded_table_bytes.blocks.back()) == "after");
+
+    std::string many_tables_source;
+    for (std::size_t i = 0; i <= DocumentParser::MAX_TABLES; ++i)
+        many_tables_source += "`t\nH\n---\n`t\n";
+    many_tables_source += "after";
+    const auto bounded_table_count = parser.parse(many_tables_source);
+    check("table count is independently bounded and following text survives",
+          bounded_table_count.tables.size() == DocumentParser::MAX_TABLES &&
+              bounded_table_count.has_truncation(TruncationReason::TABLES) &&
+              block_text(bounded_table_count.blocks.back()) == "after");
+
+    std::string cell_bounded_source = "`t\n";
+    for (std::size_t c = 0; c < DocumentParser::MAX_TABLE_COLUMNS; ++c) {
+        if (c != 0) cell_bounded_source += '|';
+        cell_bounded_source += "H";
+    }
+    cell_bounded_source += "\n---|---|---|---|---|---|---|---\n";
+    for (std::size_t row = 0; row < DocumentParser::MAX_TABLE_CELLS /
+                                          DocumentParser::MAX_TABLE_COLUMNS; ++row)
+        cell_bounded_source += "a|b|c|d|e|f|g|h\n";
+    cell_bounded_source += "`t";
+    const auto bounded_table_cells = parser.parse(cell_bounded_source);
+    check("coherent row and column limits bound per-table cell records",
+          bounded_table_cells.tables.size() == 1 &&
+              bounded_table_cells.table_cells.size() == DocumentParser::MAX_TABLE_CELLS &&
+              bounded_table_cells.has_truncation(TruncationReason::TABLE_ROWS));
+
     const auto anchor_doc = parser.parse(
         "First\n"
         "`:spot Second\n"
@@ -669,7 +933,7 @@ int main(int argc, char** argv) {
                                                   doc.blocks[4].runs[0].text == "`!literal");
     bool saw_unsupported = false;
     for (const auto& block : doc.blocks) saw_unsupported = saw_unsupported || block.type == BlockType::UNSUPPORTED;
-    check("unsupported structured content has fallback", doc.unsupported && saw_unsupported);
+    check("malformed table content has a readable fallback", doc.malformed && saw_unsupported);
 
     auto later_cache = parser.parse("text\n#!c=99999999999999999999\nmore");
     check("cache metadata is first-line-only", later_cache.cache_seconds == 0);
@@ -905,6 +1169,21 @@ int main(int argc, char** argv) {
           !UI::LXMF::NomadNet::block_has_layout_content(BlockType::TEXT, 0));
     check("divider has layout content without a text run",
           UI::LXMF::NomadNet::block_has_layout_content(BlockType::DIVIDER, 0));
+    check("tables keep their columns when the structural minimum fits the device",
+          UI::LXMF::NomadNet::choose_table_layout(52, 304) ==
+              UI::LXMF::NomadNet::TableLayoutTier::FIT);
+    check("natural or authored widths do not turn a structurally fitting table into cards",
+          UI::LXMF::NomadNet::choose_table_layout(78, 304) ==
+              UI::LXMF::NomadNet::TableLayoutTier::FIT);
+    check("only tables whose structural minimum exceeds the content area use reflow",
+          UI::LXMF::NomadNet::choose_table_layout(305, 304) ==
+              UI::LXMF::NomadNet::TableLayoutTier::REFLOW);
+    int16_t fitted_columns[2] = {40, 400};
+    const int16_t fitted_width = UI::LXMF::NomadNet::fit_table_columns(
+        fitted_columns, 2, 26, 180);
+    check("oversized natural columns shrink widest-first like canonical NomadNet without losing columns",
+          fitted_width == 180 && fitted_columns[0] == 40 && fitted_columns[1] == 140 &&
+              fitted_columns[0] + fitted_columns[1] == 180);
 
     check("virtual viewport maps short pages without scaling",
           VirtualViewport::logical_from_physical(640, 1200, 150, 1200) == 640 &&

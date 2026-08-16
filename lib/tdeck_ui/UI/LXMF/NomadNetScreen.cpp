@@ -448,6 +448,218 @@ bool NomadNetScreen::commit_line(int32_t line_y,int16_t line_height,
     return true;
 }
 
+bool NomadNetScreen::layout_table_cell(const NomadNet::CompactPage::TableCellRecord& cell,
+                                       int16_t left,int16_t available,int32_t top,
+                                       int32_t window_top,int32_t window_bottom,
+                                       bool emit,int32_t& height){
+    if(available<1||cell.first_run>_page.runs().size()||
+       cell.run_count>_page.runs().size()-cell.first_run)return false;
+    int16_t x=left;
+    int16_t line_h=16;
+    int32_t line_y=top;
+    bool line_started=false;
+    _line_layout.clear();
+    auto finish_line=[&](){
+        if(emit){
+            if(!commit_line(line_y,line_h,cell.alignment,left,available,0,
+                            window_top,window_bottom))return false;
+        }else _line_layout.clear();
+        line_y+=line_h;
+        x=left;
+        line_h=16;
+        line_started=false;
+        return true;
+    };
+    for(uint16_t r=0;r<cell.run_count;++r){
+        const uint16_t run_index=static_cast<uint16_t>(cell.first_run+r);
+        const auto& run=_page.runs()[run_index];
+        const auto text=_page.text(run);
+        const lv_font_t* font=page_run_font(run,false);
+        const int16_t run_h=static_cast<int16_t>(font->line_height+3);
+        line_h=std::max(line_h,run_h);
+        std::size_t offset=0;
+        while(offset<text.size()){
+            std::size_t end=offset;
+            const bool whitespace=text[offset]==' '||text[offset]=='\t';
+            while(end<text.size()&&((text[end]==' '||text[end]=='\t')==whitespace)&&end-offset<255)++end;
+            if(end==offset)++end;
+            int16_t fragment_w=static_cast<int16_t>(lv_txt_get_width(text.data()+offset,
+                static_cast<uint32_t>(end-offset),font,0,LV_TEXT_FLAG_NONE));
+            if(whitespace&&x+fragment_w>left+available){offset=end;continue;}
+            if(!whitespace&&x>left&&x+fragment_w>left+available){
+                if(!finish_line())return false;
+                line_h=run_h;
+            }
+            if(fragment_w>available){
+                end=offset;
+                fragment_w=0;
+                while(end<text.size()&&end-offset<255){
+                    const std::size_t previous=end;
+                    uint32_t next_index=static_cast<uint32_t>(end);
+                    _lv_txt_encoded_next(text.data(),&next_index);
+                    end=next_index;
+                    const int16_t candidate=static_cast<int16_t>(lv_txt_get_width(text.data()+offset,
+                        static_cast<uint32_t>(end-offset),font,0,LV_TEXT_FLAG_NONE));
+                    if(candidate>available&&previous>offset){end=previous;break;}
+                    fragment_w=candidate;
+                }
+            }
+            if(!(whitespace&&x==left)){
+                if(emit){
+                    if(run.link_index>=0&&static_cast<std::size_t>(run.link_index)<_link_y.size()){
+                        if(_link_y[run.link_index]<0)_link_y[run.link_index]=line_y;
+                        _link_bottom[run.link_index]=std::max(_link_bottom[run.link_index],line_y+run_h);
+                    }
+                    if(!append_line_fragment(LayoutFragment(run_index,static_cast<uint16_t>(offset),
+                        static_cast<uint16_t>(end-offset),run.link_index,x,0,fragment_w,run_h,false)))return false;
+                }
+                x=static_cast<int16_t>(x+fragment_w);
+                line_started=true;
+            }
+            offset=end;
+        }
+    }
+    if(line_started||line_y==top){
+        if(!finish_line())return false;
+    }
+    height=std::max<int32_t>(16,line_y-top);
+    return true;
+}
+
+bool NomadNetScreen::layout_table_fit(const NomadNet::CompactPage::TableRecord& table,
+                                      const int16_t* column_widths,int16_t table_fit_width,
+                                      int32_t& y,int32_t window_top,int32_t window_bottom){
+    constexpr int16_t content_width=304;
+    int16_t table_left=table.alignment==NomadNet::Alignment::CENTER?
+        static_cast<int16_t>((content_width-table_fit_width)/2):
+        table.alignment==NomadNet::Alignment::RIGHT?
+            static_cast<int16_t>(content_width-table_fit_width):0;
+    for(uint16_t row=0;row<table.row_count;++row){
+        int32_t row_height=16;
+        for(uint8_t column=0;column<table.column_count;++column){
+            const std::size_t cell_index=table.first_cell+
+                static_cast<std::size_t>(row)*table.column_count+column;
+            if(cell_index>=_page.table_cells().size())return false;
+            int32_t cell_height=0;
+            if(!layout_table_cell(_page.table_cells()[cell_index],0,
+                    std::max<int16_t>(1,column_widths[column]-8),0,
+                    window_top,window_bottom,false,cell_height))return false;
+            row_height=std::max(row_height,cell_height+6);
+        }
+        int16_t cell_left=table_left;
+        for(uint8_t column=0;column<table.column_count;++column){
+            const std::size_t cell_index=table.first_cell+
+                static_cast<std::size_t>(row)*table.column_count+column;
+            if(y+row_height>=window_top&&y<window_bottom){
+                if(_page_layout.size()>=MAX_WINDOW_FRAGMENTS)return false;
+                LayoutFragment box(UINT16_MAX,0,0,-1,cell_left,
+                    static_cast<int16_t>(y-window_top),column_widths[column],
+                    static_cast<int16_t>(row_height),false);
+                box.table_cell=true;
+                box.table_header=row==0;
+                _page_layout.push_back(box);
+            }
+            int32_t ignored=0;
+            if(!layout_table_cell(_page.table_cells()[cell_index],
+                    static_cast<int16_t>(cell_left+4),
+                    std::max<int16_t>(1,column_widths[column]-8),y+3,
+                    window_top,window_bottom,true,ignored))return false;
+            cell_left=static_cast<int16_t>(cell_left+column_widths[column]);
+        }
+        y+=row_height;
+    }
+    y+=3;
+    return true;
+}
+
+bool NomadNetScreen::layout_table_reflow(const NomadNet::CompactPage::TableRecord& table,
+                                         int32_t& y,int32_t window_top,int32_t window_bottom){
+    constexpr int16_t card_width=304;
+    constexpr int16_t text_left=4;
+    constexpr int16_t text_width=296;
+    const uint16_t data_rows=table.row_count>1?static_cast<uint16_t>(table.row_count-1):1;
+    for(uint16_t data_row=0;data_row<data_rows;++data_row){
+        for(uint8_t column=0;column<table.column_count;++column){
+            const std::size_t header_index=table.first_cell+column;
+            const std::size_t value_index=table.row_count>1?
+                table.first_cell+static_cast<std::size_t>(data_row+1)*table.column_count+column:
+                header_index;
+            if(header_index>=_page.table_cells().size()||value_index>=_page.table_cells().size())return false;
+            const std::size_t pair_count=table.row_count>1?2:1;
+            const std::size_t indices[2]={header_index,value_index};
+            for(std::size_t part=0;part<pair_count;++part){
+                int32_t cell_height=0;
+                if(!layout_table_cell(_page.table_cells()[indices[part]],text_left,text_width,0,
+                        window_top,window_bottom,false,cell_height))return false;
+                const int32_t box_height=cell_height+6;
+                if(y+box_height>=window_top&&y<window_bottom){
+                    if(_page_layout.size()>=MAX_WINDOW_FRAGMENTS)return false;
+                    LayoutFragment box(UINT16_MAX,0,0,-1,0,
+                        static_cast<int16_t>(y-window_top),card_width,
+                        static_cast<int16_t>(box_height),false);
+                    box.table_cell=true;
+                    box.table_header=part==0;
+                    _page_layout.push_back(box);
+                }
+                int32_t ignored=0;
+                if(!layout_table_cell(_page.table_cells()[indices[part]],text_left,text_width,y+3,
+                        window_top,window_bottom,true,ignored))return false;
+                y+=box_height;
+            }
+        }
+        y+=4;
+    }
+    return true;
+}
+
+bool NomadNetScreen::layout_table(const NomadNet::CompactPage::BlockRecord& block,
+                                  int32_t& y,int32_t window_top,int32_t window_bottom){
+    constexpr int16_t content_width=304;
+    if(block.table_index<0||static_cast<std::size_t>(block.table_index)>=_page.tables().size())return false;
+    const auto& table=_page.tables()[block.table_index];
+    if(table.column_count==0||table.column_count>NomadNet::DocumentParser::MAX_TABLE_COLUMNS||
+       table.row_count==0)return false;
+    int16_t column_widths[NomadNet::DocumentParser::MAX_TABLE_COLUMNS]={0};
+    const int16_t minimum_width=static_cast<int16_t>(lv_txt_get_width(
+        "   ",3,&nomadnet_font_12,0,LV_TEXT_FLAG_NONE)+8);
+    for(uint8_t column=0;column<table.column_count;++column)column_widths[column]=minimum_width;
+    for(uint16_t row=0;row<table.row_count;++row){
+        for(uint8_t column=0;column<table.column_count;++column){
+            const std::size_t cell_index=table.first_cell+
+                static_cast<std::size_t>(row)*table.column_count+column;
+            if(cell_index>=_page.table_cells().size())return false;
+            const auto& cell=_page.table_cells()[cell_index];
+            if(cell.first_run>_page.runs().size()||cell.run_count>_page.runs().size()-cell.first_run)return false;
+            int32_t measured=8;
+            for(uint16_t r=0;r<cell.run_count;++r){
+                const auto& run=_page.runs()[cell.first_run+r];
+                const auto text=_page.text(run);
+                measured+=lv_txt_get_width(text.data(),static_cast<uint32_t>(text.size()),
+                    page_run_font(run,false),0,LV_TEXT_FLAG_NONE);
+                measured=std::min<int32_t>(measured,INT16_MAX);
+            }
+            column_widths[column]=std::max<int16_t>(column_widths[column],
+                static_cast<int16_t>(measured));
+        }
+    }
+    int32_t natural_width=0;
+    for(uint8_t column=0;column<table.column_count;++column)natural_width+=column_widths[column];
+    const int32_t space_width=std::max<int32_t>(1,lv_txt_get_width(
+        " ",1,&nomadnet_font_12,0,LV_TEXT_FLAG_NONE));
+    const int32_t metadata_width=std::min<int32_t>(content_width,
+        static_cast<int32_t>(table.max_width)*space_width);
+    const int32_t structural_minimum=static_cast<int32_t>(minimum_width)*table.column_count;
+    if(NomadNet::choose_table_layout(structural_minimum,content_width)==
+       NomadNet::TableLayoutTier::FIT){
+        const int16_t target_width=static_cast<int16_t>(std::max<int32_t>(
+            structural_minimum,std::min<int32_t>(metadata_width,content_width)));
+        const int16_t table_fit_width=NomadNet::fit_table_columns(
+            column_widths,table.column_count,minimum_width,target_width);
+        return layout_table_fit(table,column_widths,table_fit_width,y,window_top,window_bottom);
+    }
+    return layout_table_reflow(table,y,window_top,window_bottom);
+}
+
 bool NomadNetScreen::layout_from(std::size_t start_block,int32_t start_y,
                                  int32_t window_top,int32_t window_bottom,
                                  bool build_index){
@@ -471,6 +683,10 @@ bool NomadNetScreen::layout_from(std::size_t start_block,int32_t start_y,
                 _page_layout.push_back(divider);
             }
             y+=divider_height;continue;
+        }
+        if(block.type==NomadNet::BlockType::TABLE){
+            if(!layout_table(block,y,window_top,window_bottom))return false;
+            continue;
         }
         const bool heading=block.type==NomadNet::BlockType::HEADING;
         const bool has_runs=block.run_count!=0&&block.first_run<_page.runs().size();
@@ -646,6 +862,14 @@ void NomadNetScreen::draw_page(lv_event_t* event){
                     lv_draw_label(draw_ctx,&dsc,&glyph_area,scratch,nullptr);
                 }
             }
+            continue;
+        }
+        if(fragment.table_cell){
+            lv_draw_rect_dsc_t cell;lv_draw_rect_dsc_init(&cell);
+            cell.bg_color=fragment.table_header?Theme::surfaceContainer():Theme::surface();
+            cell.border_color=Theme::border();
+            cell.border_width=1;
+            lv_draw_rect(draw_ctx,&cell,&area);
             continue;
         }
         if(fragment.heading_starts_band()){
