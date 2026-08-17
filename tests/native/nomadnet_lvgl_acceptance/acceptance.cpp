@@ -193,8 +193,8 @@ int main() {
 
     const uint32_t baseline = lv_obj_get_child_cnt(lv_scr_act());
     bool fit_tier = false, fit_columns = false, reflow_tier = false, reflow_cards = false;
-    bool stacked_tier = false, stacked_cards = false, stacked_pixels = false;
-    bool stacked_scroll = false, stacked_objects = false;
+    bool eight_column_tier = false, eight_column_preserved = false, eight_column_pixels = false;
+    bool table_link_focus = false, eight_column_objects = false;
     bool focus_events = false, edge_scroll = false;
     bool ready = false, cancel = false, enter = false, escape = false, focus_restore = false;
     bool table_pixels = false, form_pixels = false, focus_pixels = false, glyph_pixels = false;
@@ -246,34 +246,37 @@ int main() {
         reflow_cards = reflow.columns == 3 && reflow.cards == 0 && reflow.width == 304 &&
                        reflow.x == 0 && reflow.height > 22;
 
-        auto stacked_doc = parser.parse(
-            "`tc304\nH1|H2|H3|H4|H5|H6|H7|H8\n"
+        auto eight_column_doc = parser.parse(
+            "`tl304\nA|B|C|D|E|F|G|H\n"
             "---|---|---|---|---|---|---|---\n"
-            "one|two|three|four|five|six|seven|`[eight`:/eight]\n`t");
-        assert(screen.set_page(stacked_doc));
+            "Alpha|Bravo|Charlie|Delta|Echo|Foxtrot|Golf|`[Hotel`:/hotel]\n"
+            "One|Two|Three|Four|Five|Six|Seven|Eight\n`t");
+        assert(screen.set_page(eight_column_doc));
         lv_obj_update_layout(screen._screen);
-        const auto stacked = screen._table_layout;
-        stacked_tier = stacked.valid && stacked.tier == UI::LXMF::NomadNet::TableLayoutTier::STACKED;
-        stacked_cards = stacked.columns == 0 && stacked.cards == 8 && stacked.x == 0 &&
-                        stacked.width == 304 && stacked.height > 8 * 16 &&
-                        screen._page_layout.size() <= screen.MAX_WINDOW_FRAGMENTS;
+        const auto eight_column = screen._table_layout;
+        eight_column_tier = eight_column.valid &&
+            eight_column.tier == UI::LXMF::NomadNet::TableLayoutTier::REFLOW;
+        eight_column_preserved = eight_column.columns == 8 && eight_column.cards == 0 &&
+            eight_column.x == 0 && eight_column.width == 304 && eight_column.height > 22 &&
+            screen._page_layout.size() <= screen.MAX_WINDOW_FRAGMENTS;
         render();
-        lv_area_t stacked_content;
-        lv_obj_get_content_coords(screen._content, &stacked_content);
-        const int stacked_mid = (stacked_content.y1 + stacked_content.y2) / 2;
-        stacked_pixels = count_color(stacked_content.x1, stacked_content.y1,
-                                     stacked_content.x2, stacked_mid,
-                                     UI::LXMF::Theme::border()) > 10 &&
-                         count_color(stacked_content.x1, stacked_mid + 1,
-                                     stacked_content.x2, stacked_content.y2,
-                                     UI::LXMF::Theme::border()) > 10;
-        stacked_objects = lv_obj_get_child_cnt(screen._screen) <= 16;
+        lv_area_t eight_column_content;
+        lv_obj_get_content_coords(screen._content, &eight_column_content);
+        const int eight_column_mid =
+            (eight_column_content.y1 + eight_column_content.y2) / 2;
+        eight_column_pixels = count_color(
+            eight_column_content.x1, eight_column_content.y1,
+            eight_column_content.x2, eight_column_mid,
+            UI::LXMF::Theme::border()) > 10 &&
+            count_color(eight_column_content.x1, eight_column_mid + 1,
+                        eight_column_content.x2, eight_column_content.y2,
+                        UI::LXMF::Theme::border()) > 10;
+        eight_column_objects = lv_obj_get_child_cnt(screen._screen) <= 16;
         lv_group_focus_obj(screen._content);
         lv_group_set_editing(group, true);
         screen._selected_focus = -1;
         dispatch_key(LV_KEY_DOWN);
-        stacked_scroll = screen._selected_link >= 0 && screen.logical_scroll() > 0 &&
-                         lv_obj_get_scroll_y(screen._content) > 0;
+        table_link_focus = screen._selected_link >= 0;
 
         std::string edge_page = "`<24|username`Initial>\n";
         for (int i = 0; i < 70; ++i) edge_page += "viewport edge acceptance line\n";
@@ -366,17 +369,17 @@ int main() {
     lv_group_del(group);
     std::printf(
         "LVGL ACCEPT 320x240 fit_tier=%d fit_columns=%d reflow_tier=%d reflow_cards=%d "
-        "stacked_tier=%d stacked_cards=%d stacked_pixels=%d stacked_scroll=%d stacked_objects=%d "
+        "eight_column_tier=%d eight_column_preserved=%d eight_column_pixels=%d table_link_focus=%d eight_column_objects=%d "
         "focus_events=%d edge_scroll=%d ready=%d cancel=%d enter=%d escape=%d focus_restore=%d "
         "teardown=%d cached_status_transient=%d cached_status_oom_collapses=%d stale_group=%d background_pixels=%d table_pixels=%d form_pixels=%d "
         "focus_pixels=%d glyph_pixels=%d exact_fonts=1 objects=%u\n",
-        fit_tier, fit_columns, reflow_tier, reflow_cards, stacked_tier, stacked_cards,
-        stacked_pixels, stacked_scroll, stacked_objects, focus_events, edge_scroll,
+        fit_tier, fit_columns, reflow_tier, reflow_cards, eight_column_tier, eight_column_preserved,
+        eight_column_pixels, table_link_focus, eight_column_objects, focus_events, edge_scroll,
         ready, cancel, enter, escape, focus_restore, teardown, cached_status_transient,
         cached_status_oom_collapses, 0, background_pixels,
         table_pixels, form_pixels, focus_pixels, glyph_pixels, remaining);
-    return fit_tier && fit_columns && reflow_tier && reflow_cards && stacked_tier &&
-           stacked_cards && stacked_pixels && stacked_scroll && stacked_objects &&
+    return fit_tier && fit_columns && reflow_tier && reflow_cards && eight_column_tier &&
+           eight_column_preserved && eight_column_pixels && table_link_focus && eight_column_objects &&
            focus_events && edge_scroll &&
            ready && cancel && enter && escape && focus_restore && teardown && cached_status_transient &&
            cached_status_oom_collapses && background_pixels &&

@@ -841,11 +841,8 @@ bool NomadNetScreen::layout_table(const NomadNet::CompactPage::BlockRecord& bloc
     const int32_t metadata_width=std::min<int32_t>(content_width,
         static_cast<int32_t>(table.max_width)*space_width);
     const int32_t structural_minimum=static_cast<int32_t>(minimum_width)*table.column_count;
-    const int16_t minimum_readable_cell_width=static_cast<int16_t>(lv_txt_get_width(
-        "Readable",8,&nomadnet_font_12,0,LV_TEXT_FLAG_NONE)+8);
     const auto tier=NomadNet::choose_table_layout(
-        structural_minimum,natural_width,content_width,table.column_count,
-        minimum_readable_cell_width);
+        structural_minimum,natural_width,content_width);
     const int32_t table_top=y;
     if(tier!=NomadNet::TableLayoutTier::STACKED){
         const int16_t target_width=static_cast<int16_t>(std::max<int32_t>(

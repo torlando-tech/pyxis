@@ -1504,6 +1504,9 @@ int main(int argc, char** argv) {
     check("tables whose structural minimum exceeds the content area use cards",
           UI::LXMF::NomadNet::choose_table_layout(305, 400, 304) ==
               UI::LXMF::NomadNet::TableLayoutTier::STACKED);
+    check("eight canonical minimum columns remain two-dimensional on the T-Deck",
+          UI::LXMF::NomadNet::choose_table_layout(232, 400, 304) ==
+              UI::LXMF::NomadNet::TableLayoutTier::REFLOW);
     int16_t fitted_columns[2] = {40, 400};
     const int16_t fitted_width = UI::LXMF::NomadNet::fit_table_columns(
         fitted_columns, 2, 26, 180);

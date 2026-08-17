@@ -25,12 +25,7 @@ enum class TableLayoutTier : uint8_t { FIT, REFLOW, STACKED };
 
 inline TableLayoutTier choose_table_layout(int32_t structural_minimum_width,
                                            int32_t natural_width,
-                                           int32_t content_width,
-                                           uint8_t column_count = 1,
-                                           int16_t minimum_readable_cell_width = 0) {
-    if (column_count != 0 && minimum_readable_cell_width > 0 &&
-        content_width / column_count < minimum_readable_cell_width)
-        return TableLayoutTier::STACKED;
+                                           int32_t content_width) {
     if (natural_width <= content_width) return TableLayoutTier::FIT;
     return structural_minimum_width <= content_width
         ? TableLayoutTier::REFLOW : TableLayoutTier::STACKED;
