@@ -280,7 +280,8 @@ def test_nomadnet_table_renderer_is_bounded_and_virtualized():
     assert "try {" in parse_guard
     assert "catch (const std::bad_alloc&)" in parse_guard
     assert "Page is too large for available memory" in parse_guard
-    assert "_nomad_response.clear()" in parse_guard
+    # Allocation failure must relinquish the full normalized PSRAM buffer.
+    assert "_nomad_response.release()" in manager
 
 
 def test_nomadnet_anchor_navigation_stays_local_and_uses_layout_checkpoints():
@@ -312,7 +313,7 @@ def test_nomadnet_anchor_navigation_stays_local_and_uses_layout_checkpoints():
     assert "_nomad_url.path,_nomad_url.fields" in open_page
     assert "NomadNet::should_jump_locally" in open_page
     local = open_page[open_page.index("NomadNet::should_jump_locally"):
-                      open_page.index("RouterLock router_lock")]
+                      open_page.index("_nomad_pending_scroll=restore_logical_scroll")]
     assert "_nomadnet_screen->jump_to_anchor(parsed.fragment)" in local
     assert "if(!resolved&&parsed.fragment.empty())return;" in local
     assert "_nomad_history.current_request_data()" in local
@@ -321,20 +322,23 @@ def test_nomadnet_anchor_navigation_stays_local_and_uses_layout_checkpoints():
     assert "begin_navigation" not in local
 
     request = manager[manager.index("void UIManager::nomad_send_request()"):
-                      manager.index("void UIManager::nomad_update()")]
+                      manager.index("bool UIManager::nomad_apply_page_bytes")]
     assert "_nomad_url.path.data()" in request
     assert "fragment" not in request
 
     response = manager[manager.index("case NomadNet::AsyncMailbox::Kind::RESPONSE:"):
                        manager.index("case NomadNet::AsyncMailbox::Kind::NONE:")]
-    assert "_nomadnet_screen->set_page(document)" in response
-    assert "_nomadnet_screen->jump_to_anchor(_nomad_url.fragment)" in response
-    assert "_nomadnet_screen->restore_logical_scroll(_nomad_pending_scroll)" in response
-    assert "if(page_applied&&_nomad_pending_scroll>=0)" in response
-    assert "else if(page_applied&&_nomad_url.has_fragment)" in response
-    assert (response.index("_nomadnet_screen->restore_logical_scroll(_nomad_pending_scroll)") <
-            response.index("_nomadnet_screen->jump_to_anchor(_nomad_url.fragment)"))
-    assert "Unknown anchor: #" in response
+    apply = manager[manager.index("bool UIManager::nomad_apply_page_document("):
+                    manager.index("void UIManager::nomad_update()")]
+    assert "nomad_apply_page_document(document, false)" in response
+    assert "_nomadnet_screen->set_page(document)" in apply
+    assert "_nomadnet_screen->jump_to_anchor(_nomad_url.fragment)" in apply
+    assert "_nomadnet_screen->restore_logical_scroll(_nomad_pending_scroll)" in apply
+    assert "if (applied && _nomad_pending_scroll >= 0)" in apply
+    assert "else if (applied && _nomad_url.has_fragment)" in apply
+    assert (apply.index("_nomadnet_screen->restore_logical_scroll(_nomad_pending_scroll)") <
+            apply.index("_nomadnet_screen->jump_to_anchor(_nomad_url.fragment)"))
+    assert "Unknown anchor: #" in apply
     assert "int32_t _nomad_pending_scroll" in manager_h
 
 
@@ -398,10 +402,30 @@ def test_nomadnet_page_body_uses_one_compact_custom_viewport():
 
 def test_successful_page_application_releases_normalized_response():
     manager = (INCLUDE / "UIManager.cpp").read_text()
-    apply_start = manager.index("bool page_applied = false;")
-    apply_end = manager.index("nomad_heap_checkpoint(\"response-page-applied\")", apply_start)
-    applied = manager[apply_start:apply_end]
-    assert "_nomad_response.release();" in applied
+    response = manager[manager.index("case NomadNet::AsyncMailbox::Kind::RESPONSE:"):
+                       manager.index("case NomadNet::AsyncMailbox::Kind::NONE:")]
+    checkpoint = response.index('nomad_heap_checkpoint("response-page-applied")')
+    assert response.index("_nomad_response.take()", checkpoint) > checkpoint
+    assert response.index("_nomad_response.release()", checkpoint) > checkpoint
+
+
+def test_cache_lookup_preserves_page_and_response_uses_captured_request_class():
+    manager = (INCLUDE / "UIManager.cpp").read_text()
+    header = (INCLUDE / "UIManager.h").read_text()
+    open_page = manager[manager.index("void UIManager::nomad_open("):
+                        manager.index("void UIManager::nomad_reload()")]
+    lookup = open_page.index("_nomad_cache_flow.begin")
+    assert "begin_navigation" not in open_page[:lookup]
+    assert "_nomad_request_data_class" in header
+    assert open_page.index("_nomad_request_data_class = _nomad_submission_ready") < lookup
+    send = manager[manager.index("void UIManager::nomad_send_request()"):
+                   manager.index("bool UIManager::nomad_apply_page_bytes")]
+    assert "_nomad_request_data_class =" not in send
+    assert "_nomad_submission_ready = false" in send
+    response = manager[manager.index("case NomadNet::AsyncMailbox::Kind::RESPONSE:"):
+                       manager.index("case NomadNet::AsyncMailbox::Kind::NONE:")]
+    assert "_nomad_request_data_class == NomadNet::RequestDataClass::NIL" in response
+    assert "!_nomad_submission_ready" not in response
 
 
 def test_directory_rebuild_has_one_final_focus_owner():
@@ -483,9 +507,15 @@ def test_nomadnet_validates_queued_addresses_before_navigation_teardown():
     open_page = manager[manager.index("void UIManager::nomad_open("):
                         manager.index("void UIManager::nomad_reload()")]
     parse = open_page.index("NomadNet::Url::parse")
-    navigation = open_page.index("_nomadnet_screen->begin_navigation(parsed.str())")
-    same_destination = open_page.index("const bool same_destination")
-    assert parse < navigation < same_destination
+    lookup = open_page.index("_nomad_cache_flow.begin")
+    assert parse < lookup
+    assert "begin_navigation" not in open_page[:lookup]
+    live = manager[manager.index("void UIManager::nomad_begin_live_transport()"):
+                   manager.index("void UIManager::nomad_reload()")]
+    # A valid address must also preserve the current page until live transport
+    # serialization succeeds; lock contention is retried by the owner loop.
+    assert live.index("RouterLock router_lock;") < \
+        live.index("_nomadnet_screen->begin_navigation(_nomad_url.str())")
 
 
 def test_launcher_transition_has_one_final_focus_owner():
@@ -531,6 +561,62 @@ def test_nomadnet_directory_uses_one_coherent_focus_style():
     assert add_row.index("Theme::primaryPressed(),LV_STATE_FOCUSED") < add_row.index(
         "lv_obj_set_style_outline_width(button,0,LV_STATE_FOCUS_KEY);"
     )
+
+
+def test_nomadnet_cache_blocker_boundaries_are_closed():
+    manager = (INCLUDE / "UIManager.cpp").read_text()
+    header = (INCLUDE / "UIManager.h").read_text()
+    cache = (INCLUDE / "NomadNetCache.cpp").read_text()
+    storage = (ROOT / "lib/tdeck_ui/Hardware/TDeck/NomadNetStorageSD.cpp").read_text()
+
+    # Every navigation owns transport/mailbox/cache actions by a monotonically
+    # advancing generation, and old transport is reconciled before a hit publishes.
+    assert "_nomad_navigation_generation" in header
+    open_page = manager[manager.index("void UIManager::nomad_open("):
+                        manager.index("void UIManager::nomad_reload()")]
+    assert "nomad_supersede_transport" in open_page
+    cache_hit = manager[manager.index("if (_nomad_state == NomadState::CACHE)"):
+                        manager.index("RouterLock router_lock", manager.index("if (_nomad_state == NomadState::CACHE)"))]
+    assert "_nomad_navigation_generation" in cache_hit
+    response = manager[manager.index("case NomadNet::AsyncMailbox::Kind::RESPONSE:"):
+                       manager.index("case NomadNet::AsyncMailbox::Kind::NONE:")]
+    assert "event.generation" in manager
+    assert "_nomad_cache_pending_generation" in response
+
+    # Commit readback is one fixed bounded streaming scratch buffer, never a
+    # second full internal-heap vector while the PSRAM body remains owned.
+    verify = cache[cache.index("case Operation::VERIFY_BODY"):
+                   cache.index("case Operation::VERIFY_META")]
+    assert "readStep(stageBody(), io_" not in verify
+    assert "verify_scratch_" in verify
+    assert "verify_hash_" in verify
+
+    # Production directory enumeration must preserve errno fidelity instead of
+    # collapsing exists/openNextFile failures to missing/EOF.
+    listing = storage[storage.index("StorageResult NomadNetStorageSD::beginList"):]
+    assert "::opendir" in listing and "::readdir" in listing
+    assert "errno" in listing and "::closedir" in listing
+    assert "SD.exists(p)" not in listing
+    assert "openNextFile" not in listing
+
+    removal = storage[storage.index("StorageResult NomadNetStorageSD::remove"):
+                      storage.index("StorageResult NomadNetStorageSD::rename")]
+    assert "mountedPath(p" in removal
+    assert "::unlink(" in removal
+    assert "errno==ENOENT?StorageResult::MISS:ioResult()" in removal
+    assert "SD.exists" not in removal and "SD.remove" not in removal
+
+    # Live admission is non-destructive until Router serialization succeeds.
+    # Contention leaves an explicit owner-loop state that retries deterministically.
+    live = manager[manager.index("void UIManager::nomad_begin_live_transport()"):
+                   manager.index("void UIManager::nomad_reload()")]
+    assert live.index("RouterLock router_lock;") < live.index("begin_navigation")
+    assert "if (!router_lock.acquired())" in live
+    assert "_nomad_state = NomadState::LIVE_PENDING;" in live
+    update = manager[manager.index("void UIManager::nomad_update()"):
+                     manager.index("void UIManager::on_nomad_link_established")]
+    assert "if (_nomad_state == NomadState::LIVE_PENDING)" in update
+    assert "nomad_begin_live_transport();" in update
 
 
 def test_network_transition_has_one_final_focus_owner():
@@ -888,18 +974,17 @@ def test_nomadnet_same_destination_navigation_reuses_active_link():
         "nomad_finish_request_keep_link();"
     )]
     assert "nomad_stop_transport();" in malformed
-    assert "page_applied = _nomadnet_screen->set_page(document);" in response
+    assert "nomad_apply_page_document(document, false)" in response
     assert "if (!page_applied)" in response
-    assert response.index("_nomadnet_screen->set_page(document)") < response.index(
+    assert response.index("nomad_apply_page_document(document, false)") < response.index(
         "nomad_finish_request_keep_link();"
     )
-    retained = response[response.index("_nomadnet_screen->set_page(document)"):
-                        response.index("set_page_saved(page_saved)")]
-    assert "_nomad_link.status() == Type::Link::ACTIVE" in retained
-    assert "nomad_stop_transport();" in retained
     application_failure = response[response.index("if (!page_applied)"):
-                                   response.index("set_page_saved(page_saved)")]
+                                   response.index("const bool has_password")]
     assert "nomad_stop_transport();" in application_failure
+    retained = response[response.index("_nomad_link.status() == Type::Link::ACTIVE"):]
+    assert "_nomad_destination_hash.toHex() == _nomad_url.destination_hex" in retained
+    assert "nomad_stop_transport();" in retained
 
 
 def test_nomadnet_physical_test_hooks_are_isolated_and_owner_queued():

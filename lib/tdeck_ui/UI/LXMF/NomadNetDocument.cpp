@@ -648,6 +648,7 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
         offset = end == retained ? retained + 1 : end + 1;
 
         if (first && line.rfind("#!c=", 0) == 0) {
+            doc.has_cache_directive = true;
             const std::string number = line.substr(4);
             if (!number.empty() && std::all_of(number.begin(), number.end(),
                     [](unsigned char c) { return std::isdigit(c) != 0; })) {
@@ -656,8 +657,16 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
                 if (parse_end && *parse_end == '\0') {
                     doc.cache_seconds = static_cast<uint32_t>(
                         std::min<unsigned long long>(parsed, MAX_CACHE_SECONDS));
-                } else doc.malformed = true;
-            } else doc.malformed = true;
+                } else {
+                    doc.cache_seconds = 0;
+                    doc.malformed = true;
+                    doc.cache_directive_valid = false;
+                }
+            } else {
+                doc.cache_seconds = 0;
+                doc.malformed = true;
+                doc.cache_directive_valid = false;
+            }
             continue;
         }
         if (!table_mode && line.rfind("#!bg=", 0) == 0) {

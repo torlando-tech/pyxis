@@ -87,6 +87,7 @@ public:
     bool truncated() const { return false; }
     void clear() { _bytes.clear(); }
     void release() { ExternalVector<uint8_t>().swap(_bytes); }
+    ExternalVector<uint8_t> take() { ExternalVector<uint8_t> result; result.swap(_bytes); return result; }
 
 private:
     ExternalVector<uint8_t> _bytes;
