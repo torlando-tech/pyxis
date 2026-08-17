@@ -11,6 +11,7 @@ CacheFlowState NomadNetCacheFlow::begin(const CacheKey& key, std::uint64_t now,
     now_ = now;
     ExternalVector<std::uint8_t>().swap(page_);
     status_ = reload ? "Invalidating cached page..." : "Checking page cache...";
+    lookup_admitted_ = false;
     invalidation_admitted_ = false;
     if (reload) {
         state_ = CacheFlowState::INVALIDATE;
@@ -19,9 +20,14 @@ CacheFlowState NomadNetCacheFlow::begin(const CacheKey& key, std::uint64_t now,
         }
         return state_;
     }
-    cache_.beginLookup(key_, now, false);
-    state_ = cache_.busy() ? CacheFlowState::LOOKUP : CacheFlowState::NEED_LIVE;
-    if (state_ == CacheFlowState::NEED_LIVE) status_ = "Requesting page...";
+    state_ = CacheFlowState::LOOKUP;
+    if (!cache_.busy()) {
+        lookup_admitted_ = cache_.beginLookup(key_, now, false) == CacheResult::PENDING;
+        if (!lookup_admitted_) {
+            state_ = CacheFlowState::NEED_LIVE;
+            status_ = "Requesting page...";
+        }
+    }
     return state_;
 }
 
@@ -45,6 +51,14 @@ void NomadNetCacheFlow::service() {
         return;
     }
     if (state_ != CacheFlowState::LOOKUP || cache_.busy()) return;
+    if (!lookup_admitted_) {
+        lookup_admitted_ = cache_.beginLookup(key_, now_, false) == CacheResult::PENDING;
+        if (!lookup_admitted_) {
+            state_ = CacheFlowState::NEED_LIVE;
+            status_ = "Requesting page...";
+        }
+        return;
+    }
     if (cache_.lastResult() == CacheResult::HIT && cache_.takeBody(page_)) {
         state_ = CacheFlowState::READY;
         status_ = "Cached page; current reachability not checked";

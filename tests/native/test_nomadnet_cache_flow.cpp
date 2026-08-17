@@ -8,6 +8,14 @@ struct Mem:NomadNetStorage{std::map<std::string,std::vector<uint8_t>>f;std::stri
 int main(){int f=0;auto ck=[&](bool x,const char*n){if(!x){f++;std::cerr<<"FAIL "<<n<<"\n";}};Mem s;NomadNetCache c(s);NomadNetCacheFlow flow(c);CacheKey k{"0123456789abcdef0123456789abcdef","/page/index.mu",RequestDataClass::NIL};
  ck(flow.begin(k,100,false)==CacheFlowState::LOOKUP,"lookup first");for(int i=0;i<10&&flow.state()==CacheFlowState::LOOKUP;i++)flow.service();ck(flow.state()==CacheFlowState::NEED_LIVE,"miss needs live");std::vector<uint8_t>b={'o','k'};CacheEligibility e{true,true,false,false,false,false,RequestDataClass::NIL};ck(flow.acceptLive(b,e,100),"valid live accepted");ck(flow.pageReady()&&flow.status()=="Page loaded (live)","render ready before commit");for(int i=0;i<20;i++)flow.service();
  NomadNetCacheFlow hit(c);ck(hit.begin(k,101,false)==CacheFlowState::LOOKUP,"second lookup");for(int i=0;i<10&&hit.state()==CacheFlowState::LOOKUP;i++)hit.service();ExternalVector<uint8_t>out;ck(hit.state()==CacheFlowState::READY&&hit.takePage(out)&&std::equal(out.begin(),out.end(),b.begin(),b.end())&&hit.status()=="Cached page; current reachability not checked","hit without peer and without internal-vector copy");
+ // A new lookup arriving while unrelated cache work is active must wait for
+ // cancellation cleanup, admit its own lookup, and still use the available hit.
+ CacheKey other{"fedcba9876543210fedcba9876543210","/page/other.mu",RequestDataClass::NIL};
+ ck(c.beginCommit(other,b,101,43200)==CacheResult::PENDING,"overlap commit admitted");
+ NomadNetCacheFlow overlap(c);ck(overlap.begin(k,102,false)==CacheFlowState::LOOKUP,"overlap lookup waits");
+ for(int i=0;i<200&&overlap.state()==CacheFlowState::LOOKUP;++i)overlap.service();
+ ExternalVector<uint8_t>overlap_out;
+ ck(overlap.state()==CacheFlowState::READY&&overlap.takePage(overlap_out)&&std::equal(overlap_out.begin(),overlap_out.end(),b.begin(),b.end()),"busy cache retries requested lookup and preserves hit");
  NomadNetCacheFlow fields(c);k.request_data=RequestDataClass::FIELDS;fields.begin(k,101,false);fields.service();ck(fields.state()==CacheFlowState::NEED_LIVE,"request data bypass");
  k.request_data=RequestDataClass::NIL;NomadNetCacheFlow reload(c);reload.begin(k,101,true);while(reload.state()==CacheFlowState::INVALIDATE)reload.service();ck(reload.state()==CacheFlowState::NEED_LIVE,"reload bypass invalidates without history-side effects");
  NomadNetCacheFlow malformed(c);malformed.begin(k,101,false);while(malformed.state()==CacheFlowState::LOOKUP)malformed.service();CacheEligibility bad{true,false,false,true,false,false,RequestDataClass::NIL};ck(!malformed.acceptLive(b,bad,101)&&malformed.state()==CacheFlowState::FAILED,"malformed not committed");

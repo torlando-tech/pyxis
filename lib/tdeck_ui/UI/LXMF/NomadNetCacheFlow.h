@@ -38,6 +38,7 @@ private:
     ExternalVector<std::uint8_t> page_;
     std::string status_;
     std::uint64_t now_ = 0;
+    bool lookup_admitted_ = false;
     bool invalidation_admitted_ = false;
 };
 
