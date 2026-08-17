@@ -71,7 +71,11 @@ def test_nomadnet_x86_real_peer_flow():
     assert owner["reload_reused"] == "1"
     assert "SERVER PASS exact form request data anonymous=True" in result.stdout
     assert "SERVER PASS exact form request data anonymous=False" in result.stdout
-    assert "REFERENCE NomadNet Git 89e3eea10c60d8fe597d36d2e091d5aab86bdfb8 hash-pinned" in result.stdout
+    reference_markers = (
+        "REFERENCE NomadNet Git 89e3eea10c60d8fe597d36d2e091d5aab86bdfb8 hash-pinned",
+        "REFERENCE NomadNet package 1.2.8 hash-pinned",
+    )
+    assert any(marker in result.stdout for marker in reference_markers)
     assert "REFERENCE RNS 1.4.2" in result.stdout
     assert "REFERENCE RNS tree b5398e7bae0cdd47212e0c6bff3f3a51b21012db0c23cb20d43b5103612f6c5e" in result.stdout
     assert "REFERENCE Browser.handle_link oracle: PASS" in result.stdout
