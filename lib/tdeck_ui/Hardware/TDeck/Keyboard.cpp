@@ -196,7 +196,9 @@ void Keyboard::lvgl_read_cb(lv_indev_drv_t* drv, lv_indev_data_t* data) {
 
     if (key != 0) {
         data->state = LV_INDEV_STATE_PRESSED;
-        data->key = key;
+        // The keyboard controller reports carriage return (0x0D), while LVGL
+        // uses line feed (0x0A) as its canonical Enter navigation key.
+        data->key = key==KEY_ENTER?LV_KEY_ENTER:key;
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
         data->key = 0;

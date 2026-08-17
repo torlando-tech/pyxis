@@ -558,8 +558,11 @@ bool NomadNetScreen::layout_table_cell(const NomadNet::CompactPage::TableCellRec
                 requested=std::max<int32_t>(48,static_cast<int32_t>(field.width)*space_width+8);
             }else{
                 const auto label=_page.field_label(run.field_index);
-                requested=26+lv_txt_get_width(label.data(),static_cast<uint32_t>(label.size()),
-                    font,0,LV_TEXT_FLAG_NONE);
+                const char* prefix=field.type==NomadNet::FormFieldType::RADIO?"( ) ":"[ ] ";
+                const int16_t prefix_width=static_cast<int16_t>(
+                    lv_txt_get_width(prefix,4,font,0,LV_TEXT_FLAG_NONE));
+                requested=8+prefix_width+lv_txt_get_width(
+                    label.data(),static_cast<uint32_t>(label.size()),font,0,LV_TEXT_FLAG_NONE);
             }
             const int16_t field_width=static_cast<int16_t>(std::max<int32_t>(1,
                 std::min<int32_t>(available,requested)));
@@ -738,13 +741,20 @@ bool NomadNetScreen::layout_table(const NomadNet::CompactPage::BlockRecord& bloc
                 if(run.field_index>=0&&static_cast<std::size_t>(run.field_index)<_page.fields().size()){
                     const auto& field=_page.fields()[run.field_index];
                     const auto* font=page_run_font(run,false);
-                    const int32_t field_width=field.type==NomadNet::FormFieldType::TEXT||
-                        field.type==NomadNet::FormFieldType::PASSWORD?
-                        std::max<int32_t>(48,static_cast<int32_t>(field.width)*
-                            std::max<int32_t>(1,lv_txt_get_width(" ",1,font,0,LV_TEXT_FLAG_NONE))+8):
-                        26+lv_txt_get_width(_page.field_label(run.field_index).data(),
-                            static_cast<uint32_t>(_page.field_label(run.field_index).size()),
-                            font,0,LV_TEXT_FLAG_NONE);
+                    int32_t field_width=0;
+                    if(field.type==NomadNet::FormFieldType::TEXT||
+                       field.type==NomadNet::FormFieldType::PASSWORD){
+                        field_width=std::max<int32_t>(48,static_cast<int32_t>(field.width)*
+                            std::max<int32_t>(1,lv_txt_get_width(" ",1,font,0,LV_TEXT_FLAG_NONE))+8);
+                    }else{
+                        const auto label=_page.field_label(run.field_index);
+                        const char* prefix=field.type==NomadNet::FormFieldType::RADIO?"( ) ":"[ ] ";
+                        const int16_t prefix_width=static_cast<int16_t>(
+                            lv_txt_get_width(prefix,4,font,0,LV_TEXT_FLAG_NONE));
+                        const int32_t requested=8+prefix_width+lv_txt_get_width(
+                            label.data(),static_cast<uint32_t>(label.size()),font,0,LV_TEXT_FLAG_NONE);
+                        field_width=requested;
+                    }
                     measured+=field_width;
                 }else{
                     const auto text=_page.text(run);
@@ -839,8 +849,11 @@ bool NomadNetScreen::layout_from(std::size_t start_block,int32_t start_y,
                     requested=std::max<int32_t>(48,requested);
                 }else{
                     const auto label=_page.field_label(run.field_index);
-                    requested=26+lv_txt_get_width(label.data(),static_cast<uint32_t>(label.size()),
-                        font,0,LV_TEXT_FLAG_NONE);
+                    const char* prefix=field.type==NomadNet::FormFieldType::RADIO?"( ) ":"[ ] ";
+                    const int16_t prefix_width=static_cast<int16_t>(
+                        lv_txt_get_width(prefix,4,font,0,LV_TEXT_FLAG_NONE));
+                    requested=8+prefix_width+lv_txt_get_width(
+                        label.data(),static_cast<uint32_t>(label.size()),font,0,LV_TEXT_FLAG_NONE);
                 }
                 const int16_t field_width=static_cast<int16_t>(std::max<int32_t>(1,
                     std::min<int32_t>(available,requested)));
@@ -1149,13 +1162,14 @@ void NomadNetScreen::begin_field_edit(uint16_t field_id){
         _field_editor=nullptr;
         _editing_field=-1;
     };
-    lv_obj_set_size(_field_editor,312,38);
+    lv_obj_set_size(_field_editor,312,type==NomadNet::FormFieldType::PASSWORD?38:76);
     lv_obj_align(_field_editor,LV_ALIGN_BOTTOM_MID,0,-4);
-    lv_textarea_set_one_line(_field_editor,true);
+    lv_textarea_set_one_line(_field_editor,type==NomadNet::FormFieldType::PASSWORD);
     lv_textarea_set_max_length(_field_editor,NomadNet::DocumentParser::MAX_FIELD_VALUE_BYTES);
     lv_obj_set_style_bg_color(_field_editor,Theme::surfaceInput(),0);
     if(!TextAreaHelper::enable_paste(_field_editor)||
-       !lv_obj_add_event_cb(_field_editor,field_editor_event,LV_EVENT_ALL,this)){
+       !lv_obj_add_event_cb(_field_editor,field_editor_event,
+                            static_cast<lv_event_code_t>(LV_EVENT_ALL|LV_EVENT_PREPROCESS),this)){
         discard_editor();
         set_status("Field editor is unavailable");
         return;
@@ -1280,10 +1294,32 @@ bool NomadNetScreen::prepare_submission(uint16_t link_id,uint32_t generation,
 
 void NomadNetScreen::field_editor_event(lv_event_t* event){
     auto* self=static_cast<NomadNetScreen*>(lv_event_get_user_data(event));
+    auto finish_editor=[&](bool accept){
+        auto* editor=self->_field_editor;
+        auto* indev=lv_indev_get_act();
+        lv_event_stop_processing(event);
+        if(indev&&editor)lv_indev_reset(indev,editor);
+        self->finish_field_edit(accept);
+    };
     const auto code=lv_event_get_code(event);
-    if(code==LV_EVENT_READY)self->finish_field_edit(true);
-    else if(code==LV_EVENT_CANCEL)self->finish_field_edit(false);
-    else if(code==LV_EVENT_KEY&&lv_event_get_key(event)==LV_KEY_ESC)self->finish_field_edit(false);
+    if(code==LV_EVENT_READY)finish_editor(true);
+    else if(code==LV_EVENT_CANCEL)finish_editor(false);
+    else if(code==LV_EVENT_KEY){
+        const uint32_t key=lv_event_get_key(event);
+        auto* indev=lv_indev_get_act();
+        if(key==LV_KEY_ENTER&&indev==LVGL::LVGLInit::get_keyboard()){
+            finish_editor(true);
+        }else if(key==LV_KEY_ENTER&&indev==LVGL::LVGLInit::get_trackball()){
+            auto* editor=self->_field_editor;
+            if(editor){
+                if(lv_textarea_get_one_line(editor))finish_editor(true);
+                else{
+                    lv_event_stop_processing(event);
+                    lv_textarea_add_char(editor,'\n');
+                }
+            }
+        }else if(key==LV_KEY_ESC)finish_editor(false);
+    }
 }
 
 void NomadNetScreen::page_event(lv_event_t* event){
