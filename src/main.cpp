@@ -2991,10 +2991,11 @@ void loop() {
         pending_wifi_password = "";
     }
 
-    // A Back/Home click is published from LVGL without touching protocol state.
-    // Service that terminal action before accepting another synchronous inbound
-    // packet/Resource pass so cancellation cannot be starved by network work.
-    if (ui_manager) ui_manager->service_nomad_terminal_action();
+    // Browser actions are published from LVGL without touching protocol state.
+    // Service one before accepting another synchronous inbound packet/Resource
+    // pass so a heard-node Open immediately displays cache/transport feedback,
+    // and Back/Home cancellation cannot be starved by network work.
+    if (ui_manager) ui_manager->service_nomad_user_action();
     const bool nomad_link_pending = ui_manager && ui_manager->nomad_link_pending();
 #ifdef PYXIS_NOMAD_LINK_DIAGNOSTIC
     const bool nomad_busy = nomad_suspend_nonessential && nomad_link_pending;

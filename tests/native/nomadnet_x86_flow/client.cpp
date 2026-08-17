@@ -8,10 +8,13 @@
 #include "NomadNetDocument.h"
 #include "NomadNetCompactPage.h"
 #include "NomadNetForm.h"
+#include "NomadNetHistory.h"
 #include "NomadNetLibrary.h"
 #include "NomadNetMailbox.h"
+#include "NomadNetOwner.h"
 #include "NomadNetProtocol.h"
 #include "NomadNetUrl.h"
+#include "BuildManifest.h"
 
 #include <cstdio>
 #include <cstring>
@@ -51,6 +54,42 @@ static bool pending_empty = false;
 static bool link_closed = false;
 static int link_callbacks = 0;
 static int reuse_requests = 0;
+static NN::PageHistory owner_history;
+static NN::PageHistory::PendingOpen owner_pending_history;
+static int owner_requests = 0;
+static bool owner_submit = false;
+static bool owner_history_bytes = false;
+static bool owner_retained_link = false;
+static bool owner_back_restored = false;
+static bool owner_reload_reused = false;
+static NN::ExternalVector<uint8_t> owner_first_request;
+static NN::OwnerController owner;
+
+class ScreenSubmissionSource final : public NN::OwnerSubmissionSource {
+public:
+    explicit ScreenSubmissionSource(const char* value) : _value(value) {}
+    bool prepare_submission(uint16_t, uint32_t, std::string& target,
+                            NN::ExternalVector<uint8_t>& output,
+                            NN::FormEncodeResult& result) override {
+        NN::DocumentParser parser;
+        const auto document = parser.parse(
+            "`<name`Initial> `<!|password`Initial> "
+            "`<?|color|red|*`Red> `<?|color|blue|*`Blue> "
+            "`[:/page/form.mu`name|password|color|fixed=yes`Submit]");
+        NN::CompactPage page;
+        NN::FormState state;
+        if (!page.assign(document) || !state.assign(page) ||
+            !state.set_value(0, _value) || !state.set_value(1, "example-pass")) {
+            result = NN::FormEncodeResult::ALLOCATION_FAILED;
+            return false;
+        }
+        result = state.encode("name|password|color|fixed=yes", output);
+        target = destination_hex + ":/page/form.mu";
+        return result == NN::FormEncodeResult::OK;
+    }
+private:
+    const char* _value;
+};
 
 static bool prepare_form_request(NN::ExternalVector<uint8_t>& output) {
     NN::DocumentParser parser;
@@ -89,7 +128,8 @@ static bool validate_page(const RNS::Bytes& response, bool expect_large) {
         fail("Micron parse");
         return false;
     }
-    const bool form_scenario = scenario == "form-anonymous" || scenario == "form-identified";
+    const bool form_scenario = scenario == "form-anonymous" || scenario == "form-identified" ||
+                               scenario == "owner-form-history";
     const char* marker = form_scenario ? "Form response" :
         (expect_large ? "Resource-backed page" : "Immediate page");
     std::string lan_heading;
@@ -147,6 +187,7 @@ static bool validate_page(const RNS::Bytes& response, bool expect_large) {
 
     // Exercise the Save -> Back ordering used by the owner loop. Save remains
     // durable work, but the terminal action is guaranteed to follow it.
+    if (scenario == "owner-form-history") return true;
     if (!actions.publish(NN::UserActionKind::SAVE, url) ||
         !actions.publish(NN::UserActionKind::BACK, "")) {
         fail("Save/Back publication");
@@ -217,7 +258,42 @@ static void on_link_closed(RNS::Link& closed_link) {
     }
 }
 
+static bool owner_request_data(const NN::ExternalVector<uint8_t>& request_data,
+                               RNS::Link* established = nullptr) {
+    RNS::Link& request_link = established ? *established : active_link;
+    receipt = request_link.request(RNS::Bytes("/page/form.mu"),
+        RNS::Bytes(request_data.data(), request_data.size()), on_response, on_failed,
+        on_progress, 8.0, NN::AsyncMailbox::MAX_WIRE_BYTES);
+    if (!receipt) return false;
+    mailbox.expect_request(bytes_vector(receipt.get_request_id()));
+    request_started = true;
+    request_started_at = RNS::Utilities::OS::time();
+    ++owner_requests;
+    return true;
+}
+
+static bool owner_request_current(RNS::Link* established = nullptr) {
+    return owner_request_data(owner_history.current_request_data(), established);
+}
+
+static bool service_submit_through_owner(const char* name, RNS::Link* established = nullptr) {
+    NN::UserAction action;
+    if (!actions.pop(action) || action.kind != NN::UserActionKind::SUBMIT) return false;
+    ScreenSubmissionSource screen(name);
+    auto command = owner.service(action, owner_history, screen, 0);
+    if (command.result != NN::OwnerResult::REQUEST) return false;
+    owner_submit = true;
+    if (owner_requests == 0) owner_first_request.assign(
+        command.request_data.begin(), command.request_data.end());
+    owner_pending_history = std::move(command.pending_history);
+    return owner_pending_history.ready() && owner_request_data(command.request_data, established);
+}
+
 static void on_link_established(RNS::Link& established_link) {
+    // Link construction invokes this callback before the assigning expression
+    // completes; take the established production handle before owner requests.
+    active_link = established_link;
+
     link_established = true;
     ++link_callbacks;
     mailbox.begin(bytes_vector(established_link.link_id()));
@@ -231,14 +307,21 @@ static void on_link_established(RNS::Link& established_link) {
     else if (scenario == "near-limit") path = "/page/near-limit.mu";
     else if (scenario == "oversized") path = "/page/oversized.mu";
     else if (scenario == "cancel") path = "/page/cancel.mu";
-    else if (scenario == "form-anonymous" || scenario == "form-identified")
+    else if (scenario == "form-anonymous" || scenario == "form-identified" ||
+             scenario == "owner-form-history")
         path = "/page/form.mu";
     else {
         path = "/page/missing.mu";
         timeout = 1.5;
     }
     NN::ExternalVector<uint8_t> request_data;
-    if (scenario == "form-anonymous" || scenario == "form-identified") {
+    if (scenario == "owner-form-history") {
+        if (!actions.publish_submit(0, 1) ||
+            !service_submit_through_owner("Example User", &established_link)) {
+            fail("production-owner initial Submit");
+        }
+        return;
+    } else if (scenario == "form-anonymous" || scenario == "form-identified") {
         if (!prepare_form_request(request_data)) {
             fail("form request encoding");
             return;
@@ -310,6 +393,67 @@ static void consume_event() {
             }
             passed = validate_page(response, expected_resource);
             if (!passed) return;
+            if (scenario == "owner-form-history") {
+                if (owner_pending_history.ready()) {
+                    if (!owner_history.commit(std::move(owner_pending_history))) {
+                        fail("production-owner response history commit");
+                        return;
+                    }
+                    owner_history_bytes = owner_history.current_has_request_data();
+                }
+                const bool retained_owner = NN::OwnerController::retain_active_link(
+                    destination_hex, destination_hex,
+                    active_link && active_link.status() == RNS::Type::Link::ACTIVE);
+                if (owner_requests < 3 &&
+                    (!retained_owner || !active_link.pending_requests().empty())) {
+                    fail("owner response did not retain active Link");
+                    return;
+                }
+                if (owner_requests < 3) owner_retained_link = true;
+                if (owner_requests == 1) {
+                    mailbox.prepare();
+                    if (!actions.publish_submit(0, 2) ||
+                        !service_submit_through_owner("Changed User")) {
+                        fail("production-owner changed Submit");
+                    }
+                    break;
+                }
+                if (owner_requests == 2) {
+                    NN::UserAction back_action;
+                    back_action.kind = NN::UserActionKind::BACK;
+                    ScreenSubmissionSource unused("unused");
+                    auto back_command = owner.service(back_action, owner_history, unused, 0);
+                    if (back_command.result != NN::OwnerResult::REQUEST ||
+                        !back_command.pending_history.ready()) {
+                        fail("production-owner Back history restore");
+                        return;
+                    }
+                    if (back_command.request_data != owner_first_request) {
+                        fail("production-owner Back exact request bytes");
+                        return;
+                    }
+                    if (!owner_history.commit(std::move(back_command.pending_history)) ||
+                        owner_history.current_request_data() != owner_first_request) {
+                        fail("production-owner Back publication commit");
+                        return;
+                    }
+                    owner_back_restored = true;
+                    NN::UserAction reload_action;
+                    reload_action.kind = NN::UserActionKind::RELOAD;
+                    auto reload_command = owner.service(reload_action, owner_history, unused, 0);
+                    mailbox.prepare();
+                    owner_reload_reused = reload_command.result == NN::OwnerResult::REQUEST &&
+                        reload_command.request_data == owner_first_request && owner_request_current();
+                    if (!owner_reload_reused) fail("production-owner Reload request");
+                    break;
+                }
+                if (owner_requests != 3 || link_callbacks != 1) {
+                    fail("production-owner retained-Link Reload invariants");
+                    return;
+                }
+                completed = true;
+                break;
+            }
             if (scenario == "reuse" && reuse_requests == 1) {
                 if (!active_link || active_link.status() != RNS::Type::Link::ACTIVE ||
                     !active_link.pending_requests().empty()) {
@@ -398,15 +542,23 @@ static bool cleanup_complete() {
 }
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--manifest") == 0) {
+        std::printf("{\"schema\":1,\"base\":\"%s\",\"branch\":\"%s\","
+                    "\"microreticulum\":\"%s\",\"sources\":%s}\n",
+                    PYXIS_MANIFEST_BASE, PYXIS_MANIFEST_BRANCH,
+                    PYXIS_MANIFEST_MICRORETICULUM, PYXIS_MANIFEST_SOURCES_JSON);
+        return 0;
+    }
     if (argc < 2) {
-        std::fprintf(stderr, "usage: %s immediate|resource|near-limit|oversized|timeout|cancel|reuse|form-anonymous|form-identified | lan host port destination\n", argv[0]);
+        std::fprintf(stderr, "usage: %s immediate|resource|near-limit|oversized|timeout|cancel|reuse|form-anonymous|form-identified|owner-form-history | lan host port destination\n", argv[0]);
         return 2;
     }
     scenario = argv[1];
     if (scenario != "immediate" && scenario != "resource" && scenario != "near-limit" &&
         scenario != "oversized" &&
         scenario != "timeout" && scenario != "cancel" && scenario != "reuse" &&
-        scenario != "form-anonymous" && scenario != "form-identified" && scenario != "lan") return 2;
+        scenario != "form-anonymous" && scenario != "form-identified" &&
+        scenario != "owner-form-history" && scenario != "lan") return 2;
     if ((scenario == "lan" && argc != 5) || (scenario != "lan" && argc != 2)) return 2;
 
     microStore::FileSystem filesystem{microStore::Adapters::UniversalFileSystem(".")};
@@ -473,7 +625,8 @@ int main(int argc, char** argv) {
     cleanup_complete();
     std::printf("RESULT scenario=%s announce=%d path=%d link=%d request=%d progress=%d callbacks=%d "
                 "cancel=%d deadline=%d resource_started=%d resource_progress=%d receipt_failed=%d "
-                "pending=%zu link_closed=%d stale_rejected=%d reuse_requests=%d link_callbacks=%d passed=%d\n",
+                "pending=%zu link_closed=%d stale_rejected=%d reuse_requests=%d link_callbacks=%d "
+                "owner_submit=%d history_bytes=%d retained_link=%d back_restored=%d reload_reused=%d passed=%d\n",
                 scenario.c_str(), announce_seen ? 1 : 0,
                 destination_hex.empty() ? 0 : 1, link_established ? 1 : 0,
                 request_started ? 1 : 0, progress_seen ? 1 : 0, progress_callbacks,
@@ -482,7 +635,9 @@ int main(int argc, char** argv) {
                 receipt_failed ? 1 : 0,
                 active_link ? active_link.pending_requests().size() : 0,
                 link_closed ? 1 : 0, stale_callback_rejections, reuse_requests, link_callbacks,
-                passed ? 1 : 0);
+                owner_submit ? 1 : 0, owner_history_bytes ? 1 : 0,
+                owner_retained_link ? 1 : 0, owner_back_restored ? 1 : 0,
+                owner_reload_reused ? 1 : 0, passed ? 1 : 0);
     if (scenario == "lan") {
         std::printf("LAN TRANSPORT rx=%zu rxbytes=%zu tx=%zu txbytes=%zu\n",
                     network_interface.rx(), network_interface.rxbytes(),

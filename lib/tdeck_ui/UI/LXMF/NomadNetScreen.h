@@ -30,6 +30,7 @@ public:
     void set_save_callback(SaveCallback cb) { _save = std::move(cb); }
     void set_identify_callback(IdentifyCallback cb) { _identify = std::move(cb); }
     void set_address(const std::string& address);
+    bool set_local_address(const std::string& address);
     std::string address() const;
     void set_status(const char* status);
     bool set_page(const NomadNet::Document& document);
@@ -45,11 +46,31 @@ public:
     void set_page_saved(bool saved);
     void set_identify_enabled(bool enabled);
     void begin_navigation(const std::string& target);
+    void show_pending_navigation(const std::string& target);
     void show_start();
     bool handle_library_back();
     bool directory_visible() const { return _directory_visible.load(std::memory_order_acquire); }
     void show(); void hide();
 private:
+    struct TableLayoutObservation {
+        NomadNet::TableLayoutTier tier = NomadNet::TableLayoutTier::FIT;
+        int16_t x = 0;
+        int32_t y = 0;
+        int16_t width = 0;
+        int32_t height = 0;
+        uint8_t columns = 0;
+        uint16_t cards = 0;
+        bool valid = false;
+        TableLayoutObservation() = default;
+        TableLayoutObservation(NomadNet::TableLayoutTier tier_value,
+                               int16_t x_value, int32_t y_value,
+                               int16_t width_value, int32_t height_value,
+                               uint8_t columns_value, uint16_t cards_value,
+                               bool valid_value)
+            : tier(tier_value), x(x_value), y(y_value), width(width_value),
+              height(height_value), columns(columns_value), cards(cards_value),
+              valid(valid_value) {}
+    };
     // Only the visible region plus bounded overscan is retained. The parser
     // admits at most 1024 runs, so this also covers a pathological viewport
     // containing every styled run plus bounded dividers.
@@ -104,6 +125,7 @@ private:
     lv_obj_t* _reload_button=nullptr; lv_obj_t* _save_button=nullptr; lv_obj_t* _identify_button=nullptr; lv_obj_t* _address_row=nullptr; lv_obj_t* _address=nullptr;
     lv_obj_t* _go_button=nullptr; lv_obj_t* _address_summary=nullptr; lv_obj_t* _edit_button=nullptr;
     lv_obj_t* _status=nullptr; lv_obj_t* _content=nullptr; lv_obj_t* _field_editor=nullptr;
+    lv_timer_t* _status_timer=nullptr;
     lv_obj_t* _directory=nullptr;
     NomadNet::CompactPage _page;
     NomadNet::FormState _form_state;
@@ -120,6 +142,7 @@ private:
     int32_t _logical_scroll = 0;
     int32_t _layout_window_top = 0;
     int32_t _layout_window_bottom = 0;
+    TableLayoutObservation _table_layout;
     int16_t _selected_link = -1;
     int16_t _selected_field = -1;
     int16_t _selected_focus = -1;
@@ -138,6 +161,8 @@ private:
     Callback _back,_home; OpenCallback _reload,_open; LinkCallback _link;
     SubmitCallback _submit; SaveCallback _save; IdentifyCallback _identify;
     void set_address_editing(bool editing);
+    static void status_timer_cb(lv_timer_t* timer);
+    void cancel_status_timer();
     void apply_browser_layout(bool show_status);
     void render_directory(View view);
     void show_browser(bool editing);

@@ -743,7 +743,6 @@ void UIManager::update() {
         _settings_screen->tick();  // keep the live clock / GPS / system readouts ticking
     }
     const uint32_t now = millis();
-    nomad_update_user_actions();
     nomad_update_library();
     nomad_update();
     // Snapshot acquisition is deliberately before LVGL_LOCK and is coalesced
@@ -963,16 +962,16 @@ void UIManager::replace_route(Route route) {
 }
 
 void UIManager::back() {
-    if (_navigation.current() == Route::NOMADNET && _nomad_history.back()) {
-        if (!nomad_restore_history_submission()) {
-            LVGL_LOCK();
-            _nomadnet_screen->set_status("Saved form request exceeds available memory");
-            return;
-        }
-        nomad_open(_nomad_history.current(), false, _nomad_history.current_scroll(),
-                   _nomad_history.current_has_request_data());
+    if (_navigation.current() == Route::NOMADNET) {
+        _nomad_actions.publish(NomadNet::UserActionKind::BACK, {});
         return;
     }
+    LVGL_LOCK();
+    if (!_navigation.back()) return;
+    render_route(_navigation.current());
+}
+
+void UIManager::nomad_back_empty() {
     if (_navigation.current() == Route::NOMADNET) {
         nomad_advance_navigation_generation();
         bool handled = false;
@@ -1949,6 +1948,18 @@ void UIManager::nomad_update_library() {
 }
 
 void UIManager::nomad_update_user_actions() {
+    class ScreenSubmissionSource final : public NomadNet::OwnerSubmissionSource {
+    public:
+        explicit ScreenSubmissionSource(NomadNetScreen& screen) : _screen(screen) {}
+        bool prepare_submission(uint16_t item_id, uint32_t generation,
+                std::string& target, NomadNet::ExternalVector<uint8_t>& bytes,
+                NomadNet::FormEncodeResult& result) override {
+            LVGL_LOCK();
+            return _screen.prepare_submission(item_id, generation, target, bytes, result);
+        }
+    private:
+        NomadNetScreen& _screen;
+    } source(*_nomadnet_screen);
     // Back/Home is a terminal slot behind at most CAPACITY retained explicit
     // Saves. Drain that bounded batch in one owner-loop pass so the terminal
     // action cannot sit behind the synchronous library persistence below.
@@ -1965,35 +1976,29 @@ void UIManager::nomad_update_user_actions() {
             nomad_open(target);
             break;
         case NomadNet::UserActionKind::RELOAD:
-            // Use the exact current history entry and its retained request bytes;
-            // reload never appends history and always bypasses the cache once.
-            nomad_reload();
-            break;
+        case NomadNet::UserActionKind::BACK:
         case NomadNet::UserActionKind::SUBMIT: {
-            std::string submit_target;
-            NomadNet::ExternalVector<uint8_t> submission_data;
-            NomadNet::FormEncodeResult result = NomadNet::FormEncodeResult::INVALID_STATE;
-            bool prepared = false;
-            {
+            int32_t current_scroll = 0;
+            { LVGL_LOCK(); current_scroll = _nomadnet_screen->logical_scroll(); }
+            auto command = _nomad_owner.service(action, _nomad_history, source, current_scroll);
+            if (command.result != NomadNet::OwnerResult::REQUEST) {
+                if (action.kind == NomadNet::UserActionKind::BACK &&
+                        command.result == NomadNet::OwnerResult::BACK_EMPTY) {
+                    nomad_back_empty();
+                    if (_navigation.current() != Route::NOMADNET) _nomad_actions.clear();
+                    break;
+                }
                 LVGL_LOCK();
-                prepared = _nomadnet_screen->prepare_submission(
-                    action.item_id, action.generation, submit_target,
-                    submission_data, result);
-            }
-            if (!prepared) {
-                LVGL_LOCK();
-                _nomadnet_screen->set_status(
-                    result == NomadNet::FormEncodeResult::INVALID_STATE
-                        ? "Form changed before submission"
-                        : result == NomadNet::FormEncodeResult::ALLOCATION_FAILED
-                            ? "Form submission exceeds available memory"
-                            : "Form submission exceeds device limits");
+                _nomadnet_screen->set_status(NomadNet::OwnerController::status(command.result));
                 break;
             }
             NomadNet::clear_encoded_form(_nomad_submission_data);
-            _nomad_submission_data.swap(submission_data);
-            _nomad_submission_ready = true;
-            nomad_open(submit_target, true, -1, true);
+            _nomad_submission_data.swap(command.request_data);
+            _nomad_submission_ready = !_nomad_submission_data.empty();
+            _nomad_pending_history = std::move(command.pending_history);
+            _nomad_cache_bypass_once = command.cache_bypass;
+            nomad_open(command.target, false, command.restore_scroll,
+                       !_nomad_submission_data.empty(), true);
             break;
         }
         case NomadNet::UserActionKind::SAVE: {
@@ -2031,10 +2036,7 @@ void UIManager::nomad_update_user_actions() {
                 ? "Identity enabled for this node" : "Anonymous browsing enabled for this node");
             break;
         }
-        case NomadNet::UserActionKind::BACK:
-            back();
-            if (_navigation.current() != Route::NOMADNET) _nomad_actions.clear();
-            break;
+
         case NomadNet::UserActionKind::HOME:
             _nomad_actions.clear();
             home();
@@ -2046,8 +2048,8 @@ void UIManager::nomad_update_user_actions() {
     }
 }
 
-void UIManager::service_nomad_terminal_action() {
-    if (_nomad_actions.terminal_pending()) nomad_update_user_actions();
+void UIManager::service_nomad_user_action() {
+    nomad_update_user_actions();
 }
 
 bool UIManager::nomad_link_pending() const {
@@ -2121,6 +2123,7 @@ void UIManager::nomad_finish_request_keep_link() {
 bool UIManager::nomad_stop_transport() {
     NomadNet::clear_encoded_form(_nomad_submission_data);
     _nomad_submission_ready = false;
+    _nomad_pending_history.clear();
     // Link teardown can synchronously cancel an in-flight response Resource,
     // update its shared RequestReceipt and invoke callbacks. Keep that mutation
     // in the Reticulum serialization domain, and let teardown mark the receipt
@@ -2197,7 +2200,8 @@ bool UIManager::nomad_supersede_transport(const std::string& destination_hex) {
 }
 
 void UIManager::nomad_open(const std::string& address, bool add_history,
-                           int32_t restore_logical_scroll, bool preserve_submission) {
+                           int32_t restore_logical_scroll, bool preserve_submission,
+                           bool history_prepared) {
     if (!preserve_submission) {
         NomadNet::clear_encoded_form(_nomad_submission_data);
         _nomad_submission_ready = false;
@@ -2205,10 +2209,22 @@ void UIManager::nomad_open(const std::string& address, bool add_history,
     nomad_heap_checkpoint("open-enter");
     NomadNet::Url parsed;
     std::string error;
-    if (!NomadNet::Url::parse(address, parsed, error, _nomad_url.destination_hex,
-            _nomad_url.path,_nomad_url.fields)) {
+    bool parsed_ok = false;
+    try {
+        parsed_ok = NomadNet::Url::parse(address, parsed, error,
+            _nomad_url.destination_hex, _nomad_url.path, _nomad_url.fields);
+    } catch (const std::bad_alloc&) {
         NomadNet::clear_encoded_form(_nomad_submission_data);
         _nomad_submission_ready = false;
+        _nomad_pending_history.clear();
+        LVGL_LOCK();
+        _nomadnet_screen->set_status("Address exceeds available memory");
+        return;
+    }
+    if (!parsed_ok) {
+        NomadNet::clear_encoded_form(_nomad_submission_data);
+        _nomad_submission_ready = false;
+        _nomad_pending_history.clear();
         LVGL_LOCK();
         _nomadnet_screen->set_status(error.c_str());
         return;
@@ -2224,44 +2240,53 @@ void UIManager::nomad_open(const std::string& address, bool add_history,
     }
     const bool restoring_history=restore_logical_scroll>=0;
     if(!preserve_submission&&NomadNet::should_jump_locally(_nomad_url,parsed,page_loaded,restoring_history)){
-        bool resolved=true;
-        {
-            LVGL_LOCK();
-            if(restoring_history)
-                _nomadnet_screen->restore_logical_scroll(restore_logical_scroll);
-            else
-                resolved=_nomadnet_screen->jump_to_anchor(parsed.fragment);
-            if(!resolved&&parsed.fragment.empty())return;
-            if(!resolved){
-                const std::string status="Unknown anchor: #"+parsed.fragment;
-                _nomadnet_screen->set_status(status.c_str());
+        NomadNet::LocalNavigationResult local_result =
+            NomadNet::LocalNavigationResult::STAGING_FAILED;
+        try {
+            // Materialize every fallible canonical owner value before transport,
+            // visible scroll/address, or history state is changed.
+            const std::string canonical_address = parsed.str();
+            NomadNet::Url next_url = parsed;
+            local_result = NomadNet::apply_local_navigation_transaction(
+                canonical_address, add_history, current_scroll,
+                restore_logical_scroll, history_prepared,
+                _nomad_history, _nomad_pending_history,
+                [&]() {
+                    _nomad_cache_flow.cancel();
+                    return nomad_supersede_transport(parsed.destination_hex);
+                },
+                [&](const std::string& published_address, int32_t restore_scroll) {
+                    bool resolved = true;
+                    LVGL_LOCK();
+                    if (!_nomadnet_screen->set_local_address(published_address))
+                        return false;
+                    if (restore_scroll >= 0)
+                        _nomadnet_screen->restore_logical_scroll(restore_scroll);
+                    else
+                        resolved = _nomadnet_screen->jump_to_anchor(parsed.fragment);
+                    if (!resolved) return false;
+                    _nomadnet_screen->set_status("Page loaded");
+                    return true;
+                });
+            if (local_result == NomadNet::LocalNavigationResult::APPLIED) {
+                _nomad_url = std::move(next_url);
+                _nomad_pending_scroll = -1;
+                nomad_advance_navigation_generation();
+                return;
             }
+        } catch (const std::bad_alloc&) {
+            _nomad_pending_history.clear();
+            local_result = NomadNet::LocalNavigationResult::STAGING_FAILED;
         }
-        if(!resolved)return;
-        const auto& current_request = _nomad_history.current_request_data();
-        const uint8_t* request_bytes = _nomad_history.current_has_request_data()
-            ? current_request.data() : nullptr;
-        const std::size_t request_size = _nomad_history.current_has_request_data()
-            ? current_request.size() : 0;
-        if (!_nomad_history.open(parsed.str(), add_history, current_scroll,
-                request_bytes, request_size)) {
-            LVGL_LOCK();
-            _nomadnet_screen->set_status("Form history exceeds available memory");
-            return;
-        }
-        nomad_advance_navigation_generation();
-        _nomad_cache_flow.cancel();
-        if (!nomad_supersede_transport(parsed.destination_hex)) {
-            LVGL_LOCK();
+        LVGL_LOCK();
+        if (local_result == NomadNet::LocalNavigationResult::PUBLICATION_FAILED &&
+                !parsed.fragment.empty()) {
+            const std::string status = "Unknown anchor: #" + parsed.fragment;
+            _nomadnet_screen->set_status(status.c_str());
+        } else if (local_result == NomadNet::LocalNavigationResult::PREPARATION_FAILED) {
             _nomadnet_screen->set_status("Navigation is busy; try again");
-            return;
-        }
-        _nomad_url=parsed;
-        _nomad_pending_scroll=-1;
-        {
-            LVGL_LOCK();
-            _nomadnet_screen->set_address(parsed.str());
-            _nomadnet_screen->set_status("Page loaded");
+        } else {
+            _nomadnet_screen->set_status("Form history exceeds available memory");
         }
         return;
     }
@@ -2272,8 +2297,9 @@ void UIManager::nomad_open(const std::string& address, bool add_history,
         ? _nomad_submission_data.data() : nullptr;
     const std::size_t history_request_size = _nomad_submission_ready
         ? _nomad_submission_data.size() : 0;
-    if (!_nomad_history.open(parsed.str(), add_history, current_scroll,
-            history_request, history_request_size)) {
+    if (!history_prepared && !_nomad_history.prepare_open(parsed.str(), add_history,
+            current_scroll, history_request, history_request_size,
+            _nomad_pending_history)) {
         NomadNet::clear_encoded_form(_nomad_submission_data);
         _nomad_submission_ready = false;
         LVGL_LOCK();
@@ -2285,6 +2311,7 @@ void UIManager::nomad_open(const std::string& address, bool add_history,
     if (!nomad_supersede_transport(parsed.destination_hex)) {
         NomadNet::clear_encoded_form(_nomad_submission_data);
         _nomad_submission_ready = false;
+        _nomad_pending_history.clear();
         LVGL_LOCK();
         _nomadnet_screen->set_status("Navigation is busy; try again");
         return;
@@ -2302,6 +2329,10 @@ void UIManager::nomad_open(const std::string& address, bool add_history,
     const bool bypass = _nomad_cache_bypass_once;
     _nomad_cache_bypass_once = false;
     _nomad_cache_generation = _nomad_navigation_generation;
+    {
+        LVGL_LOCK();
+        _nomadnet_screen->show_pending_navigation(address);
+    }
     if (_nomad_cache_flow.begin(cache_key, cache_now, bypass) ==
             NomadNet::CacheFlowState::LOOKUP) {
         _nomad_state = NomadState::CACHE;
@@ -2321,17 +2352,17 @@ void UIManager::nomad_begin_live_transport() {
         return;
     }
     {
-        // Cache lookup and Router contention are deliberately non-destructive.
-        // Clear the old model only after live transport admission owns Router.
+        // Transport admission is non-destructive. The old model remains visible
+        // until the complete replacement has been published successfully.
         LVGL_LOCK();
         nomad_heap_checkpoint("action-before-navigation");
-        _nomadnet_screen->begin_navigation(_nomad_url.str());
+        _nomadnet_screen->set_address(_nomad_url.str());
         nomad_heap_checkpoint("action-after-navigation");
     }
-    const bool same_destination = _nomad_link &&
-        _nomad_link.status() == Type::Link::ACTIVE &&
-        _nomad_destination_hash &&
-        _nomad_destination_hash.toHex() == _nomad_url.destination_hex;
+    const bool same_destination = NomadNet::OwnerController::retain_active_link(
+        _nomad_url.destination_hex,
+        _nomad_destination_hash ? _nomad_destination_hash.toHex() : std::string(),
+        _nomad_link && _nomad_link.status() == Type::Link::ACTIVE);
     if (same_destination) {
         _nomad_response.clear();
         _nomad_request_policy.reset();
@@ -2364,37 +2395,6 @@ void UIManager::nomad_begin_live_transport() {
         Transport::request_path(_nomad_destination_hash);
         _nomad_state = NomadState::PATH;
         _nomad_deadline_ms = millis() + NomadNet::RequestPolicy::PATH_WAIT_MS;
-    }
-}
-
-void UIManager::nomad_reload() {
-    if (_nomad_history.current().empty()) {
-        LVGL_LOCK();
-        _nomadnet_screen->set_status("Enter a NomadNet address");
-        return;
-    }
-    if (!nomad_restore_history_submission()) {
-        LVGL_LOCK();
-        _nomadnet_screen->set_status("Saved form request exceeds available memory");
-        return;
-    }
-    _nomad_cache_bypass_once = true;
-    nomad_open(_nomad_history.current(), false, -1,
-               _nomad_history.current_has_request_data());
-}
-
-bool UIManager::nomad_restore_history_submission() {
-    NomadNet::clear_encoded_form(_nomad_submission_data);
-    _nomad_submission_ready = false;
-    if (!_nomad_history.current_has_request_data()) return true;
-    try {
-        const auto& request = _nomad_history.current_request_data();
-        _nomad_submission_data.assign(request.begin(), request.end());
-        _nomad_submission_ready = true;
-        return true;
-    } catch (const std::bad_alloc&) {
-        NomadNet::clear_encoded_form(_nomad_submission_data);
-        return false;
     }
 }
 
@@ -2495,11 +2495,16 @@ void UIManager::nomad_send_request() {
 
 bool UIManager::nomad_apply_page_bytes(const uint8_t* data, std::size_t size, bool cached) {
     NomadNet::Document document;
-    try {
-        document = _nomad_parser.parse(reinterpret_cast<const char*>(data), size);
-    } catch (const std::bad_alloc&) {
+    const auto parse_status = _nomad_parser.parse_into(
+        reinterpret_cast<const char*>(data), size, document);
+    if (parse_status == NomadNet::ParseStatus::ALLOCATION_FAILED) {
         LVGL_LOCK();
         _nomadnet_screen->set_status("Page is too large for available memory");
+        return false;
+    }
+    if (parse_status == NomadNet::ParseStatus::INVALID_INPUT) {
+        LVGL_LOCK();
+        _nomadnet_screen->set_status("Page input is invalid");
         return false;
     }
     if (document.malformed && document.blocks.empty()) {
@@ -2507,53 +2512,51 @@ bool UIManager::nomad_apply_page_bytes(const uint8_t* data, std::size_t size, bo
         _nomadnet_screen->set_status("Page is not valid UTF-8/Micron");
         return false;
     }
-    return nomad_apply_page_document(document, cached);
+    return nomad_apply_page_document(document, cached) ==
+        NomadNet::PageApplyResult::APPLIED;
 }
 
-bool UIManager::nomad_apply_page_document(const NomadNet::Document& document, bool cached) {
-    std::vector<std::string> heading_runs;
-    for (const auto& block : document.blocks) {
-        if (block.type != NomadNet::BlockType::HEADING) continue;
-        for (const auto& run : block.runs) heading_runs.push_back(run.text);
-        break;
-    }
-    const std::string title = NomadNet::page_title(_nomad_url.path, heading_runs);
-    if (_nomad_library.record_page(_nomad_url.str(), title,
-            static_cast<uint64_t>(Utilities::OS::time()))) _nomad_library_dirty = true;
-    const bool page_saved = _nomad_library.page_saved(_nomad_url.str());
-    bool applied = false;
-    bool anchor_resolved = true;
-    {
-        LVGL_LOCK();
-        if (cached) {
-            // Parsing and semantic admission succeeded while the prior page was
-            // still visible. Destructive replacement occurs only at publication.
-            _nomadnet_screen->begin_navigation(_nomad_url.str());
-        }
-        _nomadnet_screen->set_library(_nomad_library);
-        applied = _nomadnet_screen->set_page(document);
-        if (applied && _nomad_pending_scroll >= 0)
-            _nomadnet_screen->restore_logical_scroll(_nomad_pending_scroll);
-        else if (applied && _nomad_url.has_fragment)
-            anchor_resolved = _nomadnet_screen->jump_to_anchor(_nomad_url.fragment);
-        if (applied) {
-            _nomadnet_screen->set_page_saved(page_saved);
-            _nomadnet_screen->set_identify_enabled(
-                _nomad_library.node_identified(_nomad_url.destination_hex));
-            if (!anchor_resolved && !_nomad_url.fragment.empty()) {
-                const std::string status = "Unknown anchor: #" + _nomad_url.fragment;
-                _nomadnet_screen->set_status(status.c_str());
-            } else {
+NomadNet::PageApplyResult UIManager::nomad_apply_page_document(
+        const NomadNet::Document& document, bool cached) {
+    bool library_changed = false;
+    const auto result = NomadNet::apply_page_transaction_for_url(
+        document, _nomad_url, static_cast<uint64_t>(Utilities::OS::time()),
+        _nomad_library,
+        [&](const NomadNet::PagePublication& publication) {
+            bool anchor_resolved = true;
+            LVGL_LOCK();
+            if (!_nomadnet_screen->set_page(document)) return false;
+            if (_nomad_pending_scroll >= 0)
+                _nomadnet_screen->restore_logical_scroll(_nomad_pending_scroll);
+            else if (_nomad_url.has_fragment)
+                anchor_resolved = _nomadnet_screen->jump_to_anchor(_nomad_url.fragment);
+            _nomadnet_screen->set_page_saved(publication.page_saved);
+            _nomadnet_screen->set_identify_enabled(publication.identify_enabled);
+            if (!anchor_resolved && !publication.unknown_anchor_status.empty())
+                _nomadnet_screen->set_status(publication.unknown_anchor_status.c_str());
+            else
                 _nomadnet_screen->set_status(cached
                     ? "Cached page; current reachability not checked"
                     : "Page loaded (live)");
-            }
-        }
+            library_changed = publication.library_changed;
+            return true;
+        },
+        [&]() noexcept {
+            if (_nomad_pending_history.ready())
+                _nomad_history.commit(std::move(_nomad_pending_history));
+        });
+    if (result == NomadNet::PageApplyResult::ALLOCATION_FAILED) {
+        LVGL_LOCK();
+        _nomadnet_screen->set_status("Page is too large for available memory");
     }
+    if (result != NomadNet::PageApplyResult::APPLIED) {
+        _nomad_pending_history.clear();
+        return result;
+    }
+    if (library_changed) _nomad_library_dirty = true;
     _nomad_pending_scroll = -1;
-    return applied;
+    return result;
 }
-
 void UIManager::nomad_update() {
     // Filesystem chunks are owner-loop work and are always serviced before the
     // Router serialization domain. LVGL is taken only later to apply a complete,
@@ -2683,17 +2686,14 @@ void UIManager::nomad_update() {
                 _nomadnet_screen->set_status("Page is not valid UTF-8/Micron");
                 break;
             }
-            const bool page_applied = nomad_apply_page_document(document, false);
+            const bool page_applied = nomad_apply_page_document(document, false) ==
+                NomadNet::PageApplyResult::APPLIED;
             nomad_heap_checkpoint("response-page-applied");
             if (!page_applied) {
                 _nomad_response.release();
                 nomad_stop_transport();
                 break;
             }
-            const bool has_password = std::any_of(document.fields.begin(), document.fields.end(),
-                [](const NomadNet::FormField& field) {
-                    return field.type == NomadNet::FormFieldType::PASSWORD;
-                });
             const bool ordinary_nil =
                 _nomad_request_data_class == NomadNet::RequestDataClass::NIL;
             const auto directive = NomadNet::parse_cache_directive(bytes.data(), bytes.size());
@@ -2703,7 +2703,7 @@ void UIManager::nomad_update() {
             const NomadNet::CacheKey cache_key{
                 _nomad_url.destination_hex, _nomad_url.path,
                 _nomad_request_data_class};
-            if (ordinary_nil && valid_document && !has_password && cache_now &&
+            if (ordinary_nil && valid_document && cache_now &&
                     directive.valid && directive.ttl) {
                 _nomad_cache_pending_key = cache_key;
                 _nomad_cache_pending_body = _nomad_response.take();
@@ -2712,7 +2712,7 @@ void UIManager::nomad_update() {
                 _nomad_cache_pending_generation = event.generation;
             } else {
                 _nomad_response.release();
-                if (ordinary_nil && (!directive.valid || directive.ttl == 0 || has_password))
+                if (ordinary_nil && (!directive.valid || directive.ttl == 0))
                     { _nomad_cache_pending_key = cache_key;
                       _nomad_cache_pending_generation = event.generation;
                       _nomad_cache_pending_invalidate = true; }

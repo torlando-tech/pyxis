@@ -36,6 +36,7 @@ state = {
     "link": None,
     "link_closed": False,
     "form_valid": False,
+    "form_sequence": [],
 }
 
 
@@ -75,6 +76,7 @@ def page_handler(path, data, request_id, link_id, remote_identity, requested_at)
     state["anonymous"] = remote_identity is None
     if path == "/page/form.mu":
         state["form_valid"] = data == EXPECTED_FORM_DATA
+        state["form_sequence"].append(data)
     print(f"SERVER request count={state['request_count']} path={path} bytes={len(PAGES[path])} anonymous={state['anonymous']}", flush=True)
     return PAGES[path]
 
@@ -115,7 +117,7 @@ def write_config(config_dir: str):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("scenario", choices=("immediate", "resource", "near-limit", "oversized", "timeout", "cancel", "reuse", "form-anonymous", "form-identified"))
+    parser.add_argument("scenario", choices=("immediate", "resource", "near-limit", "oversized", "timeout", "cancel", "reuse", "form-anonymous", "form-identified", "owner-form-history"))
     parser.add_argument("--timeout", type=float, default=20.0)
     args = parser.parse_args()
 
@@ -134,7 +136,8 @@ def main():
                                                  allow=RNS.Destination.ALLOW_ALL,
                                                  auto_compress=False)
     elif args.scenario != "timeout":
-        path = "/page/form.mu" if args.scenario.startswith("form-") else f"/page/{args.scenario}.mu"
+        path = ("/page/form.mu" if args.scenario.startswith("form-") or
+                args.scenario == "owner-form-history" else f"/page/{args.scenario}.mu")
         destination.register_request_handler(path, page_handler,
                                              allow=RNS.Destination.ALLOW_ALL,
                                              auto_compress=False)
@@ -143,6 +146,7 @@ def main():
 
     started = time.time()
     last_announce = started
+    owner_response_deadline = None
     while time.time() - started < args.timeout:
         now = time.time()
         if now - last_announce >= 2.0 and not state["request_seen"]:
@@ -162,6 +166,24 @@ def main():
                 print("SERVER PASS exact form request data anonymous=False", flush=True)
                 return 0
             print("SERVER FAIL form data or identified identity mismatch", flush=True)
+            return 1
+        if args.scenario == "owner-form-history" and state["request_count"] == 3:
+            expected_changed = dict(EXPECTED_FORM_DATA)
+            expected_changed["field_name"] = "Changed User"
+            if (state["anonymous"] and state["form_sequence"] ==
+                    [EXPECTED_FORM_DATA, expected_changed, EXPECTED_FORM_DATA]):
+                if owner_response_deadline is None:
+                    owner_response_deadline = now + 2.0
+                    print("SERVER owner response 3 queued; awaiting client receipt", flush=True)
+                if state["link_closed"]:
+                    print("SERVER PASS exact form request data owner-history=True delivery-settled=True", flush=True)
+                    return 0
+                if now >= owner_response_deadline:
+                    print("SERVER FAIL owner response delivery did not settle", flush=True)
+                    return 1
+                time.sleep(0.02)
+                continue
+            print("SERVER FAIL owner form/history request sequence", flush=True)
             return 1
         if args.scenario in ("immediate", "resource", "near-limit", "oversized") and state["request_seen"]:
             time.sleep(1.0)

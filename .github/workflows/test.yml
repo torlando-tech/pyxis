@@ -32,7 +32,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libbz2-dev
-          pip install pytest rns==1.4.2 nomadnet==1.2.8
+          pip install pytest platformio rns==1.4.2 nomadnet==1.2.8
+
+      - name: Resolve and attest pinned LVGL dependency
+        env:
+          PYXIS_PLATFORMIO_BIN: ${{ env.pythonLocation }}/bin/pio
+        run: python tools/resolve_lvgl.py --root "$PWD"
 
       - name: Build NomadNet real-peer client
         run: |
@@ -43,6 +48,7 @@ jobs:
 
       - name: Run pytest
         env:
+          PYXIS_PLATFORMIO_BIN: ${{ env.pythonLocation }}/bin/pio
           PYXIS_NOMADNET_X86_CLIENT: ${{ github.workspace }}/build/nomadnet-x86-flow/pyxis_nomadnet_x86_flow
           PYXIS_NOMADNET_RNS_PYTHON: ${{ env.pythonLocation }}/bin/python
           PYXIS_NOMADNET_REFERENCE_SOURCE: ${{ env.pythonLocation }}/lib/python3.11/site-packages

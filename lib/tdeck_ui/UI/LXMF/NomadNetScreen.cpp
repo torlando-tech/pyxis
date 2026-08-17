@@ -124,14 +124,23 @@ NomadNetScreen::NomadNetScreen() {
     set_status("Enter a NomadNet address");show_start();hide();
 }
 NomadNetScreen::~NomadNetScreen(){
+    cancel_status_timer();
     finish_field_edit(false);
     if(_field_editor)lv_textarea_set_text(_field_editor,"");
     if(_screen)lv_obj_del(_screen);
 }
 void NomadNetScreen::set_address(const std::string& value){
-    lv_textarea_set_text(_address,value.c_str());
     const auto summary=NomadNet::display_text(NomadNet::compact_address(value));
+    lv_textarea_set_text(_address,value.c_str());
     lv_label_set_text(_address_summary,summary.c_str());
+}
+bool NomadNetScreen::set_local_address(const std::string& value){
+    // A local navigation changes only the fragment. The compact destination
+    // summary is therefore already correct. The patched textarea replacement
+    // is transactional; verify publication without allocating before changing
+    // scroll or committing the staged history transaction.
+    lv_textarea_set_text(_address,value.c_str());
+    return std::strcmp(lv_textarea_get_text(_address),value.c_str())==0;
 }
 std::string NomadNetScreen::address()const{return lv_textarea_get_text(_address);}
 void NomadNetScreen::set_library(const NomadNet::Library& library){
@@ -174,6 +183,7 @@ void NomadNetScreen::clear_document(){
     _logical_scroll=0;
     _layout_window_top=0;
     _layout_window_bottom=0;
+    _table_layout=TableLayoutObservation{};
     _selected_link=-1;
     _selected_field=-1;
     _selected_focus=-1;
@@ -196,6 +206,11 @@ void NomadNetScreen::clear_directory(){
 void NomadNetScreen::begin_navigation(const std::string& target){
     clear_document();
     clear_directory();
+    set_address(target);
+    show_browser(false);
+    set_status("Opening NomadNet page...");
+}
+void NomadNetScreen::show_pending_navigation(const std::string& target){
     set_address(target);
     show_browser(false);
     set_status("Opening NomadNet page...");
@@ -373,58 +388,110 @@ void NomadNetScreen::set_address_editing(bool editing){
         else{lv_group_add_obj(group,_edit_button);lv_group_focus_obj(_edit_button);}
     }
 }
+void NomadNetScreen::cancel_status_timer(){
+    if(!_status_timer)return;
+    lv_timer_del(_status_timer);
+    _status_timer=nullptr;
+}
+void NomadNetScreen::status_timer_cb(lv_timer_t* timer){
+    auto* screen=static_cast<NomadNetScreen*>(timer->user_data);
+    if(!screen||screen->_status_timer!=timer)return;
+    screen->_status_timer=nullptr;
+    screen->apply_browser_layout(false);
+}
 void NomadNetScreen::set_status(const char* value){
-    const std::string status=value?value:"";
-    lv_label_set_text(_status,status.c_str());
-    const bool loaded_ack=_page_loaded&&status.rfind("Page loaded",0)==0;
+    cancel_status_timer();
+    const char* status=value?value:"";
+    lv_label_set_text(_status,status);
+    const bool loaded_ack=_page_loaded&&std::strncmp(status,"Page loaded",11)==0;
+    const bool cached_ack=_page_loaded&&std::strncmp(status,"Cached page",11)==0;
     apply_browser_layout(!loaded_ack);
+    if(cached_ack){
+        _status_timer=lv_timer_create(status_timer_cb,1500,this);
+        if(_status_timer)lv_timer_set_repeat_count(_status_timer,1);
+        else apply_browser_layout(false);
+    }
 }
 bool NomadNetScreen::set_page(const NomadNet::Document& document) {
+    // Prepare every heap-backed model before touching the published page. The
+    // temporary owns and releases partial capacities on every failure.
+    NomadNet::CompactPage candidate_page;
+    NomadNet::FormState candidate_form;
+    try {
+        if(!candidate_page.assign(document)||!candidate_form.assign(candidate_page)){
+            set_status("Page is too large for available memory");
+            return false;
+        }
+        if(candidate_page.truncated()){
+            const std::string notice=NomadNet::truncation_notice(document);
+            if(!candidate_page.append_notice(notice)){
+                set_status("Page truncation notice could not be retained");
+                return false;
+            }
+        }else if(candidate_page.unsupported()&&
+                 !candidate_page.append_notice("[Unsupported Micron content]")){
+            set_status("Unsupported-content notice could not be retained");
+            return false;
+        }
+    }catch(const std::bad_alloc&){
+        set_status("Page is too large for available memory");
+        return false;
+    }
+
+    auto old_page=std::move(_page);
+    auto old_form=std::move(_form_state);
+    auto old_page_layout=std::move(_page_layout);
+    auto old_line_layout=std::move(_line_layout);
+    auto old_checkpoints=std::move(_layout_checkpoints);
+    auto old_link_y=std::move(_link_y);
+    auto old_link_bottom=std::move(_link_bottom);
+    auto old_field_y=std::move(_field_y);
+    auto old_field_bottom=std::move(_field_bottom);
+    auto old_focus=std::move(_focus_order);
+    const int32_t old_page_height=_page_height,old_physical_extent=_physical_extent;
+    const int32_t old_logical_scroll=_logical_scroll,old_window_top=_layout_window_top;
+    const int32_t old_window_bottom=_layout_window_bottom;
+    const TableLayoutObservation old_table_layout=_table_layout;
+    const int16_t old_selected_link=_selected_link,old_selected_field=_selected_field;
+    const int16_t old_selected_focus=_selected_focus;
+    const bool old_page_loaded=_page_loaded;
+
+    _page=std::move(candidate_page);
+    _form_state=std::move(candidate_form);
+    bool laid_out=false;
+    try{laid_out=layout_page();}catch(const std::bad_alloc&){laid_out=false;}
+    if(!laid_out){
+        _page=std::move(old_page);_form_state=std::move(old_form);
+        _page_layout=std::move(old_page_layout);_line_layout=std::move(old_line_layout);
+        _layout_checkpoints=std::move(old_checkpoints);_link_y=std::move(old_link_y);
+        _link_bottom=std::move(old_link_bottom);_field_y=std::move(old_field_y);
+        _field_bottom=std::move(old_field_bottom);_focus_order=std::move(old_focus);
+        _page_height=old_page_height;_physical_extent=old_physical_extent;
+        _logical_scroll=old_logical_scroll;_layout_window_top=old_window_top;
+        _layout_window_bottom=old_window_bottom;_table_layout=old_table_layout;
+        _selected_link=old_selected_link;
+        _selected_field=old_selected_field;_selected_focus=old_selected_focus;
+        _page_loaded=old_page_loaded;
+        set_status("Page viewport could not be retained");
+        return false;
+    }
+
     auto* group=LVGL::LVGLInit::get_default_group();
     if(group)lv_group_remove_obj(_content);
     finish_field_edit(false);
     ++_form_generation;
-    _form_state.clear();
-    if(!_page.assign(document) || !_form_state.assign(_page)) {
-        clear_document();
-        set_status("Page is too large for available memory");
-        return false;
-    }
-    try {
-        if(_page.truncated()){
-            const std::string notice=NomadNet::truncation_notice(document);
-            if(!_page.append_notice(notice)){
-                clear_document();
-                set_status("Page truncation notice could not be retained");
-                return false;
-            }
-        }
-        else if(_page.unsupported()&&!_page.append_notice("[Unsupported Micron content]")){
-            clear_document();
-            set_status("Unsupported-content notice could not be retained");
-            return false;
-        }
-        show_browser(false);
-        if(!layout_page()){
-            clear_document();
-            set_status("Page viewport could not be retained");
-            return false;
-        }
-        lv_obj_set_style_bg_color(_content,_page.has_background()
-            ?lv_color_hex(_page.background()):Theme::surface(),0);
-        _page_loaded=true;
-        lv_obj_scroll_to_y(_content,0,LV_ANIM_OFF);
-        lv_obj_refresh_self_size(_content);
-        lv_obj_invalidate(_content);
-        return true;
-    }catch(const std::bad_alloc&){
-        clear_document();
-        set_status("Page is too large for available memory");
-        return false;
-    }
+    show_browser(false);
+    lv_obj_set_style_bg_color(_content,_page.has_background()
+        ?lv_color_hex(_page.background()):Theme::surface(),0);
+    _page_loaded=true;
+    lv_obj_scroll_to_y(_content,0,LV_ANIM_OFF);
+    lv_obj_refresh_self_size(_content);
+    lv_obj_invalidate(_content);
+    return true;
 }
 
 bool NomadNetScreen::layout_page(){
+    _table_layout=TableLayoutObservation{};
     _page_layout.clear();
     _line_layout.clear();
     _layout_checkpoints.clear();
@@ -774,15 +841,32 @@ bool NomadNetScreen::layout_table(const NomadNet::CompactPage::BlockRecord& bloc
     const int32_t metadata_width=std::min<int32_t>(content_width,
         static_cast<int32_t>(table.max_width)*space_width);
     const int32_t structural_minimum=static_cast<int32_t>(minimum_width)*table.column_count;
-    if(NomadNet::choose_table_layout(structural_minimum,content_width)==
-       NomadNet::TableLayoutTier::FIT){
+    const auto tier=NomadNet::choose_table_layout(
+        structural_minimum,natural_width,content_width);
+    const int32_t table_top=y;
+    if(tier!=NomadNet::TableLayoutTier::STACKED){
         const int16_t target_width=static_cast<int16_t>(std::max<int32_t>(
             structural_minimum,std::min<int32_t>(metadata_width,content_width)));
         const int16_t table_fit_width=NomadNet::fit_table_columns(
             column_widths,table.column_count,minimum_width,target_width);
-        return layout_table_fit(table,column_widths,table_fit_width,y,window_top,window_bottom);
+        if(!layout_table_fit(table,column_widths,table_fit_width,y,window_top,window_bottom))return false;
+        if(!_table_layout.valid){
+            const int16_t left=table.alignment==NomadNet::Alignment::CENTER?
+                static_cast<int16_t>((content_width-table_fit_width)/2):
+                table.alignment==NomadNet::Alignment::RIGHT?
+                    static_cast<int16_t>(content_width-table_fit_width):0;
+            _table_layout={tier,left,table_top,table_fit_width,y-table_top,
+                           table.column_count,0,true};
+        }
+        return true;
     }
-    return layout_table_reflow(table,y,window_top,window_bottom);
+    if(!layout_table_reflow(table,y,window_top,window_bottom))return false;
+    if(!_table_layout.valid){
+        const uint16_t rows=table.row_count>1?static_cast<uint16_t>(table.row_count-1):1;
+        _table_layout={tier,0,table_top,content_width,y-table_top,0,
+                       static_cast<uint16_t>(rows*table.column_count),true};
+    }
+    return true;
 }
 
 bool NomadNetScreen::layout_from(std::size_t start_block,int32_t start_y,

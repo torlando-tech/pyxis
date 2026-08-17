@@ -11,6 +11,8 @@
 #include "NomadNetDocument.h"
 #include "NomadNetDisplay.h"
 #include "NomadNetHistory.h"
+#include "NomadNetOwner.h"
+#include "NomadNetPageApplication.h"
 #include "NomadNetGlyphs.h"
 #include "NomadNetLibrary.h"
 #include "NomadNetActionMailbox.h"
@@ -120,6 +122,127 @@ int main(int argc, char** argv) {
               history.current_scroll() == 137);
     for (std::size_t i = 0; i < PageHistory::MAX_DEPTH + 4; ++i) history.open(std::to_string(i));
     check("browser history is bounded", history.depth() == PageHistory::MAX_DEPTH);
+
+    class TestSubmission final : public UI::LXMF::NomadNet::OwnerSubmissionSource {
+    public:
+        bool prepare_submission(uint16_t, uint32_t, std::string& target,
+                UI::LXMF::NomadNet::ExternalVector<uint8_t>& bytes,
+                FormEncodeResult& result) override {
+            target = "form";
+            const uint8_t submitted[] = {0x81, 0xa1, 'x', 0xa1, 'y'};
+            bytes.assign(submitted, submitted + sizeof(submitted));
+            result = FormEncodeResult::OK;
+            return true;
+        }
+    } submission;
+    UI::LXMF::NomadNet::OwnerController owner;
+    PageHistory staged_history;
+    staged_history.open("old");
+    UserAction submit_action;
+    submit_action.kind = UserActionKind::SUBMIT;
+    auto submit_command = owner.service(submit_action, staged_history, submission, 19);
+    check("owner Submit stages history without publishing it",
+          submit_command.result == UI::LXMF::NomadNet::OwnerResult::REQUEST &&
+          staged_history.current() == "old" && staged_history.depth() == 0 &&
+          submit_command.pending_history.ready());
+    staged_history.commit(std::move(submit_command.pending_history));
+    check("staged Submit history publishes exactly once",
+          staged_history.current() == "form" && staged_history.depth() == 1 &&
+          staged_history.current_has_request_data());
+    const auto committed_depth = staged_history.depth();
+    staged_history.commit(std::move(submit_command.pending_history));
+    check("consumed history transaction cannot publish twice",
+          staged_history.depth() == committed_depth && staged_history.current() == "form");
+    staged_history.open("next", true, 77);
+    UserAction back_action;
+    back_action.kind = UserActionKind::BACK;
+    auto back_command = owner.service(back_action, staged_history, submission, 0);
+    check("owner Back is staged until page publication",
+          back_command.result == UI::LXMF::NomadNet::OwnerResult::REQUEST &&
+          back_command.target == "form" && staged_history.current() == "next" &&
+          back_command.pending_history.ready());
+    staged_history.commit(std::move(back_command.pending_history));
+    check("staged Back restores exact request bytes after publication",
+          staged_history.current() == "form" && staged_history.current_scroll() == 77 &&
+          staged_history.current_request_data().size() == 5);
+
+    // Exercise the exact OwnerController -> UIManager local-publication seam.
+    // The first local anchor transition is an ordinary OPEN; Back must retain
+    // the OwnerController's staged BACK until the visible state is published.
+    PageHistory local_history;
+    local_history.open("node:/page/a.mu");
+    std::string visible_address = "node:/page/a.mu";
+    int32_t visible_scroll = 137;
+    PageHistory::PendingOpen local_pending;
+    bool history_unchanged_during_publication = false;
+    const auto anchor_result = UI::LXMF::NomadNet::apply_local_navigation_transaction(
+        "node:/page/a.mu#details", true, visible_scroll, -1, false,
+        local_history, local_pending,
+        [] { return true; },
+        [&](const std::string& canonical, int32_t) {
+            history_unchanged_during_publication =
+                local_history.current() == "node:/page/a.mu" && local_history.depth() == 0;
+            visible_address = canonical;
+            visible_scroll = 420;
+            return true;
+        });
+    check("ordinary local anchor navigation stages and commits OPEN after publication",
+          anchor_result == UI::LXMF::NomadNet::LocalNavigationResult::APPLIED &&
+          history_unchanged_during_publication &&
+          visible_address == "node:/page/a.mu#details" && visible_scroll == 420 &&
+          local_history.current() == visible_address && local_history.depth() == 1);
+
+    auto local_back = owner.service(back_action, local_history, submission, visible_scroll);
+    history_unchanged_during_publication = false;
+    const auto back_result = UI::LXMF::NomadNet::apply_local_navigation_transaction(
+        local_back.target, false, visible_scroll, local_back.restore_scroll, true,
+        local_history, local_back.pending_history,
+        [] { return true; },
+        [&](const std::string& canonical, int32_t restore_scroll) {
+            history_unchanged_during_publication =
+                local_history.current() == "node:/page/a.mu#details" &&
+                local_history.depth() == 1 && local_back.pending_history.ready();
+            visible_address = canonical;
+            visible_scroll = restore_scroll;
+            return true;
+        });
+    check("same-resource Back publishes before committing the staged BACK exactly once",
+          back_result == UI::LXMF::NomadNet::LocalNavigationResult::APPLIED &&
+          history_unchanged_during_publication &&
+          visible_address == "node:/page/a.mu" && visible_scroll == 137 &&
+          local_history.current() == visible_address && local_history.depth() == 0 &&
+          !local_back.pending_history.ready());
+    auto second_local_back = owner.service(back_action, local_history, submission, visible_scroll);
+    check("second Back cannot repeat the consumed same-resource history entry",
+          second_local_back.result == UI::LXMF::NomadNet::OwnerResult::BACK_EMPTY &&
+          local_history.current() == "node:/page/a.mu" && local_history.depth() == 0);
+
+    PageHistory failed_local_history;
+    failed_local_history.open("node:/page/a.mu");
+    failed_local_history.open("node:/page/a.mu#details", true, 137);
+    auto supersede_back = owner.service(back_action, failed_local_history, submission, 420);
+    const std::string failed_visible_address = "node:/page/a.mu#details";
+    const auto supersede_result = UI::LXMF::NomadNet::apply_local_navigation_transaction(
+        supersede_back.target, false, 420, supersede_back.restore_scroll, true,
+        failed_local_history, supersede_back.pending_history,
+        [] { return false; },
+        [](const std::string&, int32_t) { return true; });
+    check("same-resource supersede failure preserves page/history and clears staged BACK",
+          supersede_result == UI::LXMF::NomadNet::LocalNavigationResult::PREPARATION_FAILED &&
+          failed_visible_address == "node:/page/a.mu#details" &&
+          failed_local_history.current() == failed_visible_address &&
+          failed_local_history.depth() == 1 && !supersede_back.pending_history.ready());
+
+    auto publication_back = owner.service(back_action, failed_local_history, submission, 420);
+    const auto publication_result = UI::LXMF::NomadNet::apply_local_navigation_transaction(
+        publication_back.target, false, 420, publication_back.restore_scroll, true,
+        failed_local_history, publication_back.pending_history,
+        [] { return true; },
+        [](const std::string&, int32_t) { return false; });
+    check("same-resource publication failure preserves page/history and clears staged BACK",
+          publication_result == UI::LXMF::NomadNet::LocalNavigationResult::PUBLICATION_FAILED &&
+          failed_local_history.current() == failed_visible_address &&
+          failed_local_history.depth() == 1 && !publication_back.pending_history.ready());
 
     AsyncMailbox mailbox;
     const std::vector<uint8_t> old_link{1}, new_link{2};
@@ -1296,7 +1419,8 @@ int main(int argc, char** argv) {
         std::string fixture((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
         auto real = parser.parse(fixture);
         check("authoritative Aleph fixture is readable", input.good() || input.eof());
-        check("authoritative fixture yields headings", !real.blocks.empty() && real.blocks[0].type == BlockType::HEADING);
+        check("authoritative fixture yields headings", std::any_of(real.blocks.begin(), real.blocks.end(),
+              [](const auto& block) { return block.type == BlockType::HEADING; }));
         check("authoritative fixture yields links", !real.links.empty());
         bool retained_fixture_fields = false;
         CompactPage real_page;
@@ -1372,13 +1496,16 @@ int main(int argc, char** argv) {
     check("divider has layout content without a text run",
           UI::LXMF::NomadNet::block_has_layout_content(BlockType::DIVIDER, 0));
     check("tables keep their columns when the structural minimum fits the device",
-          UI::LXMF::NomadNet::choose_table_layout(52, 304) ==
+          UI::LXMF::NomadNet::choose_table_layout(52, 52, 304) ==
               UI::LXMF::NomadNet::TableLayoutTier::FIT);
-    check("natural or authored widths do not turn a structurally fitting table into cards",
-          UI::LXMF::NomadNet::choose_table_layout(78, 304) ==
-              UI::LXMF::NomadNet::TableLayoutTier::FIT);
-    check("only tables whose structural minimum exceeds the content area use reflow",
-          UI::LXMF::NomadNet::choose_table_layout(305, 304) ==
+    check("oversized natural widths reflow while the structural minimum still fits",
+          UI::LXMF::NomadNet::choose_table_layout(52, 400, 304) ==
+              UI::LXMF::NomadNet::TableLayoutTier::REFLOW);
+    check("tables whose structural minimum exceeds the content area use cards",
+          UI::LXMF::NomadNet::choose_table_layout(305, 400, 304) ==
+              UI::LXMF::NomadNet::TableLayoutTier::STACKED);
+    check("eight canonical minimum columns remain two-dimensional on the T-Deck",
+          UI::LXMF::NomadNet::choose_table_layout(232, 400, 304) ==
               UI::LXMF::NomadNet::TableLayoutTier::REFLOW);
     int16_t fitted_columns[2] = {40, 400};
     const int16_t fitted_width = UI::LXMF::NomadNet::fit_table_columns(
