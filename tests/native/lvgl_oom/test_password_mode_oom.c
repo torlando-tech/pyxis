@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "lvgl.h"
 
@@ -52,6 +53,17 @@ int main(void) {
     assert(!lv_textarea_get_password_mode(textarea));
     assert(lv_textarea_get_text(textarea) != NULL);
     assert(lv_textarea_get_text(textarea)[0] == '\0');
+
+    /* A constrained non-password replacement must be atomic as a whole. A
+     * failed clear may not be followed by characterwise append, which would
+     * corrupt the visible browser address while Back remains uncommitted. */
+    lv_textarea_set_max_length(textarea, 511);
+    lv_textarea_set_text(textarea, "node:/page/a.mu#details");
+    assert(strcmp(lv_textarea_get_text(textarea), "node:/page/a.mu#details") == 0);
+    fail_allocations = true;
+    lv_textarea_set_text(textarea, "node:/page/a.mu");
+    fail_allocations = false;
+    assert(strcmp(lv_textarea_get_text(textarea), "node:/page/a.mu#details") == 0);
 
     lv_obj_del(textarea);
     return 0;

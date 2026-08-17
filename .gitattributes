@@ -1,0 +1,2 @@
+# Canonical Micron fixture excerpts preserve source bytes, including spaces.
+tests/native/fixtures/nomadnet_feature_matrix.mu whitespace=-trailing-space

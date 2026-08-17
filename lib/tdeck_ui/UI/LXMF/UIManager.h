@@ -20,6 +20,8 @@
 #include "NomadNetMailbox.h"
 #include "NomadNetRequestPolicy.h"
 #include "NomadNetActionMailbox.h"
+#include "NomadNetOwner.h"
+#include "NomadNetPageApplication.h"
 #include "NomadNetLibrary.h"
 #include "NomadNetCacheFlow.h"
 #include "Hardware/TDeck/NomadNetStorageSD.h"
@@ -410,6 +412,8 @@ private:
     NomadNet::DocumentParser _nomad_parser;
     NomadNet::ResponseBuffer _nomad_response;
     NomadNet::PageHistory _nomad_history;
+    NomadNet::PageHistory::PendingOpen _nomad_pending_history;
+    NomadNet::OwnerController _nomad_owner;
     NomadNet::AsyncMailbox _nomad_mailbox;
     NomadNet::ActionMailbox _nomad_actions;
     NomadNet::ExternalVector<uint8_t> _nomad_submission_data;
@@ -451,15 +455,16 @@ private:
     void hide_all_screens();
     void nomad_open(const std::string& address, bool add_history = true,
                     int32_t restore_logical_scroll = -1,
-                    bool preserve_submission = false);
-    void nomad_reload();
-    bool nomad_restore_history_submission();
+                    bool preserve_submission = false,
+                    bool history_prepared = false);
     void nomad_update();
+    void nomad_back_empty();
     uint32_t nomad_advance_navigation_generation();
     bool nomad_supersede_transport(const std::string& destination_hex);
     void nomad_begin_live_transport();
     bool nomad_apply_page_bytes(const uint8_t* data, std::size_t size, bool cached);
-    bool nomad_apply_page_document(const NomadNet::Document& document, bool cached);
+    NomadNet::PageApplyResult nomad_apply_page_document(
+        const NomadNet::Document& document, bool cached);
     void nomad_start_link();
     void nomad_identify_link_if_configured();
     void nomad_send_request();

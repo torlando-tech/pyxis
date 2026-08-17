@@ -1,6 +1,7 @@
 #include "NomadNetDocument.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdlib>
 
@@ -433,7 +434,14 @@ std::string trim_table_cell(const std::string& value) {
     return value.substr(first, last - first);
 }
 
-std::vector<std::string> parse_table_row(const std::string& source) {
+struct BoundedTableRow {
+    std::array<std::string, DocumentParser::MAX_TABLE_COLUMNS> cells;
+    std::size_t count = 0;
+    bool columns_exceeded = false;
+    bool cell_bytes_exceeded = false;
+};
+
+BoundedTableRow parse_table_row(const std::string& source) {
     std::size_t first = 0;
     std::size_t last = source.size();
     while (first < last && std::isspace(static_cast<unsigned char>(source[first]))) ++first;
@@ -441,25 +449,57 @@ std::vector<std::string> parse_table_row(const std::string& source) {
     if (first < last && source[first] == '|') ++first;
     if (last > first && source[last - 1] == '|') --last;
 
-    std::vector<std::string> cells;
+    BoundedTableRow row;
     std::string current;
+    current.reserve(std::min<std::size_t>(last - first,
+        DocumentParser::MAX_TABLE_CELL_BYTES));
     bool escaped = false;
+    bool current_overflow_seen = false;
+    auto append_cell_byte = [&](char value) {
+        if (row.count >= DocumentParser::MAX_TABLE_COLUMNS) return;
+        if (current_overflow_seen) {
+            row.cell_bytes_exceeded = true;
+            return;
+        }
+        if (current.size() < DocumentParser::MAX_TABLE_CELL_BYTES) {
+            current.push_back(value);
+            return;
+        }
+        row.cell_bytes_exceeded = true;
+        if (!current_overflow_seen &&
+            (static_cast<unsigned char>(value) & 0xc0) == 0x80) {
+            while (!current.empty() &&
+                   (static_cast<unsigned char>(current.back()) & 0xc0) == 0x80)
+                current.pop_back();
+            if (!current.empty() && static_cast<unsigned char>(current.back()) >= 0xc2)
+                current.pop_back();
+        }
+        current_overflow_seen = true;
+    };
+    auto finish_cell = [&]() {
+        if (row.count < DocumentParser::MAX_TABLE_COLUMNS) {
+            row.cells[row.count++] = trim_table_cell(current);
+        } else {
+            row.columns_exceeded = true;
+        }
+        current.clear();
+        current_overflow_seen = false;
+    };
     for (std::size_t i = first; i < last; ++i) {
         const char value = source[i];
         if (escaped) {
-            current.push_back(value);
+            append_cell_byte(value);
             escaped = false;
         } else if (value == '\\') {
             escaped = true;
         } else if (value == '|') {
-            cells.push_back(trim_table_cell(current));
-            current.clear();
+            finish_cell();
         } else {
-            current.push_back(value);
+            append_cell_byte(value);
         }
     }
-    cells.push_back(trim_table_cell(current));
-    return cells;
+    finish_cell();
+    return row;
 }
 
 Alignment table_cell_alignment(const std::string& source) {
@@ -527,8 +567,11 @@ bool append_table(Document& doc, const std::vector<std::string>& lines,
 
     const auto header = parse_table_row(lines.front());
     const auto alignment_cells = parse_table_row(lines[1]);
-    const std::size_t columns = std::min(header.size(), DocumentParser::MAX_TABLE_COLUMNS);
-    if (header.size() > columns) doc.mark_truncated(TruncationReason::TABLE_COLUMNS);
+    const std::size_t columns = header.count;
+    if (header.columns_exceeded || alignment_cells.columns_exceeded)
+        doc.mark_truncated(TruncationReason::TABLE_COLUMNS);
+    if (header.cell_bytes_exceeded || alignment_cells.cell_bytes_exceeded)
+        doc.mark_truncated(TruncationReason::TABLE_CELL_BYTES);
     if (columns == 0) {
         append_malformed_table(doc, lines, total_runs);
         return false;
@@ -554,15 +597,18 @@ bool append_table(Document& doc, const std::vector<std::string>& lines,
 
     for (std::size_t row = 0; row < rows; ++row) {
         const auto cells = row == 0 ? header : parse_table_row(lines[row + 1]);
+        if (cells.columns_exceeded) doc.mark_truncated(TruncationReason::TABLE_COLUMNS);
+        if (cells.cell_bytes_exceeded) doc.mark_truncated(TruncationReason::TABLE_CELL_BYTES);
         for (std::size_t column = 0; column < columns; ++column) {
             TableCell cell;
             cell.first_run = static_cast<uint32_t>(doc.table_runs.size());
             cell.alignment = row == 0 ? Alignment::LEFT :
-                (column < alignment_cells.size() ? table_cell_alignment(alignment_cells[column]) : Alignment::LEFT);
+                (column < alignment_cells.count ? table_cell_alignment(alignment_cells.cells[column]) : Alignment::LEFT);
             Block parsed;
-            if (column < cells.size()) {
-                std::string cell_source = cells[column];
-                const bool cell_truncated = cell_source.size() > DocumentParser::MAX_TABLE_CELL_BYTES;
+            if (column < cells.count) {
+                std::string cell_source = cells.cells[column];
+                const bool cell_truncated = cells.cell_bytes_exceeded &&
+                    cell_source.size() == DocumentParser::MAX_TABLE_CELL_BYTES;
                 const Style style_before_cell = style;
                 if (cell_truncated) {
                     std::size_t retained = DocumentParser::MAX_TABLE_CELL_BYTES;
@@ -600,6 +646,24 @@ bool append_table(Document& doc, const std::vector<std::string>& lines,
 
 Document DocumentParser::parse(const std::string& source) const {
     return parse(source.data(), source.size());
+}
+
+ParseStatus DocumentParser::parse_into(const char* source, std::size_t size,
+                                       Document& output) const noexcept {
+    if (!source && size != 0) {
+        output = Document{};
+        output.malformed = true;
+        return ParseStatus::INVALID_INPUT;
+    }
+    try {
+        Document candidate = parse(source, size);
+        output = std::move(candidate);
+        return ParseStatus::OK;
+    } catch (const std::bad_alloc&) {
+        output = Document{};
+        output.allocation_failed = true;
+        return ParseStatus::ALLOCATION_FAILED;
+    }
 }
 
 Document DocumentParser::parse(const char* source, std::size_t size) const {

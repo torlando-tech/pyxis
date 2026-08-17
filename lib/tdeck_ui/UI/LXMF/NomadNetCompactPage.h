@@ -21,12 +21,19 @@ inline bool block_has_layout_content(BlockType type, uint16_t run_count) {
            type == BlockType::TABLE || run_count != 0;
 }
 
-enum class TableLayoutTier : uint8_t { FIT, REFLOW };
+enum class TableLayoutTier : uint8_t { FIT, REFLOW, STACKED };
 
 inline TableLayoutTier choose_table_layout(int32_t structural_minimum_width,
-                                           int32_t content_width) {
+                                           int32_t natural_width,
+                                           int32_t content_width,
+                                           uint8_t column_count = 1,
+                                           int16_t minimum_readable_cell_width = 0) {
+    if (column_count != 0 && minimum_readable_cell_width > 0 &&
+        content_width / column_count < minimum_readable_cell_width)
+        return TableLayoutTier::STACKED;
+    if (natural_width <= content_width) return TableLayoutTier::FIT;
     return structural_minimum_width <= content_width
-        ? TableLayoutTier::FIT : TableLayoutTier::REFLOW;
+        ? TableLayoutTier::REFLOW : TableLayoutTier::STACKED;
 }
 
 inline int16_t fit_table_columns(int16_t* widths, uint8_t column_count,
@@ -192,6 +199,7 @@ public:
 
     bool empty() const { return _blocks.empty(); }
     std::size_t arena_bytes() const { return _arena.size(); }
+
     const ExternalVector<BlockRecord>& blocks() const { return _blocks; }
     const ExternalVector<RunRecord>& runs() const { return _runs; }
     const ExternalVector<LinkRecord>& links() const { return _links; }

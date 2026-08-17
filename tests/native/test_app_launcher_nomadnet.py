@@ -6,8 +6,24 @@ from pathlib import Path
 
 import pytest
 
+import hashlib
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
+
+
+def test_nomadnet_feature_fixture_has_honest_pinned_provenance():
+    fixture = HERE / "fixtures/nomadnet_feature_matrix.mu"
+    data = fixture.read_bytes()
+    assert hashlib.sha256(data).hexdigest() == (
+        "1988c090a9c84ac0ff9c6d9f798e892710aea2c834639402fcc2e9089b23835f"
+    )
+    text = data.decode("utf-8")
+    assert "nomadnet/examples/various/input_fields.py c72e87170a3d833fc18b9c9d12299a4a056d8f46c4f8a43e3f872fc0b7b69dc9" in text
+    authoritative = text.split("# BEGIN AUTHORITATIVE\n", 1)[1].split("# END AUTHORITATIVE", 1)[0]
+    assert "transcribed" not in authoritative
+    assert "# source-range:" in authoritative
+    assert "# BEGIN ADAPTED" in text and "# BEGIN SYNTHETIC" in text
 SOURCE = HERE / "test_app_launcher_nomadnet.cpp"
 INCLUDE = ROOT / "lib" / "tdeck_ui" / "UI" / "LXMF"
 FIXTURES = {
@@ -15,7 +31,49 @@ FIXTURES = {
         "e47de4e19e7216e48a8d441abbca1650b77ab6a2b47bedbd2144301f44172728",
     HERE / "fixtures" / "columba_releases_live.mu":
         "1ea4eea2b06d6988c53c19df51d38f78abd27125b4613f7a3fa5715f7461b10a",
+    HERE / "fixtures" / "nomadnet_feature_matrix.mu":
+        "1988c090a9c84ac0ff9c6d9f798e892710aea2c834639402fcc2e9089b23835f",
 }
+
+FEATURE_MATRIX = HERE / "fixtures" / "nomadnet_feature_matrix.mu"
+FEATURE_MATRIX_SHA256 = "1988c090a9c84ac0ff9c6d9f798e892710aea2c834639402fcc2e9089b23835f"
+CANONICAL_NOMADNET_COMMIT = "89e3eea10c60d8fe597d36d2e091d5aab86bdfb8"
+CANONICAL_SOURCE_SHA256 = {
+    "nomadnet/ui/textui/MicronParser.py":
+        "c4b40918fe813a7cfbb696f33df8a08451fd0156a6919a185b75225f52402ffb",
+    "nomadnet/ui/textui/Browser.py":
+        "b7bc37e0fd4e72261703a037ab1967ea4cc43b837dc1cd74f92a835bacab40a1",
+    "nomadnet/Node.py":
+        "2461a592b731cb1469bebb5ccc5f523892127881cb7a7e8ed586ac62a8c0c23a",
+}
+
+
+def test_nomadnet_feature_matrix_is_byte_exact_and_classifies_every_milestone_feature():
+    data = FEATURE_MATRIX.read_bytes()
+    assert hashlib.sha256(data).hexdigest() == FEATURE_MATRIX_SHA256
+    text = data.decode("utf-8")
+    assert f"# canonical-commit: {CANONICAL_NOMADNET_COMMIT}" in text
+    for relative, digest in CANONICAL_SOURCE_SHA256.items():
+        assert f"# canonical-source-sha256: {relative} {digest}" in text
+    assert text.count("# BEGIN AUTHORITATIVE") == 1
+    assert text.count("# END AUTHORITATIVE") == 1
+    assert text.count("# BEGIN SYNTHETIC") == 1
+    assert text.count("# END SYNTHETIC") == 1
+    required = {
+        "default-divider", "custom-divider", "rgb-color", "grayscale-color",
+        "unknown-modifier", "anchor", "heading", "table-delimiters",
+        "field-text", "field-password", "field-checkbox", "field-radio",
+        "submit-named", "submit-wildcard", "submit-preconfigured", "partial-descriptor",
+        "canonical-submit-variants", "canonical-input-and-submit", "canonical-checkbox-radio",
+    }
+    observed = set(re.findall(r"^# feature: ([a-z0-9-]+) status: (supported|degraded|future)$",
+                              text, flags=re.MULTILINE))
+    assert {name for name, _ in observed} == required
+    statuses = dict(observed)
+    assert statuses["partial-descriptor"] == "future"
+    assert statuses["table-delimiters"] == "supported"
+    assert statuses["field-password"] == "supported"
+    assert "# feature: partial-descriptor status: supported" not in text
 
 
 def _cxx():
@@ -41,6 +99,7 @@ def test_app_launcher_nomadnet_native(tmp_path):
         str(INCLUDE / "NomadNetForm.cpp"),
         str(INCLUDE / "NomadNetGlyphs.cpp"),
         str(INCLUDE / "NomadNetLibrary.cpp"),
+        str(INCLUDE / "NomadNetOwner.cpp"),
         str(INCLUDE / "NomadNetUrl.cpp"),
         "-o", str(binary),
     ]
@@ -162,8 +221,8 @@ def test_nomadnet_forms_are_bounded_virtualized_and_owner_submitted():
     assert "if(pwd_resized == NULL) return;\\n        ta->pwd_tmp = pwd_resized;" in lvgl_patch
     assert "if(pwd_bulk_resized == NULL) return;\\n        ta->pwd_tmp = pwd_bulk_resized;" in lvgl_patch
     assert "Reserve password storage before mutating the label" in lvgl_patch
-    assert 'env_libdeps_dir(env, "lvgl", "src", "core", "lv_obj_class.c")' in lvgl_patch
-    assert 'env_libdeps_dir(env, "lvgl", "src", "widgets", "lv_label.c")' in lvgl_patch
+    assert 'lvgl_path("src", "core", "lv_obj_class.c")' in lvgl_patch
+    assert 'lvgl_path("src", "widgets", "lv_label.c")' in lvgl_patch
     assert "if(parent->spec_attr == NULL)" in lvgl_patch
     assert "lv_obj_t ** children_resized" in lvgl_patch
     assert "char * label_resized = lv_mem_realloc" in lvgl_patch
@@ -171,8 +230,8 @@ def test_nomadnet_forms_are_bounded_virtualized_and_owner_submitted():
     assert "volatile char * visible" in lvgl_patch
     assert "size_t visible_len = strlen(txt)" in lvgl_patch
     assert "size_t masked_len = strlen(visible)" in lvgl_patch
-    assert 'env_libdeps_dir(env, "lvgl", "src", "core", "lv_event.c")' in lvgl_patch
-    assert 'env_libdeps_dir(env, "lvgl", "src", "core", "lv_group.c")' in lvgl_patch
+    assert 'lvgl_path("src", "core", "lv_event.c")' in lvgl_patch
+    assert 'lvgl_path("src", "core", "lv_group.c")' in lvgl_patch
     assert "lv_event_dsc_t * event_dsc_resized" in lvgl_patch
     assert "uint32_t event_dsc_cnt_new" in lvgl_patch
     assert "if(lv_label_get_text(ta->label) == NULL)" in lvgl_patch
@@ -292,6 +351,7 @@ def test_nomadnet_anchor_navigation_stays_local_and_uses_layout_checkpoints():
     screen = (INCLUDE / "NomadNetScreen.cpp").read_text()
     manager_h = (INCLUDE / "UIManager.h").read_text()
     manager = (INCLUDE / "UIManager.cpp").read_text()
+    page_application = (INCLUDE / "NomadNetPageApplication.h").read_text()
 
     assert "MAX_ANCHORS = 128" in document_h
     assert "MAX_ANCHOR_NAME_BYTES = 64" in document_h
@@ -309,15 +369,30 @@ def test_nomadnet_anchor_navigation_stays_local_and_uses_layout_checkpoints():
     assert "scroll_to_logical(target,LV_ANIM_OFF)" in jump
 
     open_page = manager[manager.index("void UIManager::nomad_open("):
-                        manager.index("void UIManager::nomad_reload()")]
-    assert "_nomad_url.path,_nomad_url.fields" in open_page
+                        manager.index("void UIManager::nomad_start_link()")]
+    assert "_nomad_url.path, _nomad_url.fields" in open_page
     assert "NomadNet::should_jump_locally" in open_page
     local = open_page[open_page.index("NomadNet::should_jump_locally"):
                       open_page.index("_nomad_pending_scroll=restore_logical_scroll")]
     assert "_nomadnet_screen->jump_to_anchor(parsed.fragment)" in local
-    assert "if(!resolved&&parsed.fragment.empty())return;" in local
-    assert "_nomad_history.current_request_data()" in local
-    assert "_nomad_history.open(parsed.str(), add_history, current_scroll," in local
+    assert "if (!resolved) return false;" in local
+    assert "NomadNet::apply_local_navigation_transaction" in local
+    assert "restore_logical_scroll, history_prepared" in local
+    assert "set_local_address(published_address)" in local
+    assert local.index("set_local_address(published_address)") < local.index(
+        "restore_logical_scroll(restore_scroll)"
+    )
+    local_address = screen[screen.index("bool NomadNetScreen::set_local_address("):
+                           screen.index("std::string NomadNetScreen::address()")]
+    assert "lv_textarea_set_text(_address,value.c_str())" in local_address
+    assert "std::strcmp(lv_textarea_get_text(_address),value.c_str())==0" in local_address
+    local_transaction = page_application[page_application.index(
+        "LocalNavigationResult apply_local_navigation_transaction"):
+        page_application.index("enum class PageApplyResult")]
+    assert "if (history_prepared)" in local_transaction
+    assert "history.prepare_open(canonical_address" in local_transaction
+    assert local_transaction.index("publish(canonical_address, restore_scroll)") < \
+        local_transaction.index("history.commit(std::move(pending))")
     assert "nomad_send_request" not in local
     assert "begin_navigation" not in local
 
@@ -328,17 +403,18 @@ def test_nomadnet_anchor_navigation_stays_local_and_uses_layout_checkpoints():
 
     response = manager[manager.index("case NomadNet::AsyncMailbox::Kind::RESPONSE:"):
                        manager.index("case NomadNet::AsyncMailbox::Kind::NONE:")]
-    apply = manager[manager.index("bool UIManager::nomad_apply_page_document("):
+    apply = manager[manager.index("NomadNet::PageApplyResult UIManager::nomad_apply_page_document("):
                     manager.index("void UIManager::nomad_update()")]
     assert "nomad_apply_page_document(document, false)" in response
     assert "_nomadnet_screen->set_page(document)" in apply
     assert "_nomadnet_screen->jump_to_anchor(_nomad_url.fragment)" in apply
     assert "_nomadnet_screen->restore_logical_scroll(_nomad_pending_scroll)" in apply
-    assert "if (applied && _nomad_pending_scroll >= 0)" in apply
-    assert "else if (applied && _nomad_url.has_fragment)" in apply
+    assert "if (_nomad_pending_scroll >= 0)" in apply
+    assert "if (result != NomadNet::PageApplyResult::APPLIED)" in apply
+    assert "else if (_nomad_url.has_fragment)" in apply
     assert (apply.index("_nomadnet_screen->restore_logical_scroll(_nomad_pending_scroll)") <
             apply.index("_nomadnet_screen->jump_to_anchor(_nomad_url.fragment)"))
-    assert "Unknown anchor: #" in apply
+    assert "Unknown anchor: #" in page_application
     assert "int32_t _nomad_pending_scroll" in manager_h
 
 
@@ -361,8 +437,9 @@ def test_nomadnet_page_body_uses_one_compact_custom_viewport():
     assert "divider_height=16" not in screen
     assert "commit_line" in screen
     assert "NomadNet::truncation_notice(document)" in set_page
-    assert "if(!_page.append_notice(notice))" in set_page
-    assert "if(!layout_page())" in set_page
+    assert "if(!candidate_page.append_notice(notice))" in set_page
+    assert "try{laid_out=layout_page();}" in set_page
+    assert "if(!laid_out)" in set_page
     assert "catch(const std::bad_alloc&)" in set_page
     assert "Page is too large for available memory" in set_page
     assert "[Page truncated to device safety limits]" not in set_page
@@ -413,7 +490,7 @@ def test_cache_lookup_preserves_page_and_response_uses_captured_request_class():
     manager = (INCLUDE / "UIManager.cpp").read_text()
     header = (INCLUDE / "UIManager.h").read_text()
     open_page = manager[manager.index("void UIManager::nomad_open("):
-                        manager.index("void UIManager::nomad_reload()")]
+                        manager.index("void UIManager::nomad_start_link()")]
     lookup = open_page.index("_nomad_cache_flow.begin")
     assert "begin_navigation" not in open_page[:lookup]
     assert "_nomad_request_data_class" in header
@@ -505,17 +582,17 @@ def test_nomadnet_validates_queued_addresses_before_navigation_teardown():
     assert "begin_navigation(" not in actions
 
     open_page = manager[manager.index("void UIManager::nomad_open("):
-                        manager.index("void UIManager::nomad_reload()")]
+                        manager.index("void UIManager::nomad_start_link()")]
     parse = open_page.index("NomadNet::Url::parse")
     lookup = open_page.index("_nomad_cache_flow.begin")
     assert parse < lookup
     assert "begin_navigation" not in open_page[:lookup]
     live = manager[manager.index("void UIManager::nomad_begin_live_transport()"):
-                   manager.index("void UIManager::nomad_reload()")]
+                   manager.index("void UIManager::nomad_start_link()")]
     # A valid address must also preserve the current page until live transport
     # serialization succeeds; lock contention is retried by the owner loop.
     assert live.index("RouterLock router_lock;") < \
-        live.index("_nomadnet_screen->begin_navigation(_nomad_url.str())")
+        live.index("_nomadnet_screen->set_address(_nomad_url.str())")
 
 
 def test_launcher_transition_has_one_final_focus_owner():
@@ -573,7 +650,7 @@ def test_nomadnet_cache_blocker_boundaries_are_closed():
     # advancing generation, and old transport is reconciled before a hit publishes.
     assert "_nomad_navigation_generation" in header
     open_page = manager[manager.index("void UIManager::nomad_open("):
-                        manager.index("void UIManager::nomad_reload()")]
+                        manager.index("void UIManager::nomad_start_link()")]
     assert "nomad_supersede_transport" in open_page
     cache_hit = manager[manager.index("if (_nomad_state == NomadState::CACHE)"):
                         manager.index("RouterLock router_lock", manager.index("if (_nomad_state == NomadState::CACHE)"))]
@@ -609,8 +686,8 @@ def test_nomadnet_cache_blocker_boundaries_are_closed():
     # Live admission is non-destructive until Router serialization succeeds.
     # Contention leaves an explicit owner-loop state that retries deterministically.
     live = manager[manager.index("void UIManager::nomad_begin_live_transport()"):
-                   manager.index("void UIManager::nomad_reload()")]
-    assert live.index("RouterLock router_lock;") < live.index("begin_navigation")
+                   manager.index("void UIManager::nomad_start_link()")]
+    assert live.index("RouterLock router_lock;") < live.index("set_address")
     assert "if (!router_lock.acquired())" in live
     assert "_nomad_state = NomadState::LIVE_PENDING;" in live
     update = manager[manager.index("void UIManager::nomad_update()"):
@@ -760,7 +837,7 @@ def test_nomadnet_requests_are_anonymous_and_back_cleanup_is_serialized():
     assert stop.index("_nomad_link.teardown()") < stop.index("nomad_release_request();")
 
     reopen = manager_cpp[manager_cpp.index("void UIManager::nomad_open("):
-                         manager_cpp.index("void UIManager::nomad_reload()")]
+                         manager_cpp.index("void UIManager::nomad_start_link()")]
     assert "RouterLock router_lock;" in reopen
     assert reopen.index("_nomad_link.teardown()") < reopen.index("nomad_release_request();")
 
@@ -956,7 +1033,7 @@ def test_nomadnet_same_destination_navigation_reuses_active_link():
     assert "bool set_page(const NomadNet::Document& document);" in screen_h
 
     reopen = manager_cpp[manager_cpp.index("void UIManager::nomad_open("):
-                         manager_cpp.index("void UIManager::nomad_reload()")]
+                         manager_cpp.index("void UIManager::nomad_start_link()")]
     assert "same_destination" in reopen
     assert "_nomad_link.status() == Type::Link::ACTIVE" in reopen
     assert reopen.index("if (same_destination") < reopen.index("_nomad_link.teardown()")
@@ -985,6 +1062,22 @@ def test_nomadnet_same_destination_navigation_reuses_active_link():
     retained = response[response.index("_nomad_link.status() == Type::Link::ACTIVE"):]
     assert "_nomad_destination_hash.toHex() == _nomad_url.destination_hex" in retained
     assert "nomad_stop_transport();" in retained
+
+
+def test_nomadnet_owner_routes_back_reload_and_table_observation_is_private():
+    screen_h = (INCLUDE / "NomadNetScreen.h").read_text()
+    manager_h = (INCLUDE / "UIManager.h").read_text()
+    manager = (INCLUDE / "UIManager.cpp").read_text()
+    assert "table_layout_observation" not in screen_h
+    assert screen_h.index("private:") < screen_h.index("struct TableLayoutObservation")
+    assert "nomad_restore_history_submission" not in manager_h + manager
+    assert "void UIManager::nomad_reload()" not in manager
+    back = manager[manager.index("void UIManager::back()"):
+                   manager.index("void UIManager::nomad_back_empty()")]
+    assert "UserActionKind::BACK" in back
+    actions = manager[manager.index("void UIManager::nomad_update_user_actions()"):
+                      manager.index("void UIManager::service_nomad_terminal_action()")]
+    assert "UserActionKind::RELOAD" in actions and "_nomad_owner.service" in actions
 
 
 def test_nomadnet_physical_test_hooks_are_isolated_and_owner_queued():

@@ -10,6 +10,7 @@ namespace UI::LXMF::NomadNet {
 enum class BlockType { TEXT, HEADING, DIVIDER, TABLE, UNSUPPORTED };
 enum class Alignment { LEFT, CENTER, RIGHT };
 enum class FormFieldType : uint8_t { TEXT, PASSWORD, CHECKBOX, RADIO };
+enum class ParseStatus : uint8_t { OK, INVALID_INPUT, ALLOCATION_FAILED };
 
 enum class TruncationReason : uint32_t {
     DOCUMENT_BYTES = 1 << 0,
@@ -121,6 +122,7 @@ struct Document {
     bool truncated = false;
     bool malformed = false;
     bool unsupported = false;
+    bool allocation_failed = false;
     std::size_t source_bytes = 0;
     std::size_t source_lines = 0;
     uint32_t truncation_reasons = 0;
@@ -167,6 +169,7 @@ public:
 
     Document parse(const std::string& source) const;
     Document parse(const char* source, std::size_t size) const;
+    ParseStatus parse_into(const char* source, std::size_t size, Document& output) const noexcept;
 };
 
 std::string truncation_notice(const Document& document);
