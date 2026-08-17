@@ -43,8 +43,8 @@ if os.environ.get("PYXIS_FLOW_SCENARIOS"):
         raise SystemExit("invalid PYXIS_FLOW_SCENARIOS")
     SCENARIOS = requested
 
-MANIFEST_BASE = "3658c54cc76bdc16e7a514ff008f2cb70c69e192"
-MANIFEST_BRANCH = "feat/nomadnet-limits-observability"
+MANIFEST_BASE = "51e4b586c4c3867ae399f573557edda6f3b48a44"
+MANIFEST_BRANCH = "feat/nomadnet-partials-core"
 MANIFEST_MICRORETICULUM = "cd0338e7fc07d3a7785a450656ba766491cbf6e8"
 MANIFEST_FILES = (
     "tests/native/nomadnet_x86_flow/CMakeLists.txt",
@@ -60,6 +60,9 @@ MANIFEST_FILES = (
     "lib/tdeck_ui/UI/LXMF/NomadNetDocument.h",
     "lib/tdeck_ui/UI/LXMF/NomadNetCompactPage.cpp",
     "lib/tdeck_ui/UI/LXMF/NomadNetCompactPage.h",
+    "lib/tdeck_ui/UI/LXMF/NomadNetPartialScheduler.cpp",
+    "lib/tdeck_ui/UI/LXMF/NomadNetPartialScheduler.h",
+    "lib/tdeck_ui/UI/LXMF/NomadNetPartialHash.h",
     "lib/tdeck_ui/UI/LXMF/NomadNetGlyphs.cpp",
     "lib/tdeck_ui/UI/LXMF/NomadNetGlyphs.h",
     "lib/tdeck_ui/UI/LXMF/NomadNetForm.cpp",

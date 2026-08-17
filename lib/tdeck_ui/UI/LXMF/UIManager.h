@@ -15,6 +15,7 @@
 #include "NavigationStack.h"
 #include "NomadNetUrl.h"
 #include "NomadNetDocument.h"
+#include "NomadNetPartialScheduler.h"
 #include "NomadNetProtocol.h"
 #include "NomadNetHistory.h"
 #include "NomadNetMailbox.h"
@@ -411,6 +412,7 @@ private:
 
     NomadNet::Url _nomad_url;
     NomadNet::DocumentParser _nomad_parser;
+    NomadNet::PartialScheduler _nomad_partial_scheduler;
     NomadNet::ResponseBuffer _nomad_response;
     NomadNet::PageHistory _nomad_history;
     NomadNet::PageHistory::PendingOpen _nomad_pending_history;

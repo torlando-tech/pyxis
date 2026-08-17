@@ -1,8 +1,10 @@
 #include "NomadNetDocument.h"
+#include "NomadNetPartialHash.h"
 
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 
 namespace UI::LXMF::NomadNet {
@@ -642,6 +644,259 @@ bool append_table(Document& doc, const std::vector<std::string>& lines,
     return true;
 }
 
+struct DecimalDigitRange {
+    uint32_t first;
+    uint32_t last;
+};
+
+constexpr DecimalDigitRange PYTHON_DECIMAL_DIGIT_RANGES[] = {
+    {0x30U, 0x39U}, {0x660U, 0x669U}, {0x6F0U, 0x6F9U},
+    {0x7C0U, 0x7C9U}, {0x966U, 0x96FU}, {0x9E6U, 0x9EFU},
+    {0xA66U, 0xA6FU}, {0xAE6U, 0xAEFU}, {0xB66U, 0xB6FU},
+    {0xBE6U, 0xBEFU}, {0xC66U, 0xC6FU}, {0xCE6U, 0xCEFU},
+    {0xD66U, 0xD6FU}, {0xDE6U, 0xDEFU}, {0xE50U, 0xE59U},
+    {0xED0U, 0xED9U}, {0xF20U, 0xF29U}, {0x1040U, 0x1049U},
+    {0x1090U, 0x1099U}, {0x17E0U, 0x17E9U}, {0x1810U, 0x1819U},
+    {0x1946U, 0x194FU}, {0x19D0U, 0x19D9U}, {0x1A80U, 0x1A89U},
+    {0x1A90U, 0x1A99U}, {0x1B50U, 0x1B59U}, {0x1BB0U, 0x1BB9U},
+    {0x1C40U, 0x1C49U}, {0x1C50U, 0x1C59U}, {0xA620U, 0xA629U},
+    {0xA8D0U, 0xA8D9U}, {0xA900U, 0xA909U}, {0xA9D0U, 0xA9D9U},
+    {0xA9F0U, 0xA9F9U}, {0xAA50U, 0xAA59U}, {0xABF0U, 0xABF9U},
+    {0xFF10U, 0xFF19U}, {0x104A0U, 0x104A9U}, {0x10D30U, 0x10D39U},
+    {0x11066U, 0x1106FU}, {0x110F0U, 0x110F9U}, {0x11136U, 0x1113FU},
+    {0x111D0U, 0x111D9U}, {0x112F0U, 0x112F9U}, {0x11450U, 0x11459U},
+    {0x114D0U, 0x114D9U}, {0x11650U, 0x11659U}, {0x116C0U, 0x116C9U},
+    {0x11730U, 0x11739U}, {0x118E0U, 0x118E9U}, {0x11950U, 0x11959U},
+    {0x11C50U, 0x11C59U}, {0x11D50U, 0x11D59U}, {0x11DA0U, 0x11DA9U},
+    {0x11F50U, 0x11F59U}, {0x16A60U, 0x16A69U}, {0x16AC0U, 0x16AC9U},
+    {0x16B50U, 0x16B59U}, {0x1D7CEU, 0x1D7FFU}, {0x1E140U, 0x1E149U},
+    {0x1E2F0U, 0x1E2F9U}, {0x1E4F0U, 0x1E4F9U}, {0x1E950U, 0x1E959U},
+    {0x1FBF0U, 0x1FBF9U},
+};
+
+bool decode_utf8_codepoint(const std::string& input, std::size_t& position,
+                           std::size_t end, uint32_t& codepoint) {
+    if (position >= end) return false;
+    const unsigned char lead = static_cast<unsigned char>(input[position]);
+    std::size_t length = 0;
+    if (lead < 0x80U) {
+        codepoint = lead;
+        length = 1;
+    } else if (lead >= 0xC2U && lead <= 0xDFU) {
+        codepoint = lead & 0x1FU;
+        length = 2;
+    } else if (lead >= 0xE0U && lead <= 0xEFU) {
+        codepoint = lead & 0x0FU;
+        length = 3;
+    } else if (lead >= 0xF0U && lead <= 0xF4U) {
+        codepoint = lead & 0x07U;
+        length = 4;
+    } else {
+        return false;
+    }
+    if (length > end - position) return false;
+    for (std::size_t i = 1; i < length; ++i) {
+        const unsigned char continuation = static_cast<unsigned char>(input[position + i]);
+        if ((continuation & 0xC0U) != 0x80U) return false;
+        codepoint = (codepoint << 6U) | (continuation & 0x3FU);
+    }
+    if ((length == 3 && codepoint < 0x800U) ||
+        (length == 4 && codepoint < 0x10000U) ||
+        (codepoint >= 0xD800U && codepoint <= 0xDFFFU) || codepoint > 0x10FFFFU)
+        return false;
+    position += length;
+    return true;
+}
+
+bool decode_python_decimal_digit(const std::string& input, std::size_t& position,
+                                 std::size_t end, uint8_t& digit) {
+    std::size_t after_codepoint = position;
+    uint32_t codepoint = 0;
+    if (!decode_utf8_codepoint(input, after_codepoint, end, codepoint)) return false;
+    for (const auto& range : PYTHON_DECIMAL_DIGIT_RANGES) {
+        if (codepoint >= range.first && codepoint <= range.last) {
+            digit = static_cast<uint8_t>((codepoint - range.first) % 10U);
+            position = after_codepoint;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool python_float_whitespace(uint32_t codepoint) {
+    return (codepoint >= 0x09U && codepoint <= 0x0DU) ||
+           codepoint == 0x20U || codepoint == 0x85U || codepoint == 0xA0U ||
+           codepoint == 0x1680U ||
+           (codepoint >= 0x2000U && codepoint <= 0x200AU) ||
+           codepoint == 0x2028U || codepoint == 0x2029U || codepoint == 0x202FU ||
+           codepoint == 0x205FU || codepoint == 0x3000U;
+}
+
+bool parse_python_decimal(const std::string& input, double& value) {
+    std::string canonical;
+    canonical.reserve(input.size());
+    for (std::size_t position = 0; position < input.size();) {
+        std::size_t after_digit = position;
+        uint8_t digit = 0;
+        if (decode_python_decimal_digit(input, after_digit, input.size(), digit)) {
+            canonical.push_back(static_cast<char>('0' + digit));
+            position = after_digit;
+            continue;
+        }
+        uint32_t codepoint = 0;
+        std::size_t after_codepoint = position;
+        if (!decode_utf8_codepoint(input, after_codepoint, input.size(), codepoint)) return false;
+        if (python_float_whitespace(codepoint)) canonical.push_back(' ');
+        else if (codepoint <= 0x7FU) canonical.push_back(static_cast<char>(codepoint));
+        else return false;
+        position = after_codepoint;
+    }
+
+    std::size_t begin = 0;
+    std::size_t end = canonical.size();
+    while (begin < end && canonical[begin] == ' ') ++begin;
+    while (end > begin && canonical[end - 1] == ' ') --end;
+    if (begin == end) return false;
+
+    std::size_t cursor = begin;
+    if (canonical[cursor] == '+' || canonical[cursor] == '-') ++cursor;
+    if (cursor == end) return false;
+
+    auto consume_digits = [&](std::size_t& position) {
+        bool any = false;
+        bool previous_digit = false;
+        while (position < end) {
+            const unsigned char current = static_cast<unsigned char>(canonical[position]);
+            if (std::isdigit(current)) {
+                any = true;
+                previous_digit = true;
+                ++position;
+            } else if (canonical[position] == '_' && previous_digit &&
+                       position + 1 < end) {
+                if (!std::isdigit(static_cast<unsigned char>(canonical[position + 1]))) break;
+                previous_digit = false;
+                ++position;
+            } else {
+                break;
+            }
+        }
+        return any && previous_digit;
+    };
+
+    const bool integer_digits = consume_digits(cursor);
+    bool fraction_digits = false;
+    if (cursor < end && canonical[cursor] == '.') {
+        ++cursor;
+        fraction_digits = consume_digits(cursor);
+    }
+    if (!integer_digits && !fraction_digits) return false;
+    if (cursor < end && (canonical[cursor] == 'e' || canonical[cursor] == 'E')) {
+        ++cursor;
+        if (cursor < end && (canonical[cursor] == '+' || canonical[cursor] == '-')) ++cursor;
+        if (!consume_digits(cursor)) return false;
+    }
+    if (cursor != end) return false;
+
+    std::string normalized;
+    normalized.reserve(end - begin);
+    for (std::size_t i = begin; i < end; ++i) {
+        if (canonical[i] != '_') normalized.push_back(canonical[i]);
+    }
+    char* parse_end = nullptr;
+    value = std::strtod(normalized.c_str(), &parse_end);
+    return parse_end && parse_end != normalized.c_str() && *parse_end == '\0';
+}
+
+bool parse_partial_descriptor(const std::string& line, Partial& partial,
+                              TruncationReason& limit_reason) {
+    limit_reason = TruncationReason::NONE;
+    const std::size_t close = line.find('}', 2);
+    if (line.rfind("`{", 0) != 0 || close == std::string::npos) return false;
+    const std::size_t data_size = close - 2;
+    if (data_size > DocumentParser::MAX_PARTIAL_DESCRIPTOR_BYTES) {
+        limit_reason = TruncationReason::PARTIAL_DESCRIPTOR_BYTES;
+        return false;
+    }
+    const std::string data = line.substr(2, data_size);
+    const std::size_t first_separator = data.find('`');
+    const std::size_t second_separator = first_separator == std::string::npos
+        ? std::string::npos : data.find('`', first_separator + 1);
+    if (second_separator != std::string::npos &&
+        data.find('`', second_separator + 1) != std::string::npos) return false;
+
+    const std::size_t url_end = first_separator == std::string::npos
+        ? data.size() : first_separator;
+    if (url_end == 0) return false;
+    if (url_end > DocumentParser::MAX_PARTIAL_URL_BYTES) {
+        limit_reason = TruncationReason::PARTIAL_DESCRIPTOR_BYTES;
+        return false;
+    }
+    partial.url = data.substr(0, url_end);
+    partial.descriptor = data;
+    std::string hash_input = partial.url;
+
+    if (first_separator != std::string::npos) {
+        const std::size_t refresh_start = first_separator + 1;
+        const std::size_t refresh_size = (second_separator == std::string::npos
+            ? data.size() : second_separator) - refresh_start;
+        const std::string refresh = data.substr(refresh_start, refresh_size);
+        double seconds = 0.0;
+        if (!parse_python_decimal(refresh, seconds) || !std::isfinite(seconds)) return false;
+        if (seconds >= 1.0) {
+            const double milliseconds = seconds * 1000.0;
+            if (milliseconds > static_cast<double>(DocumentParser::MAX_PARTIAL_REFRESH_MS))
+                return false;
+            partial.refresh_interval_ms = static_cast<uint32_t>(milliseconds);
+        }
+        hash_input += "|" + refresh;
+    }
+
+    if (second_separator == std::string::npos) {
+        // Canonical split(\"|\") semantics retain one empty selector.
+        partial.fields.emplace_back();
+    } else {
+        const std::size_t selectors_start = second_separator + 1;
+        const std::size_t selectors_size = data.size() - selectors_start;
+        if (selectors_size > DocumentParser::MAX_PARTIAL_FIELD_BYTES) {
+            limit_reason = TruncationReason::PARTIAL_FIELD_BYTES;
+            return false;
+        }
+        partial.selectors = data.substr(selectors_start, selectors_size);
+        hash_input += "|" + partial.selectors;
+        std::size_t field_start = 0;
+        while (field_start <= partial.selectors.size()) {
+            if (partial.fields.size() >= DocumentParser::MAX_PARTIAL_FIELDS) {
+                limit_reason = TruncationReason::PARTIAL_FIELDS;
+                return false;
+            }
+            const std::size_t field_end = partial.selectors.find('|', field_start);
+            const std::size_t field_size = (field_end == std::string::npos
+                ? partial.selectors.size() : field_end) - field_start;
+            if (field_size > DocumentParser::MAX_PARTIAL_FIELD_BYTES) {
+                limit_reason = TruncationReason::PARTIAL_FIELD_BYTES;
+                return false;
+            }
+            const std::string field = partial.selectors.substr(field_start, field_size);
+            partial.fields.push_back(field);
+            if (field.rfind("pid=", 0) == 0) {
+                const std::size_t value_end = field.find('=', 4);
+                const std::size_t id_size = (value_end == std::string::npos
+                    ? field.size() : value_end) - 4;
+                if (id_size > DocumentParser::MAX_PARTIAL_ID_BYTES) {
+                    limit_reason = TruncationReason::PARTIAL_FIELD_BYTES;
+                    return false;
+                }
+                partial.id = field.substr(4, id_size);
+            }
+            if (field_end == std::string::npos) break;
+            field_start = field_end + 1;
+        }
+    }
+    partial.descriptor_hash = partial_descriptor_sha256(
+        hash_input.data(), hash_input.size());
+    return true;
+}
+
 } // namespace
 
 Document DocumentParser::parse(const std::string& source) const {
@@ -691,6 +946,7 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
     Alignment table_alignment = Alignment::LEFT;
     uint16_t table_width = DEFAULT_TABLE_WIDTH;
     std::size_t table_bytes = 0;
+    std::size_t partial_bytes = 0;
     std::vector<std::string> table_lines;
     uint8_t section_depth = 0;
     std::size_t total_runs = 0;
@@ -765,13 +1021,36 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
             continue;
         }
         if (line.empty()) continue;
-        bool pre_escaped_table_line = false;
-        if (!literal && line[0] == '\\' &&
-                (table_mode || line.rfind("\\`t", 0) == 0)) {
-            line.erase(0, 1);
-            pre_escaped_table_line = true;
+        char classification_first_char = 0;
+        while (!line.empty()) {
+            if (!literal && line == "`=") {
+                literal = true;
+                line.clear();
+                break;
+            }
+            classification_first_char = line[0];
+            if (!literal && classification_first_char == '>' &&
+                    line.find("`<") != std::string::npos) {
+                const auto first_non_heading = line.find_first_not_of('>');
+                line.erase(0, first_non_heading == std::string::npos
+                    ? line.size() : first_non_heading);
+                if (line.empty()) break;
+                classification_first_char = line[0];
+            }
+            if (!literal && !table_mode && classification_first_char == '<') {
+                section_depth = 0;
+                line.erase(0, 1);
+                continue;
+            }
+            break;
         }
-        if (!literal && !pre_escaped_table_line && !line.empty() && line[0] == '#') continue;
+        if (line.empty()) continue;
+        bool pre_escaped = false;
+        if (!literal && line[0] == '\\') {
+            line.erase(0, 1);
+            pre_escaped = true;
+        }
+        if (!literal && classification_first_char == '#') continue;
         if (!literal && line.rfind("`t", 0) == 0) {
             if (table_mode) {
                 const bool canonical_table_rendered = table_lines.size() >= 2;
@@ -824,17 +1103,6 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
             }
             continue;
         }
-        while (!line.empty() && line[0] == '<') {
-            section_depth = 0;
-            line.erase(0, 1);
-        }
-        if (line.empty()) continue;
-        if (!literal && line[0] == '>' && line.find("`<") != std::string::npos) {
-            const auto first_non_heading = line.find_first_not_of('>');
-            line.erase(0, first_non_heading == std::string::npos
-                ? line.size() : first_non_heading);
-            if (line.empty()) continue;
-        }
         if (doc.blocks.size() >= MAX_BLOCKS) {
             doc.mark_truncated(TruncationReason::BLOCKS);
             break;
@@ -847,7 +1115,7 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
             Run run;
             run.text = line;
             block.runs.push_back(std::move(run));
-        } else if (line[0] == '>') {
+        } else if (classification_first_char == '>') {
             block.type = BlockType::HEADING;
             std::size_t depth = 0;
             while (depth < line.size() && line[depth] == '>') ++depth;
@@ -856,7 +1124,7 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
             const std::string heading = line.substr(depth);
             parse_inline(doc, block, heading, style);
             add_anchor(doc, heading_slug(heading), doc.blocks.size());
-        } else if (line[0] == '-') {
+        } else if (classification_first_char == '-') {
             block.type = BlockType::DIVIDER;
             uint32_t codepoint = 0;
             std::size_t codepoint_bytes = 0;
@@ -865,12 +1133,70 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
                 block.divider_codepoint = codepoint;
             }
         } else if (line.rfind("`{", 0) == 0) {
-            block.type = BlockType::UNSUPPORTED;
-            Run run;
-            run.text = "[Unsupported Micron content]";
-            block.runs.push_back(std::move(run));
-            doc.unsupported = true;
+            Partial partial;
+            TruncationReason partial_limit = TruncationReason::NONE;
+            if (parse_partial_descriptor(line, partial, partial_limit)) {
+                bool admitted = true;
+                if (doc.partials.size() >= MAX_PARTIALS) {
+                    doc.mark_truncated(TruncationReason::PARTIALS);
+                    admitted = false;
+                }
+                if (partial.descriptor.size() > MAX_PARTIAL_DESCRIPTOR_BYTES ||
+                    partial.url.size() > MAX_PARTIAL_URL_BYTES) {
+                    doc.mark_truncated(TruncationReason::PARTIAL_DESCRIPTOR_BYTES);
+                    admitted = false;
+                }
+                if (partial.fields.size() > MAX_PARTIAL_FIELDS) {
+                    doc.mark_truncated(TruncationReason::PARTIAL_FIELDS);
+                    admitted = false;
+                }
+                if (partial.selectors.size() > MAX_PARTIAL_FIELD_BYTES ||
+                    partial.id.size() > MAX_PARTIAL_ID_BYTES) {
+                    doc.mark_truncated(TruncationReason::PARTIAL_FIELD_BYTES);
+                    admitted = false;
+                }
+                for (const auto& field : partial.fields) {
+                    if (field.size() > MAX_PARTIAL_FIELD_BYTES) {
+                        doc.mark_truncated(TruncationReason::PARTIAL_FIELD_BYTES);
+                        admitted = false;
+                        break;
+                    }
+                }
+                std::size_t bytes = partial.descriptor.size() + partial.url.size() +
+                    partial.selectors.size() + partial.id.size() + partial.fields.size() + 4;
+                for (const auto& field : partial.fields) bytes += field.size();
+                if (bytes > MAX_PARTIAL_BYTES - std::min(partial_bytes, MAX_PARTIAL_BYTES)) {
+                    doc.mark_truncated(TruncationReason::PARTIAL_DESCRIPTOR_BYTES);
+                    admitted = false;
+                }
+                if (admitted) {
+                    partial_bytes += bytes;
+                    block.type = BlockType::PARTIAL;
+                    doc.partials.push_back(std::move(partial));
+                    block.partial_index = static_cast<int16_t>(doc.partials.size() - 1);
+                    Run run;
+                    run.text = "[Dynamic content loading]";
+                    block.runs.push_back(std::move(run));
+                } else {
+                    block.type = BlockType::UNSUPPORTED;
+                    Run run;
+                    run.text = "[Partial omitted: limits exceeded]";
+                    block.runs.push_back(std::move(run));
+                }
+            } else {
+                block.type = BlockType::UNSUPPORTED;
+                Run run;
+                if (partial_limit != TruncationReason::NONE) {
+                    doc.mark_truncated(partial_limit);
+                    run.text = "[Partial omitted: limits exceeded]";
+                } else {
+                    run.text = "[Invalid Micron partial]";
+                    doc.malformed = true;
+                }
+                block.runs.push_back(std::move(run));
+            }
         } else {
+            if (pre_escaped) line.insert(line.begin(), '\\');
             parse_inline(doc, block, line, style);
         }
         const bool total_runs_exceeded =
@@ -938,6 +1264,15 @@ std::string truncation_notice(const Document& document) {
     if (document.has_truncation(TruncationReason::TABLES))
         return "[Page truncated: more than " +
             std::to_string(DocumentParser::MAX_TABLES) + " tables]";
+    if (document.has_truncation(TruncationReason::PARTIALS))
+        return "[Page truncated: more than " +
+            std::to_string(DocumentParser::MAX_PARTIALS) + " dynamic partials]";
+    if (document.has_truncation(TruncationReason::PARTIAL_DESCRIPTOR_BYTES))
+        return "[Page truncated: dynamic partial metadata exceeds limits]";
+    if (document.has_truncation(TruncationReason::PARTIAL_FIELDS))
+        return "[Page truncated: too many dynamic partial fields]";
+    if (document.has_truncation(TruncationReason::PARTIAL_FIELD_BYTES))
+        return "[Page truncated: dynamic partial field exceeds limits]";
     if (document.has_truncation(TruncationReason::FORM_NAME_BYTES))
         return "[Page truncated: form field name exceeds " +
             std::to_string(DocumentParser::MAX_FIELD_NAME_BYTES) + " bytes]";

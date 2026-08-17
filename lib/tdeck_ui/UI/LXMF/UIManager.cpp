@@ -2167,6 +2167,7 @@ bool UIManager::nomad_refresh_path_after_link_failure() {
 }
 
 uint32_t UIManager::nomad_advance_navigation_generation() {
+    _nomad_partial_scheduler.cancel(_nomad_navigation_generation);
     ++_nomad_navigation_generation;
     if (_nomad_navigation_generation == 0) ++_nomad_navigation_generation;
     return _nomad_navigation_generation;
@@ -2271,7 +2272,7 @@ void UIManager::nomad_open(const std::string& address, bool add_history,
             if (local_result == NomadNet::LocalNavigationResult::APPLIED) {
                 _nomad_url = std::move(next_url);
                 _nomad_pending_scroll = -1;
-                nomad_advance_navigation_generation();
+                // A fragment jump keeps the same published page and partials.
                 return;
             }
         } catch (const std::bad_alloc&) {
@@ -2553,6 +2554,8 @@ NomadNet::PageApplyResult UIManager::nomad_apply_page_document(
         _nomad_pending_history.clear();
         return result;
     }
+    _nomad_partial_scheduler.configure(
+        document, _nomad_navigation_generation, millis());
     if (library_changed) _nomad_library_dirty = true;
     _nomad_pending_scroll = -1;
     return result;

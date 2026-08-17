@@ -27,8 +27,8 @@ target_compile_definitions(udp_interface PRIVATE
 
 set(PYXIS_NOMADNET_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../lib/tdeck_ui/UI/LXMF")
 set(PYXIS_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../..")
-set(PYXIS_MANIFEST_BASE "3658c54cc76bdc16e7a514ff008f2cb70c69e192")
-set(PYXIS_MANIFEST_BRANCH "feat/nomadnet-limits-observability")
+set(PYXIS_MANIFEST_BASE "51e4b586c4c3867ae399f573557edda6f3b48a44")
+set(PYXIS_MANIFEST_BRANCH "feat/nomadnet-partials-core")
 set(PYXIS_MANIFEST_MICRORETICULUM "cd0338e7fc07d3a7785a450656ba766491cbf6e8")
 execute_process(COMMAND git rev-parse HEAD WORKING_DIRECTORY "${RNS_SOURCE}"
   OUTPUT_VARIABLE _rns_commit OUTPUT_STRIP_TRAILING_WHITESPACE
@@ -50,6 +50,9 @@ set(PYXIS_MANIFEST_FILES
   "lib/tdeck_ui/UI/LXMF/NomadNetDocument.h"
   "lib/tdeck_ui/UI/LXMF/NomadNetCompactPage.cpp"
   "lib/tdeck_ui/UI/LXMF/NomadNetCompactPage.h"
+  "lib/tdeck_ui/UI/LXMF/NomadNetPartialScheduler.cpp"
+  "lib/tdeck_ui/UI/LXMF/NomadNetPartialScheduler.h"
+  "lib/tdeck_ui/UI/LXMF/NomadNetPartialHash.h"
   "lib/tdeck_ui/UI/LXMF/NomadNetGlyphs.cpp"
   "lib/tdeck_ui/UI/LXMF/NomadNetGlyphs.h"
   "lib/tdeck_ui/UI/LXMF/NomadNetForm.cpp"
@@ -73,6 +76,7 @@ add_executable(pyxis_nomadnet_x86_flow
   "${PYXIS_ROOT}/src/TCPClientInterface.cpp"
   "${PYXIS_NOMADNET_DIR}/NomadNetDocument.cpp"
   "${PYXIS_ROOT}/lib/tdeck_ui/UI/LXMF/NomadNetCompactPage.cpp"
+  "${PYXIS_ROOT}/lib/tdeck_ui/UI/LXMF/NomadNetPartialScheduler.cpp"
   "${PYXIS_ROOT}/lib/tdeck_ui/UI/LXMF/NomadNetForm.cpp"
   "${PYXIS_ROOT}/lib/tdeck_ui/UI/LXMF/NomadNetGlyphs.cpp"
   "${PYXIS_NOMADNET_DIR}/NomadNetLibrary.cpp"
