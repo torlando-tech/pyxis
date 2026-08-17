@@ -2691,10 +2691,6 @@ void UIManager::nomad_update() {
                 nomad_stop_transport();
                 break;
             }
-            const bool has_password = std::any_of(document.fields.begin(), document.fields.end(),
-                [](const NomadNet::FormField& field) {
-                    return field.type == NomadNet::FormFieldType::PASSWORD;
-                });
             const bool ordinary_nil =
                 _nomad_request_data_class == NomadNet::RequestDataClass::NIL;
             const auto directive = NomadNet::parse_cache_directive(bytes.data(), bytes.size());
@@ -2704,7 +2700,7 @@ void UIManager::nomad_update() {
             const NomadNet::CacheKey cache_key{
                 _nomad_url.destination_hex, _nomad_url.path,
                 _nomad_request_data_class};
-            if (ordinary_nil && valid_document && !has_password && cache_now &&
+            if (ordinary_nil && valid_document && cache_now &&
                     directive.valid && directive.ttl) {
                 _nomad_cache_pending_key = cache_key;
                 _nomad_cache_pending_body = _nomad_response.take();
@@ -2713,7 +2709,7 @@ void UIManager::nomad_update() {
                 _nomad_cache_pending_generation = event.generation;
             } else {
                 _nomad_response.release();
-                if (ordinary_nil && (!directive.valid || directive.ttl == 0 || has_password))
+                if (ordinary_nil && (!directive.valid || directive.ttl == 0))
                     { _nomad_cache_pending_key = cache_key;
                       _nomad_cache_pending_generation = event.generation;
                       _nomad_cache_pending_invalidate = true; }

@@ -23,6 +23,17 @@ lv_group_t* group = nullptr;
 lv_disp_t* display = nullptr;
 lv_indev_t* keyboard = nullptr;
 std::vector<lv_color_t> framebuffer(320 * 240);
+bool fail_next_timer_create = false;
+
+extern "C" lv_timer_t* __real_lv_timer_create(lv_timer_cb_t, uint32_t, void*);
+extern "C" lv_timer_t* __wrap_lv_timer_create(lv_timer_cb_t callback, uint32_t period,
+                                                void* user_data) {
+    if (fail_next_timer_create) {
+        fail_next_timer_create = false;
+        return nullptr;
+    }
+    return __real_lv_timer_create(callback, period, user_data);
+}
 
 struct KeyFeed { uint32_t key = 0; uint8_t phase = 0; } key_feed;
 
@@ -187,7 +198,8 @@ int main() {
     bool focus_events = false, edge_scroll = false;
     bool ready = false, cancel = false, enter = false, escape = false, focus_restore = false;
     bool table_pixels = false, form_pixels = false, focus_pixels = false, glyph_pixels = false;
-    bool background_pixels = false, teardown = false;
+    bool background_pixels = false, teardown = false, cached_status_transient = false;
+    bool cached_status_oom_collapses = false;
     int delete_events = 0;
 
     UI::LXMF::NomadNet::DocumentParser parser;
@@ -200,6 +212,24 @@ int main() {
             "---\n`[Next`:/page/next.mu]\n`[Submit`:/page/form.mu`username]");
         assert(screen.set_page(fit_doc));
         lv_obj_update_layout(screen._screen);
+        screen.set_status("Cached page; current reachability not checked");
+        lv_obj_update_layout(screen._screen);
+        const int16_t content_with_cached_notice = lv_obj_get_height(screen._content);
+        const bool cached_notice_visible =
+            !lv_obj_has_flag(screen._status, LV_OBJ_FLAG_HIDDEN);
+        for (int i = 0; i < 12; ++i) pump();
+        lv_obj_update_layout(screen._screen);
+        cached_status_transient = cached_notice_visible &&
+            lv_obj_has_flag(screen._status, LV_OBJ_FLAG_HIDDEN) &&
+            lv_obj_get_height(screen._content) > content_with_cached_notice;
+        screen.set_status("Checking page cache...");
+        fail_next_timer_create = true;
+        screen.set_status("Cached page; current reachability not checked");
+        lv_obj_update_layout(screen._screen);
+        cached_status_oom_collapses = !fail_next_timer_create &&
+            screen._status_timer == nullptr &&
+            lv_obj_has_flag(screen._status, LV_OBJ_FLAG_HIDDEN) &&
+            lv_obj_get_height(screen._content) > content_with_cached_notice;
         const auto fit = screen._table_layout;
         fit_tier = fit.valid && fit.tier == UI::LXMF::NomadNet::TableLayoutTier::FIT;
         fit_columns = fit.columns == 2 && fit.cards == 0 && fit.x >= 0 && fit.width > 0 &&
@@ -338,15 +368,17 @@ int main() {
         "LVGL ACCEPT 320x240 fit_tier=%d fit_columns=%d reflow_tier=%d reflow_cards=%d "
         "stacked_tier=%d stacked_cards=%d stacked_pixels=%d stacked_scroll=%d stacked_objects=%d "
         "focus_events=%d edge_scroll=%d ready=%d cancel=%d enter=%d escape=%d focus_restore=%d "
-        "teardown=%d stale_group=%d background_pixels=%d table_pixels=%d form_pixels=%d "
+        "teardown=%d cached_status_transient=%d cached_status_oom_collapses=%d stale_group=%d background_pixels=%d table_pixels=%d form_pixels=%d "
         "focus_pixels=%d glyph_pixels=%d exact_fonts=1 objects=%u\n",
         fit_tier, fit_columns, reflow_tier, reflow_cards, stacked_tier, stacked_cards,
         stacked_pixels, stacked_scroll, stacked_objects, focus_events, edge_scroll,
-        ready, cancel, enter, escape, focus_restore, teardown, 0, background_pixels,
+        ready, cancel, enter, escape, focus_restore, teardown, cached_status_transient,
+        cached_status_oom_collapses, 0, background_pixels,
         table_pixels, form_pixels, focus_pixels, glyph_pixels, remaining);
     return fit_tier && fit_columns && reflow_tier && reflow_cards && stacked_tier &&
            stacked_cards && stacked_pixels && stacked_scroll && stacked_objects &&
            focus_events && edge_scroll &&
-           ready && cancel && enter && escape && focus_restore && teardown && background_pixels &&
+           ready && cancel && enter && escape && focus_restore && teardown && cached_status_transient &&
+           cached_status_oom_collapses && background_pixels &&
            table_pixels && form_pixels && focus_pixels && glyph_pixels && remaining == 0 ? 0 : 1;
 }

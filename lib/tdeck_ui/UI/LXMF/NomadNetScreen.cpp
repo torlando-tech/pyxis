@@ -124,6 +124,7 @@ NomadNetScreen::NomadNetScreen() {
     set_status("Enter a NomadNet address");show_start();hide();
 }
 NomadNetScreen::~NomadNetScreen(){
+    cancel_status_timer();
     finish_field_edit(false);
     if(_field_editor)lv_textarea_set_text(_field_editor,"");
     if(_screen)lv_obj_del(_screen);
@@ -382,11 +383,29 @@ void NomadNetScreen::set_address_editing(bool editing){
         else{lv_group_add_obj(group,_edit_button);lv_group_focus_obj(_edit_button);}
     }
 }
+void NomadNetScreen::cancel_status_timer(){
+    if(!_status_timer)return;
+    lv_timer_del(_status_timer);
+    _status_timer=nullptr;
+}
+void NomadNetScreen::status_timer_cb(lv_timer_t* timer){
+    auto* screen=static_cast<NomadNetScreen*>(timer->user_data);
+    if(!screen||screen->_status_timer!=timer)return;
+    screen->_status_timer=nullptr;
+    screen->apply_browser_layout(false);
+}
 void NomadNetScreen::set_status(const char* value){
+    cancel_status_timer();
     const char* status=value?value:"";
     lv_label_set_text(_status,status);
     const bool loaded_ack=_page_loaded&&std::strncmp(status,"Page loaded",11)==0;
+    const bool cached_ack=_page_loaded&&std::strncmp(status,"Cached page",11)==0;
     apply_browser_layout(!loaded_ack);
+    if(cached_ack){
+        _status_timer=lv_timer_create(status_timer_cb,1500,this);
+        if(_status_timer)lv_timer_set_repeat_count(_status_timer,1);
+        else apply_browser_layout(false);
+    }
 }
 bool NomadNetScreen::set_page(const NomadNet::Document& document) {
     // Prepare every heap-backed model before touching the published page. The

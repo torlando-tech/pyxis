@@ -34,5 +34,6 @@ target_include_directories(nomadnet_lvgl_acceptance PRIVATE
 target_compile_definitions(nomadnet_lvgl_acceptance PRIVATE ARDUINO=1)
 target_compile_options(nomadnet_lvgl_acceptance PRIVATE -Wall -Wextra
   -fsanitize=address,undefined -fno-omit-frame-pointer)
-target_link_options(nomadnet_lvgl_acceptance PRIVATE -fsanitize=address,undefined)
+target_link_options(nomadnet_lvgl_acceptance PRIVATE -fsanitize=address,undefined
+  -Wl,--wrap=lv_timer_create)
 target_link_libraries(nomadnet_lvgl_acceptance PRIVATE lvgl)

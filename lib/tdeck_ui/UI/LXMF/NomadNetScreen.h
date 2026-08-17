@@ -124,6 +124,7 @@ private:
     lv_obj_t* _reload_button=nullptr; lv_obj_t* _save_button=nullptr; lv_obj_t* _identify_button=nullptr; lv_obj_t* _address_row=nullptr; lv_obj_t* _address=nullptr;
     lv_obj_t* _go_button=nullptr; lv_obj_t* _address_summary=nullptr; lv_obj_t* _edit_button=nullptr;
     lv_obj_t* _status=nullptr; lv_obj_t* _content=nullptr; lv_obj_t* _field_editor=nullptr;
+    lv_timer_t* _status_timer=nullptr;
     lv_obj_t* _directory=nullptr;
     NomadNet::CompactPage _page;
     NomadNet::FormState _form_state;
@@ -159,6 +160,8 @@ private:
     Callback _back,_home; OpenCallback _reload,_open; LinkCallback _link;
     SubmitCallback _submit; SaveCallback _save; IdentifyCallback _identify;
     void set_address_editing(bool editing);
+    static void status_timer_cb(lv_timer_t* timer);
+    void cancel_status_timer();
     void apply_browser_layout(bool show_status);
     void render_directory(View view);
     void show_browser(bool editing);

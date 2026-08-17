@@ -1057,11 +1057,24 @@ def test_nomadnet_same_destination_navigation_reuses_active_link():
         "nomad_finish_request_keep_link();"
     )
     application_failure = response[response.index("if (!page_applied)"):
-                                   response.index("const bool has_password")]
+                                   response.index("const bool ordinary_nil")]
     assert "nomad_stop_transport();" in application_failure
     retained = response[response.index("_nomad_link.status() == Type::Link::ACTIVE"):]
     assert "_nomad_destination_hash.toHex() == _nomad_url.destination_hex" in retained
     assert "nomad_stop_transport();" in retained
+
+
+def test_nomadnet_cache_persists_only_unsubmitted_server_response_bodies():
+    manager_cpp = (INCLUDE / "UIManager.cpp").read_text()
+    response = manager_cpp[manager_cpp.index("case NomadNet::AsyncMailbox::Kind::RESPONSE:"):
+                           manager_cpp.index("case NomadNet::AsyncMailbox::Kind::NONE:")]
+
+    # A password descriptor in server markup does not contain mutable editor state.
+    # Cache admission is based on the request-data class, not field descriptors.
+    assert "has_password" not in response
+    assert "_nomad_request_data_class == NomadNet::RequestDataClass::NIL" in response
+    assert "ordinary_nil && valid_document && cache_now" in response
+    assert "_nomad_cache_pending_body = _nomad_response.take();" in response
 
 
 def test_nomadnet_owner_routes_back_reload_and_table_observation_is_private():
