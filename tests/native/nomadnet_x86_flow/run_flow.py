@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import ast
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -13,28 +14,34 @@ CLIENT = Path(sys.argv[1])
 PYTHON = Path(sys.argv[2])
 NOMADNET_SOURCE = Path(sys.argv[3])
 NOMADNET_COMMIT = "89e3eea10c60d8fe597d36d2e091d5aab86bdfb8"
-REFERENCE_FILES = (
-    "nomadnet/ui/textui/MicronParser.py",
-    "nomadnet/ui/textui/Browser.py",
-)
+NOMADNET_VERSION = "1.2.8"
+REFERENCE_FILES = {
+    "nomadnet/_version.py":
+        "09f5579b4c3094a3d6d2484e730856c3ad53a60b5988b8a309e3ec00838adda5",
+    "nomadnet/ui/textui/MicronParser.py":
+        "c4b40918fe813a7cfbb696f33df8a08451fd0156a6919a185b75225f52402ffb",
+    "nomadnet/ui/textui/Browser.py":
+        "b7bc37e0fd4e72261703a037ab1967ea4cc43b837dc1cd74f92a835bacab40a1",
+}
 SCENARIOS = ("immediate", "resource", "near-limit", "oversized", "timeout", "cancel", "reuse",
              "form-anonymous", "form-identified")
 
-reference_head = subprocess.check_output(
-    ["git", "-C", str(NOMADNET_SOURCE), "rev-parse", "HEAD"], text=True,
-).strip()
-if reference_head != NOMADNET_COMMIT:
-    raise SystemExit(f"wrong NomadNet reference commit: {reference_head}")
-for relative in REFERENCE_FILES:
+for relative, expected_hash in REFERENCE_FILES.items():
     path = NOMADNET_SOURCE / relative
     if not path.is_file():
         raise SystemExit(f"missing NomadNet reference file: {relative}")
-    unchanged = subprocess.run(
-        ["git", "-C", str(NOMADNET_SOURCE), "diff", "--quiet", NOMADNET_COMMIT, "--", relative],
-        check=False,
-    )
-    if unchanged.returncode != 0:
-        raise SystemExit(f"modified NomadNet reference file: {relative}")
+    actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    if actual_hash != expected_hash:
+        raise SystemExit(f"wrong NomadNet reference file hash for {relative}: {actual_hash}")
+version_tree = ast.parse((NOMADNET_SOURCE / "nomadnet/_version.py").read_text())
+version = next(
+    ast.literal_eval(node.value)
+    for node in version_tree.body
+    if isinstance(node, ast.Assign)
+    and any(isinstance(target, ast.Name) and target.id == "__version__" for target in node.targets)
+)
+if version != NOMADNET_VERSION:
+    raise SystemExit(f"wrong NomadNet reference version: {version}")
 print(f"REFERENCE NomadNet {NOMADNET_COMMIT}")
 
 
