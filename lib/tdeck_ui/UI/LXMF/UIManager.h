@@ -106,9 +106,10 @@ public:
      */
     void update();
 
-    // Service an already-published NomadNet Back/Home before another inbound
-    // Reticulum pass. No-ops when no terminal browser action is pending.
-    void service_nomad_terminal_action();
+    // Service one already-published NomadNet action before another inbound
+    // Reticulum pass. This gives Open immediate cache/transport status instead
+    // of leaving a heard-node tap queued behind synchronous packet work.
+    void service_nomad_user_action();
 
     // True only during the bounded pending-Link epoch. Diagnostic A/B mode may
     // defer nonessential maintenance here; Reticulum/TCP and Back/Home remain

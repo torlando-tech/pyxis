@@ -743,7 +743,6 @@ void UIManager::update() {
         _settings_screen->tick();  // keep the live clock / GPS / system readouts ticking
     }
     const uint32_t now = millis();
-    nomad_update_user_actions();
     nomad_update_library();
     nomad_update();
     // Snapshot acquisition is deliberately before LVGL_LOCK and is coalesced
@@ -2049,8 +2048,8 @@ void UIManager::nomad_update_user_actions() {
     }
 }
 
-void UIManager::service_nomad_terminal_action() {
-    if (_nomad_actions.terminal_pending()) nomad_update_user_actions();
+void UIManager::service_nomad_user_action() {
+    nomad_update_user_actions();
 }
 
 bool UIManager::nomad_link_pending() const {
@@ -2330,6 +2329,10 @@ void UIManager::nomad_open(const std::string& address, bool add_history,
     const bool bypass = _nomad_cache_bypass_once;
     _nomad_cache_bypass_once = false;
     _nomad_cache_generation = _nomad_navigation_generation;
+    {
+        LVGL_LOCK();
+        _nomadnet_screen->show_pending_navigation(address);
+    }
     if (_nomad_cache_flow.begin(cache_key, cache_now, bypass) ==
             NomadNet::CacheFlowState::LOOKUP) {
         _nomad_state = NomadState::CACHE;

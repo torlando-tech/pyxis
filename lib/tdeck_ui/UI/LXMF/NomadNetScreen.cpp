@@ -210,6 +210,11 @@ void NomadNetScreen::begin_navigation(const std::string& target){
     show_browser(false);
     set_status("Opening NomadNet page...");
 }
+void NomadNetScreen::show_pending_navigation(const std::string& target){
+    set_address(target);
+    show_browser(false);
+    set_status("Opening NomadNet page...");
+}
 void NomadNetScreen::show_start(){
     clear_document();
     render_directory(View::START);

@@ -578,7 +578,7 @@ def test_nomadnet_validates_queued_addresses_before_navigation_teardown():
     assert "begin_navigation(" not in clicked
 
     actions = manager[manager.index("void UIManager::nomad_update_user_actions()"):
-                      manager.index("void UIManager::service_nomad_terminal_action()")]
+                      manager.index("void UIManager::service_nomad_user_action()")]
     assert "begin_navigation(" not in actions
 
     open_page = manager[manager.index("void UIManager::nomad_open("):
@@ -766,6 +766,26 @@ def test_directory_icons_use_lvgl_symbol_font_separately_from_remote_text():
         assert f",{symbol});" in screen
 
 
+def test_nomadnet_open_feedback_is_serviced_before_reticulum_poll():
+    """A heard-node tap must not wait behind transport or hidden cache work."""
+    main_cpp = (ROOT / "src" / "main.cpp").read_text()
+    manager_cpp = (INCLUDE / "UIManager.cpp").read_text()
+    pre_transport = main_cpp[:main_cpp.index("reticulum->loop();")]
+    assert "ui_manager->service_nomad_user_action();" in pre_transport
+
+    open_path = manager_cpp[manager_cpp.index("void UIManager::nomad_open("):
+                            manager_cpp.index("void UIManager::nomad_begin_live_transport()")]
+    assert open_path.index("show_pending_navigation") < open_path.index("_nomad_cache_flow.begin")
+
+    screen_cpp = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    pending = screen_cpp[screen_cpp.index("void NomadNetScreen::show_pending_navigation"):
+                         screen_cpp.index("void NomadNetScreen::show_start")]
+    assert 'set_status("Opening NomadNet page...")' in pending
+
+    # Each main-loop pass has one bounded browser-action service point.
+    assert manager_cpp.count("nomad_update_user_actions();") == 1
+
+
 def test_nomadnet_latency_and_path_lifecycle_contracts():
     manager_cpp = (INCLUDE / "UIManager.cpp").read_text()
     main_cpp = (ROOT / "src" / "main.cpp").read_text()
@@ -775,10 +795,10 @@ def test_nomadnet_latency_and_path_lifecycle_contracts():
     # boundary, otherwise Back/Open remains frozen behind flash erase/GC.
     assert main_cpp.index("ui_manager->update();") < main_cpp.index("reticulum->should_persist_data();")
 
-    # Terminal browser cancellation must be serviced before another inbound
-    # transport pass. Resource receive/assembly is synchronous on this owner
-    # loop and must not repeatedly outrun an already-published Back/Home.
-    assert main_cpp.index("ui_manager->service_nomad_terminal_action();") < \
+    # All browser actions must be serviced before another inbound transport pass.
+    # Resource receive/assembly is synchronous on this owner loop and must not
+    # outrun visible Open feedback or already-published Back/Home cancellation.
+    assert main_cpp.index("ui_manager->service_nomad_user_action();") < \
         main_cpp.index("reticulum->loop();")
 
     # Back/Home published immediately after Save must not remain queued behind
@@ -789,7 +809,8 @@ def test_nomadnet_latency_and_path_lifecycle_contracts():
     assert "ActionMailbox::CAPACITY + 1" in action_update
     assert "action.kind != NomadNet::UserActionKind::SAVE" in action_update
     assert "_nomad_actions.terminal_pending()" in action_update
-    assert manager_cpp.index("nomad_update_user_actions();") < manager_cpp.index("nomad_update_library();")
+    assert main_cpp.index("ui_manager->service_nomad_user_action();") < \
+        main_cpp.index("ui_manager->update();")
 
     # Requesting is ambiguous. Once the dependency reports Resource progress,
     # expose that distinct phase instead of leaving the stale request status.
@@ -1089,7 +1110,7 @@ def test_nomadnet_owner_routes_back_reload_and_table_observation_is_private():
                    manager.index("void UIManager::nomad_back_empty()")]
     assert "UserActionKind::BACK" in back
     actions = manager[manager.index("void UIManager::nomad_update_user_actions()"):
-                      manager.index("void UIManager::service_nomad_terminal_action()")]
+                      manager.index("void UIManager::service_nomad_user_action()")]
     assert "UserActionKind::RELOAD" in actions and "_nomad_owner.service" in actions
 
 
@@ -1149,7 +1170,7 @@ def test_nomadnet_active_window_defers_only_nonessential_owner_loop_work():
     reticulum = main[main.index("// Process Reticulum") : main.index("// Best-effort instantaneous RSSI")]
     assert "if (!nomad_busy)" not in reticulum
     assert "reticulum->loop();" in reticulum
-    assert main.index("service_nomad_terminal_action();") < main.index("reticulum->loop();")
+    assert main.index("service_nomad_user_action();") < main.index("reticulum->loop();")
 
     persistence = main[main.index("// Periodically persist identity/transport data") :
                        main.index("// Reticulum::loop() above")]

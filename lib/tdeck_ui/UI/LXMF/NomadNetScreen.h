@@ -46,6 +46,7 @@ public:
     void set_page_saved(bool saved);
     void set_identify_enabled(bool enabled);
     void begin_navigation(const std::string& target);
+    void show_pending_navigation(const std::string& target);
     void show_start();
     bool handle_library_back();
     bool directory_visible() const { return _directory_visible.load(std::memory_order_acquire); }
