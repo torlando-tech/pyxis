@@ -38,6 +38,7 @@ def test_app_launcher_nomadnet_native(tmp_path):
         f"-I{INCLUDE}", str(SOURCE),
         str(INCLUDE / "NomadNetDocument.cpp"),
         str(INCLUDE / "NomadNetCompactPage.cpp"),
+        str(INCLUDE / "NomadNetForm.cpp"),
         str(INCLUDE / "NomadNetGlyphs.cpp"),
         str(INCLUDE / "NomadNetLibrary.cpp"),
         str(INCLUDE / "NomadNetUrl.cpp"),
@@ -49,6 +50,24 @@ def test_app_launcher_nomadnet_native(tmp_path):
         result = subprocess.run([str(binary), str(fixture)], capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, result.stdout + result.stderr
         assert result.stdout.strip().endswith("passed, 0 failed")
+
+
+def test_form_empty_selector_allocation_failure_is_contained(tmp_path):
+    binary = tmp_path / "test_nomadnet_form_alloc_failure"
+    source = HERE / "test_nomadnet_form_alloc_failure.cpp"
+    command = [
+        _cxx(), "-std=c++17", "-Wall", "-Wextra", "-Werror",
+        f"-I{INCLUDE}", str(source),
+        str(INCLUDE / "NomadNetDocument.cpp"),
+        str(INCLUDE / "NomadNetCompactPage.cpp"),
+        str(INCLUDE / "NomadNetForm.cpp"),
+        str(INCLUDE / "NomadNetGlyphs.cpp"),
+        "-o", str(binary),
+    ]
+    compiled = subprocess.run(command, capture_output=True, text=True)
+    assert compiled.returncode == 0, compiled.stdout + compiled.stderr
+    result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_ui_wiring_contract():
@@ -118,6 +137,121 @@ def test_ui_wiring_contract():
     assert "set_save_callback" in manager_cpp
 
 
+def test_nomadnet_forms_are_bounded_virtualized_and_owner_submitted():
+    document_h = (INCLUDE / "NomadNetDocument.h").read_text()
+    form_h = (INCLUDE / "NomadNetForm.h").read_text()
+    form_cpp = (INCLUDE / "NomadNetForm.cpp").read_text()
+    compact_h = (INCLUDE / "NomadNetCompactPage.h").read_text()
+    screen = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    manager = (INCLUDE / "UIManager.cpp").read_text()
+    x86_client = (ROOT / "tests/native/nomadnet_x86_flow/client.cpp").read_text()
+    platformio = (ROOT / "platformio.ini").read_text()
+    lvgl_patch = (ROOT / "patch_lvgl_textarea.py").read_text()
+
+    assert "pre:patch_lvgl_textarea.py" in platformio
+    assert "if(obj == NULL) return NULL;" in lvgl_patch
+    assert "if(ta->label == NULL)" in lvgl_patch
+    assert "char * pwd_resized" in lvgl_patch
+    assert "ta->pwd_tmp = pwd_resized" in lvgl_patch
+    assert "ta->pwd_tmp = pwd_bulk_resized" in lvgl_patch
+    assert "if(pwd_shrunk != NULL) ta->pwd_tmp = pwd_shrunk" in lvgl_patch
+    assert "ta->pwd_tmp = pwd_set_resized" in lvgl_patch
+    assert "lv_obj_class_create_obj(&lv_label_class, obj)" in lvgl_patch
+    assert "char * pwd_mode_tmp = lv_mem_alloc(len + 1)" in lvgl_patch
+    assert "ta->pwd_mode = 1U" in lvgl_patch
+    assert "if(pwd_resized == NULL) return;\\n        ta->pwd_tmp = pwd_resized;" in lvgl_patch
+    assert "if(pwd_bulk_resized == NULL) return;\\n        ta->pwd_tmp = pwd_bulk_resized;" in lvgl_patch
+    assert "Reserve password storage before mutating the label" in lvgl_patch
+    assert 'env_libdeps_dir(env, "lvgl", "src", "core", "lv_obj_class.c")' in lvgl_patch
+    assert 'env_libdeps_dir(env, "lvgl", "src", "widgets", "lv_label.c")' in lvgl_patch
+    assert "if(parent->spec_attr == NULL)" in lvgl_patch
+    assert "lv_obj_t ** children_resized" in lvgl_patch
+    assert "char * label_resized = lv_mem_realloc" in lvgl_patch
+    assert "if(txt_tmp == NULL) {" in lvgl_patch
+    assert "volatile char * visible" in lvgl_patch
+    assert "size_t visible_len = strlen(txt)" in lvgl_patch
+    assert "size_t masked_len = strlen(visible)" in lvgl_patch
+    assert 'env_libdeps_dir(env, "lvgl", "src", "core", "lv_event.c")' in lvgl_patch
+    assert 'env_libdeps_dir(env, "lvgl", "src", "core", "lv_group.c")' in lvgl_patch
+    assert "lv_event_dsc_t * event_dsc_resized" in lvgl_patch
+    assert "uint32_t event_dsc_cnt_new" in lvgl_patch
+    assert "if(lv_label_get_text(ta->label) == NULL)" in lvgl_patch
+    assert "lv_obj_add_event_cb(ta->label, label_event_cb" in lvgl_patch
+    assert "obj->spec_attr->group_p = group;" in lvgl_patch
+    group_patch = lvgl_patch[lvgl_patch.index("group_add_new ="):]
+    assert group_patch.index("lv_obj_t ** next = _lv_ll_ins_tail") < group_patch.index(
+        "obj->spec_attr->group_p = group;"
+    )
+
+    for bound in ("MAX_FIELDS", "MAX_FIELD_NAME_BYTES", "MAX_FIELD_VALUE_BYTES",
+                  "MAX_FIELD_LABEL_BYTES", "MAX_FORM_BYTES", "MAX_ENCODED_BYTES"):
+        assert bound in document_h or bound in form_h
+    assert "ExternalVector<FieldRecord>" in compact_h
+    assert "ExternalVector<FieldState>" in form_h
+    assert "field_index" in compact_h
+    assert "clear_encoded_form" in form_cpp
+    assert "~FieldState" in form_h
+    constructor = screen[screen.index("NomadNetScreen::NomadNetScreen"):
+                         screen.index("NomadNetScreen::~NomadNetScreen")]
+    begin_edit = screen[screen.index("void NomadNetScreen::begin_field_edit"):
+                        screen.index("void NomadNetScreen::finish_field_edit")]
+    finish_edit = screen[screen.index("void NomadNetScreen::finish_field_edit"):
+                         screen.index("void NomadNetScreen::activate_selected_link")]
+    assert "_field_editor=lv_textarea_create" not in constructor
+    assert begin_edit.count("_field_editor=lv_textarea_create") == 1
+    assert "if(!_field_editor)" in begin_edit
+    assert "Field editor is unavailable" in begin_edit
+    assert "std::strcmp(loaded_value,state.value.data())!=0" in begin_edit
+    assert "lv_textarea_get_text(_field_editor)==nullptr" in begin_edit
+    assert "if(type==NomadNet::FormFieldType::PASSWORD&&\n       !lv_textarea_get_password_mode(_field_editor))" in begin_edit
+    assert begin_edit.index("lv_textarea_set_password_mode(_field_editor,true)") < begin_edit.index(
+        "!lv_textarea_get_password_mode(_field_editor)"
+    ) < begin_edit.index("lv_textarea_set_text(_field_editor,state.value.data())")
+    assert "const std::size_t wipe_length=std::strlen(value)" in begin_edit
+    assert "if(!TextAreaHelper::enable_paste(_field_editor)" in begin_edit
+    assert "!lv_obj_add_event_cb(_field_editor" in begin_edit
+    assert "lv_obj_get_group(_field_editor)!=group" in begin_edit
+    assert begin_edit.index("lv_group_add_obj(group,_field_editor)") < begin_edit.index(
+        "lv_group_remove_obj(_content)"
+    )
+    assert "lv_obj_del(_field_editor)" in finish_edit
+    assert "_field_editor=nullptr" in finish_edit
+    form_layout = screen[screen.index("bool NomadNetScreen::layout_page()"):
+                         screen.index("void NomadNetScreen::draw_page")]
+    assert "lv_obj_create" not in form_layout
+    assert "set_submit_callback" in manager
+    assert "prepare_submission" in manager
+    assert "_nomad_submission_ready" in manager
+    request_start = manager.index("void UIManager::nomad_send_request()")
+    request = manager[request_start:manager.index("void UIManager::nomad_update()", request_start)]
+    assert "packed_request_data" in request
+    assert "clear_encoded_form(_nomad_submission_data)" in request
+    assert "catch (const std::bad_alloc&)" in request
+    assert "Request exceeds available internal memory" in request
+    assert "request_data.size() > NomadNet::FormState::MAX_ENCODED_BYTES" in request
+    assert "Request data exceeds device limit" in request
+    assert "NomadNet::AsyncMailbox::MAX_WIRE_BYTES, true" in request
+    identify_link = manager[manager.index("void UIManager::nomad_identify_link_if_configured()"):
+                            manager.index("void UIManager::nomad_send_request()")]
+    assert "if (_nomad_library.node_identified(_nomad_url.destination_hex))" in identify_link
+    assert "if (_nomad_link_identified) return;" in identify_link
+    assert "_nomad_link.identify(_router.identity())" in identify_link
+    link_event = manager[manager.index("case NomadNet::AsyncMailbox::Kind::LINK_ESTABLISHED"):
+                         manager.index("case NomadNet::AsyncMailbox::Kind::LINK_CLOSED")]
+    assert "nomad_identify_link_if_configured()" not in link_event
+    assert request.count("nomad_identify_link_if_configured()") == 1
+    assert request.index("nomad_identify_link_if_configured()") < request.index("_nomad_link.request(")
+    assert "set_value(uint16_t id, const char* value, std::size_t size)" in form_h
+    assert "MAX_ENCODED_BYTES = 384" in form_h
+    prepare_submission = screen[screen.index("bool NomadNetScreen::prepare_submission"):
+                                screen.index("void NomadNetScreen::field_editor_event")]
+    assert "catch(const std::bad_alloc&)" in prepare_submission
+    assert "FormEncodeResult::ALLOCATION_FAILED" in prepare_submission
+    assert "set_identify_callback" in manager
+    assert "set_identify_enabled" in manager
+    assert "Deliberately no link.identify()" in x86_client
+
+
 def test_nomadnet_table_renderer_is_bounded_and_virtualized():
     document_h = (INCLUDE / "NomadNetDocument.h").read_text()
     compact_h = (INCLUDE / "NomadNetCompactPage.h").read_text()
@@ -181,7 +315,8 @@ def test_nomadnet_anchor_navigation_stays_local_and_uses_layout_checkpoints():
                       open_page.index("RouterLock router_lock")]
     assert "_nomadnet_screen->jump_to_anchor(parsed.fragment)" in local
     assert "if(!resolved&&parsed.fragment.empty())return;" in local
-    assert "_nomad_history.open(parsed.str(),add_history,current_scroll)" in local
+    assert "_nomad_history.current_request_data()" in local
+    assert "_nomad_history.open(parsed.str(), add_history, current_scroll," in local
     assert "nomad_send_request" not in local
     assert "begin_navigation" not in local
 
@@ -523,8 +658,8 @@ def test_nomadnet_requests_are_anonymous_and_back_cleanup_is_serialized():
     manager_cpp = (INCLUDE / "UIManager.cpp").read_text()
 
     # Canonical NomadNet identifies only for nodes with an explicit per-node
-    # identify-on-connect policy. Pyxis has no such opt-in setting, so ordinary
-    # page requests must remain anonymous.
+    # identify-on-connect policy. The established-link event delegates that
+    # policy decision before request creation instead of identifying every link.
     link_event = manager_cpp[manager_cpp.index("case NomadNet::AsyncMailbox::Kind::LINK_ESTABLISHED:"):
                              manager_cpp.index("case NomadNet::AsyncMailbox::Kind::LINK_CLOSED:")]
     assert ".identify(" not in link_event
@@ -533,7 +668,7 @@ def test_nomadnet_requests_are_anonymous_and_back_cleanup_is_serialized():
     # Link teardown cancels an in-flight Resource and updates its shared request
     # receipt. Observe that cancellation before using the compatibility pending-
     # receipt cleanup, and keep both mutations under the Reticulum owner lock.
-    stop = manager_cpp[manager_cpp.index("void UIManager::nomad_stop_transport()"):
+    stop = manager_cpp[manager_cpp.index("bool UIManager::nomad_stop_transport()"):
                        manager_cpp.index("bool UIManager::nomad_refresh_path_after_link_failure()")]
     assert "RouterLock router_lock;" in stop
     assert stop.index("_nomad_link.teardown()") < stop.index("nomad_release_request();")
@@ -842,7 +977,7 @@ def test_nomadnet_active_window_defers_only_nonessential_owner_loop_work():
     assert "_nomad_state == NomadState::LINK" in predicate
     assert "RNS::Type::Link::ACTIVE" in predicate
     assert "RNS::Type::Link::CLOSED" in predicate
-    stop = implementation[implementation.index("void UIManager::nomad_stop_transport()") :
+    stop = implementation[implementation.index("bool UIManager::nomad_stop_transport()") :
                           implementation.index("bool UIManager::nomad_refresh_path_after_link_failure()")]
     assert "_nomad_state = NomadState::IDLE;" in stop
 

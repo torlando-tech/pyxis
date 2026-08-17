@@ -9,8 +9,9 @@ namespace UI::LXMF::NomadNet {
 
 enum class BlockType { TEXT, HEADING, DIVIDER, TABLE, UNSUPPORTED };
 enum class Alignment { LEFT, CENTER, RIGHT };
+enum class FormFieldType : uint8_t { TEXT, PASSWORD, CHECKBOX, RADIO };
 
-enum class TruncationReason : uint16_t {
+enum class TruncationReason : uint32_t {
     DOCUMENT_BYTES = 1 << 0,
     SOURCE_LINES = 1 << 1,
     SOURCE_LINE_BYTES = 1 << 2,
@@ -26,7 +27,12 @@ enum class TruncationReason : uint16_t {
     TABLE_CELL_BYTES = 1 << 12,
     TABLE_BYTES = 1 << 13,
     TABLE_CELLS = 1 << 14,
-    TABLE_FALLBACK_BYTES = 1 << 15,
+    TABLE_FALLBACK_BYTES = 1u << 15,
+    FORM_FIELDS = 1u << 16,
+    FORM_NAME_BYTES = 1u << 17,
+    FORM_VALUE_BYTES = 1u << 18,
+    FORM_LABEL_BYTES = 1u << 19,
+    FORM_BYTES = 1u << 20,
 };
 
 struct Run {
@@ -39,6 +45,18 @@ struct Run {
     bool has_background = false;
     uint32_t background = 0;
     int link_index = -1;
+    int field_index = -1;
+};
+
+struct FormField {
+    uint16_t id = 0;
+    FormFieldType type = FormFieldType::TEXT;
+    std::string name;
+    std::string value;
+    std::string label;
+    uint16_t width = 24;
+    bool checked = false;
+    bool masked = false;
 };
 
 struct TableCell {
@@ -65,9 +83,15 @@ struct Block {
 };
 
 struct Link {
+    Link() = default;
+    Link(const std::string& link_label, const std::string& link_target,
+         const std::string& link_fields, bool contains_fields = false)
+        : label(link_label), target(link_target), fields(link_fields), has_fields(contains_fields) {}
+
     std::string label;
     std::string target;
     std::string fields;
+    bool has_fields = false;
 };
 
 struct Anchor {
@@ -86,6 +110,7 @@ struct Document {
     std::vector<Table> tables;
     std::vector<TableCell> table_cells;
     std::vector<Run> table_runs;
+    std::vector<FormField> fields;
     uint32_t cache_seconds = 0;
     bool has_background = false;
     uint32_t background = 0;
@@ -96,14 +121,15 @@ struct Document {
     bool unsupported = false;
     std::size_t source_bytes = 0;
     std::size_t source_lines = 0;
-    uint16_t truncation_reasons = 0;
+    uint32_t truncation_reasons = 0;
+    std::size_t form_bytes = 0;
 
     void mark_truncated(TruncationReason reason) {
         truncated = true;
-        truncation_reasons |= static_cast<uint16_t>(reason);
+        truncation_reasons |= static_cast<uint32_t>(reason);
     }
     bool has_truncation(TruncationReason reason) const {
-        return (truncation_reasons & static_cast<uint16_t>(reason)) != 0;
+        return (truncation_reasons & static_cast<uint32_t>(reason)) != 0;
     }
 };
 
@@ -126,6 +152,13 @@ public:
     static constexpr std::size_t MAX_TABLE_CELL_BYTES = 512;
     static constexpr std::size_t MAX_TABLE_FALLBACK_BYTES = 1024;
     static constexpr std::size_t MAX_TABLE_BYTES = 16 * 1024;
+    static constexpr std::size_t MAX_FIELDS = 64;
+    static constexpr std::size_t MAX_FIELD_NAME_BYTES = 64;
+    static constexpr std::size_t MAX_FIELD_VALUE_BYTES = 512;
+    static constexpr std::size_t MAX_FIELD_LABEL_BYTES = 256;
+    static constexpr std::size_t MAX_FORM_BYTES = 16 * 1024;
+    static constexpr uint16_t DEFAULT_FIELD_WIDTH = 24;
+    static constexpr uint16_t MAX_FIELD_WIDTH = 256;
     static constexpr uint16_t DEFAULT_TABLE_WIDTH = 100;
     static constexpr uint16_t MAX_TABLE_WIDTH = UINT16_MAX;
     static constexpr uint32_t MAX_CACHE_SECONDS = 7 * 24 * 60 * 60;

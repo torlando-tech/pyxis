@@ -16,15 +16,36 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Checkout pinned microReticulum reference
+        uses: actions/checkout@v4
+        with:
+          repository: torlando-tech/microReticulum
+          ref: cd0338e7fc07d3a7785a450656ba766491cbf6e8
+          path: .ci/microReticulum
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install pytest
-        run: pip install pytest
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libbz2-dev
+          pip install pytest rns==1.4.2 nomadnet==1.2.8
+
+      - name: Build NomadNet real-peer client
+        run: |
+          cmake -S tests/native/nomadnet_x86_flow \
+            -B build/nomadnet-x86-flow \
+            -DRNS_SOURCE="$PWD/.ci/microReticulum"
+          cmake --build build/nomadnet-x86-flow --parallel
 
       - name: Run pytest
+        env:
+          PYXIS_NOMADNET_X86_CLIENT: ${{ github.workspace }}/build/nomadnet-x86-flow/pyxis_nomadnet_x86_flow
+          PYXIS_NOMADNET_RNS_PYTHON: ${{ env.pythonLocation }}/bin/python
+          PYXIS_NOMADNET_REFERENCE_SOURCE: ${{ env.pythonLocation }}/lib/python3.11/site-packages
         run: pytest tests/build_scripts tests/native -v
 
   microreticulum-native:

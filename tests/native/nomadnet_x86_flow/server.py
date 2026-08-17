@@ -1,11 +1,33 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
 import os
+from pathlib import Path
 import sys
 import tempfile
 import time
 
 import RNS
+
+RNS_VERSION = "1.4.2"
+RNS_TREE_SHA256 = "b5398e7bae0cdd47212e0c6bff3f3a51b21012db0c23cb20d43b5103612f6c5e"
+if getattr(RNS, "__version__", None) != RNS_VERSION:
+    raise SystemExit(f"wrong RNS reference version: {getattr(RNS, '__version__', None)}")
+if RNS.__file__ is None:
+    raise SystemExit("RNS reference has no source path")
+reference_root = Path(RNS.__file__).resolve().parent
+reference_hash = hashlib.sha256()
+for reference_file in sorted(reference_root.rglob("*.py")):
+    relative = reference_file.relative_to(reference_root).as_posix().encode()
+    content = reference_file.read_bytes()
+    reference_hash.update(len(relative).to_bytes(4, "big"))
+    reference_hash.update(relative)
+    reference_hash.update(len(content).to_bytes(8, "big"))
+    reference_hash.update(content)
+if reference_hash.hexdigest() != RNS_TREE_SHA256:
+    raise SystemExit(f"wrong RNS reference tree: {reference_hash.hexdigest()}")
+print(f"REFERENCE RNS {RNS_VERSION}")
+print(f"REFERENCE RNS tree {RNS_TREE_SHA256}")
 
 state = {
     "request_seen": False,
@@ -13,6 +35,7 @@ state = {
     "anonymous": False,
     "link": None,
     "link_closed": False,
+    "form_valid": False,
 }
 
 
@@ -35,6 +58,14 @@ PAGES = {
     "/page/cancel.mu": micron_page("Resource-backed page", 60_000),
     "/page/reuse-first.mu": micron_page("Immediate page", 220),
     "/page/reuse-second.mu": micron_page("Resource-backed page", 12_000),
+    "/page/form.mu": micron_page("Form response", 220),
+}
+
+EXPECTED_FORM_DATA = {
+    "var_fixed": "yes",
+    "field_name": "Example User",
+    "field_password": "example-pass",
+    "field_color": "red,blue",
 }
 
 
@@ -42,6 +73,8 @@ def page_handler(path, data, request_id, link_id, remote_identity, requested_at)
     state["request_seen"] = True
     state["request_count"] += 1
     state["anonymous"] = remote_identity is None
+    if path == "/page/form.mu":
+        state["form_valid"] = data == EXPECTED_FORM_DATA
     print(f"SERVER request count={state['request_count']} path={path} bytes={len(PAGES[path])} anonymous={state['anonymous']}", flush=True)
     return PAGES[path]
 
@@ -82,7 +115,7 @@ def write_config(config_dir: str):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("scenario", choices=("immediate", "resource", "near-limit", "oversized", "timeout", "cancel", "reuse"))
+    parser.add_argument("scenario", choices=("immediate", "resource", "near-limit", "oversized", "timeout", "cancel", "reuse", "form-anonymous", "form-identified"))
     parser.add_argument("--timeout", type=float, default=20.0)
     args = parser.parse_args()
 
@@ -101,7 +134,7 @@ def main():
                                                  allow=RNS.Destination.ALLOW_ALL,
                                                  auto_compress=False)
     elif args.scenario != "timeout":
-        path = f"/page/{args.scenario}.mu"
+        path = "/page/form.mu" if args.scenario.startswith("form-") else f"/page/{args.scenario}.mu"
         destination.register_request_handler(path, page_handler,
                                              allow=RNS.Destination.ALLOW_ALL,
                                              auto_compress=False)
@@ -115,8 +148,20 @@ def main():
         if now - last_announce >= 2.0 and not state["request_seen"]:
             destination.announce(app_data=b"Pyxis x86 NomadNet peer")
             last_announce = now
-        if state["request_seen"] and not state["anonymous"]:
+        if state["request_seen"] and not state["anonymous"] and args.scenario != "form-identified":
             print("SERVER FAIL client identified unexpectedly", flush=True)
+            return 1
+        if args.scenario == "form-anonymous" and state["request_seen"]:
+            if state["anonymous"] and state["form_valid"]:
+                print("SERVER PASS exact form request data anonymous=True", flush=True)
+                return 0
+            print("SERVER FAIL form data or anonymous identity mismatch", flush=True)
+            return 1
+        if args.scenario == "form-identified" and state["request_seen"]:
+            if not state["anonymous"] and state["form_valid"]:
+                print("SERVER PASS exact form request data anonymous=False", flush=True)
+                return 0
+            print("SERVER FAIL form data or identified identity mismatch", flush=True)
             return 1
         if args.scenario in ("immediate", "resource", "near-limit", "oversized") and state["request_seen"]:
             time.sleep(1.0)

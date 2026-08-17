@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
@@ -17,6 +18,7 @@
 #include "NomadNetCompactPage.h"
 #include "NomadNetColors.h"
 #include "NomadNetFocus.h"
+#include "NomadNetForm.h"
 #include "NomadNetProtocol.h"
 #include "NomadNetRequestPolicy.h"
 #include "NomadNetUrl.h"
@@ -40,6 +42,9 @@ using UI::LXMF::NomadNet::sanitize_directory_name;
 using UI::LXMF::NomadNet::page_title;
 using UI::LXMF::NomadNet::AsyncMailbox;
 using UI::LXMF::NomadNet::CompactPage;
+using UI::LXMF::NomadNet::FormEncodeResult;
+using UI::LXMF::NomadNet::FormFieldType;
+using UI::LXMF::NomadNet::FormState;
 using UI::LXMF::NomadNet::resolve_foreground;
 using UI::LXMF::NomadNet::for_each_focus_span;
 using UI::LXMF::NomadNet::ResponseBuffer;
@@ -85,6 +90,26 @@ int main(int argc, char** argv) {
     check("browser back restores prior page and logical scroll",
           history.back() && history.current() == "a" && history.current_scroll() == 84 &&
               history.depth() == 0);
+    const uint8_t submitted_request[] = {
+        0x81, 0xab, 'f','i','e','l','d','_','s','e','c','r','e','t', 0xa1, 'x'};
+    history.clear();
+    check("history admits bounded volatile form request data",
+          history.open("form", true, 0, submitted_request, sizeof(submitted_request)) &&
+              history.current_has_request_data() &&
+              history.current_request_data().size() == sizeof(submitted_request));
+    check("history preserves exact form request data across Back",
+          history.open("next") && history.back() && history.current() == "form" &&
+              std::equal(history.current_request_data().begin(),
+                         history.current_request_data().end(), submitted_request));
+    const uint8_t changed_request[] = {
+        0x81, 0xab, 'f','i','e','l','d','_','s','e','c','r','e','t', 0xa1, 'y'};
+    history.clear();
+    check("same-address changed form submissions create distinct history entries",
+          history.open("form", true, 0, submitted_request, sizeof(submitted_request)) &&
+              history.open("form", true, 41, changed_request, sizeof(changed_request)) &&
+              history.depth() == 1 && history.back() && history.current_scroll() == 41 &&
+              std::equal(history.current_request_data().begin(),
+                         history.current_request_data().end(), submitted_request));
     history.clear();
     history.open("node:/page/a.mu");
     history.open("node:/page/a.mu#details", true, 137);
@@ -203,6 +228,139 @@ int main(int argc, char** argv) {
         for (const auto& run : block.runs) value += run.text;
         return value;
     };
+
+    const auto canonical_form = parser.parse(
+        "Before `<name`Alice> `<16|nickname`Nick> `<8!|secret`hunter2>\n"
+        "`<?|flags|red|*`Red> `<?|flags|blue`Blue> "
+        "`<^|choice|a|*`A> `<^|choice|b|*`B> `<empty`> After");
+    check("canonical Micron text, password, checkbox, and radio fields parse in source order",
+          canonical_form.fields.size() == 8 &&
+              canonical_form.fields[0].type == FormFieldType::TEXT &&
+              canonical_form.fields[0].name == "name" && canonical_form.fields[0].value == "Alice" &&
+              canonical_form.fields[1].width == 16 && canonical_form.fields[1].value == "Nick" &&
+              canonical_form.fields[2].type == FormFieldType::PASSWORD && canonical_form.fields[2].masked &&
+              canonical_form.fields[2].width == 8 &&
+              canonical_form.fields[3].type == FormFieldType::CHECKBOX &&
+              canonical_form.fields[3].value == "red" && canonical_form.fields[3].label == "Red" &&
+              canonical_form.fields[3].checked && !canonical_form.fields[4].checked &&
+              canonical_form.fields[5].type == FormFieldType::RADIO &&
+              !canonical_form.fields[5].checked && canonical_form.fields[6].checked &&
+              canonical_form.fields[7].value.empty());
+    const auto bounded_widths = parser.parse(
+        "`<!32|masked`x> `<257|wide`x> `<abc|invalid`x> `<0|zero`x> `<-5|negative`x> "
+        "`<?|fallback`Label>");
+    check("canonical widths are parsed while unsafe nonpositive widths are locally normalized",
+          bounded_widths.fields.size() == 6 && bounded_widths.fields[0].width == 32 &&
+              bounded_widths.fields[1].width == 256 && bounded_widths.fields[2].width == 24 &&
+              bounded_widths.fields[3].width == 1 && bounded_widths.fields[4].width == 1);
+    check("checkbox labels canonically fall back to submitted values",
+          bounded_widths.fields[5].type == FormFieldType::CHECKBOX &&
+              bounded_widths.fields[5].label == "Label" && bounded_widths.fields[5].value == "Label");
+    std::size_t field_placeholders = 0;
+    for (const auto& block : canonical_form.blocks)
+        for (const auto& run : block.runs)
+            if (run.field_index >= 0) ++field_placeholders;
+    check("inline field positions retain stable field references", field_placeholders == canonical_form.fields.size());
+
+    CompactPage form_page;
+    check("compact page retains bounded field records and arena strings",
+          form_page.assign(canonical_form) && form_page.fields().size() == canonical_form.fields.size() &&
+              form_page.field_name(0) == "name" && form_page.field_value(2) == "hunter2" &&
+              form_page.field_label(3) == "Red" && form_page.runs()[1].field_index >= -1);
+    FormState form_state;
+    check("form state initializes from compact fields", form_state.assign(form_page) && form_state.fields().size() == 8);
+    check("bounded edits and canonical checkbox/radio selection update active state",
+          form_state.set_value(0, "Bob") && form_state.set_checked(4, true) &&
+              form_state.set_checked(5, true) && form_state.fields()[5].checked && !form_state.fields()[6].checked);
+    UI::LXMF::NomadNet::ExternalVector<uint8_t> encoded_form;
+    auto encoded_equals = [&encoded_form](const std::vector<uint8_t>& expected) {
+        return encoded_form.size() == expected.size() &&
+            std::equal(encoded_form.begin(), encoded_form.end(), expected.begin());
+    };
+    const std::vector<uint8_t> expected_form{
+        0x84,
+        0xa8, 'v','a','r','_','m','o','d','e', 0xa4, 'f','a','s','t',
+        0xaa, 'f','i','e','l','d','_','n','a','m','e', 0xa3, 'B','o','b',
+        0xab, 'f','i','e','l','d','_','f','l','a','g','s', 0xa8, 'r','e','d',',','b','l','u','e',
+        0xac, 'f','i','e','l','d','_','c','h','o','i','c','e', 0xa1, 'a'};
+    check("selected fields and configured variables encode byte-exact canonical MessagePack",
+          form_state.encode("mode=fast|name|flags|choice", encoded_form) == FormEncodeResult::OK &&
+              encoded_equals(expected_form));
+    const auto duplicate_form = parser.parse("`<dup`first> `<dup`second>");
+    CompactPage duplicate_page;
+    FormState duplicate_state;
+    const std::vector<uint8_t> expected_duplicate{
+        0x83,
+        0xaa, 'v','a','r','_','a','c','t','i','o','n', 0xa4, 'e','d','i','t',
+        0xa9, 'v','a','r','_','e','m','p','t','y', 0xa0,
+        0xa9, 'f','i','e','l','d','_','d','u','p', 0xa6, 's','e','c','o','n','d'};
+    check("duplicate variables and fields are last-wins while multi-equals assignments are ignored",
+          duplicate_page.assign(duplicate_form) && duplicate_state.assign(duplicate_page) &&
+              duplicate_state.encode("dup|action=view|action=edit|eq=a=b|empty=", encoded_form) ==
+                  FormEncodeResult::OK && encoded_equals(expected_duplicate));
+    const std::vector<uint8_t> expected_empty{
+        0x81, 0xab, 'f','i','e','l','d','_','e','m','p','t','y', 0xa0};
+    check("unchecked controls are absent and empty selected text remains an empty string",
+          form_state.encode("empty", encoded_form) == FormEncodeResult::OK &&
+              encoded_equals(expected_empty));
+    check("explicit empty submission components encode an empty map",
+          form_state.encode("", encoded_form) == FormEncodeResult::OK &&
+              encoded_form.size() == 1 && encoded_form[0] == 0x80);
+
+    const auto malformed_form = parser.parse("before `<name`unterminated after");
+    check("unterminated fields fail closed without retaining controls",
+          malformed_form.fields.empty() && malformed_form.malformed);
+    const auto empty_submission_link = parser.parse("`[Submit`:/page/test.mu`]");
+    CompactPage empty_submission_page;
+    check("an empty third link component canonically behaves as an ordinary nil-data link",
+          empty_submission_link.links.size() == 1 && !empty_submission_link.links[0].has_fields &&
+              empty_submission_page.assign(empty_submission_link) &&
+              empty_submission_page.target(0) == ":/page/test.mu");
+    const auto oversegmented_link = parser.parse("`[Submit`:/page/test.mu`name`extra]");
+    check("links with more than three canonical components are inert",
+          oversegmented_link.links.empty() && oversegmented_link.malformed);
+    const auto heading_form = parser.parse(">Heading `<name`value>");
+    check("a heading containing a form control canonically falls back to body text",
+          heading_form.fields.size() == 1 && !heading_form.blocks.empty() &&
+              heading_form.blocks[0].type == BlockType::TEXT && heading_form.anchors.empty() &&
+              block_text(heading_form.blocks[0]).rfind("Heading", 0) == 0);
+    const auto empty_checkbox_form = parser.parse("`<?|flags||*`> `<?|flags|x|*`X>");
+    CompactPage empty_checkbox_page;
+    FormState empty_checkbox_state;
+    const std::vector<uint8_t> expected_empty_checkbox{
+        0x81, 0xab, 'f','i','e','l','d','_','f','l','a','g','s', 0xa1, 'x'};
+    check("checkbox aggregation replaces an earlier empty checked value",
+          empty_checkbox_page.assign(empty_checkbox_form) &&
+              empty_checkbox_state.assign(empty_checkbox_page) &&
+              empty_checkbox_state.encode("flags", encoded_form) == FormEncodeResult::OK &&
+              encoded_equals(expected_empty_checkbox));
+    std::string too_many_fields;
+    for (std::size_t i = 0; i < DocumentParser::MAX_FIELDS + 1; ++i)
+        too_many_fields += "`<f" + std::to_string(i) + "`v> ";
+    const auto bounded_fields = parser.parse(too_many_fields);
+    check("field count is independently bounded with an explicit reason",
+          bounded_fields.fields.size() == DocumentParser::MAX_FIELDS && bounded_fields.truncated &&
+              bounded_fields.has_truncation(TruncationReason::FORM_FIELDS));
+    std::string maximum_form_source;
+    for (std::size_t i = 0; i < DocumentParser::MAX_FIELDS; ++i)
+        maximum_form_source += "`<f" + std::to_string(i) + "`x> ";
+    CompactPage maximum_form_page;
+    FormState maximum_form_state;
+    std::string maximum_selectors = "*";
+    for (std::size_t i = 0; i + 1 < FormState::MAX_SELECTORS; ++i)
+        maximum_selectors += "|v" + std::to_string(i) + "=x";
+    check("packet-sized handoff rejects an otherwise bounded oversized map",
+          maximum_form_page.assign(parser.parse(maximum_form_source)) &&
+              maximum_form_state.assign(maximum_form_page) &&
+              maximum_form_state.encode(maximum_selectors, encoded_form) ==
+                  FormEncodeResult::OUTPUT_TOO_LARGE && encoded_form.empty());
+    const auto oversized_field = parser.parse(
+        "`<" + std::string(DocumentParser::MAX_FIELD_NAME_BYTES + 1, 'n') + "`value> After");
+    check("oversized field components are rejected without hiding following content",
+          oversized_field.fields.empty() && oversized_field.truncated &&
+              oversized_field.has_truncation(TruncationReason::FORM_NAME_BYTES) &&
+              !oversized_field.blocks.empty() && block_text(oversized_field.blocks.back()).find("After") != std::string::npos);
+
     auto unknown_modifier = parser.parse("before `xafter");
     check("unknown modifier is consumed like canonical NomadNet",
           unknown_modifier.blocks.size() == 1 && block_text(unknown_modifier.blocks[0]) == "before after");
@@ -1155,6 +1313,14 @@ int main(int argc, char** argv) {
         0xa5, 'v', 'a', 'r', '_', 'r', 0xa4, 'l', 'x', 'm', 'f'};
     check("configured link variables encode as the NomadNet request-data map",
           configured_variables == expected_variables);
+    const auto duplicate_variables = UI::LXMF::NomadNet::request_data(
+        "action=view|mode=brief|action=edit");
+    const std::vector<uint8_t> expected_duplicate_variables{
+        0x82,
+        0xaa, 'v','a','r','_','a','c','t','i','o','n', 0xa4, 'e','d','i','t',
+        0xa8, 'v','a','r','_','m','o','d','e', 0xa5, 'b','r','i','e','f'};
+    check("manual duplicate variables are canonical last-wins map entries",
+          duplicate_variables == expected_duplicate_variables);
     ResponseBuffer response;
     const uint8_t bin8[] = {0xc4, 0x03, 'm', 'u', '!'};
     check("msgpack bin8 response normalizes", UI::LXMF::NomadNet::normalize_response(bin8, sizeof(bin8), response) &&
@@ -1251,6 +1417,9 @@ int main(int argc, char** argv) {
           library.nodes().size() == 1 && library.nodes()[0].name == "Example Node");
     check("heard node updates in place", library.hear_node(node_hash, "Renamed Node", 200, 1) &&
           library.nodes().size() == 1 && library.nodes()[0].last_heard == 200);
+    check("identified browsing is explicit and scoped per NomadNet node",
+          !library.node_identified(node_hash) && library.set_node_identified(node_hash, true) &&
+              library.node_identified(node_hash));
     check("page navigation records bounded recent page", library.record_page(page_url, "Home", 300) &&
           library.pages().size() == 1 && library.pages()[0].title == "Home");
     check("saving page also saves its node", library.set_page_saved(page_url, true) &&
@@ -1282,7 +1451,14 @@ int main(int argc, char** argv) {
     Library restored_library;
     check("NomadNet library round trips", restored_library.decode(encoded_library.data(), encoded_library.size()) &&
           restored_library.nodes().size() == 1 && restored_library.pages().size() == 1 &&
-          restored_library.pages()[0].saved);
+          restored_library.pages()[0].saved && restored_library.node_identified(node_hash));
+    const std::string legacy_library = "PXNN1\nN\t" + node_hash +
+        "\t4c6567616379\t1\t0\t1\n";
+    Library legacy_decoded;
+    check("legacy libraries migrate with anonymous browsing as the safe default",
+          legacy_decoded.decode(reinterpret_cast<const uint8_t*>(legacy_library.data()),
+                                legacy_library.size()) &&
+              legacy_decoded.node_saved(node_hash) && !legacy_decoded.node_identified(node_hash));
     const uint8_t corrupt_library[] = {'P', 'X', 'N', 'N', '9', '\n'};
     check("corrupt NomadNet library fails closed",
           !restored_library.decode(corrupt_library, sizeof(corrupt_library)) && restored_library.nodes().size() == 1);
@@ -1371,6 +1547,19 @@ int main(int argc, char** argv) {
           action.target() == page_url);
     check("save target does not drift with current browser URL", actions.pop(action) &&
           action.kind == UserActionKind::SAVE && action.target() == new_saved_url);
+    check("form submit action carries only a stable link id and page generation",
+          actions.publish_submit(7, 42) && actions.pop(action) &&
+              action.kind == UserActionKind::SUBMIT && action.item_id == 7 &&
+              action.generation == 42 && action.target().empty());
+    check("duplicate form submits coalesce while a different queued submit is rejected",
+          actions.publish_submit(7, 43) && actions.publish_submit(7, 43) &&
+              !actions.publish_submit(8, 43) && actions.pop(action) &&
+              action.kind == UserActionKind::SUBMIT && action.item_id == 7 &&
+              action.generation == 43 && !actions.pop(action));
+    check("per-node identity policy action carries the explicit desired state",
+          actions.publish_identify(node_hash, true) && actions.pop(action) &&
+              action.kind == UserActionKind::IDENTIFY && action.target() == node_hash &&
+              action.item_id == 1);
     for (std::size_t i = 0; i < ActionMailbox::CAPACITY; ++i)
         check("bounded NomadNet action queue accepts capacity", actions.publish(UserActionKind::OPEN, page_url));
     check("bounded NomadNet action queue rejects ordinary overflow",

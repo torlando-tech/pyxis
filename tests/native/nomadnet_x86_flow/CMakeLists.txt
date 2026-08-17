@@ -31,6 +31,9 @@ add_executable(pyxis_nomadnet_x86_flow
   client.cpp
   "${PYXIS_ROOT}/src/TCPClientInterface.cpp"
   "${PYXIS_NOMADNET_DIR}/NomadNetDocument.cpp"
+  "${PYXIS_ROOT}/lib/tdeck_ui/UI/LXMF/NomadNetCompactPage.cpp"
+  "${PYXIS_ROOT}/lib/tdeck_ui/UI/LXMF/NomadNetForm.cpp"
+  "${PYXIS_ROOT}/lib/tdeck_ui/UI/LXMF/NomadNetGlyphs.cpp"
   "${PYXIS_NOMADNET_DIR}/NomadNetLibrary.cpp"
   "${PYXIS_NOMADNET_DIR}/NomadNetUrl.cpp"
 )
