@@ -111,7 +111,9 @@ struct Document {
     std::vector<TableCell> table_cells;
     std::vector<Run> table_runs;
     std::vector<FormField> fields;
-    uint32_t cache_seconds = 0;
+    uint32_t cache_seconds = 12U * 60U * 60U;
+    bool has_cache_directive = false;
+    bool cache_directive_valid = true;
     bool has_background = false;
     uint32_t background = 0;
     bool has_foreground = false;

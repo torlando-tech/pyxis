@@ -10,7 +10,7 @@
 
 namespace UI::LXMF::NomadNet {
 
-enum class UserActionKind : uint8_t { OPEN, SUBMIT, SAVE, IDENTIFY, BACK, HOME };
+enum class UserActionKind : uint8_t { OPEN, RELOAD, SUBMIT, SAVE, IDENTIFY, BACK, HOME };
 
 struct UserAction {
     static constexpr std::size_t MAX_TARGET_BYTES = 511;
@@ -47,7 +47,8 @@ public:
             _terminal_kind = kind;
             _terminal_pending = true;
             return true;
-        } else if (_terminal_pending && kind == UserActionKind::OPEN) {
+        } else if (_terminal_pending &&
+                   (kind == UserActionKind::OPEN || kind == UserActionKind::RELOAD)) {
             return false;
         }
         if (kind == UserActionKind::SAVE) {

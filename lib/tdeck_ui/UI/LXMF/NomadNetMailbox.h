@@ -20,11 +20,13 @@ public:
         Kind kind = Kind::NONE;
         ExternalVector<uint8_t> data;
         std::size_t transfer_size = 0;
+        std::uint32_t generation = 0;
     };
 
-    void begin(const std::vector<uint8_t>& link_token) {
+    void begin(const std::vector<uint8_t>& link_token, std::uint32_t generation = 0) {
         Guard guard(_lock);
         _sealed = false;
+        if (generation != 0) _generation = generation;
         if (_link_token == link_token &&
             (_event.kind == Kind::LINK_ESTABLISHED || _event.kind == Kind::LINK_CLOSED)) return;
         _link_token = link_token;
@@ -55,6 +57,7 @@ public:
                              _event.kind == Kind::FAILED ||
                              _event.kind == Kind::OVERSIZED)) return false;
         _event.kind = established ? Kind::LINK_ESTABLISHED : Kind::LINK_CLOSED;
+        _event.generation = _generation;
         _event.data.clear();
         _event.transfer_size = 0;
         return true;
@@ -71,10 +74,22 @@ public:
             set_oversized(size);
             return true;
         }
-        _event.kind = Kind::RESPONSE;
-        _event.transfer_size = transfer_size;
         _event.data.clear();
-        if (size != 0) _event.data.assign(data, data + size);
+        try {
+            if (size != 0) _event.data.assign(data, data + size);
+        } catch (const std::bad_alloc&) {
+            // Callback context must never unwind through Reticulum. Discard any
+            // partial payload and publish a bounded terminal failure for the
+            // accepted request token instead.
+            _event.data.clear();
+            _event.kind = Kind::FAILED;
+            _event.generation = _generation;
+            _event.transfer_size = 0;
+            return true;
+        }
+        _event.kind = Kind::RESPONSE;
+        _event.generation = _generation;
+        _event.transfer_size = transfer_size;
         return true;
     }
 
@@ -86,6 +101,7 @@ public:
         if (token != _request_token) return false;
         if (_event.kind == Kind::OVERSIZED || _event.kind == Kind::RESPONSE) return false;
         _event.kind = Kind::FAILED;
+        _event.generation = _generation;
         _event.data.clear();
         _event.transfer_size = 0;
         return true;
@@ -100,6 +116,7 @@ public:
         if (_event.kind == Kind::RESPONSE || _event.kind == Kind::FAILED ||
             _event.kind == Kind::OVERSIZED) return false;
         _event.kind = Kind::PROGRESS;
+        _event.generation = _generation;
         _event.data.clear();
         _event.transfer_size = transfer_size;
         return true;
@@ -130,9 +147,10 @@ public:
 
     // Open an explicit pre-arm window before constructing a Link. Some
     // implementations can call back before begin() receives its token.
-    void prepare() {
+    void prepare(std::uint32_t generation = 0) {
         Guard guard(_lock);
         reset(false);
+        _generation = generation;
     }
 
     // Terminal cleanup can synchronously invoke RequestReceipt's failed
@@ -162,6 +180,7 @@ private:
 
     void set_oversized(std::size_t transfer_size) {
         _event.kind = Kind::OVERSIZED;
+        _event.generation = _generation;
         _event.data.clear();
         _event.transfer_size = transfer_size;
     }
@@ -170,6 +189,7 @@ private:
     bool _sealed = false;
     std::vector<uint8_t> _link_token;
     std::vector<uint8_t> _request_token;
+    std::uint32_t _generation = 0;
     Event _event;
 };
 

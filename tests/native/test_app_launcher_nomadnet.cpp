@@ -128,6 +128,16 @@ int main(int argc, char** argv) {
     check("active link callback is accepted", mailbox.publish_link(new_link, true));
     AsyncMailbox::Event event;
     check("link event crosses mailbox", mailbox.take(event) && event.kind == AsyncMailbox::Kind::LINK_ESTABLISHED);
+    AsyncMailbox generated;
+    generated.prepare(41);
+    check("prepared callback captures its navigation generation",
+          generated.publish_link(new_link, true) && generated.take(event) &&
+              event.generation == 41);
+    generated.prepare(42);
+    generated.begin(new_link, 42);
+    check("new callback captures the replacement navigation generation",
+          generated.publish_link(new_link, true) && generated.take(event) &&
+              event.generation == 42);
     AsyncMailbox early_link;
     check("link callback may arrive before token arming", early_link.publish_link(new_link, true));
     early_link.begin(new_link);
@@ -1114,11 +1124,15 @@ int main(int argc, char** argv) {
     check("malformed table content has a readable fallback", doc.malformed && saw_unsupported);
 
     auto later_cache = parser.parse("text\n#!c=99999999999999999999\nmore");
-    check("cache metadata is first-line-only", later_cache.cache_seconds == 0);
+    check("cache metadata is first-line-only",
+          !later_cache.has_cache_directive &&
+              later_cache.cache_seconds == 12U * 60U * 60U);
     auto clamped_cache = parser.parse("#!c=99999999999999999999\ntext");
     check("cache seconds clamps without overflow", clamped_cache.cache_seconds == DocumentParser::MAX_CACHE_SECONDS);
     auto high_bit_digit = parser.parse(std::string("#!c=1") + char(0xff) + "\ntext");
-    check("cache digit validation is unsigned-char safe", high_bit_digit.cache_seconds == 0 && high_bit_digit.malformed);
+    check("cache digit validation is unsigned-char safe",
+          high_bit_digit.cache_seconds == 12U * 60U * 60U &&
+              high_bit_digit.malformed);
 
     std::string invalid_utf8("ok\xF0\x28\x8C\x28", 6);
     auto utf8_doc = parser.parse(invalid_utf8);
@@ -1144,7 +1158,9 @@ int main(int argc, char** argv) {
           huge_doc.has_truncation(UI::LXMF::NomadNet::TruncationReason::DOCUMENT_BYTES) &&
           UI::LXMF::NomadNet::truncation_notice(huge_doc) ==
               "[Page truncated: source exceeds 64 KiB]");
-    check("parser never processes metadata beyond retained source", huge_doc.cache_seconds == 0);
+    check("parser never processes metadata beyond retained source",
+          !huge_doc.has_cache_directive &&
+              huge_doc.cache_seconds == 12U * 60U * 60U);
     std::string long_line(DocumentParser::MAX_SOURCE_LINE_BYTES + 20, 'q');
     auto line_doc = parser.parse(long_line);
     check("source line capped", line_doc.truncated && !line_doc.blocks.empty() &&

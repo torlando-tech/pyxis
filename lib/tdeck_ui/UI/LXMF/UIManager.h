@@ -21,6 +21,8 @@
 #include "NomadNetRequestPolicy.h"
 #include "NomadNetActionMailbox.h"
 #include "NomadNetLibrary.h"
+#include "NomadNetCacheFlow.h"
+#include "Hardware/TDeck/NomadNetStorageSD.h"
 #include "ConversationListScreen.h"
 #include "ChatScreen.h"
 #include "ComposeScreen.h"
@@ -412,8 +414,22 @@ private:
     NomadNet::ActionMailbox _nomad_actions;
     NomadNet::ExternalVector<uint8_t> _nomad_submission_data;
     bool _nomad_submission_ready = false;
+    NomadNet::RequestDataClass _nomad_request_data_class =
+        NomadNet::RequestDataClass::NIL;
     NomadNet::Library _nomad_library;
     NomadNet::RequestPolicy _nomad_request_policy;
+    Hardware::TDeck::NomadNetStorageSD _nomad_storage;
+    NomadNet::NomadNetCache _nomad_cache;
+    NomadNet::NomadNetCacheFlow _nomad_cache_flow;
+    bool _nomad_cache_bypass_once = false;
+    NomadNet::ExternalVector<uint8_t> _nomad_cache_pending_body;
+    NomadNet::CacheKey _nomad_cache_pending_key;
+    uint64_t _nomad_cache_pending_now = 0;
+    uint32_t _nomad_cache_pending_ttl = 0;
+    bool _nomad_cache_pending_invalidate = false;
+    uint32_t _nomad_navigation_generation = 0;
+    uint32_t _nomad_cache_generation = 0;
+    uint32_t _nomad_cache_pending_generation = 0;
     RNS::HAnnounceHandler _nomad_announce_handler;
 
     std::atomic<bool> _nomad_directory_refresh_pending{false};
@@ -424,7 +440,7 @@ private:
     RNS::Link _nomad_link{RNS::Type::NONE};
     bool _nomad_link_identified = false;
     RNS::RequestReceipt _nomad_request{RNS::Type::NONE};
-    enum class NomadState { IDLE, PATH, LINK, REQUEST };
+    enum class NomadState { IDLE, CACHE, LIVE_PENDING, PATH, LINK, REQUEST };
     std::atomic<NomadState> _nomad_state{NomadState::IDLE};
     uint32_t _nomad_deadline_ms = 0;
     int32_t _nomad_pending_scroll = -1;
@@ -439,6 +455,11 @@ private:
     void nomad_reload();
     bool nomad_restore_history_submission();
     void nomad_update();
+    uint32_t nomad_advance_navigation_generation();
+    bool nomad_supersede_transport(const std::string& destination_hex);
+    void nomad_begin_live_transport();
+    bool nomad_apply_page_bytes(const uint8_t* data, std::size_t size, bool cached);
+    bool nomad_apply_page_document(const NomadNet::Document& document, bool cached);
     void nomad_start_link();
     void nomad_identify_link_if_configured();
     void nomad_send_request();
