@@ -43,5 +43,8 @@ def test_actual_nomadnet_screen_320x240_acceptance(tmp_path):
     assert "ready=1 cancel=1 enter=1 escape=1 focus_restore=1" in output
     assert "teardown=1 cached_status_transient=1 cached_status_oom_collapses=1 stale_group=0" in output
     assert "background_pixels=1 table_pixels=1 form_pixels=1 focus_pixels=1 glyph_pixels=1" in output
+    assert "partial_focus_fallback=1 partial_scroll_anchor=1" in output
+    assert "partial_second_scroll_rollback=1" in output
+    assert "partial_region_top_fallback=1" in output
     assert "exact_fonts=1" in output
     assert output.endswith("objects=0")

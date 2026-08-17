@@ -21,6 +21,25 @@ void operator delete(void* value) noexcept { std::free(value); }
 void operator delete(void* value, std::size_t) noexcept { std::free(value); }
 
 int main() {
+    {
+        AsyncMailbox bounded;
+        const std::vector<std::uint8_t> request{9};
+        const std::vector<std::uint8_t> response(17, 0x41);
+        bounded.prepare(88, 16);
+        bounded.expect_request(request);
+        if (!bounded.publish_response(
+                request, response.data(), response.size(), response.size()))
+            return 1;
+        AsyncMailbox::Event oversized;
+        if (!bounded.take(oversized) ||
+                oversized.kind != AsyncMailbox::Kind::OVERSIZED ||
+                oversized.transfer_size != response.size() ||
+                oversized.generation != 88 || !oversized.data.empty()) {
+            std::cerr << "owner-specific response bound was not enforced\n";
+            return 1;
+        }
+    }
+
     AsyncMailbox mailbox;
     const std::vector<std::uint8_t> link{1};
     const std::vector<std::uint8_t> request{2};

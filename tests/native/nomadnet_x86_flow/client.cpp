@@ -12,6 +12,8 @@
 #include "NomadNetLibrary.h"
 #include "NomadNetMailbox.h"
 #include "NomadNetOwner.h"
+#include "NomadNetPartialController.h"
+#include "NomadNetPartialScheduler.h"
 #include "NomadNetProtocol.h"
 #include "NomadNetUrl.h"
 #include "BuildManifest.h"
@@ -64,6 +66,11 @@ static bool owner_back_restored = false;
 static bool owner_reload_reused = false;
 static NN::ExternalVector<uint8_t> owner_first_request;
 static NN::OwnerController owner;
+static NN::PartialScheduler partial_scheduler;
+static NN::PartialController partial_controller;
+static NN::PartialRequest partial_request;
+static NN::CompactPage partial_page;
+static bool partial_live = false;
 
 class ScreenSubmissionSource final : public NN::OwnerSubmissionSource {
 public:
@@ -300,7 +307,26 @@ static void on_link_established(RNS::Link& established_link) {
     established_link.set_resource_started_callback(on_resource_started);
     std::string path;
     double timeout = 8.0;
-    if (scenario == "immediate") path = "/page/immediate.mu";
+    if (scenario == "partial") {
+        const std::string source = "Before\n`{" + destination_hex +
+            ":/page/partial.mu}\nAfter";
+        const NN::Document document = NN::DocumentParser().parse(source);
+        const auto nil = NN::no_form_request_data();
+        if (document.malformed || document.partials.size() != 1 ||
+            !partial_page.assign(document)) {
+            fail("partial base parse");
+            return;
+        }
+        partial_scheduler.configure(partial_page, 1U, 0U);
+        partial_controller.reset_page(document.source_bytes);
+        if (!partial_scheduler.poll(0U, true, true, partial_request) ||
+            !partial_controller.prepare(partial_request, partial_page,
+                                        nil.data(), nil.size())) {
+            fail("partial lease preparation");
+            return;
+        }
+        path = "/page/partial.mu";
+    } else if (scenario == "immediate") path = "/page/immediate.mu";
     else if (scenario == "reuse") path = "/page/reuse-first.mu";
     else if (scenario == "lan") path = "/page/index.mu";
     else if (scenario == "resource") path = "/page/resource.mu";
@@ -334,7 +360,9 @@ static void on_link_established(RNS::Link& established_link) {
     receipt = established_link.request(RNS::Bytes(path),
                                        RNS::Bytes(request_data.data(), request_data.size()),
                                        on_response, on_failed, on_progress, timeout,
-                                       NN::AsyncMailbox::MAX_WIRE_BYTES);
+                                       scenario == "partial"
+                                           ? NN::PartialController::MAX_RESPONSE_WIRE_BYTES
+                                           : NN::AsyncMailbox::MAX_WIRE_BYTES);
     NN::clear_encoded_form(request_data);
     if (!receipt) {
         fail("request creation");
@@ -364,7 +392,9 @@ public:
         destination = RNS::Destination(identity, RNS::Type::Destination::OUT,
                                        RNS::Type::Destination::SINGLE,
                                        "nomadnetwork", "node");
-        mailbox.prepare();
+        mailbox.prepare(0, scenario == "partial"
+            ? NN::PartialController::MAX_RESPONSE_WIRE_BYTES
+            : NN::AsyncMailbox::MAX_WIRE_BYTES);
         active_link = RNS::Link(destination, on_link_established, on_link_closed);
         // Deliberately no link.identify(): ordinary Pyxis page retrieval is anonymous.
     }
@@ -385,6 +415,46 @@ static void consume_event() {
                 return;
             }
             const RNS::Bytes response(event.data.data(), event.data.size());
+            if (scenario == "partial") {
+                NN::ResponseBuffer normalized;
+                NN::CompactPage candidate;
+                if (!partial_controller.active() ||
+                    !partial_controller.matches(partial_request) ||
+                    !NN::normalize_response(response.data(), response.size(), normalized) ||
+                    normalized.size() > NN::PartialController::MAX_RESPONSE_BYTES) {
+                    fail("partial response ownership");
+                    return;
+                }
+                const std::string source(
+                    reinterpret_cast<const char*>(normalized.bytes().data()),
+                    normalized.size());
+                const NN::Document fragment = NN::DocumentParser().parse(source);
+                if (fragment.malformed || fragment.truncated ||
+                    !partial_controller.can_accept_fragment(
+                        partial_request.partial_index, normalized.size()) ||
+                    candidate.assign_replacing_partial(
+                        partial_page, partial_request.partial_index, fragment,
+                        NN::PartialController::MAX_EXPANDED_SOURCE_BYTES) !=
+                        NN::PartialReplaceResult::APPLIED ||
+                    !partial_controller.commit_fragment(
+                        partial_request.partial_index, normalized.size())) {
+                    fail("partial transactional replacement");
+                    return;
+                }
+                partial_page = std::move(candidate);
+                std::string rendered;
+                for (const auto& run : partial_page.runs()) {
+                    const auto text = partial_page.text(run);
+                    rendered.append(text.data(), text.size());
+                }
+                partial_live = rendered.find("Peer-refreshed fragment") != std::string::npos &&
+                    partial_scheduler.complete(partial_request, true, 1U);
+                partial_controller.abandon_request();
+                passed = partial_live;
+                completed = true;
+                if (!passed) fail("partial rendered content");
+                break;
+            }
             const bool expected_resource = scenario == "resource" || scenario == "near-limit" ||
                                            (scenario == "reuse" && reuse_requests == 2);
             if (expected_resource && progress_callbacks == 0) {
@@ -550,7 +620,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (argc < 2) {
-        std::fprintf(stderr, "usage: %s immediate|resource|near-limit|oversized|timeout|cancel|reuse|form-anonymous|form-identified|owner-form-history | lan host port destination\n", argv[0]);
+        std::fprintf(stderr, "usage: %s immediate|resource|near-limit|oversized|timeout|cancel|reuse|form-anonymous|form-identified|owner-form-history|partial | lan host port destination\n", argv[0]);
         return 2;
     }
     scenario = argv[1];
@@ -558,7 +628,7 @@ int main(int argc, char** argv) {
         scenario != "oversized" &&
         scenario != "timeout" && scenario != "cancel" && scenario != "reuse" &&
         scenario != "form-anonymous" && scenario != "form-identified" &&
-        scenario != "owner-form-history" && scenario != "lan") return 2;
+        scenario != "owner-form-history" && scenario != "partial" && scenario != "lan") return 2;
     if ((scenario == "lan" && argc != 5) || (scenario != "lan" && argc != 2)) return 2;
 
     microStore::FileSystem filesystem{microStore::Adapters::UniversalFileSystem(".")};
@@ -626,7 +696,7 @@ int main(int argc, char** argv) {
     std::printf("RESULT scenario=%s announce=%d path=%d link=%d request=%d progress=%d callbacks=%d "
                 "cancel=%d deadline=%d resource_started=%d resource_progress=%d receipt_failed=%d "
                 "pending=%zu link_closed=%d stale_rejected=%d reuse_requests=%d link_callbacks=%d "
-                "owner_submit=%d history_bytes=%d retained_link=%d back_restored=%d reload_reused=%d passed=%d\n",
+                "owner_submit=%d history_bytes=%d retained_link=%d back_restored=%d reload_reused=%d partial_live=%d passed=%d\n",
                 scenario.c_str(), announce_seen ? 1 : 0,
                 destination_hex.empty() ? 0 : 1, link_established ? 1 : 0,
                 request_started ? 1 : 0, progress_seen ? 1 : 0, progress_callbacks,
@@ -637,7 +707,7 @@ int main(int argc, char** argv) {
                 link_closed ? 1 : 0, stale_callback_rejections, reuse_requests, link_callbacks,
                 owner_submit ? 1 : 0, owner_history_bytes ? 1 : 0,
                 owner_retained_link ? 1 : 0, owner_back_restored ? 1 : 0,
-                owner_reload_reused ? 1 : 0, passed ? 1 : 0);
+                owner_reload_reused ? 1 : 0, partial_live ? 1 : 0, passed ? 1 : 0);
     if (scenario == "lan") {
         std::printf("LAN TRANSPORT rx=%zu rxbytes=%zu tx=%zu txbytes=%zu\n",
                     network_interface.rx(), network_interface.rxbytes(),

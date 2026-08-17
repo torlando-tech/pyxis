@@ -16,6 +16,7 @@
 #include "NomadNetUrl.h"
 #include "NomadNetDocument.h"
 #include "NomadNetPartialScheduler.h"
+#include "NomadNetPartialController.h"
 #include "NomadNetProtocol.h"
 #include "NomadNetHistory.h"
 #include "NomadNetMailbox.h"
@@ -413,6 +414,9 @@ private:
     NomadNet::Url _nomad_url;
     NomadNet::DocumentParser _nomad_parser;
     NomadNet::PartialScheduler _nomad_partial_scheduler;
+    NomadNet::PartialController _nomad_partial_controller;
+    NomadNet::PartialRequest _nomad_partial_request;
+    NomadNet::Url _nomad_partial_url;
     NomadNet::ResponseBuffer _nomad_response;
     NomadNet::PageHistory _nomad_history;
     NomadNet::PageHistory::PendingOpen _nomad_pending_history;
@@ -447,7 +451,9 @@ private:
     RNS::Link _nomad_link{RNS::Type::NONE};
     bool _nomad_link_identified = false;
     RNS::RequestReceipt _nomad_request{RNS::Type::NONE};
-    enum class NomadState { IDLE, CACHE, LIVE_PENDING, PATH, LINK, REQUEST };
+    enum class NomadState {
+        IDLE, CACHE, LIVE_PENDING, PARTIAL_PENDING, PATH, LINK, REQUEST
+    };
     std::atomic<NomadState> _nomad_state{NomadState::IDLE};
     uint32_t _nomad_deadline_ms = 0;
     int32_t _nomad_pending_scroll = -1;
@@ -465,6 +471,14 @@ private:
     uint32_t nomad_advance_navigation_generation();
     bool nomad_supersede_transport(const std::string& destination_hex);
     void nomad_begin_live_transport();
+    void nomad_begin_partial_transport();
+    void nomad_poll_partials(uint32_t now_ms);
+    void nomad_finish_partial(bool success, const char* status);
+    void nomad_defer_partial(const char* status, bool retain_link = true);
+    void nomad_release_partial(bool success, bool deferred, const char* status,
+                               bool allow_retain_link);
+    const NomadNet::Url& nomad_transport_url() const;
+    bool nomad_schedule_partial_ids(const std::string& address, uint32_t now_ms);
     bool nomad_apply_page_bytes(const uint8_t* data, std::size_t size, bool cached);
     NomadNet::PageApplyResult nomad_apply_page_document(
         const NomadNet::Document& document, bool cached);

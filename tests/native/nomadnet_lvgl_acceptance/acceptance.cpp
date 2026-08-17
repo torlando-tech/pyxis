@@ -200,6 +200,11 @@ int main() {
     bool table_pixels = false, form_pixels = false, focus_pixels = false, glyph_pixels = false;
     bool background_pixels = false, teardown = false, cached_status_transient = false;
     bool cached_status_oom_collapses = false;
+    bool partial_replace = false, partial_forms = false, partial_empty = false;
+    bool partial_link_focus = false, partial_focus_fallback = false;
+    bool partial_scroll_anchor = false;
+    bool partial_second_scroll_rollback = false;
+    bool partial_region_top_fallback = false;
     int delete_events = 0;
 
     UI::LXMF::NomadNet::DocumentParser parser;
@@ -360,6 +365,171 @@ int main() {
         teardown = teardown && home_called && lv_group_get_focused(group) == nullptr &&
                    lv_indev_get_obj_act() == nullptr && !group_contains(screen._content);
     }
+    {
+        UI::LXMF::NomadNetScreen screen;
+        screen.show();
+        const auto page = parser.parse(
+            "`<24|username`Initial>\n"
+            "`{:/partial.mu`10`pid=clock|username}\nfooter");
+        assert(screen.set_page(page));
+        assert(screen._form_state.set_value(0, "User edit"));
+        UI::LXMF::NomadNet::PartialScheduler scheduler;
+        scheduler.configure(page, 7, 0);
+        UI::LXMF::NomadNet::PartialRequest request;
+        assert(scheduler.poll(0, true, true, request));
+        UI::LXMF::NomadNet::PartialController controller;
+        controller.reset_page(page.source_bytes);
+        UI::LXMF::NomadNet::FormEncodeResult encode_result;
+        assert(screen.prepare_partial_request(request, controller, encode_result));
+        const auto fragment = parser.parse(
+            "Updated `<24|username`Server>\n"
+            "`[Open`:/next.mu]\n"
+            "`tc80\nA|B\n---|---\nOne|`[Two`:/two]\n`t\n"
+            "`{:nested.mu}");
+        assert(screen.apply_partial_fragment(request, fragment, controller) ==
+               UI::LXMF::NomadNet::PartialReplaceResult::APPLIED);
+        partial_replace = screen._page.partials().size() == 1 &&
+            screen._page.blocks().size() >= 4 &&
+            screen._page.blocks()[1].partial_region_index == 0 &&
+            screen._page.tables().size() == 1 && screen._page.links().size() == 2 &&
+            screen.partial_id_matches(0, "clock", 5);
+        partial_forms = screen._form_state.fields().size() == 2 &&
+            std::string(screen._form_state.fields()[0].value.data(),
+                        screen._form_state.fields()[0].value_length) == "User edit";
+        screen._selected_link = 0;
+        for (std::size_t index = 0; index < screen._focus_order.size(); ++index) {
+            if (!screen._focus_order[index].field &&
+                    screen._focus_order[index].index == 0) {
+                screen._selected_focus = static_cast<int16_t>(index);
+                break;
+            }
+        }
+        assert(screen.apply_partial_fragment(request, fragment, controller) ==
+               UI::LXMF::NomadNet::PartialReplaceResult::APPLIED);
+        partial_link_focus = screen._selected_link == 0 && screen._selected_focus >= 0;
+        const auto empty_fragment = parser.parse("");
+        assert(screen.apply_partial_fragment(request, empty_fragment, controller) ==
+               UI::LXMF::NomadNet::PartialReplaceResult::APPLIED);
+        partial_empty = screen._page.partials().size() == 1 &&
+            std::any_of(screen._page.blocks().begin(), screen._page.blocks().end(),
+                [](const auto& block) { return block.partial_region_index == 0; });
+
+        const auto focus_page = parser.parse("`{:/focus.mu`10}\n");
+        assert(screen.set_page(focus_page));
+        scheduler.configure(focus_page, 8, 0);
+        assert(scheduler.poll(0, true, true, request));
+        controller.cancel();
+        controller.reset_page(focus_page.source_bytes);
+        assert(screen.prepare_partial_request(request, controller, encode_result));
+        assert(screen.apply_partial_fragment(request, parser.parse(
+            "`[First`:/first]\n`[Gone`:/gone]\n`[Third`:/third]"),
+            controller) == UI::LXMF::NomadNet::PartialReplaceResult::APPLIED);
+        for (std::size_t index = 0; index < screen._page.links().size(); ++index) {
+            const auto target = screen._page.target(index);
+            if (std::string(target.data(), target.size()) != ":/gone") continue;
+            screen._selected_link = static_cast<int16_t>(index);
+            for (std::size_t focus = 0; focus < screen._focus_order.size(); ++focus)
+                if (!screen._focus_order[focus].field &&
+                        screen._focus_order[focus].index == index)
+                    screen._selected_focus = static_cast<int16_t>(focus);
+        }
+        assert(screen.apply_partial_fragment(request, parser.parse(
+            "`[First`:/first]\n`[Third`:/third]"), controller) ==
+            UI::LXMF::NomadNet::PartialReplaceResult::APPLIED);
+        partial_focus_fallback = screen._selected_link >= 0 &&
+            [&] {
+                const auto target = screen._page.target(
+                    static_cast<std::size_t>(screen._selected_link));
+                return std::string(target.data(), target.size()) == ":/third";
+            }();
+
+        std::string scroll_source = "`{:/scroll.mu`10}\n";
+        for (int index = 0; index < 30; ++index)
+            scroll_source += "Base " + std::to_string(index) + "\n\n";
+        const auto scroll_page = parser.parse(scroll_source);
+        assert(screen.set_page(scroll_page));
+        scheduler.configure(scroll_page, 9, 0);
+        assert(scheduler.poll(0, true, true, request));
+        controller.cancel();
+        controller.reset_page(scroll_page.source_bytes);
+        assert(screen.prepare_partial_request(request, controller, encode_result));
+        assert(screen.apply_partial_fragment(request, parser.parse("short"), controller) ==
+            UI::LXMF::NomadNet::PartialReplaceResult::APPLIED);
+        assert(screen.scroll_to_logical(120, LV_ANIM_OFF));
+        auto top_identity = [&]() {
+            int16_t region = -2;
+            std::size_t ordinal = 0;
+            const UI::LXMF::NomadNetScreen::LayoutCheckpoint* top = nullptr;
+            for (const auto& checkpoint : screen._layout_checkpoints)
+                if (checkpoint.y <= screen._logical_scroll &&
+                        (!top || checkpoint.y >= top->y)) top = &checkpoint;
+            if (!top || top->block_index >= screen._page.blocks().size())
+                return std::pair<int16_t, std::size_t>{region, ordinal};
+            region = screen._page.blocks()[top->block_index].partial_region_index;
+            for (std::size_t index = 0; index < top->block_index; ++index)
+                if (screen._page.blocks()[index].partial_region_index == region) ++ordinal;
+            return std::pair<int16_t, std::size_t>{region, ordinal};
+        };
+        const auto before_top = top_identity();
+        std::string expanded;
+        for (int index = 0; index < 18; ++index)
+            expanded += "Expanded " + std::to_string(index) + "\n\n";
+        assert(screen.apply_partial_fragment(request, parser.parse(expanded), controller) ==
+            UI::LXMF::NomadNet::PartialReplaceResult::APPLIED);
+        partial_scroll_anchor = before_top == top_identity();
+        const auto rollback_top = top_identity();
+        const int32_t rollback_logical = screen._logical_scroll;
+        const int32_t rollback_widget = lv_obj_get_scroll_y(screen._content);
+        const std::size_t rollback_blocks = screen._page.blocks().size();
+        screen._test_scroll_fail_countdown = 1;
+        const auto rollback_result = screen.apply_partial_fragment(
+            request, parser.parse("replacement\n\nwith another block"), controller);
+        partial_second_scroll_rollback =
+            rollback_result == UI::LXMF::NomadNet::PartialReplaceResult::ALLOCATION_FAILED &&
+            screen._logical_scroll == rollback_logical &&
+            lv_obj_get_scroll_y(screen._content) == rollback_widget &&
+            screen._page.blocks().size() == rollback_blocks &&
+            top_identity() == rollback_top;
+
+        std::string tall_fragment;
+        for (int line = 0; line < 18; ++line)
+            tall_fragment += "partial " + std::to_string(line) + "\n\n";
+        assert(screen.apply_partial_fragment(
+            request, parser.parse(tall_fragment), controller) ==
+            UI::LXMF::NomadNet::PartialReplaceResult::APPLIED);
+        std::size_t partial_seen = 0;
+        int32_t removed_anchor_y = -1;
+        for (const auto& checkpoint : screen._layout_checkpoints) {
+            if (screen._page.blocks()[checkpoint.block_index].partial_region_index != 0)
+                continue;
+            if (partial_seen++ == 8) {
+                removed_anchor_y = checkpoint.y;
+                break;
+            }
+        }
+        assert(removed_anchor_y >= 0);
+        assert(screen.scroll_to_logical(removed_anchor_y + 1, LV_ANIM_OFF));
+        assert(screen.apply_partial_fragment(
+            request, parser.parse("short replacement"), controller) ==
+            UI::LXMF::NomadNet::PartialReplaceResult::APPLIED);
+        const auto region_fallback = top_identity();
+        int32_t expected_region_top = 0;
+        for (const auto& checkpoint : screen._layout_checkpoints) {
+            if (screen._page.blocks()[checkpoint.block_index].partial_region_index == 0) {
+                expected_region_top = checkpoint.y;
+                break;
+            }
+        }
+        const int32_t viewport = std::max<int32_t>(
+            1, lv_obj_get_content_height(screen._content));
+        expected_region_top = std::min(
+            expected_region_top, std::max<int32_t>(0, screen._page_height - viewport));
+        partial_region_top_fallback =
+            std::get<0>(region_fallback) == 0 &&
+            std::get<1>(region_fallback) == 0 &&
+            screen._logical_scroll == expected_region_top;
+        screen.hide();
+    }
     pump();
     const uint32_t remaining = lv_obj_get_child_cnt(lv_scr_act()) - baseline;
     teardown = teardown && remaining == 0 && lv_group_get_focused(group) == nullptr;
@@ -372,16 +542,23 @@ int main() {
         "eight_column_tier=%d eight_column_preserved=%d eight_column_pixels=%d table_link_focus=%d eight_column_objects=%d "
         "focus_events=%d edge_scroll=%d ready=%d cancel=%d enter=%d escape=%d focus_restore=%d "
         "teardown=%d cached_status_transient=%d cached_status_oom_collapses=%d stale_group=%d background_pixels=%d table_pixels=%d form_pixels=%d "
-        "focus_pixels=%d glyph_pixels=%d exact_fonts=1 objects=%u\n",
+        "focus_pixels=%d glyph_pixels=%d partial_replace=%d partial_forms=%d partial_link_focus=%d partial_focus_fallback=%d partial_scroll_anchor=%d partial_second_scroll_rollback=%d partial_region_top_fallback=%d partial_empty=%d exact_fonts=1 objects=%u\n",
         fit_tier, fit_columns, reflow_tier, reflow_cards, eight_column_tier, eight_column_preserved,
         eight_column_pixels, table_link_focus, eight_column_objects, focus_events, edge_scroll,
         ready, cancel, enter, escape, focus_restore, teardown, cached_status_transient,
         cached_status_oom_collapses, 0, background_pixels,
-        table_pixels, form_pixels, focus_pixels, glyph_pixels, remaining);
+        table_pixels, form_pixels, focus_pixels, glyph_pixels,
+        partial_replace, partial_forms, partial_link_focus, partial_focus_fallback,
+        partial_scroll_anchor, partial_second_scroll_rollback,
+        partial_region_top_fallback, partial_empty, remaining);
     return fit_tier && fit_columns && reflow_tier && reflow_cards && eight_column_tier &&
            eight_column_preserved && eight_column_pixels && table_link_focus && eight_column_objects &&
            focus_events && edge_scroll &&
            ready && cancel && enter && escape && focus_restore && teardown && cached_status_transient &&
            cached_status_oom_collapses && background_pixels &&
-           table_pixels && form_pixels && focus_pixels && glyph_pixels && remaining == 0 ? 0 : 1;
+           table_pixels && form_pixels && focus_pixels && glyph_pixels &&
+           partial_replace && partial_forms && partial_link_focus && partial_focus_fallback &&
+           partial_scroll_anchor && partial_second_scroll_rollback &&
+           partial_region_top_fallback && partial_empty &&
+           remaining == 0 ? 0 : 1;
 }

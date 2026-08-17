@@ -1174,6 +1174,7 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
                     block.type = BlockType::PARTIAL;
                     doc.partials.push_back(std::move(partial));
                     block.partial_index = static_cast<int16_t>(doc.partials.size() - 1);
+                    block.partial_region_index = block.partial_index;
                     Run run;
                     run.text = "[Dynamic content loading]";
                     block.runs.push_back(std::move(run));

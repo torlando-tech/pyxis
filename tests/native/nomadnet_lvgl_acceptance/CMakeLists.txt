@@ -15,6 +15,8 @@ add_executable(nomadnet_lvgl_acceptance
   "${NN}/NomadNetDocument.cpp"
   "${NN}/NomadNetCompactPage.cpp"
   "${NN}/NomadNetForm.cpp"
+  "${NN}/NomadNetPartialController.cpp"
+  "${NN}/NomadNetPartialScheduler.cpp"
   "${NN}/NomadNetGlyphs.cpp"
   "${NN}/NomadNetLibrary.cpp"
   "${NN}/NomadNetScreen.cpp"
@@ -31,7 +33,8 @@ target_include_directories(nomadnet_lvgl_acceptance PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/stubs" "${NN}" "${PYXIS_ROOT}/lib/tdeck_ui/UI"
   "${PYXIS_ROOT}/lib/tdeck_ui/UI/Fonts"
   "${LVGL_SOURCE}" "${LVGL_SOURCE}/src")
-target_compile_definitions(nomadnet_lvgl_acceptance PRIVATE ARDUINO=1)
+target_compile_definitions(nomadnet_lvgl_acceptance PRIVATE
+    PYXIS_NOMADNET_TEST_HOOKS=1 ARDUINO=1)
 target_compile_options(nomadnet_lvgl_acceptance PRIVATE -Wall -Wextra
   -fsanitize=address,undefined -fno-omit-frame-pointer)
 target_link_options(nomadnet_lvgl_acceptance PRIVATE -fsanitize=address,undefined

@@ -54,6 +54,18 @@ constexpr const char* NOMAD_LIBRARY_STAGE = "/nomadnet/library.new";
 constexpr const char* NOMAD_LIBRARY_BACKUP = "/nomadnet/library.bak";
 constexpr const char* NOMAD_LIBRARY_OLD = "/nomadnet/library.old";
 
+bool bytes_equal_lower_hex(const Bytes& bytes, const std::string& hex) {
+    static constexpr char DIGITS[] = "0123456789abcdef";
+    if (hex.size() != bytes.size() * 2U) return false;
+    for (std::size_t index = 0; index < bytes.size(); ++index) {
+        const uint8_t value = bytes[index];
+        if (hex[index * 2U] != DIGITS[value >> 4U] ||
+                hex[index * 2U + 1U] != DIGITS[value & 0x0fU])
+            return false;
+    }
+    return true;
+}
+
 #if defined(MEMORY_INSTRUMENTATION_ENABLED) || defined(PYXIS_NOMAD_MEMORY_DIAGNOSTIC)
 void nomad_heap_checkpoint(const char* phase) {
     Serial.printf(
@@ -2168,6 +2180,8 @@ bool UIManager::nomad_refresh_path_after_link_failure() {
 
 uint32_t UIManager::nomad_advance_navigation_generation() {
     _nomad_partial_scheduler.cancel(_nomad_navigation_generation);
+    _nomad_partial_controller.cancel();
+    _nomad_partial_request = NomadNet::PartialRequest{};
     ++_nomad_navigation_generation;
     if (_nomad_navigation_generation == 0) ++_nomad_navigation_generation;
     return _nomad_navigation_generation;
@@ -2186,7 +2200,7 @@ bool UIManager::nomad_supersede_transport(const std::string& destination_hex) {
     const bool retain_link = _nomad_link &&
         _nomad_link.status() == Type::Link::ACTIVE &&
         _nomad_destination_hash &&
-        _nomad_destination_hash.toHex() == destination_hex;
+        bytes_equal_lower_hex(_nomad_destination_hash, destination_hex);
     if (!retain_link && _nomad_link && _nomad_link.status() != Type::Link::CLOSED)
         _nomad_link.teardown();
     nomad_release_request();
@@ -2203,6 +2217,10 @@ bool UIManager::nomad_supersede_transport(const std::string& destination_hex) {
 void UIManager::nomad_open(const std::string& address, bool add_history,
                            int32_t restore_logical_scroll, bool preserve_submission,
                            bool history_prepared) {
+    if (address.rfind("p:", 0) == 0) {
+        nomad_schedule_partial_ids(address, millis());
+        return;
+    }
     if (!preserve_submission) {
         NomadNet::clear_encoded_form(_nomad_submission_data);
         _nomad_submission_ready = false;
@@ -2344,6 +2362,183 @@ void UIManager::nomad_open(const std::string& address, bool add_history,
     nomad_begin_live_transport();
 }
 
+const NomadNet::Url& UIManager::nomad_transport_url() const {
+    return _nomad_partial_controller.active() ? _nomad_partial_url : _nomad_url;
+}
+
+bool UIManager::nomad_schedule_partial_ids(const std::string& address,
+                                           uint32_t now_ms) {
+    bool matched = false;
+    std::size_t start = 2;
+    while (start <= address.size()) {
+        const std::size_t end = address.find(':', start);
+        const std::size_t size = (end == std::string::npos ? address.size() : end) - start;
+        if (size != 0 && size <= NomadNet::DocumentParser::MAX_PARTIAL_ID_BYTES) {
+            LVGL_LOCK();
+            for (std::size_t index = 0;
+                    index < _nomad_partial_scheduler.size(); ++index) {
+                if (_nomadnet_screen->partial_id_matches(
+                        index, address.data() + start, size) &&
+                        _nomad_partial_scheduler.request_now(
+                            index, _nomad_navigation_generation, now_ms))
+                    matched = true;
+            }
+        }
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    LVGL_LOCK();
+    _nomadnet_screen->set_status(matched
+        ? "Dynamic content queued" : "No matching dynamic content");
+    return matched;
+}
+
+void UIManager::nomad_poll_partials(uint32_t now_ms) {
+    if (_nomad_state != NomadState::IDLE ||
+            _nomad_partial_controller.active())
+        return;
+    NomadNet::PartialRequest request;
+    if (!_nomad_partial_scheduler.poll(
+            now_ms, _navigation.current() == Route::NOMADNET,
+            true, request))
+        return;
+
+    NomadNet::FormEncodeResult encode_result;
+    bool prepared = false;
+    {
+        LVGL_LOCK();
+        prepared = _nomadnet_screen->prepare_partial_request(
+            request, _nomad_partial_controller, encode_result);
+    }
+    if (!prepared) {
+        _nomad_partial_scheduler.defer(request);
+        _nomad_partial_controller.abandon_request();
+        LVGL_LOCK();
+        _nomadnet_screen->set_status(
+            encode_result == NomadNet::FormEncodeResult::ALLOCATION_FAILED
+                ? "Dynamic request exceeds available memory"
+                : "Dynamic request data exceeds device limit");
+        return;
+    }
+
+    NomadNet::Url target;
+    std::string error;
+    bool parsed = false;
+    bool allocation_failed = false;
+    try {
+        parsed = NomadNet::Url::parse(
+            std::string(_nomad_partial_controller.url_data(),
+                        _nomad_partial_controller.url_size()),
+            target, error, _nomad_url.destination_hex, _nomad_url.path, {});
+    } catch (const std::bad_alloc&) {
+        allocation_failed = true;
+    }
+    if (!parsed || target.has_fragment) {
+        if (allocation_failed) _nomad_partial_scheduler.defer(request);
+        else _nomad_partial_scheduler.complete(request, false, now_ms);
+        _nomad_partial_controller.abandon_request();
+        LVGL_LOCK();
+        _nomadnet_screen->set_status(
+            allocation_failed ? "Dynamic address exceeds available memory" :
+            parsed ? "Dynamic address cannot target a fragment" : error.c_str());
+        return;
+    }
+    if (!nomad_supersede_transport(target.destination_hex)) {
+        _nomad_partial_scheduler.defer(request);
+        _nomad_partial_controller.abandon_request();
+        LVGL_LOCK();
+        _nomadnet_screen->set_status("Dynamic request owner is busy");
+        return;
+    }
+    _nomad_partial_request = request;
+    _nomad_partial_url = std::move(target);
+    _nomad_state = NomadState::PARTIAL_PENDING;
+    nomad_begin_partial_transport();
+}
+
+void UIManager::nomad_begin_partial_transport() {
+    try {
+    if (!_nomad_partial_controller.active()) {
+        _nomad_state = NomadState::IDLE;
+        return;
+    }
+    RouterLock router_lock;
+    if (!router_lock.acquired()) {
+        _nomad_state = NomadState::PARTIAL_PENDING;
+        return;
+    }
+    const bool same_destination = _nomad_link &&
+        _nomad_link.status() == Type::Link::ACTIVE &&
+        _nomad_destination_hash && bytes_equal_lower_hex(
+            _nomad_destination_hash, _nomad_partial_url.destination_hex);
+    _nomad_mailbox.prepare(
+        _nomad_navigation_generation,
+        NomadNet::PartialController::MAX_RESPONSE_WIRE_BYTES);
+    if (same_destination) {
+        nomad_send_request();
+        return;
+    }
+    if (_nomad_link && _nomad_link.status() != Type::Link::CLOSED)
+        _nomad_link.teardown();
+    nomad_release_request();
+    _nomad_link = Link(Type::NONE);
+    _nomad_link_identified = false;
+    _nomad_request = RequestReceipt(Type::NONE);
+    _nomad_response.clear();
+    _nomad_request_policy.reset();
+    _nomad_destination_hash = Bytes();
+    _nomad_destination_hash.assignHex(_nomad_partial_url.destination_hex.c_str());
+    {
+        LVGL_LOCK();
+        _nomadnet_screen->set_status("Discovering dynamic-content path...");
+    }
+    if (Transport::has_path(_nomad_destination_hash)) nomad_start_link();
+    else {
+        Transport::request_path(_nomad_destination_hash);
+        _nomad_state = NomadState::PATH;
+        _nomad_deadline_ms = millis() + NomadNet::RequestPolicy::PATH_WAIT_MS;
+    }
+    } catch (const std::bad_alloc&) {
+        nomad_defer_partial(
+            "Dynamic transport exceeds available internal memory", false);
+    }
+}
+
+void UIManager::nomad_finish_partial(bool success, const char* status) {
+    nomad_release_partial(success, false, status, true);
+}
+
+void UIManager::nomad_defer_partial(const char* status, bool retain_link) {
+    nomad_release_partial(false, true, status, retain_link);
+}
+
+void UIManager::nomad_release_partial(bool success, bool deferred, const char* status,
+                                      bool allow_retain_link) {
+    if (!_nomad_partial_controller.active()) return;
+    const std::string& destination = _nomad_partial_url.destination_hex;
+    if (deferred) _nomad_partial_scheduler.defer(_nomad_partial_request);
+    else _nomad_partial_scheduler.complete(
+            _nomad_partial_request, success, millis());
+    _nomad_response.release();
+    const bool retain_link = allow_retain_link && _nomad_link &&
+        _nomad_link.status() == Type::Link::ACTIVE &&
+        _nomad_destination_hash &&
+        bytes_equal_lower_hex(_nomad_destination_hash, destination);
+    if (retain_link) {
+        if (success) nomad_finish_request_keep_link();
+        else {
+            nomad_release_request();
+            _nomad_state = NomadState::IDLE;
+            _nomad_deadline_ms = 0;
+        }
+    } else nomad_stop_transport();
+    _nomad_partial_controller.abandon_request();
+    _nomad_partial_request = NomadNet::PartialRequest{};
+    _nomad_partial_url = NomadNet::Url{};
+    LVGL_LOCK();
+    _nomadnet_screen->set_status(status);
+}
+
 void UIManager::nomad_begin_live_transport() {
     RouterLock router_lock;
     if (!router_lock.acquired()) {
@@ -2360,10 +2555,10 @@ void UIManager::nomad_begin_live_transport() {
         _nomadnet_screen->set_address(_nomad_url.str());
         nomad_heap_checkpoint("action-after-navigation");
     }
-    const bool same_destination = NomadNet::OwnerController::retain_active_link(
-        _nomad_url.destination_hex,
-        _nomad_destination_hash ? _nomad_destination_hash.toHex() : std::string(),
-        _nomad_link && _nomad_link.status() == Type::Link::ACTIVE);
+    const bool same_destination = _nomad_link &&
+        _nomad_link.status() == Type::Link::ACTIVE &&
+        _nomad_destination_hash && bytes_equal_lower_hex(
+            _nomad_destination_hash, _nomad_url.destination_hex);
     if (same_destination) {
         _nomad_response.clear();
         _nomad_request_policy.reset();
@@ -2372,7 +2567,11 @@ void UIManager::nomad_begin_live_transport() {
             _nomadnet_screen->set_address(_nomad_url.str());
             _nomadnet_screen->set_status("Requesting page...");
         }
-        _nomad_mailbox.prepare(_nomad_navigation_generation);
+        _nomad_mailbox.prepare(
+            _nomad_navigation_generation,
+            _nomad_partial_controller.active()
+                ? NomadNet::PartialController::MAX_RESPONSE_WIRE_BYTES
+                : NomadNet::AsyncMailbox::MAX_WIRE_BYTES);
         nomad_send_request();
         return;
     }
@@ -2403,6 +2602,10 @@ void UIManager::nomad_start_link() {
     nomad_heap_checkpoint("link-enter");
     Identity identity = Identity::recall(_nomad_destination_hash);
     if (!identity) {
+        if (_nomad_partial_controller.active()) {
+            nomad_finish_partial(false, "Dynamic-content identity is not known");
+            return;
+        }
         _nomad_state = NomadState::IDLE;
         NomadNet::clear_encoded_form(_nomad_submission_data);
         _nomad_submission_ready = false;
@@ -2413,6 +2616,10 @@ void UIManager::nomad_start_link() {
     Destination destination(identity, Type::Destination::OUT,
                             Type::Destination::SINGLE, "nomadnetwork", "node");
     if (destination.hash() != _nomad_destination_hash) {
+        if (_nomad_partial_controller.active()) {
+            nomad_finish_partial(false, "Dynamic-content identity does not match address");
+            return;
+        }
         _nomad_state = NomadState::IDLE;
         NomadNet::clear_encoded_form(_nomad_submission_data);
         _nomad_submission_ready = false;
@@ -2420,7 +2627,11 @@ void UIManager::nomad_start_link() {
         _nomadnet_screen->set_status("Identity does not match node address");
         return;
     }
-    _nomad_mailbox.prepare(_nomad_navigation_generation);
+    _nomad_mailbox.prepare(
+        _nomad_navigation_generation,
+        _nomad_partial_controller.active()
+            ? NomadNet::PartialController::MAX_RESPONSE_WIRE_BYTES
+            : NomadNet::AsyncMailbox::MAX_WIRE_BYTES);
     nomad_heap_checkpoint("link-before-construct");
     _nomad_link = Link(destination, on_nomad_link_established, on_nomad_link_closed);
     nomad_heap_checkpoint("link-after-construct");
@@ -2433,7 +2644,7 @@ void UIManager::nomad_start_link() {
 
 void UIManager::nomad_identify_link_if_configured() {
     if (_nomad_link_identified) return;
-    if (_nomad_library.node_identified(_nomad_url.destination_hex)) {
+    if (_nomad_library.node_identified(nomad_transport_url().destination_hex)) {
         _nomad_link.identify(_router.identity());
         _nomad_link_identified = true;
     }
@@ -2446,7 +2657,10 @@ void UIManager::nomad_send_request() {
     _nomad_link.set_resource_started_callback(on_nomad_resource_started);
     RNS::Bytes packed_request_data;
     try {
-        if (_nomad_submission_ready) {
+        if (_nomad_partial_controller.active()) {
+            packed_request_data = Bytes(_nomad_partial_controller.request_data(),
+                                        _nomad_partial_controller.request_size());
+        } else if (_nomad_submission_ready) {
             packed_request_data = Bytes(_nomad_submission_data.data(), _nomad_submission_data.size());
         } else {
             const auto request_data = NomadNet::request_data(_nomad_url.fields);
@@ -2458,40 +2672,63 @@ void UIManager::nomad_send_request() {
             }
             packed_request_data = Bytes(request_data.data(), request_data.size());
         }
-        _nomad_request = _nomad_link.request(
-            Bytes(reinterpret_cast<const uint8_t*>(_nomad_url.path.data()), _nomad_url.path.size()),
-            packed_request_data, on_nomad_response, on_nomad_failed,
-            on_nomad_progress, 30.0, NomadNet::AsyncMailbox::MAX_WIRE_BYTES, true);
+        if (_nomad_partial_controller.active()) {
+            _nomad_request = _nomad_link.request(
+                Bytes(reinterpret_cast<const uint8_t*>(_nomad_partial_url.path.data()),
+                      _nomad_partial_url.path.size()),
+                packed_request_data, on_nomad_response, on_nomad_failed,
+                on_nomad_progress, 30.0,
+                NomadNet::PartialController::MAX_RESPONSE_WIRE_BYTES, true);
+        } else {
+            _nomad_request = _nomad_link.request(
+                Bytes(reinterpret_cast<const uint8_t*>(_nomad_url.path.data()),
+                      _nomad_url.path.size()),
+                packed_request_data, on_nomad_response, on_nomad_failed,
+                on_nomad_progress, 30.0, NomadNet::AsyncMailbox::MAX_WIRE_BYTES, true);
+        }
     } catch (const std::bad_alloc&) {
         if (packed_request_data) {
             volatile uint8_t* bytes = packed_request_data.writable(0);
             for (std::size_t i = 0; i < packed_request_data.size(); ++i) bytes[i] = 0;
         }
-        NomadNet::clear_encoded_form(_nomad_submission_data);
-        _nomad_submission_ready = false;
-        nomad_stop_transport();
-        LVGL_LOCK();
-        _nomadnet_screen->set_status("Request exceeds available internal memory");
+        if (_nomad_partial_controller.active()) {
+            nomad_defer_partial(
+                "Dynamic request exceeds available internal memory",
+                false);
+        } else {
+            NomadNet::clear_encoded_form(_nomad_submission_data);
+            _nomad_submission_ready = false;
+            nomad_stop_transport();
+            LVGL_LOCK();
+            _nomadnet_screen->set_status("Request exceeds available internal memory");
+        }
         return;
     }
     if (packed_request_data) {
         volatile uint8_t* bytes = packed_request_data.writable(0);
         for (std::size_t i = 0; i < packed_request_data.size(); ++i) bytes[i] = 0;
     }
-    NomadNet::clear_encoded_form(_nomad_submission_data);
-    _nomad_submission_ready = false;
+    if (!_nomad_partial_controller.active()) {
+        NomadNet::clear_encoded_form(_nomad_submission_data);
+        _nomad_submission_ready = false;
+    }
     nomad_heap_checkpoint("request-created");
     if (!_nomad_request) {
-        nomad_stop_transport();
-        LVGL_LOCK();
-        _nomadnet_screen->set_status("Request could not be sent");
+        if (_nomad_partial_controller.active())
+            nomad_finish_partial(false, "Dynamic request could not be sent");
+        else {
+            nomad_stop_transport();
+            LVGL_LOCK();
+            _nomadnet_screen->set_status("Request could not be sent");
+        }
         return;
     }
     _nomad_mailbox.expect_request(token(_nomad_request.request_id()));
     _nomad_state = NomadState::REQUEST;
     _nomad_deadline_ms = millis() + 30000;
     LVGL_LOCK();
-    _nomadnet_screen->set_status("Requesting page...");
+    _nomadnet_screen->set_status(_nomad_partial_controller.active()
+        ? "Updating dynamic content..." : "Requesting page...");
 }
 
 bool UIManager::nomad_apply_page_bytes(const uint8_t* data, std::size_t size, bool cached) {
@@ -2556,6 +2793,7 @@ NomadNet::PageApplyResult UIManager::nomad_apply_page_document(
     }
     _nomad_partial_scheduler.configure(
         document, _nomad_navigation_generation, millis());
+    _nomad_partial_controller.reset_page(document.source_bytes);
     if (library_changed) _nomad_library_dirty = true;
     _nomad_pending_scroll = -1;
     return result;
@@ -2611,6 +2849,14 @@ void UIManager::nomad_update() {
         nomad_begin_live_transport();
         return;
     }
+    if (_nomad_state == NomadState::PARTIAL_PENDING) {
+        nomad_begin_partial_transport();
+        return;
+    }
+    if (_nomad_state == NomadState::IDLE) {
+        nomad_poll_partials(millis());
+        if (_nomad_state != NomadState::IDLE) return;
+    }
     RouterLock router_lock;
     if (!router_lock.acquired()) return;
     const uint32_t now = millis();
@@ -2619,9 +2865,13 @@ void UIManager::nomad_update() {
     } else if (_nomad_state != NomadState::IDLE && _nomad_deadline_ms != 0 &&
                static_cast<int32_t>(now - _nomad_deadline_ms) >= 0) {
         if (_nomad_state == NomadState::LINK && nomad_refresh_path_after_link_failure()) return;
-        nomad_stop_transport();
-        LVGL_LOCK();
-        _nomadnet_screen->set_status("NomadNet operation timed out");
+        if (_nomad_partial_controller.active())
+            nomad_finish_partial(false, "Dynamic-content request timed out");
+        else {
+            nomad_stop_transport();
+            LVGL_LOCK();
+            _nomadnet_screen->set_status("NomadNet operation timed out");
+        }
         return;
     }
 
@@ -2638,36 +2888,108 @@ void UIManager::nomad_update() {
             break;
         case NomadNet::AsyncMailbox::Kind::LINK_CLOSED:
             if (_nomad_state == NomadState::LINK && nomad_refresh_path_after_link_failure()) break;
-            nomad_stop_transport();
-            { LVGL_LOCK(); _nomadnet_screen->set_status("NomadNet link closed"); }
+            if (_nomad_partial_controller.active())
+                nomad_finish_partial(false, "Dynamic-content link closed");
+            else {
+                nomad_stop_transport();
+                { LVGL_LOCK(); _nomadnet_screen->set_status("NomadNet link closed"); }
+            }
             break;
         case NomadNet::AsyncMailbox::Kind::FAILED:
-            nomad_stop_transport();
-            { LVGL_LOCK(); _nomadnet_screen->set_status("Page request failed"); }
+            if (_nomad_partial_controller.active())
+                nomad_finish_partial(false, "Dynamic-content request failed");
+            else {
+                nomad_stop_transport();
+                { LVGL_LOCK(); _nomadnet_screen->set_status("Page request failed"); }
+            }
             break;
         case NomadNet::AsyncMailbox::Kind::PROGRESS:
             if (_nomad_state == NomadState::REQUEST) {
                 LVGL_LOCK();
-                _nomadnet_screen->set_status("Receiving page...");
+                if (_nomad_partial_controller.active())
+                    _nomadnet_screen->set_status("Receiving dynamic content...");
+                else _nomadnet_screen->set_status("Receiving page...");
             }
             break;
         case NomadNet::AsyncMailbox::Kind::OVERSIZED:
             _nomad_response.clear();
-            nomad_stop_transport();
-            { LVGL_LOCK(); _nomadnet_screen->set_status("Page exceeds 64 KiB limit"); }
+            if (_nomad_partial_controller.active())
+                nomad_finish_partial(false, "Dynamic content exceeds 16 KiB limit");
+            else {
+                nomad_stop_transport();
+                { LVGL_LOCK(); _nomadnet_screen->set_status("Page exceeds 64 KiB limit"); }
+            }
             break;
         case NomadNet::AsyncMailbox::Kind::RESPONSE: {
             // The dependency has already removed this successful request from
             // Link::pending_requests(). Validate it before deciding whether the
             // Link is safe to retain for same-destination navigation.
+            if (_nomad_partial_controller.active()) {
+                bool lease_matches = false;
+                {
+                    LVGL_LOCK();
+                    lease_matches = _nomadnet_screen->partial_request_matches(
+                        _nomad_partial_request, _nomad_partial_controller);
+                }
+                if (!lease_matches) {
+                    _nomad_partial_scheduler.cancel(_nomad_navigation_generation);
+                    _nomad_partial_controller.cancel();
+                    nomad_stop_transport();
+                    LVGL_LOCK();
+                    _nomadnet_screen->set_status("Discarded stale dynamic content");
+                    break;
+                }
+            }
             if (!NomadNet::normalize_response(event.data.data(), event.data.size(), _nomad_response)) {
-                nomad_stop_transport();
-                LVGL_LOCK();
-                _nomadnet_screen->set_status("Malformed NomadNet response");
+                if (_nomad_partial_controller.active())
+                    nomad_finish_partial(false, "Malformed dynamic-content response");
+                else {
+                    nomad_stop_transport();
+                    LVGL_LOCK();
+                    _nomadnet_screen->set_status("Malformed NomadNet response");
+                }
                 break;
             }
             nomad_heap_checkpoint("response-normalized");
             const auto& bytes = _nomad_response.bytes();
+            if (_nomad_partial_controller.active()) {
+                if (bytes.size() > NomadNet::PartialController::MAX_RESPONSE_BYTES ||
+                        !_nomad_partial_controller.can_accept_fragment(
+                            _nomad_partial_request.partial_index, bytes.size())) {
+                    nomad_finish_partial(false,
+                        "Dynamic content exceeds expanded-page limit");
+                    break;
+                }
+                NomadNet::Document fragment;
+                const auto parse_status = _nomad_parser.parse_into(
+                    reinterpret_cast<const char*>(bytes.data()), bytes.size(), fragment);
+                if (parse_status != NomadNet::ParseStatus::OK ||
+                        fragment.malformed || fragment.truncated) {
+                    nomad_finish_partial(false,
+                        parse_status == NomadNet::ParseStatus::ALLOCATION_FAILED
+                            ? "Dynamic content exceeds available memory"
+                            : "Dynamic content is not valid UTF-8/Micron");
+                    break;
+                }
+                NomadNet::PartialReplaceResult applied;
+                {
+                    LVGL_LOCK();
+                    applied = _nomadnet_screen->apply_partial_fragment(
+                        _nomad_partial_request, fragment,
+                        _nomad_partial_controller);
+                }
+                if (applied != NomadNet::PartialReplaceResult::APPLIED ||
+                        !_nomad_partial_controller.commit_fragment(
+                            _nomad_partial_request.partial_index, bytes.size())) {
+                    nomad_finish_partial(false,
+                        applied == NomadNet::PartialReplaceResult::ALLOCATION_FAILED
+                            ? "Dynamic content exceeds available memory"
+                            : "Dynamic content exceeds page limits");
+                    break;
+                }
+                nomad_finish_partial(true, "Dynamic content updated");
+                break;
+            }
             NomadNet::Document document;
             try {
                 document = _nomad_parser.parse(
@@ -2724,7 +3046,8 @@ void UIManager::nomad_update() {
             // active Link whose independent owner hash still matches this URL.
             if (_nomad_link && _nomad_link.status() == Type::Link::ACTIVE &&
                     _nomad_destination_hash &&
-                    _nomad_destination_hash.toHex() == _nomad_url.destination_hex) {
+                    bytes_equal_lower_hex(
+                        _nomad_destination_hash, _nomad_url.destination_hex)) {
                 nomad_finish_request_keep_link();
             } else {
                 nomad_stop_transport();
@@ -2755,12 +3078,8 @@ void UIManager::on_nomad_response(const RequestReceipt& receipt) {
 
 void UIManager::on_nomad_failed(const RequestReceipt& receipt) {
     if (!s_nomad_instance) return;
-    if (receipt.response_size() > NomadNet::AsyncMailbox::MAX_WIRE_BYTES) {
-        s_nomad_instance->_nomad_mailbox.publish_oversized(
-            token(receipt.request_id()), receipt.response_size());
-        return;
-    }
-    s_nomad_instance->_nomad_mailbox.publish_failed(token(receipt.request_id()));
+    s_nomad_instance->_nomad_mailbox.publish_failed(
+        token(receipt.request_id()), receipt.response_size());
 }
 
 void UIManager::on_nomad_progress(const RequestReceipt& receipt) {

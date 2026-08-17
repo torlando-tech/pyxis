@@ -132,12 +132,23 @@ bool FormState::assign(const CompactPage& page) {
             FieldState field;
             field.id = static_cast<uint16_t>(i);
             field.type = page.fields()[i].type;
+            field.partial_region_index = page.fields()[i].partial_region_index;
             field.name_length = static_cast<uint16_t>(name.size());
             field.value_length = static_cast<uint16_t>(value.size());
             if (!name.empty()) std::memcpy(field.name.data(), name.data(), name.size());
             if (!value.empty()) std::memcpy(field.value.data(), value.data(), value.size());
             field.checked = page.fields()[i].checked;
             field.masked = page.fields()[i].masked;
+            if (field.type == FormFieldType::RADIO && field.checked) {
+                for (auto& existing : _fields) {
+                    if (existing.type == FormFieldType::RADIO &&
+                            existing.name_length == field.name_length &&
+                            (field.name_length == 0 || std::memcmp(
+                                existing.name.data(), field.name.data(),
+                                field.name_length) == 0))
+                        existing.checked = false;
+                }
+            }
             _fields.push_back(std::move(field));
         }
         return true;
@@ -145,6 +156,95 @@ bool FormState::assign(const CompactPage& page) {
         clear();
         return false;
     }
+}
+
+bool FormState::assign_preserving(const CompactPage& page,
+                                  const FormState& previous) {
+    if (!assign(page)) return false;
+    auto same_identity = [](const FieldState& left, const FieldState& right) {
+        if (left.type != right.type ||
+                left.partial_region_index != right.partial_region_index ||
+                left.name_length != right.name_length ||
+                (left.name_length != 0 && std::memcmp(
+                    left.name.data(), right.name.data(), left.name_length) != 0))
+            return false;
+        if (left.type != FormFieldType::RADIO &&
+                left.type != FormFieldType::CHECKBOX)
+            return true;
+        return left.value_length == right.value_length &&
+            (left.value_length == 0 || std::memcmp(
+                left.value.data(), right.value.data(), left.value_length) == 0);
+    };
+    auto same_radio_group = [](const FieldState& left, const FieldState& right) {
+        return left.type == FormFieldType::RADIO &&
+            right.type == FormFieldType::RADIO &&
+            left.name_length == right.name_length &&
+            (left.name_length == 0 || std::memcmp(
+                left.name.data(), right.name.data(), left.name_length) == 0);
+    };
+    for (std::size_t index = 0; index < _fields.size(); ++index) {
+        auto& field = _fields[index];
+        if (field.type == FormFieldType::RADIO) {
+            const FieldState* old_selection = nullptr;
+            std::size_t old_selection_index = previous._fields.size();
+            for (std::size_t old_index = 0;
+                 old_index < previous._fields.size(); ++old_index) {
+                const auto& old = previous._fields[old_index];
+                if (old.checked && same_radio_group(old, field)) {
+                    old_selection = &old;
+                    old_selection_index = old_index;
+                    break;
+                }
+            }
+            std::size_t selected_occurrence = 0;
+            if (old_selection) {
+                for (std::size_t prior = 0; prior < old_selection_index; ++prior)
+                    if (same_identity(previous._fields[prior], *old_selection))
+                        ++selected_occurrence;
+            }
+            const FieldState* surviving_selection = nullptr;
+            if (old_selection) {
+                std::size_t occurrence = 0;
+                for (const auto& current : _fields) {
+                    if (!same_identity(*old_selection, current)) continue;
+                    if (occurrence++ == selected_occurrence) {
+                        surviving_selection = &current;
+                        break;
+                    }
+                }
+            }
+            if (!surviving_selection) continue;
+            field.checked = &field == surviving_selection;
+            continue;
+        }
+        std::size_t occurrence = 0;
+        for (std::size_t prior = 0; prior < index; ++prior) {
+            const auto& candidate = _fields[prior];
+            if (same_identity(candidate, field))
+                ++occurrence;
+        }
+        std::size_t seen = 0;
+        const FieldState* matched = nullptr;
+        for (const auto& old : previous._fields) {
+            if (!same_identity(old, field)) continue;
+            if (seen++ == occurrence) {
+                matched = &old;
+                break;
+            }
+        }
+        if (!matched) continue;
+        if (field.type == FormFieldType::TEXT ||
+                field.type == FormFieldType::PASSWORD) {
+            wipe(field.value.data(), field.value.size());
+            if (matched->value_length != 0)
+                std::memcpy(field.value.data(), matched->value.data(),
+                            matched->value_length);
+            field.value_length = matched->value_length;
+        } else {
+            field.checked = matched->checked;
+        }
+    }
+    return true;
 }
 
 void FormState::clear() {

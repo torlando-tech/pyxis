@@ -163,7 +163,9 @@ def test_ui_wiring_contract():
     failed = manager_cpp[manager_cpp.index("void UIManager::on_nomad_failed"):
                          manager_cpp.index("void UIManager::on_nomad_progress")]
     assert "receipt.response_size()" in failed
-    assert "publish_oversized" in failed
+    assert "publish_failed" in failed
+    mailbox_h = (INCLUDE / "NomadNetMailbox.h").read_text()
+    assert "response_size > _max_wire_bytes" in mailbox_h
     assert "response_transfer_size()" in manager_cpp
     assert "DEPENDENCY HARDENING GAP" not in manager_cpp
     assert "lv_obj_set_scroll_dir" in browser_cpp
@@ -292,7 +294,10 @@ def test_nomadnet_forms_are_bounded_virtualized_and_owner_submitted():
     assert "NomadNet::AsyncMailbox::MAX_WIRE_BYTES, true" in request
     identify_link = manager[manager.index("void UIManager::nomad_identify_link_if_configured()"):
                             manager.index("void UIManager::nomad_send_request()")]
-    assert "if (_nomad_library.node_identified(_nomad_url.destination_hex))" in identify_link
+    assert "if (_nomad_library.node_identified(nomad_transport_url().destination_hex))" in identify_link
+    transport_url = manager[manager.index("const NomadNet::Url& UIManager::nomad_transport_url() const"):
+                            manager.index("bool UIManager::nomad_schedule_partial_ids")]
+    assert "_nomad_partial_controller.active() ? _nomad_partial_url : _nomad_url" in transport_url
     assert "if (_nomad_link_identified) return;" in identify_link
     assert "_nomad_link.identify(_router.identity())" in identify_link
     link_event = manager[manager.index("case NomadNet::AsyncMailbox::Kind::LINK_ESTABLISHED"):
@@ -1081,7 +1086,8 @@ def test_nomadnet_same_destination_navigation_reuses_active_link():
                                    response.index("const bool ordinary_nil")]
     assert "nomad_stop_transport();" in application_failure
     retained = response[response.index("_nomad_link.status() == Type::Link::ACTIVE"):]
-    assert "_nomad_destination_hash.toHex() == _nomad_url.destination_hex" in retained
+    assert "bytes_equal_lower_hex(" in retained
+    assert "_nomad_destination_hash, _nomad_url.destination_hex" in retained
     assert "nomad_stop_transport();" in retained
 
 

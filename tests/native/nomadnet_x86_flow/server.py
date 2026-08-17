@@ -60,6 +60,7 @@ PAGES = {
     "/page/reuse-first.mu": micron_page("Immediate page", 220),
     "/page/reuse-second.mu": micron_page("Resource-backed page", 12_000),
     "/page/form.mu": micron_page("Form response", 220),
+    "/page/partial.mu": b">Peer-refreshed fragment\n\nReal partial response.\n",
 }
 
 EXPECTED_FORM_DATA = {
@@ -117,7 +118,7 @@ def write_config(config_dir: str):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("scenario", choices=("immediate", "resource", "near-limit", "oversized", "timeout", "cancel", "reuse", "form-anonymous", "form-identified", "owner-form-history"))
+    parser.add_argument("scenario", choices=("immediate", "resource", "near-limit", "oversized", "timeout", "cancel", "reuse", "form-anonymous", "form-identified", "owner-form-history", "partial"))
     parser.add_argument("--timeout", type=float, default=20.0)
     args = parser.parse_args()
 
@@ -185,7 +186,7 @@ def main():
                 continue
             print("SERVER FAIL owner form/history request sequence", flush=True)
             return 1
-        if args.scenario in ("immediate", "resource", "near-limit", "oversized") and state["request_seen"]:
+        if args.scenario in ("immediate", "resource", "near-limit", "oversized", "partial") and state["request_seen"]:
             time.sleep(1.0)
             print("SERVER PASS", flush=True)
             return 0

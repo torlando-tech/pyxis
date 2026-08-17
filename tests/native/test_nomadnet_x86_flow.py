@@ -38,11 +38,11 @@ def test_nomadnet_x86_real_peer_flow():
     scenario_records = re.findall(
         r"^SCENARIO ([a-z-]+): (PASS|FAIL) server=(-?\d+) client=(-?\d+)$",
         result.stdout, flags=re.MULTILINE)
-    assert len(scenario_records) == 10
-    assert len({record[0] for record in scenario_records}) == 10
+    assert len(scenario_records) == 11
+    assert len({record[0] for record in scenario_records}) == 11
     assert all(record[1:] == ("PASS", "0", "0") for record in scenario_records)
     result_records = re.findall(r"^RESULT ([^\n]+)$", result.stdout, flags=re.MULTILINE)
-    assert len(result_records) == 10
+    assert len(result_records) == 11
     parsed_results = {}
     for record in result_records:
         fields = record.split()
@@ -63,6 +63,8 @@ def test_nomadnet_x86_real_peer_flow():
     assert "SCENARIO form-anonymous: PASS server=0 client=0" in result.stdout
     assert "SCENARIO form-identified: PASS server=0 client=0" in result.stdout
     assert "SCENARIO owner-form-history: PASS server=0 client=0" in result.stdout
+    assert "SCENARIO partial: PASS server=0 client=0" in result.stdout
+    assert "partial_live=1" in result.stdout
     owner = parsed_results["owner-form-history"]
     assert owner["owner_submit"] == "1"
     assert owner["history_bytes"] == "1"

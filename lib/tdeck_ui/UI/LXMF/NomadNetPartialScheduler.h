@@ -32,6 +32,7 @@ public:
               PartialRequest& request) noexcept;
     bool complete(const PartialRequest& request, bool success,
                   uint32_t now_ms) noexcept;
+    bool defer(const PartialRequest& request) noexcept;
     bool request_now(std::size_t partial_index, uint32_t page_generation,
                      uint32_t now_ms) noexcept;
 

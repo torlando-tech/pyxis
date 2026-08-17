@@ -9,6 +9,7 @@
 #include "NomadNetDocument.h"
 #include "NomadNetForm.h"
 #include "NomadNetLibrary.h"
+#include "NomadNetPartialController.h"
 #include "NomadNetVirtualViewport.h"
 
 namespace UI::LXMF {
@@ -38,6 +39,20 @@ public:
                             std::string& target,
                             NomadNet::ExternalVector<uint8_t>& request_data,
                             NomadNet::FormEncodeResult& result) const;
+    bool prepare_partial_request(const NomadNet::PartialRequest& request,
+                                 NomadNet::PartialController& controller,
+                                 NomadNet::FormEncodeResult& result) const;
+    bool partial_request_matches(
+        const NomadNet::PartialRequest& request,
+        const NomadNet::PartialController& controller) const {
+        return controller.matches(request, _page);
+    }
+    NomadNet::PartialReplaceResult apply_partial_fragment(
+        const NomadNet::PartialRequest& request,
+        const NomadNet::Document& fragment,
+        const NomadNet::PartialController& controller);
+    bool partial_id_matches(std::size_t partial_index,
+                            const char* id, std::size_t id_size) const;
     bool jump_to_anchor(const std::string& name);
     void restore_logical_scroll(int32_t logical);
     int32_t logical_scroll() const { return _logical_scroll; }
@@ -142,6 +157,10 @@ private:
     int32_t _logical_scroll = 0;
     int32_t _layout_window_top = 0;
     int32_t _layout_window_bottom = 0;
+    bool _transaction_scroll_restore = false;
+#ifdef PYXIS_NOMADNET_TEST_HOOKS
+    int8_t _test_scroll_fail_countdown = -1;
+#endif
     TableLayoutObservation _table_layout;
     int16_t _selected_link = -1;
     int16_t _selected_field = -1;
@@ -190,7 +209,7 @@ private:
                      int16_t available, uint8_t heading_level,
                      int32_t window_top, int32_t window_bottom);
     int32_t logical_scroll_from_widget() const;
-    void scroll_to_logical(int32_t logical, lv_anim_enable_t animation);
+    bool scroll_to_logical(int32_t logical, lv_anim_enable_t animation);
     void draw_page(lv_event_t* event);
     void select_link(int direction);
     void activate_selected_link();
