@@ -5,12 +5,19 @@
 
 #include "NomadNetCompactPage.h"
 #include "NomadNetDocument.h"
+#include "NomadNetForm.h"
+#include "NomadNetPartialController.h"
 #include "NomadNetPartialScheduler.h"
 
 using UI::LXMF::NomadNet::BlockType;
 using UI::LXMF::NomadNet::CompactPage;
 using UI::LXMF::NomadNet::DocumentParser;
+using UI::LXMF::NomadNet::ExternalVector;
+using UI::LXMF::NomadNet::FormEncodeResult;
+using UI::LXMF::NomadNet::FormState;
+using UI::LXMF::NomadNet::PartialReplaceResult;
 using UI::LXMF::NomadNet::PartialRequest;
+using UI::LXMF::NomadNet::PartialController;
 using UI::LXMF::NomadNet::PartialScheduler;
 using UI::LXMF::NomadNet::TruncationReason;
 
@@ -220,6 +227,205 @@ int main() {
               compact.partial_field(partial, 1) == "user_name");
     }
 
+    const auto replacement_source = parser.parse(
+        "before `<name`default>\n"
+        "`{:fragment.mu`10`name}\n"
+        "after");
+    CompactPage replacement_base;
+    check("partial replacement fixture compacts", replacement_base.assign(replacement_source));
+    FormState edited_form;
+    check("partial replacement form fixture assigns",
+          edited_form.assign(replacement_base) && edited_form.set_value(0, "user value"));
+    const auto fragment = parser.parse("updated\n`{:nested.mu}\nmore");
+    CompactPage replacement_candidate;
+    const auto replace_result = replacement_candidate.assign_replacing_partial(
+        replacement_base, 0, fragment, CompactPage::MAX_ARENA_BYTES);
+    check("partial fragment transaction replaces exactly one stable region",
+          replace_result == PartialReplaceResult::APPLIED &&
+          replacement_candidate.blocks().size() == 5 &&
+          replacement_candidate.blocks()[1].partial_region_index == 0 &&
+          replacement_candidate.blocks()[2].partial_region_index == 0 &&
+          replacement_candidate.blocks()[3].partial_region_index == 0);
+    check("nested fragment descriptors remain inert and root identity remains stable",
+          replacement_candidate.partials().size() == 1 &&
+          replacement_candidate.blocks()[2].type == BlockType::PARTIAL &&
+          replacement_candidate.blocks()[2].partial_index == -1 &&
+          replacement_candidate.partials()[0].descriptor_hash ==
+              replacement_base.partials()[0].descriptor_hash);
+    FormState preserved_form;
+    check("unrelated partial replacement preserves user-entered field state",
+          preserved_form.assign_preserving(replacement_candidate, edited_form) &&
+          preserved_form.fields().size() == 1 &&
+          std::string(preserved_form.fields()[0].value.data(),
+                      preserved_form.fields()[0].value_length) == "user value");
+    const auto region_source = parser.parse(
+        "base `<same`base-default>\n"
+        "`{:region.mu}\n"
+        "after `<same`after-default>");
+    CompactPage region_base;
+    FormState region_form;
+    check("source-region identity fixture assigns",
+          region_base.assign(region_source) && region_form.assign(region_base) &&
+          region_form.set_value(0, "base-edit") &&
+          region_form.set_value(1, "after-edit"));
+    const auto region_fragment = parser.parse("peer `<same`peer-default>");
+    CompactPage region_candidate;
+    FormState region_preserved;
+    check("partial fields cannot steal values from matching base fields",
+          region_candidate.assign_replacing_partial(
+              region_base, 0, region_fragment, CompactPage::MAX_ARENA_BYTES) ==
+                  PartialReplaceResult::APPLIED &&
+          region_preserved.assign_preserving(region_candidate, region_form) &&
+          region_preserved.fields().size() == 3 &&
+          std::string(region_preserved.fields()[0].value.data(),
+                      region_preserved.fields()[0].value_length) == "base-edit" &&
+          std::string(region_preserved.fields()[1].value.data(),
+                      region_preserved.fields()[1].value_length) == "peer-default" &&
+          std::string(region_preserved.fields()[2].value.data(),
+                      region_preserved.fields()[2].value_length) == "after-edit");
+    const auto radio_base_document = parser.parse("`{:radio.mu}");
+    CompactPage radio_base;
+    const auto radio_first_fragment = parser.parse(
+        "`<^|choice|a|*`A> `<^|choice|b`B>");
+    CompactPage radio_first;
+    FormState radio_state;
+    check("radio replacement fixture selects second option",
+          radio_base.assign(radio_base_document) &&
+          radio_first.assign_replacing_partial(
+              radio_base, 0, radio_first_fragment,
+              CompactPage::MAX_ARENA_BYTES) == PartialReplaceResult::APPLIED &&
+          radio_state.assign(radio_first) && radio_state.set_checked(1, true));
+    const auto radio_second_fragment = parser.parse("`<^|choice|b`B>");
+    CompactPage radio_second;
+    FormState radio_preserved;
+    check("surviving radio option retains identity when a peer disappears",
+          radio_second.assign_replacing_partial(
+              radio_first, 0, radio_second_fragment,
+              CompactPage::MAX_ARENA_BYTES) == PartialReplaceResult::APPLIED &&
+          radio_preserved.assign_preserving(radio_second, radio_state) &&
+          radio_preserved.fields().size() == 1 &&
+          radio_preserved.fields()[0].checked);
+    const auto radio_fallback_fragment = parser.parse("`<^|choice|b|*`B>");
+    CompactPage radio_fallback_page;
+    FormState radio_default_state;
+    check("canonical radio fallback is selected when the old key disappears",
+          radio_default_state.assign(radio_first) &&
+          radio_fallback_page.assign_replacing_partial(
+              radio_base, 0, radio_fallback_fragment,
+              CompactPage::MAX_ARENA_BYTES) == PartialReplaceResult::APPLIED &&
+          radio_preserved.assign_preserving(radio_fallback_page, radio_default_state) &&
+          radio_preserved.fields().size() == 1 &&
+          radio_preserved.fields()[0].checked);
+    const auto radio_added_default_fragment = parser.parse(
+        "`<^|choice|b`B> `<^|choice|c|*`C>");
+    CompactPage radio_added_default_page;
+    check("a surviving radio selection clears a newly canonical peer",
+          radio_added_default_page.assign_replacing_partial(
+              radio_base, 0, radio_added_default_fragment,
+              CompactPage::MAX_ARENA_BYTES) == PartialReplaceResult::APPLIED &&
+          radio_preserved.assign_preserving(radio_added_default_page, radio_state) &&
+          radio_preserved.fields().size() == 2 &&
+          radio_preserved.fields()[0].checked &&
+          !radio_preserved.fields()[1].checked &&
+          std::string(radio_preserved.fields()[0].value.data(),
+                      radio_preserved.fields()[0].value_length) == "b");
+    const auto cross_region_radio_document = parser.parse(
+        "`<^|choice|base|*`Base>\n`{:radio.mu}");
+    CompactPage cross_region_radio_base;
+    CompactPage cross_region_radio_page;
+    FormState cross_region_radio_state;
+    const auto cross_region_radio_fragment = parser.parse(
+        "`<^|choice|fragment|*`Fragment>");
+    check("same-name radios across source regions remain one submission group",
+          cross_region_radio_base.assign(cross_region_radio_document) &&
+          cross_region_radio_page.assign_replacing_partial(
+              cross_region_radio_base, 0, cross_region_radio_fragment,
+              CompactPage::MAX_ARENA_BYTES) == PartialReplaceResult::APPLIED &&
+          cross_region_radio_state.assign(cross_region_radio_page) &&
+          cross_region_radio_state.fields().size() == 2 &&
+          !cross_region_radio_state.fields()[0].checked &&
+          cross_region_radio_state.fields()[1].checked &&
+          cross_region_radio_state.set_checked(0, true) &&
+          cross_region_radio_state.fields()[0].checked &&
+          !cross_region_radio_state.fields()[1].checked);
+    const auto global_fallback_old_fragment = parser.parse(
+        "`<^|choice|old`Old>");
+    const auto global_fallback_new_fragment = parser.parse(
+        "`<^|choice|new|*`New>");
+    CompactPage global_fallback_old_page;
+    CompactPage global_fallback_new_page;
+    FormState global_fallback_old_state;
+    FormState global_fallback_preserved;
+    ExternalVector<uint8_t> global_fallback_encoded;
+    static constexpr uint8_t EXPECTED_GLOBAL_FALLBACK[] = {
+        0x81, 0xac, 'f', 'i', 'e', 'l', 'd', '_',
+        'c', 'h', 'o', 'i', 'c', 'e', 0xa3, 'n', 'e', 'w'
+    };
+    check("removed cross-region selection retains one canonical fallback",
+          global_fallback_old_page.assign_replacing_partial(
+              cross_region_radio_base, 0, global_fallback_old_fragment,
+              CompactPage::MAX_ARENA_BYTES) == PartialReplaceResult::APPLIED &&
+          global_fallback_old_state.assign(global_fallback_old_page) &&
+          global_fallback_old_state.set_checked(1, true) &&
+          global_fallback_new_page.assign_replacing_partial(
+              cross_region_radio_base, 0, global_fallback_new_fragment,
+              CompactPage::MAX_ARENA_BYTES) == PartialReplaceResult::APPLIED &&
+          global_fallback_preserved.assign_preserving(
+              global_fallback_new_page, global_fallback_old_state) &&
+          global_fallback_preserved.fields().size() == 2 &&
+          !global_fallback_preserved.fields()[0].checked &&
+          global_fallback_preserved.fields()[1].checked &&
+          global_fallback_preserved.encode(
+              std::string{"*"}, global_fallback_encoded) == FormEncodeResult::OK &&
+          global_fallback_encoded.size() == sizeof(EXPECTED_GLOBAL_FALLBACK) &&
+          std::memcmp(global_fallback_encoded.data(), EXPECTED_GLOBAL_FALLBACK,
+                      sizeof(EXPECTED_GLOBAL_FALLBACK)) == 0);
+    const auto duplicate_radio_document = parser.parse("`{:dup.mu}");
+    const auto duplicate_radio_fragment = parser.parse(
+        "`<^|dup|same`First> `<^|dup|same`Second>");
+    CompactPage duplicate_radio_base;
+    CompactPage duplicate_radio_page;
+    CompactPage duplicate_radio_replaced;
+    FormState duplicate_radio_state;
+    FormState duplicate_radio_preserved;
+    check("duplicate-value radio selection preserves its occurrence",
+          duplicate_radio_base.assign(duplicate_radio_document) &&
+          duplicate_radio_page.assign_replacing_partial(
+              duplicate_radio_base, 0, duplicate_radio_fragment,
+              CompactPage::MAX_ARENA_BYTES) == PartialReplaceResult::APPLIED &&
+          duplicate_radio_state.assign(duplicate_radio_page) &&
+          duplicate_radio_state.set_checked(1, true) &&
+          duplicate_radio_replaced.assign_replacing_partial(
+              duplicate_radio_base, 0, duplicate_radio_fragment,
+              CompactPage::MAX_ARENA_BYTES) == PartialReplaceResult::APPLIED &&
+          duplicate_radio_preserved.assign_preserving(
+              duplicate_radio_replaced, duplicate_radio_state) &&
+          duplicate_radio_preserved.fields().size() == 2 &&
+          !duplicate_radio_preserved.fields()[0].checked &&
+          duplicate_radio_preserved.fields()[1].checked);
+    const auto notice_secret_document = parser.parse(
+        "`<8!|password`PW_SECRET_7391>\n`[Link`:/target]");
+    CompactPage notice_secret_page;
+    check("notice fixture with sensitive arena data compacts",
+          notice_secret_page.assign(notice_secret_document));
+    const char* sensitive_arena_address = notice_secret_page.field_value(0).data();
+    check("notice publication cannot reallocate an arena containing password bytes",
+          notice_secret_page.append_notice(std::string(96, 'N')) &&
+          notice_secret_page.field_value(0).data() == sensitive_arena_address);
+    CompactPage repeated_candidate;
+    const auto shorter_fragment = parser.parse("short");
+    check("repeated replacement removes the prior fragment without accumulation",
+          repeated_candidate.assign_replacing_partial(
+              replacement_candidate, 0, shorter_fragment,
+              CompactPage::MAX_ARENA_BYTES) == PartialReplaceResult::APPLIED &&
+          repeated_candidate.blocks().size() == 3 &&
+          repeated_candidate.blocks()[1].partial_region_index == 0);
+    CompactPage rejected_candidate;
+    check("unknown partial occurrence fails closed",
+          rejected_candidate.assign_replacing_partial(
+              replacement_base, 1, fragment, CompactPage::MAX_ARENA_BYTES) ==
+              PartialReplaceResult::INVALID_PARTIAL && rejected_candidate.empty());
+
     const auto scheduled_document = parser.parse(
         "`{:first.mu`10}\n`{:second.mu`20}");
     CompactPage scheduled_page;
@@ -278,13 +484,19 @@ int main() {
     PartialRequest retry{};
     check("one-shot partial starts immediately", scheduler.poll(0U, true, true, retry));
     const uint32_t first_partial_generation = retry.partial_generation;
+    const uint32_t rejected_token = retry.request_token;
+    check("temporary owner admission rejection defers without terminal failure",
+          scheduler.defer(retry) && scheduler.poll(1U, true, true, retry) &&
+          retry.request_token != rejected_token &&
+          retry.partial_generation != first_partial_generation);
+    const uint32_t admitted_partial_generation = retry.partial_generation;
     check("failure is contained", scheduler.complete(retry, false, 1U));
     check("one-shot transfer failure has no automatic retry",
           !scheduler.poll(0xffffffffU, true, true, retry));
     check("manual p-link style retry rearms the exact occurrence",
           scheduler.request_now(0U, 9U, 5000U) &&
           scheduler.poll(5000U, true, true, retry) &&
-          retry.partial_generation != first_partial_generation);
+          retry.partial_generation != admitted_partial_generation);
     check("mismatched partial generation is rejected", [&] {
         PartialRequest stale = retry;
         --stale.partial_generation;
@@ -296,6 +508,49 @@ int main() {
         return !scheduler.complete(stale, true, 5001U);
     }());
     check("manual retry completion remains valid", scheduler.complete(retry, true, 5001U));
+
+    PartialController controller;
+    controller.reset_page(retry_document.source_bytes);
+    const uint8_t empty_map = 0x80;
+    check("transfer lease retains exact bounded descriptor material",
+          controller.prepare(retry, retry_page, &empty_map, 1) &&
+          controller.active() && controller.matches(retry, retry_page) &&
+          std::string(controller.descriptor_data(), controller.descriptor_size()) ==
+              ":once.mu" &&
+          std::string(controller.url_data(), controller.url_size()) == ":once.mu" &&
+          controller.request_size() == 1 && controller.request_data()[0] == empty_map);
+          const auto colliding_document = parser.parse("`{:other.mu}");
+          CompactPage colliding_page;
+          check("digest collision fixture compacts", colliding_page.assign(colliding_document));
+          if (!colliding_page.partials().empty()) {
+          auto& mutable_partial = const_cast<CompactPage::PartialRecord&>(
+          colliding_page.partials()[0]);
+          mutable_partial.descriptor_hash = retry.descriptor_hash;
+          }
+          check("completion authority requires exact descriptor bytes as well as digest",
+          !controller.matches(retry, colliding_page));
+    PartialRequest wrong_lease = retry;
+    wrong_lease.descriptor_hash[0] ^= 0x01U;
+    check("transfer lease rejects digest-only or stale completion",
+          !controller.matches(wrong_lease));
+    check("aggregate fragment accounting permits bounded replacement",
+          controller.can_accept_fragment(retry.partial_index, 1024) &&
+          controller.commit_fragment(retry.partial_index, 1024) &&
+          controller.active() &&
+          controller.expanded_source_bytes() == retry_document.source_bytes + 1024);
+    controller.abandon_request();
+    controller.reset_page(DocumentParser::MAX_DOCUMENT_BYTES);
+    check("expanded page cap rejects fragment growth deterministically", [&] {
+        scheduler.configure(retry_page, 11U, 0U);
+        PartialRequest capped_request;
+        return scheduler.poll(0U, true, true, capped_request) &&
+            controller.prepare(capped_request, retry_page, &empty_map, 1) &&
+            !controller.can_accept_fragment(0, 1);
+    }());
+    controller.cancel();
+    check("lease cancellation wipes and revokes request material",
+          !controller.active() && controller.request_size() == 0 &&
+          controller.descriptor_size() == 0);
 
     const auto wrap_document = parser.parse("`{:wrap.mu`5}");
     CompactPage wrap_page;

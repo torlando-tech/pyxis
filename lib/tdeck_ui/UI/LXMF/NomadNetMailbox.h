@@ -70,7 +70,7 @@ public:
         if (token.empty()) return false;
         if (_request_token.empty()) _request_token = token;
         if (token != _request_token) return false;
-        if (size > MAX_WIRE_BYTES || (!data && size != 0)) {
+        if (size > _max_wire_bytes || (!data && size != 0)) {
             set_oversized(size);
             return true;
         }
@@ -93,12 +93,17 @@ public:
         return true;
     }
 
-    bool publish_failed(const std::vector<uint8_t>& token) {
+    bool publish_failed(const std::vector<uint8_t>& token,
+                        std::size_t response_size = 0) {
         Guard guard(_lock);
         if (_sealed) return false;
         if (token.empty()) return false;
         if (_request_token.empty()) _request_token = token;
         if (token != _request_token) return false;
+        if (response_size > _max_wire_bytes) {
+            set_oversized(response_size);
+            return true;
+        }
         if (_event.kind == Kind::OVERSIZED || _event.kind == Kind::RESPONSE) return false;
         _event.kind = Kind::FAILED;
         _event.generation = _generation;
@@ -147,10 +152,13 @@ public:
 
     // Open an explicit pre-arm window before constructing a Link. Some
     // implementations can call back before begin() receives its token.
-    void prepare(std::uint32_t generation = 0) {
+    void prepare(std::uint32_t generation = 0,
+                 std::size_t max_wire_bytes = MAX_WIRE_BYTES) {
         Guard guard(_lock);
         reset(false);
         _generation = generation;
+        _max_wire_bytes = max_wire_bytes > MAX_WIRE_BYTES
+            ? MAX_WIRE_BYTES : max_wire_bytes;
     }
 
     // Terminal cleanup can synchronously invoke RequestReceipt's failed
@@ -190,6 +198,7 @@ private:
     std::vector<uint8_t> _link_token;
     std::vector<uint8_t> _request_token;
     std::uint32_t _generation = 0;
+    std::size_t _max_wire_bytes = MAX_WIRE_BYTES;
     Event _event;
 };
 

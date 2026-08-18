@@ -36,7 +36,7 @@ REFERENCE_FILES = {
         "2461a592b731cb1469bebb5ccc5f523892127881cb7a7e8ed586ac62a8c0c23a",
 }
 SCENARIOS = ("immediate", "resource", "near-limit", "oversized", "timeout", "cancel", "reuse",
-             "form-anonymous", "form-identified", "owner-form-history")
+             "form-anonymous", "form-identified", "owner-form-history", "partial")
 if os.environ.get("PYXIS_FLOW_SCENARIOS"):
     requested = tuple(item.strip() for item in os.environ["PYXIS_FLOW_SCENARIOS"].split(",") if item.strip())
     if not requested or any(item not in SCENARIOS for item in requested):
@@ -62,6 +62,8 @@ MANIFEST_FILES = (
     "lib/tdeck_ui/UI/LXMF/NomadNetCompactPage.h",
     "lib/tdeck_ui/UI/LXMF/NomadNetPartialScheduler.cpp",
     "lib/tdeck_ui/UI/LXMF/NomadNetPartialScheduler.h",
+    "lib/tdeck_ui/UI/LXMF/NomadNetPartialController.cpp",
+    "lib/tdeck_ui/UI/LXMF/NomadNetPartialController.h",
     "lib/tdeck_ui/UI/LXMF/NomadNetPartialHash.h",
     "lib/tdeck_ui/UI/LXMF/NomadNetGlyphs.cpp",
     "lib/tdeck_ui/UI/LXMF/NomadNetGlyphs.h",
@@ -273,6 +275,9 @@ for scenario in SCENARIOS:
             "history_bytes=1", "retained_link=1", "back_restored=1", "reload_reused=1",
         ))
         ok &= server_text.count("SERVER request count=") == 3
+    if scenario == "partial":
+        ok &= "partial_live=1" in client_text
+        ok &= "path=/page/partial.mu" in server_text
     print(f"SCENARIO {scenario}: {'PASS' if ok else 'FAIL'} server={server_rc} client={client_rc}")
     failed |= not ok
 

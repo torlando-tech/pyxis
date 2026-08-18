@@ -48,6 +48,7 @@ public:
         std::array<char, DocumentParser::MAX_FIELD_VALUE_BYTES + 1> value{};
         uint16_t name_length = 0;
         uint16_t value_length = 0;
+        int16_t partial_region_index = -1;
         bool checked = false;
         bool masked = false;
         ~FieldState() {
@@ -59,6 +60,7 @@ public:
     };
 
     bool assign(const CompactPage& page);
+    bool assign_preserving(const CompactPage& page, const FormState& previous);
     void clear();
     bool set_value(uint16_t id, const std::string& value);
     bool set_value(uint16_t id, const char* value, std::size_t size);

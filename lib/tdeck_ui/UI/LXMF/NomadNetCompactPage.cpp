@@ -114,7 +114,10 @@ bool CompactPage::assign(const Document& document) {
             arena_size += bytes;
             ++anchors_accounted;
         }
-        _arena.reserve(arena_size);
+        const std::size_t notice_slack = std::min(
+            MAX_NOTICE_BYTES + 1,
+            MAX_ARENA_BYTES - std::min(arena_size, MAX_ARENA_BYTES));
+        _arena.reserve(arena_size + notice_slack);
         _blocks.reserve(block_count);
         _runs.reserve(std::min(run_count, run_limit));
         _links.reserve(link_count);
@@ -213,6 +216,9 @@ bool CompactPage::assign(const Document& document) {
             block.partial_index = source_block.partial_index >= 0 &&
                 static_cast<std::size_t>(source_block.partial_index) < partial_count
                     ? source_block.partial_index : -1;
+            block.partial_region_index = source_block.partial_region_index >= 0 &&
+                static_cast<std::size_t>(source_block.partial_region_index) < partial_count
+                    ? source_block.partial_region_index : -1;
             for (const auto& source_run : source_block.runs) {
                 if (_runs.size() >= run_limit || block.run_count == std::numeric_limits<uint16_t>::max()) {
                     _truncated = true;
@@ -229,6 +235,12 @@ bool CompactPage::assign(const Document& document) {
                 run.field_index = source_run.field_index >= 0 &&
                     static_cast<std::size_t>(source_run.field_index) < _fields.size()
                         ? static_cast<int16_t>(source_run.field_index) : -1;
+                if (run.link_index >= 0)
+                    _links[run.link_index].partial_region_index =
+                        block.partial_region_index;
+                if (run.field_index >= 0)
+                    _fields[run.field_index].partial_region_index =
+                        block.partial_region_index;
                 if (source_run.bold) run.style |= BOLD;
                 if (source_run.italic) run.style |= ITALIC;
                 if (source_run.underline) run.style |= UNDERLINE;
@@ -321,7 +333,376 @@ bool CompactPage::assign(const Document& document) {
     }
 }
 
+PartialReplaceResult CompactPage::assign_replacing_partial(
+        const CompactPage& base, std::size_t partial_index,
+        const Document& fragment, std::size_t max_arena_bytes) {
+    clear();
+    if (partial_index >= base._partials.size())
+        return PartialReplaceResult::INVALID_PARTIAL;
+    if (fragment.allocation_failed)
+        return PartialReplaceResult::ALLOCATION_FAILED;
+    if (fragment.malformed || fragment.truncated ||
+            max_arena_bytes > MAX_ARENA_BYTES)
+        return PartialReplaceResult::LIMIT_EXCEEDED;
+
+    bool region_found = false;
+    for (const auto& block : base._blocks)
+        if (block.partial_region_index == static_cast<int16_t>(partial_index)) {
+            region_found = true;
+            break;
+        }
+    if (!region_found) return PartialReplaceResult::INVALID_PARTIAL;
+
+    CompactPage fragment_page;
+    if (!fragment_page.assign(fragment))
+        return PartialReplaceResult::ALLOCATION_FAILED;
+    if (fragment_page.truncated())
+        return PartialReplaceResult::LIMIT_EXCEEDED;
+
+    bool limit_failed = false;
+    try {
+        const std::size_t source_arena = std::min(
+            max_arena_bytes, base._arena.size() + fragment_page._arena.size());
+        const std::size_t reserve_arena = source_arena + std::min(
+            MAX_NOTICE_BYTES + 1, max_arena_bytes - source_arena);
+        _arena.reserve(reserve_arena);
+        _blocks.reserve(std::min(MAX_BLOCKS,
+            base._blocks.size() + fragment_page._blocks.size()));
+        _runs.reserve(std::min(MAX_RUNS,
+            base._runs.size() + fragment_page._runs.size()));
+        _links.reserve(std::min(MAX_LINKS,
+            base._links.size() + fragment_page._links.size()));
+        _fields.reserve(std::min(MAX_FIELDS,
+            base._fields.size() + fragment_page._fields.size()));
+        _anchors.reserve(std::min(MAX_ANCHORS,
+            base._anchors.size() + fragment_page._anchors.size()));
+        _tables.reserve(std::min(MAX_TABLES,
+            base._tables.size() + fragment_page._tables.size()));
+        _table_cells.reserve(std::min(MAX_TABLE_CELLS,
+            base._table_cells.size() + fragment_page._table_cells.size()));
+        _partials.reserve(base._partials.size());
+        _partial_fields.reserve(base._partial_fields.size());
+
+        auto append_view = [&](TextView value, uint32_t& offset,
+                               uint16_t& length) -> bool {
+            if ((!value.data() && !value.empty()) ||
+                    value.size() > std::numeric_limits<uint16_t>::max() ||
+                    value.size() + 1 > max_arena_bytes -
+                        std::min(_arena.size(), max_arena_bytes)) {
+                limit_failed = true;
+                return false;
+            }
+            offset = static_cast<uint32_t>(_arena.size());
+            length = static_cast<uint16_t>(value.size());
+            if (!value.empty())
+                _arena.insert(_arena.end(), value.data(), value.data() + value.size());
+            _arena.push_back('\0');
+            return true;
+        };
+
+        for (const auto& source : base._partials) {
+            PartialRecord partial;
+            partial.first_field = static_cast<uint32_t>(_partial_fields.size());
+            if (!append_view(base.partial_descriptor(source), partial.descriptor_offset,
+                             partial.descriptor_length) ||
+                    !append_view(base.partial_url(source), partial.url_offset,
+                                 partial.url_length) ||
+                    !append_view(base.partial_selectors(source), partial.selectors_offset,
+                                 partial.selectors_length) ||
+                    !append_view(base.partial_id(source), partial.id_offset,
+                                 partial.id_length)) {
+                clear();
+                return PartialReplaceResult::LIMIT_EXCEEDED;
+            }
+            partial.refresh_interval_ms = source.refresh_interval_ms;
+            partial.descriptor_hash = source.descriptor_hash;
+            for (std::size_t field_index = 0;
+                    field_index < source.field_count; ++field_index) {
+                if (_partial_fields.size() >= MAX_PARTIAL_FIELDS) {
+                    clear();
+                    return PartialReplaceResult::LIMIT_EXCEEDED;
+                }
+                PartialFieldRecord field;
+                if (!append_view(base.partial_field(source, field_index),
+                                 field.value_offset, field.value_length)) {
+                    clear();
+                    return PartialReplaceResult::LIMIT_EXCEEDED;
+                }
+                _partial_fields.push_back(field);
+                ++partial.field_count;
+            }
+            _partials.push_back(partial);
+        }
+
+        struct CopyMaps {
+            ExternalVector<int16_t> links;
+            ExternalVector<int16_t> fields;
+            ExternalVector<int16_t> tables;
+            ExternalVector<int32_t> blocks;
+        };
+        auto make_maps = [](const CompactPage& source) {
+            CopyMaps maps;
+            maps.links.assign(source._links.size(), -1);
+            maps.fields.assign(source._fields.size(), -1);
+            maps.tables.assign(source._tables.size(), -1);
+            maps.blocks.assign(source._blocks.size(), -1);
+            return maps;
+        };
+        CopyMaps base_maps = make_maps(base);
+        CopyMaps fragment_maps = make_maps(fragment_page);
+
+        auto copy_link = [&](const CompactPage& source, CopyMaps& maps,
+                             int16_t source_index) -> int16_t {
+            if (source_index < 0 ||
+                    static_cast<std::size_t>(source_index) >= source._links.size())
+                return -1;
+            int16_t& mapped = maps.links[source_index];
+            if (mapped >= 0) return mapped;
+            if (_links.size() >= MAX_LINKS) {
+                limit_failed = true;
+                return -1;
+            }
+            LinkRecord link;
+            if (!append_view(source.target(source_index), link.target_offset,
+                             link.target_length))
+                return -1;
+            link.partial_region_index =
+                source._links[source_index].partial_region_index;
+            mapped = static_cast<int16_t>(_links.size());
+            _links.push_back(link);
+            return mapped;
+        };
+        auto copy_field = [&](const CompactPage& source, CopyMaps& maps,
+                              int16_t source_index) -> int16_t {
+            if (source_index < 0 ||
+                    static_cast<std::size_t>(source_index) >= source._fields.size())
+                return -1;
+            int16_t& mapped = maps.fields[source_index];
+            if (mapped >= 0) return mapped;
+            if (_fields.size() >= MAX_FIELDS) {
+                limit_failed = true;
+                return -1;
+            }
+            const auto& old = source._fields[source_index];
+            FieldRecord field;
+            if (!append_view(source.field_name(source_index), field.name_offset,
+                             field.name_length) ||
+                    !append_view(source.field_value(source_index), field.value_offset,
+                                 field.value_length) ||
+                    !append_view(source.field_label(source_index), field.label_offset,
+                                 field.label_length))
+                return -1;
+            field.width = old.width;
+            field.type = old.type;
+            field.checked = old.checked;
+            field.masked = old.masked;
+            field.partial_region_index = old.partial_region_index;
+            mapped = static_cast<int16_t>(_fields.size());
+            _fields.push_back(field);
+            return mapped;
+        };
+        auto copy_run = [&](const CompactPage& source, CopyMaps& maps,
+                            const RunRecord& old, RunRecord& run) -> bool {
+            if (_runs.size() >= MAX_RUNS) {
+                limit_failed = true;
+                return false;
+            }
+            if (!append_view(source.text(old), run.text_offset, run.text_length))
+                return false;
+            run.link_index = copy_link(source, maps, old.link_index);
+            run.field_index = copy_field(source, maps, old.field_index);
+            if (&source == &fragment_page) {
+                if (run.link_index >= 0)
+                    _links[run.link_index].partial_region_index =
+                        static_cast<int16_t>(partial_index);
+                if (run.field_index >= 0)
+                    _fields[run.field_index].partial_region_index =
+                        static_cast<int16_t>(partial_index);
+            }
+            run.style = old.style;
+            run.foreground = old.foreground;
+            run.background = old.background;
+            if ((old.link_index >= 0 && run.link_index < 0) ||
+                    (old.field_index >= 0 && run.field_index < 0))
+                return false;
+            return true;
+        };
+        auto copy_table = [&](const CompactPage& source, CopyMaps& maps,
+                              int16_t source_index) -> int16_t {
+            if (source_index < 0 ||
+                    static_cast<std::size_t>(source_index) >= source._tables.size())
+                return -1;
+            int16_t& mapped = maps.tables[source_index];
+            if (mapped >= 0) return mapped;
+            if (_tables.size() >= MAX_TABLES) {
+                limit_failed = true;
+                return -1;
+            }
+            const auto& old_table = source._tables[source_index];
+            const std::size_t cell_count = static_cast<std::size_t>(old_table.row_count) *
+                                           old_table.column_count;
+            if (old_table.first_cell > source._table_cells.size() ||
+                    cell_count > source._table_cells.size() - old_table.first_cell ||
+                    cell_count > MAX_TABLE_CELLS -
+                        std::min(_table_cells.size(), MAX_TABLE_CELLS)) {
+                limit_failed = true;
+                return -1;
+            }
+            TableRecord table;
+            table.first_cell = static_cast<uint32_t>(_table_cells.size());
+            table.row_count = old_table.row_count;
+            table.column_count = old_table.column_count;
+            table.alignment = old_table.alignment;
+            table.max_width = old_table.max_width;
+            for (std::size_t cell_index = 0; cell_index < cell_count; ++cell_index) {
+                const auto& old_cell = source._table_cells[old_table.first_cell + cell_index];
+                if (old_cell.first_run > source._runs.size() ||
+                        old_cell.run_count > source._runs.size() - old_cell.first_run) {
+                    limit_failed = true;
+                    return -1;
+                }
+                TableCellRecord cell;
+                cell.first_run = static_cast<uint32_t>(_runs.size());
+                cell.alignment = old_cell.alignment;
+                for (std::size_t run_index = 0; run_index < old_cell.run_count; ++run_index) {
+                    RunRecord run;
+                    if (!copy_run(source, maps,
+                                  source._runs[old_cell.first_run + run_index], run))
+                        return -1;
+                    _runs.push_back(run);
+                    ++cell.run_count;
+                }
+                _table_cells.push_back(cell);
+            }
+            mapped = static_cast<int16_t>(_tables.size());
+            _tables.push_back(table);
+            return mapped;
+        };
+
+        auto copy_block = [&](const CompactPage& source, CopyMaps& maps,
+                              std::size_t source_index, int16_t region_override,
+                              bool retain_partial_index) -> bool {
+            if (source_index >= source._blocks.size() || _blocks.size() >= MAX_BLOCKS) {
+                limit_failed = true;
+                return false;
+            }
+            const auto& old = source._blocks[source_index];
+            if (old.first_run > source._runs.size() ||
+                    old.run_count > source._runs.size() - old.first_run) {
+                limit_failed = true;
+                return false;
+            }
+            BlockRecord block;
+            block.first_run = static_cast<uint32_t>(_runs.size());
+            block.type = old.type;
+            block.depth = old.depth;
+            block.alignment = old.alignment;
+            block.divider_codepoint = old.divider_codepoint;
+            block.partial_index = retain_partial_index ? old.partial_index : -1;
+            block.partial_region_index = region_override >= 0
+                ? region_override : old.partial_region_index;
+            if (old.table_index >= 0) {
+                block.table_index = copy_table(source, maps, old.table_index);
+                if (block.table_index < 0) return false;
+            }
+            for (std::size_t run_index = 0; run_index < old.run_count; ++run_index) {
+                RunRecord run;
+                if (!copy_run(source, maps,
+                              source._runs[old.first_run + run_index], run))
+                    return false;
+                _runs.push_back(run);
+                ++block.run_count;
+            }
+            maps.blocks[source_index] = static_cast<int32_t>(_blocks.size());
+            _blocks.push_back(block);
+            return true;
+        };
+
+        bool inserted = false;
+        for (std::size_t block_index = 0; block_index < base._blocks.size(); ++block_index) {
+            const auto& block = base._blocks[block_index];
+            if (block.partial_region_index == static_cast<int16_t>(partial_index)) {
+                if (inserted) continue;
+                inserted = true;
+                if (fragment_page._blocks.empty()) {
+                    if (_blocks.size() >= MAX_BLOCKS) {
+                        limit_failed = true;
+                        break;
+                    }
+                    BlockRecord marker;
+                    marker.first_run = static_cast<uint32_t>(_runs.size());
+                    marker.partial_region_index = static_cast<int16_t>(partial_index);
+                    _blocks.push_back(marker);
+                } else {
+                    for (std::size_t fragment_index = 0;
+                            fragment_index < fragment_page._blocks.size(); ++fragment_index)
+                        if (!copy_block(fragment_page, fragment_maps, fragment_index,
+                                        static_cast<int16_t>(partial_index), false)) {
+                            limit_failed = true;
+                            break;
+                        }
+                }
+                if (limit_failed) break;
+                continue;
+            }
+            if (!copy_block(base, base_maps, block_index, -1, true)) {
+                limit_failed = true;
+                break;
+            }
+        }
+        if (!inserted || limit_failed) {
+            clear();
+            return PartialReplaceResult::LIMIT_EXCEEDED;
+        }
+
+        auto copy_anchors = [&](const CompactPage& source, const CopyMaps& maps) -> bool {
+            for (const auto& old : source._anchors) {
+                if (old.block_index >= maps.blocks.size()) continue;
+                const int32_t mapped_block = maps.blocks[old.block_index];
+                if (mapped_block < 0) continue;
+                if (_anchors.size() >= MAX_ANCHORS) {
+                    limit_failed = true;
+                    return false;
+                }
+                AnchorRecord anchor;
+                const TextView name(source._arena.data() + old.name_offset,
+                                    old.name_length);
+                if (!append_view(name, anchor.name_offset, anchor.name_length))
+                    return false;
+                anchor.block_index = static_cast<uint16_t>(mapped_block);
+                _anchors.push_back(anchor);
+            }
+            return true;
+        };
+        if (!copy_anchors(base, base_maps) ||
+                !copy_anchors(fragment_page, fragment_maps) || limit_failed) {
+            clear();
+            return PartialReplaceResult::LIMIT_EXCEEDED;
+        }
+        std::stable_sort(_anchors.begin(), _anchors.end(),
+            [](const AnchorRecord& left, const AnchorRecord& right) {
+                return left.block_index < right.block_index;
+            });
+
+        _has_background = base._has_background;
+        _background = base._background;
+        _has_foreground = base._has_foreground;
+        _foreground = base._foreground;
+        _truncated = base._truncated;
+        _unsupported = base._unsupported || fragment_page._unsupported;
+        return PartialReplaceResult::APPLIED;
+    } catch (const std::bad_alloc&) {
+        clear();
+        return PartialReplaceResult::ALLOCATION_FAILED;
+    }
+}
+
 void CompactPage::clear() {
+    if (!_arena.empty()) {
+        volatile char* bytes = _arena.data();
+        for (std::size_t index = 0; index < _arena.size(); ++index)
+            bytes[index] = 0;
+    }
     ExternalVector<char>().swap(_arena);
     ExternalVector<BlockRecord>().swap(_blocks);
     ExternalVector<RunRecord>().swap(_runs);
@@ -338,6 +719,28 @@ void CompactPage::clear() {
     _foreground = 0;
     _truncated = false;
     _unsupported = false;
+}
+
+CompactPage& CompactPage::operator=(CompactPage&& other) noexcept {
+    if (this == &other) return *this;
+    clear();
+    _arena.swap(other._arena);
+    _blocks.swap(other._blocks);
+    _runs.swap(other._runs);
+    _links.swap(other._links);
+    _anchors.swap(other._anchors);
+    _tables.swap(other._tables);
+    _table_cells.swap(other._table_cells);
+    _fields.swap(other._fields);
+    _partials.swap(other._partials);
+    _partial_fields.swap(other._partial_fields);
+    std::swap(_has_background, other._has_background);
+    std::swap(_background, other._background);
+    std::swap(_has_foreground, other._has_foreground);
+    std::swap(_foreground, other._foreground);
+    std::swap(_truncated, other._truncated);
+    std::swap(_unsupported, other._unsupported);
+    return *this;
 }
 
 bool CompactPage::append_notice(const std::string& value) {

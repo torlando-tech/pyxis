@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <utility>
 
 #include "NomadNetDocument.h"
 #include "NomadNetMemory.h"
@@ -22,6 +23,12 @@ inline bool block_has_layout_content(BlockType type, uint16_t run_count) {
 }
 
 enum class TableLayoutTier : uint8_t { FIT, REFLOW, STACKED };
+enum class PartialReplaceResult : uint8_t {
+    APPLIED,
+    INVALID_PARTIAL,
+    LIMIT_EXCEEDED,
+    ALLOCATION_FAILED,
+};
 
 inline TableLayoutTier choose_table_layout(int32_t structural_minimum_width,
                                            int32_t natural_width,
@@ -91,6 +98,12 @@ inline uint8_t heading_bottom_spacing(uint8_t depth) {
 
 class CompactPage {
 public:
+    CompactPage() = default;
+    ~CompactPage() { clear(); }
+    CompactPage(const CompactPage&) = delete;
+    CompactPage& operator=(const CompactPage&) = delete;
+    CompactPage(CompactPage&& other) noexcept { *this = std::move(other); }
+    CompactPage& operator=(CompactPage&& other) noexcept;
     static constexpr std::size_t MAX_BLOCKS = DocumentParser::MAX_BLOCKS;
     static constexpr std::size_t MAX_RUNS = DocumentParser::MAX_TOTAL_RUNS;
     static constexpr std::size_t MAX_LINKS = DocumentParser::MAX_LINKS;
@@ -129,6 +142,7 @@ public:
         uint32_t divider_codepoint = 0x2500;
         int16_t table_index = -1;
         int16_t partial_index = -1;
+        int16_t partial_region_index = -1;
     };
 
     struct RunRecord {
@@ -144,6 +158,7 @@ public:
     struct LinkRecord {
         uint32_t target_offset = 0;
         uint16_t target_length = 0;
+        int16_t partial_region_index = -1;
     };
 
     struct AnchorRecord {
@@ -175,6 +190,7 @@ public:
         uint16_t label_length = 0;
         uint16_t width = DocumentParser::DEFAULT_FIELD_WIDTH;
         FormFieldType type = FormFieldType::TEXT;
+        int16_t partial_region_index = -1;
         bool checked = false;
         bool masked = false;
     };
@@ -215,6 +231,9 @@ public:
     };
 
     bool assign(const Document& document);
+    PartialReplaceResult assign_replacing_partial(
+        const CompactPage& base, std::size_t partial_index,
+        const Document& fragment, std::size_t max_arena_bytes);
     void clear();
 
     bool empty() const { return _blocks.empty(); }

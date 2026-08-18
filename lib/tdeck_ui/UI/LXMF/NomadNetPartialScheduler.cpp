@@ -120,6 +120,25 @@ bool PartialScheduler::complete(const PartialRequest& request, bool success,
     return true;
 }
 
+bool PartialScheduler::defer(const PartialRequest& request) noexcept {
+    if (_page_generation == 0 || request.page_generation != _page_generation ||
+        request.partial_index >= _count || request.request_token == 0 ||
+        request.request_token != _in_flight_token ||
+        request.partial_index != _in_flight_index) return false;
+    Entry& entry = _entries[request.partial_index];
+    if (!entry.in_flight || entry.request_token != request.request_token ||
+        entry.partial_generation != request.partial_generation ||
+        entry.descriptor_hash != request.descriptor_hash) return false;
+
+    entry.in_flight = false;
+    entry.request_token = 0;
+    entry.due_at_ms = entry.started_at_ms;
+    entry.pending = true;
+    _in_flight_token = 0;
+    _in_flight_index = 0;
+    return true;
+}
+
 bool PartialScheduler::request_now(std::size_t partial_index,
                                    uint32_t page_generation,
                                    uint32_t now_ms) noexcept {

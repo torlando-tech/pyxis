@@ -399,6 +399,21 @@ void NomadNetScreen::status_timer_cb(lv_timer_t* timer){
     screen->_status_timer=nullptr;
     screen->apply_browser_layout(false);
 }
+void NomadNetScreen::clear_status(){
+    cancel_status_timer();
+    if(_status)lv_label_set_text(_status,"");
+    apply_browser_layout(false);
+}
+void NomadNetScreen::set_partial_activity(bool active){
+    if(!_reload_button)return;
+    lv_obj_set_style_bg_color(_reload_button,
+        active?Theme::primary():Theme::surfaceContainer(),LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(_reload_button,
+        active?Theme::primary():Theme::primaryPressed(),LV_STATE_FOCUSED);
+    if(lv_obj_t* icon=lv_obj_get_child(_reload_button,0))
+        lv_obj_set_style_text_color(icon,active?Theme::warning():Theme::textPrimary(),0);
+    lv_obj_invalidate(_reload_button);
+}
 void NomadNetScreen::set_status(const char* value){
     cancel_status_timer();
     const char* status=value?value:"";
@@ -488,6 +503,306 @@ bool NomadNetScreen::set_page(const NomadNet::Document& document) {
     lv_obj_refresh_self_size(_content);
     lv_obj_invalidate(_content);
     return true;
+}
+
+bool NomadNetScreen::prepare_partial_request(
+        const NomadNet::PartialRequest& request,
+        NomadNet::PartialController& controller,
+        NomadNet::FormEncodeResult& result) const {
+    result = NomadNet::FormEncodeResult::INVALID_STATE;
+    if (request.partial_index >= _page.partials().size()) return false;
+    const auto& partial = _page.partials()[request.partial_index];
+    if (partial.descriptor_hash != request.descriptor_hash) return false;
+    const auto selectors = _page.partial_selectors(partial);
+    if ((!selectors.data() && !selectors.empty()) ||
+            selectors.size() > NomadNet::FormState::MAX_SELECTOR_BYTES)
+        return false;
+    NomadNet::ExternalVector<uint8_t> encoded;
+    try {
+        NomadNet::FormState snapshot = _form_state;
+        if (_field_editor && _editing_field >= 0 &&
+                static_cast<std::size_t>(_editing_field) < snapshot.fields().size()) {
+            const char* value = lv_textarea_get_text(_field_editor);
+            const std::size_t size = value ? std::strlen(value) : 0;
+            if (!snapshot.set_value(static_cast<uint16_t>(_editing_field), value, size)) {
+                result = NomadNet::FormEncodeResult::VALUE_TOO_LARGE;
+                return false;
+            }
+        }
+        result = snapshot.encode(
+            std::string(selectors.data(), selectors.size()), encoded);
+        if (result != NomadNet::FormEncodeResult::OK) return false;
+        const bool prepared = controller.prepare(
+            request, _page, encoded.data(), encoded.size());
+        NomadNet::clear_encoded_form(encoded);
+        if (!prepared) result = NomadNet::FormEncodeResult::INVALID_STATE;
+        return prepared;
+    } catch (const std::bad_alloc&) {
+        NomadNet::clear_encoded_form(encoded);
+        result = NomadNet::FormEncodeResult::ALLOCATION_FAILED;
+        return false;
+    }
+}
+
+bool NomadNetScreen::partial_id_matches(std::size_t partial_index,
+                                        const char* id,
+                                        std::size_t id_size) const {
+    if ((!id && id_size != 0) || partial_index >= _page.partials().size())
+        return false;
+    const auto value = _page.partial_id(_page.partials()[partial_index]);
+    return value.size() == id_size &&
+        (id_size == 0 || std::memcmp(value.data(), id, id_size) == 0);
+}
+
+NomadNet::PartialReplaceResult NomadNetScreen::apply_partial_fragment(
+        const NomadNet::PartialRequest& request,
+        const NomadNet::Document& fragment,
+        const NomadNet::PartialController& controller) {
+    if (!controller.matches(request, _page))
+        return NomadNet::PartialReplaceResult::INVALID_PARTIAL;
+
+    NomadNet::CompactPage candidate_page;
+    const auto replacement = candidate_page.assign_replacing_partial(
+        _page, request.partial_index, fragment,
+        NomadNet::CompactPage::MAX_ARENA_BYTES);
+    if (replacement != NomadNet::PartialReplaceResult::APPLIED)
+        return replacement;
+
+    NomadNet::FormState candidate_form;
+    if (!candidate_form.assign_preserving(candidate_page, _form_state))
+        return NomadNet::PartialReplaceResult::ALLOCATION_FAILED;
+
+    auto map_field = [&](int16_t old_index) -> int16_t {
+        if (old_index < 0 ||
+                static_cast<std::size_t>(old_index) >= _form_state.fields().size())
+            return -1;
+        const auto& old = _form_state.fields()[old_index];
+        auto matches_identity = [&](const NomadNet::FormState::FieldState& candidate) {
+            if (candidate.type != old.type ||
+                    candidate.partial_region_index != old.partial_region_index ||
+                    candidate.name_length != old.name_length ||
+                    (old.name_length != 0 && std::memcmp(
+                        candidate.name.data(), old.name.data(), old.name_length) != 0))
+                return false;
+            if (old.type != NomadNet::FormFieldType::RADIO &&
+                    old.type != NomadNet::FormFieldType::CHECKBOX)
+                return true;
+            return candidate.value_length == old.value_length &&
+                (old.value_length == 0 || std::memcmp(
+                    candidate.value.data(), old.value.data(), old.value_length) == 0);
+        };
+        std::size_t occurrence = 0;
+        for (std::size_t index = 0; index < static_cast<std::size_t>(old_index); ++index) {
+            const auto& prior = _form_state.fields()[index];
+            if (matches_identity(prior))
+                ++occurrence;
+        }
+        std::size_t seen = 0;
+        for (std::size_t index = 0; index < candidate_form.fields().size(); ++index) {
+            const auto& candidate = candidate_form.fields()[index];
+            if (!matches_identity(candidate)) continue;
+            if (seen++ == occurrence) return static_cast<int16_t>(index);
+        }
+        return -1;
+    };
+    auto map_link = [&](int16_t old_index) -> int16_t {
+        if (old_index < 0 ||
+                static_cast<std::size_t>(old_index) >= _page.links().size())
+            return -1;
+        const auto old_target = _page.target(static_cast<std::size_t>(old_index));
+        const int16_t old_region =
+            _page.links()[static_cast<std::size_t>(old_index)].partial_region_index;
+        std::size_t occurrence = 0;
+        for (std::size_t index = 0; index < static_cast<std::size_t>(old_index); ++index) {
+            const auto prior = _page.target(index);
+            if (_page.links()[index].partial_region_index == old_region &&
+                    prior.size() == old_target.size() &&
+                    (old_target.empty() || std::memcmp(
+                        prior.data(), old_target.data(), old_target.size()) == 0))
+                ++occurrence;
+        }
+        std::size_t seen = 0;
+        for (std::size_t index = 0; index < candidate_page.links().size(); ++index) {
+            const auto candidate = candidate_page.target(index);
+            if (candidate_page.links()[index].partial_region_index != old_region ||
+                    candidate.size() != old_target.size() ||
+                    (!old_target.empty() && std::memcmp(
+                        candidate.data(), old_target.data(), old_target.size()) != 0))
+                continue;
+            if (seen++ == occurrence) return static_cast<int16_t>(index);
+        }
+        return -1;
+    };
+    const int16_t mapped_selected_link = map_link(_selected_link);
+    const int16_t mapped_selected_field = map_field(_selected_field);
+    const int16_t mapped_editing_field = map_field(_editing_field);
+    int16_t fallback_link = -1;
+    int16_t fallback_field = -1;
+    auto map_focus_at = [&](std::size_t index) {
+        if (index >= _focus_order.size()) return false;
+        const auto& target = _focus_order[index];
+        if (target.field) fallback_field = map_field(
+            static_cast<int16_t>(target.index));
+        else fallback_link = map_link(static_cast<int16_t>(target.index));
+        return fallback_field >= 0 || fallback_link >= 0;
+    };
+    if (mapped_selected_link < 0 && mapped_selected_field < 0 &&
+            _selected_focus >= 0 &&
+            static_cast<std::size_t>(_selected_focus) < _focus_order.size()) {
+        for (std::size_t index = static_cast<std::size_t>(_selected_focus) + 1;
+                index < _focus_order.size(); ++index)
+            if (map_focus_at(index)) break;
+        if (fallback_link < 0 && fallback_field < 0) {
+            for (std::size_t index = static_cast<std::size_t>(_selected_focus);
+                    index-- > 0;)
+                if (map_focus_at(index)) break;
+        }
+    }
+
+    bool has_top_anchor = false;
+    int16_t old_top_region = -1;
+    std::size_t old_top_region_ordinal = 0;
+    int32_t old_top_intra = 0;
+    const LayoutCheckpoint* old_top = nullptr;
+    for (const auto& checkpoint : _layout_checkpoints) {
+        if (checkpoint.y <= _logical_scroll &&
+                (!old_top || checkpoint.y >= old_top->y))
+            old_top = &checkpoint;
+    }
+    if (old_top && old_top->block_index < _page.blocks().size()) {
+        has_top_anchor = true;
+        old_top_region = _page.blocks()[old_top->block_index].partial_region_index;
+        for (std::size_t index = 0; index < old_top->block_index; ++index)
+            if (_page.blocks()[index].partial_region_index == old_top_region)
+                ++old_top_region_ordinal;
+        old_top_intra = std::max<int32_t>(0, _logical_scroll - old_top->y);
+    }
+
+    if (_field_editor && mapped_editing_field >= 0) {
+        const char* value = lv_textarea_get_text(_field_editor);
+        const std::size_t size = value ? std::strlen(value) : 0;
+        if (!candidate_form.set_value(
+                static_cast<uint16_t>(mapped_editing_field), value, size))
+            return NomadNet::PartialReplaceResult::LIMIT_EXCEEDED;
+    }
+
+    auto old_page = std::move(_page);
+    auto old_form = std::move(_form_state);
+    auto old_page_layout = std::move(_page_layout);
+    auto old_line_layout = std::move(_line_layout);
+    auto old_checkpoints = std::move(_layout_checkpoints);
+    auto old_link_y = std::move(_link_y);
+    auto old_link_bottom = std::move(_link_bottom);
+    auto old_field_y = std::move(_field_y);
+    auto old_field_bottom = std::move(_field_bottom);
+    auto old_focus = std::move(_focus_order);
+    const int32_t old_page_height = _page_height;
+    const int32_t old_physical_extent = _physical_extent;
+    const int32_t old_logical_scroll = _logical_scroll;
+    const int32_t old_widget_scroll = lv_obj_get_scroll_y(_content);
+    const int32_t old_window_top = _layout_window_top;
+    const int32_t old_window_bottom = _layout_window_bottom;
+    const TableLayoutObservation old_table_layout = _table_layout;
+    const int16_t old_selected_link = _selected_link;
+    const int16_t old_selected_field = _selected_field;
+    const int16_t old_selected_focus = _selected_focus;
+    const int16_t old_editing_field = _editing_field;
+
+    _page = std::move(candidate_page);
+    _form_state = std::move(candidate_form);
+    bool laid_out = false;
+    try { laid_out = layout_page(); } catch (const std::bad_alloc&) { laid_out = false; }
+    auto rollback = [&]() {
+        _page = std::move(old_page);
+        _form_state = std::move(old_form);
+        _page_layout = std::move(old_page_layout);
+        _line_layout = std::move(old_line_layout);
+        _layout_checkpoints = std::move(old_checkpoints);
+        _link_y = std::move(old_link_y);
+        _link_bottom = std::move(old_link_bottom);
+        _field_y = std::move(old_field_y);
+        _field_bottom = std::move(old_field_bottom);
+        _focus_order = std::move(old_focus);
+        _page_height = old_page_height;
+        _physical_extent = old_physical_extent;
+        _logical_scroll = old_logical_scroll;
+        _layout_window_top = old_window_top;
+        _layout_window_bottom = old_window_bottom;
+        _table_layout = old_table_layout;
+        _selected_link = old_selected_link;
+        _selected_field = old_selected_field;
+        _selected_focus = old_selected_focus;
+        _editing_field = old_editing_field;
+        _transaction_scroll_restore = true;
+        lv_obj_scroll_to_y(_content, old_widget_scroll, LV_ANIM_OFF);
+        _transaction_scroll_restore = false;
+    };
+    if (!laid_out) {
+        rollback();
+        return NomadNet::PartialReplaceResult::ALLOCATION_FAILED;
+    }
+
+
+    _selected_link = mapped_selected_link >= 0 ? mapped_selected_link : fallback_link;
+    _selected_field = mapped_selected_field >= 0 ? mapped_selected_field : fallback_field;
+    _selected_focus = -1;
+    if (_selected_field >= 0 || _selected_link >= 0) {
+        for (std::size_t index = 0; index < _focus_order.size(); ++index) {
+            const bool matches_field = _selected_field >= 0 &&
+                _focus_order[index].field && _focus_order[index].index ==
+                    static_cast<uint16_t>(_selected_field);
+            const bool matches_link = _selected_field < 0 &&
+                _selected_link >= 0 && !_focus_order[index].field &&
+                _focus_order[index].index ==
+                    static_cast<uint16_t>(_selected_link);
+            if (matches_field || matches_link) {
+                _selected_focus = static_cast<int16_t>(index);
+                break;
+            }
+        }
+    }
+
+    if (_field_editor && mapped_editing_field >= 0)
+        _editing_field = mapped_editing_field;
+    if (!scroll_to_logical(old_logical_scroll, LV_ANIM_OFF)) {
+        rollback();
+        lv_obj_invalidate(_content);
+        return NomadNet::PartialReplaceResult::ALLOCATION_FAILED;
+    }
+    if (has_top_anchor) {
+        std::size_t mapped_block = _page.blocks().size();
+        std::size_t region_top = _page.blocks().size();
+        bool anchor_survived = false;
+        std::size_t seen = 0;
+        for (std::size_t index = 0; index < _page.blocks().size(); ++index) {
+            if (_page.blocks()[index].partial_region_index != old_top_region) continue;
+            if (region_top == _page.blocks().size()) region_top = index;
+            if (seen++ == old_top_region_ordinal) {
+                mapped_block = index;
+                anchor_survived = true;
+                break;
+            }
+        }
+        if (mapped_block == _page.blocks().size()) mapped_block = region_top;
+        if (mapped_block < _page.blocks().size()) {
+            for (const auto& checkpoint : _layout_checkpoints) {
+                if (checkpoint.block_index != mapped_block) continue;
+                const int32_t mapped_intra = anchor_survived ? old_top_intra : 0;
+                if (!scroll_to_logical(checkpoint.y + mapped_intra, LV_ANIM_OFF)) {
+                    rollback();
+                    lv_obj_invalidate(_content);
+                    return NomadNet::PartialReplaceResult::ALLOCATION_FAILED;
+                }
+                break;
+            }
+        }
+    }
+    if (_field_editor && mapped_editing_field < 0)
+        finish_field_edit(false);
+    ++_form_generation;
+    lv_obj_refresh_self_size(_content);
+    lv_obj_invalidate(_content);
+    return NomadNet::PartialReplaceResult::APPLIED;
 }
 
 bool NomadNetScreen::layout_page(){
@@ -1034,18 +1349,23 @@ int32_t NomadNetScreen::logical_scroll_from_widget()const{
         lv_obj_get_content_height(_content),_physical_extent);
 }
 
-void NomadNetScreen::scroll_to_logical(int32_t logical,lv_anim_enable_t animation){
+bool NomadNetScreen::scroll_to_logical(int32_t logical,lv_anim_enable_t animation){
+#ifdef PYXIS_NOMADNET_TEST_HOOKS
+    if(_test_scroll_fail_countdown==0){_test_scroll_fail_countdown=-1;return false;}
+    if(_test_scroll_fail_countdown>0)--_test_scroll_fail_countdown;
+#endif
     const int32_t viewport=std::max<int32_t>(1,lv_obj_get_content_height(_content));
     const int32_t logical_max=std::max<int32_t>(0,_page_height-viewport);
     const int32_t target=std::max<int32_t>(0,std::min(logical,logical_max));
     const int32_t physical=NomadNet::VirtualViewport::physical_from_logical(
         target,_page_height,viewport,_physical_extent);
     if(animation==LV_ANIM_OFF){
+        if(!layout_window(target))return false;
         _logical_scroll=target;
-        layout_window(_logical_scroll);
     }
     lv_obj_scroll_to_y(_content,physical,animation);
     lv_obj_invalidate(_content);
+    return true;
 }
 
 bool NomadNetScreen::jump_to_anchor(const std::string& name){
@@ -1412,6 +1732,10 @@ void NomadNetScreen::page_event(lv_event_t* event){
     if(code==LV_EVENT_DRAW_MAIN)self->draw_page(event);
     else if(code==LV_EVENT_GET_SELF_SIZE){auto* size=static_cast<lv_point_t*>(lv_event_get_param(event));size->y=std::max<lv_coord_t>(size->y,static_cast<lv_coord_t>(self->_physical_extent));}
     else if(code==LV_EVENT_SCROLL){
+        if(self->_transaction_scroll_restore){
+            lv_obj_invalidate(self->_content);
+            return;
+        }
         self->_logical_scroll=self->logical_scroll_from_widget();
         if(!self->layout_window(self->_logical_scroll))self->set_status("Page viewport could not be retained");
         lv_obj_invalidate(self->_content);

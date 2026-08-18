@@ -97,6 +97,7 @@ struct Block {
     uint32_t divider_codepoint = 0x2500;
     int16_t table_index = -1;
     int16_t partial_index = -1;
+    int16_t partial_region_index = -1;
     std::vector<Run> runs;
 };
 
