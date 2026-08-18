@@ -40,6 +40,13 @@
 - Light up keyboard (user toggle)
 - ~~Will crash in about 5 minutes of normal use (sorry)~~ I had 5d uptime on v0.2.0 with BLE disabled
 - Make LXST voice calls (codec2 only, quality sounds horrible coming out the other end in Columba, needs work)</p>
+<h2>Flashing</h2>
+<p>The easiest way to get Pyxis running is the <a href="https://torlando-tech.github.io/pyxis/flasher/">web flasher</a>, which downloads release firmware from this repository's releases and verifies each image's SHA-256 digest against the release metadata.</p>
+<p>For esptool (or any other tool that writes raw flash), each release also publishes a <strong>merged binary</strong> (<code>pyxis-&lt;tag&gt;-merged.bin</code>) that contains the bootloader, partition table, OTA selector, and application at their fixed offsets. Provision a T-Deck Plus (8 MB flash) with:</p>
+<pre><code>esptool.py --chip esp32s3 erase_flash
+esptool.py --chip esp32s3 write_flash 0x0 pyxis-&lt;tag&gt;-merged.bin
+</code></pre>
+<p><strong>Merged binaries are for first install / provisioning.</strong> Flashing one overwrites every flash region, including NVS (settings, identity) and the LittleFS partition (messages, paths, maps). To update an existing device without losing data, flash <code>firmware.bin</code> to <code>0x10000</code> only, or use the Columba-compatible <code>pyxis-&lt;tag&gt;.pyxis.zip</code> update package.</p>
 <h2>Why "Pyxis"</h2>
 <p>Pyxis, latin for "compass," is a <a href="https://en.wikipedia.org/wiki/Pyxis">constellation</a> in the southern sky depicting a mariner's compass. Small but essential, the compass ensures every message finds its destination - even when the path is uncertain. </p>
 <div class="nav">
