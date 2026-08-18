@@ -31,7 +31,8 @@ The easiest way to get Pyxis running is the [web flasher](https://torlando-tech.
 For esptool (or any other tool that writes raw flash), each release also publishes a **merged binary** (`pyxis-<tag>-merged.bin`) that contains the bootloader, partition table, OTA selector, and application at their fixed offsets. Provision a T-Deck Plus (8 MB flash) with:
 
 ```
-esptool.py --chip esp32s3 erase_flash write_flash 0x0 pyxis-<tag>-merged.bin
+esptool.py --chip esp32s3 erase_flash
+esptool.py --chip esp32s3 write_flash 0x0 pyxis-<tag>-merged.bin
 ```
 
 **Merged binaries are for first install / provisioning.** Flashing one overwrites every flash region, including NVS (settings, identity) and the LittleFS partition (messages, paths, maps). To update an existing device without losing data, flash `firmware.bin` to `0x10000` only, or use the Columba-compatible `pyxis-<tag>.pyxis.zip` update package.

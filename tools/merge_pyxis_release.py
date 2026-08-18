@@ -5,7 +5,8 @@ The merged image places the four release assets at their fixed flash offsets
 inside an erased (0xFF) 8 MiB canvas, so the whole T-Deck Plus flash can be
 provisioned with one write:
 
-    esptool.py --chip esp32s3 erase_flash write_flash 0x0 pyxis-<tag>-merged.bin
+    esptool.py --chip esp32s3 erase_flash
+    esptool.py --chip esp32s3 write_flash 0x0 pyxis-<tag>-merged.bin
 
 This is a first-install/provisioning image: flashing it overwrites every
 region including NVS, OTA data, and the LittleFS ("spiffs") partition.
