@@ -41,7 +41,7 @@ def test_actual_nomadnet_screen_320x240_acceptance(tmp_path):
     assert "eight_column_tier=1 eight_column_preserved=1 eight_column_pixels=1 table_link_focus=1 eight_column_objects=1" in output
     assert "focus_events=1 edge_scroll=1" in output
     assert "ready=1 cancel=1 enter=1 escape=1 focus_restore=1" in output
-    assert "teardown=1 cached_status_transient=1 cached_status_oom_collapses=1 stale_group=0" in output
+    assert "teardown=1 cached_status_transient=1 cached_status_oom_collapses=1 partial_activity_no_layout=1 partial_failure_visible_during_retry=1 stale_group=0" in output
     assert "background_pixels=1 table_pixels=1 form_pixels=1 focus_pixels=1 glyph_pixels=1" in output
     assert "partial_focus_fallback=1 partial_scroll_anchor=1" in output
     assert "partial_second_scroll_rollback=1" in output

@@ -399,6 +399,21 @@ void NomadNetScreen::status_timer_cb(lv_timer_t* timer){
     screen->_status_timer=nullptr;
     screen->apply_browser_layout(false);
 }
+void NomadNetScreen::clear_status(){
+    cancel_status_timer();
+    if(_status)lv_label_set_text(_status,"");
+    apply_browser_layout(false);
+}
+void NomadNetScreen::set_partial_activity(bool active){
+    if(!_reload_button)return;
+    lv_obj_set_style_bg_color(_reload_button,
+        active?Theme::primary():Theme::surfaceContainer(),LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(_reload_button,
+        active?Theme::primary():Theme::primaryPressed(),LV_STATE_FOCUSED);
+    if(lv_obj_t* icon=lv_obj_get_child(_reload_button,0))
+        lv_obj_set_style_text_color(icon,active?Theme::warning():Theme::textPrimary(),0);
+    lv_obj_invalidate(_reload_button);
+}
 void NomadNetScreen::set_status(const char* value){
     cancel_status_timer();
     const char* status=value?value:"";

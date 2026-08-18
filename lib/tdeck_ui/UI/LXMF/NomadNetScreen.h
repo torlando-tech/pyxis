@@ -34,6 +34,8 @@ public:
     bool set_local_address(const std::string& address);
     std::string address() const;
     void set_status(const char* status);
+    void clear_status();
+    void set_partial_activity(bool active);
     bool set_page(const NomadNet::Document& document);
     bool prepare_submission(uint16_t link_id, uint32_t generation,
                             std::string& target,

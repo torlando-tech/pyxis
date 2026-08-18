@@ -2174,7 +2174,10 @@ bool UIManager::nomad_refresh_path_after_link_failure() {
     _nomad_state = NomadState::PATH;
     _nomad_deadline_ms = millis() + NomadNet::RequestPolicy::PATH_WAIT_MS;
     LVGL_LOCK();
-    _nomadnet_screen->set_status("Refreshing stale path...");
+    if (_nomad_partial_controller.active())
+        _nomadnet_screen->set_partial_activity(true);
+    else
+        _nomadnet_screen->set_status("Refreshing stale path...");
     return true;
 }
 
@@ -2182,6 +2185,10 @@ uint32_t UIManager::nomad_advance_navigation_generation() {
     _nomad_partial_scheduler.cancel(_nomad_navigation_generation);
     _nomad_partial_controller.cancel();
     _nomad_partial_request = NomadNet::PartialRequest{};
+    {
+        LVGL_LOCK();
+        _nomadnet_screen->set_partial_activity(false);
+    }
     ++_nomad_navigation_generation;
     if (_nomad_navigation_generation == 0) ++_nomad_navigation_generation;
     return _nomad_navigation_generation;
@@ -2388,8 +2395,8 @@ bool UIManager::nomad_schedule_partial_ids(const std::string& address,
         start = end + 1;
     }
     LVGL_LOCK();
-    _nomadnet_screen->set_status(matched
-        ? "Dynamic content queued" : "No matching dynamic content");
+    if (!matched)
+        _nomadnet_screen->set_status("No matching dynamic content");
     return matched;
 }
 
@@ -2453,6 +2460,10 @@ void UIManager::nomad_poll_partials(uint32_t now_ms) {
     _nomad_partial_request = request;
     _nomad_partial_url = std::move(target);
     _nomad_state = NomadState::PARTIAL_PENDING;
+    {
+        LVGL_LOCK();
+        _nomadnet_screen->set_partial_activity(true);
+    }
     nomad_begin_partial_transport();
 }
 
@@ -2488,10 +2499,6 @@ void UIManager::nomad_begin_partial_transport() {
     _nomad_request_policy.reset();
     _nomad_destination_hash = Bytes();
     _nomad_destination_hash.assignHex(_nomad_partial_url.destination_hex.c_str());
-    {
-        LVGL_LOCK();
-        _nomadnet_screen->set_status("Discovering dynamic-content path...");
-    }
     if (Transport::has_path(_nomad_destination_hash)) nomad_start_link();
     else {
         Transport::request_path(_nomad_destination_hash);
@@ -2536,7 +2543,9 @@ void UIManager::nomad_release_partial(bool success, bool deferred, const char* s
     _nomad_partial_request = NomadNet::PartialRequest{};
     _nomad_partial_url = NomadNet::Url{};
     LVGL_LOCK();
-    _nomadnet_screen->set_status(status);
+    _nomadnet_screen->set_partial_activity(false);
+    if (success) _nomadnet_screen->clear_status();
+    else if (status) _nomadnet_screen->set_status(status);
 }
 
 void UIManager::nomad_begin_live_transport() {
@@ -2639,7 +2648,10 @@ void UIManager::nomad_start_link() {
     _nomad_state = NomadState::LINK;
     _nomad_deadline_ms = millis() + NomadNet::RequestPolicy::LINK_WAIT_MS;
     LVGL_LOCK();
-    _nomadnet_screen->set_status("Establishing encrypted link...");
+    if (_nomad_partial_controller.active())
+        _nomadnet_screen->set_partial_activity(true);
+    else
+        _nomadnet_screen->set_status("Establishing encrypted link...");
 }
 
 void UIManager::nomad_identify_link_if_configured() {
@@ -2727,8 +2739,9 @@ void UIManager::nomad_send_request() {
     _nomad_state = NomadState::REQUEST;
     _nomad_deadline_ms = millis() + 30000;
     LVGL_LOCK();
-    _nomadnet_screen->set_status(_nomad_partial_controller.active()
-        ? "Updating dynamic content..." : "Requesting page...");
+    if (_nomad_partial_controller.active())
+        _nomadnet_screen->set_partial_activity(true);
+    else _nomadnet_screen->set_status("Requesting page...");
 }
 
 bool UIManager::nomad_apply_page_bytes(const uint8_t* data, std::size_t size, bool cached) {
@@ -2904,11 +2917,10 @@ void UIManager::nomad_update() {
             }
             break;
         case NomadNet::AsyncMailbox::Kind::PROGRESS:
-            if (_nomad_state == NomadState::REQUEST) {
+            if (_nomad_state == NomadState::REQUEST &&
+                    !_nomad_partial_controller.active()) {
                 LVGL_LOCK();
-                if (_nomad_partial_controller.active())
-                    _nomadnet_screen->set_status("Receiving dynamic content...");
-                else _nomadnet_screen->set_status("Receiving page...");
+                _nomadnet_screen->set_status("Receiving page...");
             }
             break;
         case NomadNet::AsyncMailbox::Kind::OVERSIZED:
@@ -2936,6 +2948,7 @@ void UIManager::nomad_update() {
                     _nomad_partial_controller.cancel();
                     nomad_stop_transport();
                     LVGL_LOCK();
+                    _nomadnet_screen->set_partial_activity(false);
                     _nomadnet_screen->set_status("Discarded stale dynamic content");
                     break;
                 }
@@ -2987,7 +3000,7 @@ void UIManager::nomad_update() {
                             : "Dynamic content exceeds page limits");
                     break;
                 }
-                nomad_finish_partial(true, "Dynamic content updated");
+                nomad_finish_partial(true, nullptr);
                 break;
             }
             NomadNet::Document document;

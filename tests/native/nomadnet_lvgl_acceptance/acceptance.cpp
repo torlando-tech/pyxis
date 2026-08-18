@@ -199,7 +199,8 @@ int main() {
     bool ready = false, cancel = false, enter = false, escape = false, focus_restore = false;
     bool table_pixels = false, form_pixels = false, focus_pixels = false, glyph_pixels = false;
     bool background_pixels = false, teardown = false, cached_status_transient = false;
-    bool cached_status_oom_collapses = false;
+    bool cached_status_oom_collapses = false, partial_activity_no_layout = false;
+    bool partial_failure_visible_during_retry = false;
     bool partial_replace = false, partial_forms = false, partial_empty = false;
     bool partial_link_focus = false, partial_focus_fallback = false;
     bool partial_scroll_anchor = false;
@@ -239,8 +240,46 @@ int main() {
         fit_tier = fit.valid && fit.tier == UI::LXMF::NomadNet::TableLayoutTier::FIT;
         fit_columns = fit.columns == 2 && fit.cards == 0 && fit.x >= 0 && fit.width > 0 &&
                       fit.x + fit.width <= 304 && fit.y >= 0 && fit.height > 0;
+        std::string activity_source;
+        for (int i = 0; i < 40; ++i)
+            activity_source += "Activity row " + std::to_string(i) + "\n\n";
+        assert(screen.set_page(parser.parse(activity_source)));
+        screen.clear_status();
+        assert(screen.scroll_to_logical(80, LV_ANIM_OFF));
+        lv_obj_update_layout(screen._screen);
+        const int16_t full_content_height = lv_obj_get_height(screen._content);
+        const int32_t scroll_before_activity = screen._logical_scroll;
+        const int32_t widget_scroll_before_activity = lv_obj_get_scroll_y(screen._content);
+        lv_obj_add_state(screen._reload_button, LV_STATE_FOCUSED);
+        lv_obj_t* reload_icon = lv_obj_get_child(screen._reload_button, 0);
+        assert(reload_icon);
+        const lv_color_t focused_idle = lv_obj_get_style_text_color(
+            reload_icon, LV_PART_MAIN);
+        screen.set_partial_activity(true);
+        lv_obj_update_layout(screen._screen);
+        const lv_color_t focused_active = lv_obj_get_style_text_color(
+            reload_icon, LV_PART_MAIN);
+        screen.set_partial_activity(false);
+        lv_obj_clear_state(screen._reload_button, LV_STATE_FOCUSED);
+        lv_obj_update_layout(screen._screen);
+        partial_activity_no_layout =
+            lv_obj_has_flag(screen._status, LV_OBJ_FLAG_HIDDEN) &&
+            lv_obj_get_height(screen._content) == full_content_height &&
+            screen._logical_scroll == scroll_before_activity &&
+            lv_obj_get_scroll_y(screen._content) == widget_scroll_before_activity &&
+            lv_color_to32(focused_active) != lv_color_to32(focused_idle);
 
-        auto reflow_doc = parser.parse(
+        screen.set_status("Dynamic refresh failed");
+        lv_obj_update_layout(screen._screen);
+        const int16_t failure_content_height = lv_obj_get_height(screen._content);
+        screen.set_partial_activity(true);
+        lv_obj_update_layout(screen._screen);
+        partial_failure_visible_during_retry =
+            !lv_obj_has_flag(screen._status, LV_OBJ_FLAG_HIDDEN) &&
+            lv_obj_get_height(screen._content) == failure_content_height;
+        screen.set_partial_activity(false);
+        screen.clear_status();
+        const auto reflow_doc = parser.parse(
             "`tc304\nFirst very wide heading|Second very wide heading|Third very wide heading\n"
             "---|---|---\nA long value that cannot fit beside peers|"
             "Another long value that wraps repeatedly|Final long value\n`t");
@@ -541,12 +580,13 @@ int main() {
         "LVGL ACCEPT 320x240 fit_tier=%d fit_columns=%d reflow_tier=%d reflow_cards=%d "
         "eight_column_tier=%d eight_column_preserved=%d eight_column_pixels=%d table_link_focus=%d eight_column_objects=%d "
         "focus_events=%d edge_scroll=%d ready=%d cancel=%d enter=%d escape=%d focus_restore=%d "
-        "teardown=%d cached_status_transient=%d cached_status_oom_collapses=%d stale_group=%d background_pixels=%d table_pixels=%d form_pixels=%d "
+        "teardown=%d cached_status_transient=%d cached_status_oom_collapses=%d partial_activity_no_layout=%d partial_failure_visible_during_retry=%d stale_group=%d background_pixels=%d table_pixels=%d form_pixels=%d "
         "focus_pixels=%d glyph_pixels=%d partial_replace=%d partial_forms=%d partial_link_focus=%d partial_focus_fallback=%d partial_scroll_anchor=%d partial_second_scroll_rollback=%d partial_region_top_fallback=%d partial_empty=%d exact_fonts=1 objects=%u\n",
         fit_tier, fit_columns, reflow_tier, reflow_cards, eight_column_tier, eight_column_preserved,
         eight_column_pixels, table_link_focus, eight_column_objects, focus_events, edge_scroll,
         ready, cancel, enter, escape, focus_restore, teardown, cached_status_transient,
-        cached_status_oom_collapses, 0, background_pixels,
+        cached_status_oom_collapses, partial_activity_no_layout,
+        partial_failure_visible_during_retry, 0, background_pixels,
         table_pixels, form_pixels, focus_pixels, glyph_pixels,
         partial_replace, partial_forms, partial_link_focus, partial_focus_fallback,
         partial_scroll_anchor, partial_second_scroll_rollback,
@@ -555,7 +595,8 @@ int main() {
            eight_column_preserved && eight_column_pixels && table_link_focus && eight_column_objects &&
            focus_events && edge_scroll &&
            ready && cancel && enter && escape && focus_restore && teardown && cached_status_transient &&
-           cached_status_oom_collapses && background_pixels &&
+           cached_status_oom_collapses && partial_activity_no_layout &&
+           partial_failure_visible_during_retry && background_pixels &&
            table_pixels && form_pixels && focus_pixels && glyph_pixels &&
            partial_replace && partial_forms && partial_link_focus && partial_focus_fallback &&
            partial_scroll_anchor && partial_second_scroll_rollback &&

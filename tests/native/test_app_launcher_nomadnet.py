@@ -482,6 +482,33 @@ def test_nomadnet_page_body_uses_one_compact_custom_viewport():
     assert "lv_group_set_editing(group,false)" in screen
 
 
+def test_partial_success_uses_top_chrome_activity_without_status_banner():
+    manager = (INCLUDE / "UIManager.cpp").read_text()
+    screen = (INCLUDE / "NomadNetScreen.cpp").read_text()
+    assert '"Dynamic content updated"' not in manager
+    assert "nomad_finish_partial(true, nullptr);" in manager
+    assert "_nomadnet_screen->set_partial_activity(true);" in manager
+    assert "_nomadnet_screen->set_partial_activity(false);" in manager
+    assert "void NomadNetScreen::set_partial_activity(bool active)" in screen
+    activity = screen[screen.index("void NomadNetScreen::set_partial_activity(bool active)"):
+                      screen.index("void NomadNetScreen::set_status(")]
+    assert "apply_browser_layout" not in activity
+    assert "lv_timer" not in activity
+    assert "LV_STATE_FOCUSED" in activity
+    assert "_reload_button" in activity
+    release = manager[manager.index("void UIManager::nomad_release_partial("):
+                      manager.index("void UIManager::nomad_begin_live_transport()")]
+    assert "if (success) _nomadnet_screen->clear_status();" in release
+    start_link = manager[manager.index("void UIManager::nomad_start_link()"):
+                         manager.index("void UIManager::nomad_identify_link_if_configured()")]
+    assert "if (_nomad_partial_controller.active())" in start_link
+    assert "else\n        _nomadnet_screen->set_status(\"Establishing encrypted link...\");" in start_link
+    refresh_path = manager[manager.index("bool UIManager::nomad_refresh_path_after_link_failure()"):
+                           manager.index("uint32_t UIManager::nomad_advance_navigation_generation()")]
+    assert "if (_nomad_partial_controller.active())" in refresh_path
+    assert "else\n        _nomadnet_screen->set_status(\"Refreshing stale path...\");" in refresh_path
+
+
 def test_successful_page_application_releases_normalized_response():
     manager = (INCLUDE / "UIManager.cpp").read_text()
     response = manager[manager.index("case NomadNet::AsyncMailbox::Kind::RESPONSE:"):
