@@ -43,6 +43,12 @@ bool CompactPage::assign(const Document& document) {
         const std::size_t block_count = std::min(document.blocks.size(), block_limit);
         const std::size_t link_count = std::min(document.links.size(), MAX_LINKS);
         const std::size_t field_count = std::min(document.fields.size(), MAX_FIELDS);
+        const std::size_t partial_count = std::min(document.partials.size(), MAX_PARTIALS);
+        std::size_t partial_field_count = 0;
+        for (std::size_t i = 0; i < partial_count; ++i) {
+            partial_field_count += std::min(document.partials[i].fields.size(),
+                MAX_PARTIAL_FIELDS - std::min(partial_field_count, MAX_PARTIAL_FIELDS));
+        }
         const std::size_t table_count = std::min(document.tables.size(), MAX_TABLES);
         std::size_t table_cell_count = 0;
         for (std::size_t i = 0; i < table_count; ++i) {
@@ -90,6 +96,14 @@ bool CompactPage::assign(const Document& document) {
             if (bytes > MAX_ARENA_BYTES - std::min(arena_size, MAX_ARENA_BYTES)) return false;
             arena_size += bytes;
         }
+        for (std::size_t i = 0; i < partial_count; ++i) {
+            const auto& partial = document.partials[i];
+            std::size_t bytes = partial.descriptor.size() + partial.url.size() +
+                partial.selectors.size() + partial.id.size() + 4;
+            for (const auto& field : partial.fields) bytes += field.size() + 1;
+            if (bytes > MAX_ARENA_BYTES - std::min(arena_size, MAX_ARENA_BYTES)) return false;
+            arena_size += bytes;
+        }
         std::size_t anchors_accounted = 0;
         for (const auto& anchor : document.anchors) {
             if (anchors_accounted >= anchor_count) break;
@@ -108,6 +122,8 @@ bool CompactPage::assign(const Document& document) {
         _anchors.reserve(anchor_count);
         _tables.reserve(table_count);
         _table_cells.reserve(table_cell_count);
+        _partials.reserve(partial_count);
+        _partial_fields.reserve(partial_field_count);
 
         for (std::size_t i = 0; i < link_count; ++i) {
             LinkRecord link;
@@ -139,6 +155,33 @@ bool CompactPage::assign(const Document& document) {
             _fields.push_back(field);
         }
 
+        for (std::size_t i = 0; i < partial_count; ++i) {
+            const auto& source = document.partials[i];
+            PartialRecord partial;
+            partial.first_field = static_cast<uint32_t>(_partial_fields.size());
+            if (!append(source.descriptor, partial.descriptor_offset, partial.descriptor_length) ||
+                !append(source.url, partial.url_offset, partial.url_length) ||
+                !append(source.selectors, partial.selectors_offset, partial.selectors_length) ||
+                !append(source.id, partial.id_offset, partial.id_length)) {
+                clear();
+                return false;
+            }
+            partial.refresh_interval_ms = source.refresh_interval_ms;
+            partial.descriptor_hash = source.descriptor_hash;
+            for (const auto& source_field : source.fields) {
+                if (_partial_fields.size() >= MAX_PARTIAL_FIELDS ||
+                    partial.field_count == std::numeric_limits<uint16_t>::max()) break;
+                PartialFieldRecord field;
+                if (!append(source_field, field.value_offset, field.value_length)) {
+                    clear();
+                    return false;
+                }
+                _partial_fields.push_back(field);
+                ++partial.field_count;
+            }
+            _partials.push_back(partial);
+        }
+
         for (const auto& source_anchor : document.anchors) {
             if (_anchors.size() >= anchor_count) break;
             if (source_anchor.block_index >= block_count ||
@@ -167,6 +210,9 @@ bool CompactPage::assign(const Document& document) {
             block.table_index = source_block.table_index >= 0 &&
                 static_cast<std::size_t>(source_block.table_index) < table_count
                     ? source_block.table_index : -1;
+            block.partial_index = source_block.partial_index >= 0 &&
+                static_cast<std::size_t>(source_block.partial_index) < partial_count
+                    ? source_block.partial_index : -1;
             for (const auto& source_run : source_block.runs) {
                 if (_runs.size() >= run_limit || block.run_count == std::numeric_limits<uint16_t>::max()) {
                     _truncated = true;
@@ -264,6 +310,7 @@ bool CompactPage::assign(const Document& document) {
         _truncated = _truncated || document.truncated || document.blocks.size() > block_count ||
             document.links.size() > link_count || document.anchors.size() > anchor_count ||
             document.fields.size() > field_count || document.tables.size() > table_count ||
+            document.partials.size() > partial_count ||
             document.table_cells.size() > table_cell_count ||
             document.table_runs.size() > table_run_count;
         _unsupported = document.unsupported;
@@ -283,6 +330,8 @@ void CompactPage::clear() {
     ExternalVector<TableRecord>().swap(_tables);
     ExternalVector<TableCellRecord>().swap(_table_cells);
     ExternalVector<FieldRecord>().swap(_fields);
+    ExternalVector<PartialRecord>().swap(_partials);
+    ExternalVector<PartialFieldRecord>().swap(_partial_fields);
     _has_background = false;
     _background = 0;
     _has_foreground = false;
@@ -360,6 +409,40 @@ CompactPage::TextView CompactPage::field_label(std::size_t index) const {
     const auto& field = _fields[index];
     if (field.label_offset > _arena.size() || field.label_length > _arena.size() - field.label_offset) return {};
     return {_arena.data() + field.label_offset, field.label_length};
+}
+
+CompactPage::TextView CompactPage::partial_descriptor(const PartialRecord& partial) const {
+    if (partial.descriptor_offset > _arena.size() ||
+        partial.descriptor_length > _arena.size() - partial.descriptor_offset) return {};
+    return {_arena.data() + partial.descriptor_offset, partial.descriptor_length};
+}
+
+CompactPage::TextView CompactPage::partial_url(const PartialRecord& partial) const {
+    if (partial.url_offset > _arena.size() ||
+        partial.url_length > _arena.size() - partial.url_offset) return {};
+    return {_arena.data() + partial.url_offset, partial.url_length};
+}
+
+CompactPage::TextView CompactPage::partial_selectors(const PartialRecord& partial) const {
+    if (partial.selectors_offset > _arena.size() ||
+        partial.selectors_length > _arena.size() - partial.selectors_offset) return {};
+    return {_arena.data() + partial.selectors_offset, partial.selectors_length};
+}
+
+CompactPage::TextView CompactPage::partial_id(const PartialRecord& partial) const {
+    if (partial.id_offset > _arena.size() ||
+        partial.id_length > _arena.size() - partial.id_offset) return {};
+    return {_arena.data() + partial.id_offset, partial.id_length};
+}
+
+CompactPage::TextView CompactPage::partial_field(const PartialRecord& partial,
+                                                  std::size_t index) const {
+    if (index >= partial.field_count || partial.first_field > _partial_fields.size() ||
+        index >= _partial_fields.size() - partial.first_field) return {};
+    const auto& field = _partial_fields[partial.first_field + index];
+    if (field.value_offset > _arena.size() ||
+        field.value_length > _arena.size() - field.value_offset) return {};
+    return {_arena.data() + field.value_offset, field.value_length};
 }
 
 bool CompactPage::find_anchor(const std::string& name, uint16_t& block_index) const {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -7,12 +8,13 @@
 
 namespace UI::LXMF::NomadNet {
 
-enum class BlockType { TEXT, HEADING, DIVIDER, TABLE, UNSUPPORTED };
+enum class BlockType { TEXT, HEADING, DIVIDER, TABLE, PARTIAL, UNSUPPORTED };
 enum class Alignment { LEFT, CENTER, RIGHT };
 enum class FormFieldType : uint8_t { TEXT, PASSWORD, CHECKBOX, RADIO };
 enum class ParseStatus : uint8_t { OK, INVALID_INPUT, ALLOCATION_FAILED };
 
 enum class TruncationReason : uint32_t {
+    NONE = 0,
     DOCUMENT_BYTES = 1 << 0,
     SOURCE_LINES = 1 << 1,
     SOURCE_LINE_BYTES = 1 << 2,
@@ -34,6 +36,10 @@ enum class TruncationReason : uint32_t {
     FORM_VALUE_BYTES = 1u << 18,
     FORM_LABEL_BYTES = 1u << 19,
     FORM_BYTES = 1u << 20,
+    PARTIALS = 1u << 21,
+    PARTIAL_DESCRIPTOR_BYTES = 1u << 22,
+    PARTIAL_FIELDS = 1u << 23,
+    PARTIAL_FIELD_BYTES = 1u << 24,
 };
 
 struct Run {
@@ -74,12 +80,23 @@ struct Table {
     uint16_t max_width = 100;
 };
 
+struct Partial {
+    std::string descriptor;
+    std::string url;
+    std::string selectors;
+    std::string id;
+    std::vector<std::string> fields;
+    std::array<uint8_t, 32> descriptor_hash{};
+    uint32_t refresh_interval_ms = 0;
+};
+
 struct Block {
     BlockType type = BlockType::TEXT;
     uint8_t depth = 0;
     Alignment alignment = Alignment::LEFT;
     uint32_t divider_codepoint = 0x2500;
     int16_t table_index = -1;
+    int16_t partial_index = -1;
     std::vector<Run> runs;
 };
 
@@ -112,6 +129,7 @@ struct Document {
     std::vector<TableCell> table_cells;
     std::vector<Run> table_runs;
     std::vector<FormField> fields;
+    std::vector<Partial> partials;
     uint32_t cache_seconds = 12U * 60U * 60U;
     bool has_cache_directive = false;
     bool cache_directive_valid = true;
@@ -161,6 +179,14 @@ public:
     static constexpr std::size_t MAX_FIELD_VALUE_BYTES = 512;
     static constexpr std::size_t MAX_FIELD_LABEL_BYTES = 256;
     static constexpr std::size_t MAX_FORM_BYTES = 16 * 1024;
+    static constexpr std::size_t MAX_PARTIALS = 16;
+    static constexpr std::size_t MAX_PARTIAL_DESCRIPTOR_BYTES = 1024;
+    static constexpr std::size_t MAX_PARTIAL_URL_BYTES = 512;
+    static constexpr std::size_t MAX_PARTIAL_FIELDS = 64;
+    static constexpr std::size_t MAX_PARTIAL_FIELD_BYTES = 511;
+    static constexpr std::size_t MAX_PARTIAL_ID_BYTES = 64;
+    static constexpr uint32_t MAX_PARTIAL_REFRESH_MS = 604800000U;
+    static constexpr std::size_t MAX_PARTIAL_BYTES = 8 * 1024;
     static constexpr uint16_t DEFAULT_FIELD_WIDTH = 24;
     static constexpr uint16_t MAX_FIELD_WIDTH = 256;
     static constexpr uint16_t DEFAULT_TABLE_WIDTH = 100;

@@ -98,6 +98,9 @@ public:
     static constexpr std::size_t MAX_TABLES = DocumentParser::MAX_TABLES;
     static constexpr std::size_t MAX_TABLE_CELLS = DocumentParser::MAX_TOTAL_TABLE_CELLS;
     static constexpr std::size_t MAX_FIELDS = DocumentParser::MAX_FIELDS;
+    static constexpr std::size_t MAX_PARTIALS = DocumentParser::MAX_PARTIALS;
+    static constexpr std::size_t MAX_PARTIAL_FIELDS =
+        MAX_PARTIALS * DocumentParser::MAX_PARTIAL_FIELDS;
     // Text runs, link targets, and anchor names originate in the bounded source.
     // Link targets also remain visible in runs, while anchor declarations are
     // zero-width. Account for both bounded copies and one terminator per record.
@@ -106,6 +109,7 @@ public:
         DocumentParser::MAX_DOCUMENT_BYTES * 2 +
         DocumentParser::MAX_FORM_BYTES + MAX_FIELDS * 3 +
         MAX_ANCHORS * (DocumentParser::MAX_ANCHOR_NAME_BYTES + 1) +
+        DocumentParser::MAX_PARTIAL_BYTES +
         MAX_RUNS + MAX_LINKS + MAX_NOTICE_BYTES + 1;
 
     enum Style : uint8_t {
@@ -124,6 +128,7 @@ public:
         Alignment alignment = Alignment::LEFT;
         uint32_t divider_codepoint = 0x2500;
         int16_t table_index = -1;
+        int16_t partial_index = -1;
     };
 
     struct RunRecord {
@@ -174,6 +179,26 @@ public:
         bool masked = false;
     };
 
+    struct PartialRecord {
+        uint32_t descriptor_offset = 0;
+        uint32_t url_offset = 0;
+        uint32_t selectors_offset = 0;
+        uint32_t id_offset = 0;
+        uint32_t first_field = 0;
+        uint16_t descriptor_length = 0;
+        uint16_t url_length = 0;
+        uint16_t selectors_length = 0;
+        uint16_t id_length = 0;
+        uint16_t field_count = 0;
+        uint32_t refresh_interval_ms = 0;
+        std::array<uint8_t, 32> descriptor_hash{};
+    };
+
+    struct PartialFieldRecord {
+        uint32_t value_offset = 0;
+        uint16_t value_length = 0;
+    };
+
     struct TextView {
         const char* value = nullptr;
         std::size_t length = 0;
@@ -202,11 +227,17 @@ public:
     const ExternalVector<TableRecord>& tables() const { return _tables; }
     const ExternalVector<TableCellRecord>& table_cells() const { return _table_cells; }
     const ExternalVector<FieldRecord>& fields() const { return _fields; }
+    const ExternalVector<PartialRecord>& partials() const { return _partials; }
     TextView text(const RunRecord& run) const;
     TextView target(std::size_t index) const;
     TextView field_name(std::size_t index) const;
     TextView field_value(std::size_t index) const;
     TextView field_label(std::size_t index) const;
+    TextView partial_descriptor(const PartialRecord& partial) const;
+    TextView partial_url(const PartialRecord& partial) const;
+    TextView partial_selectors(const PartialRecord& partial) const;
+    TextView partial_id(const PartialRecord& partial) const;
+    TextView partial_field(const PartialRecord& partial, std::size_t index) const;
     bool find_anchor(const std::string& name, uint16_t& block_index) const;
 
     bool has_background() const { return _has_background; }
@@ -229,6 +260,8 @@ private:
     ExternalVector<TableRecord> _tables;
     ExternalVector<TableCellRecord> _table_cells;
     ExternalVector<FieldRecord> _fields;
+    ExternalVector<PartialRecord> _partials;
+    ExternalVector<PartialFieldRecord> _partial_fields;
     bool _has_background = false;
     uint32_t _background = 0;
     bool _has_foreground = false;
