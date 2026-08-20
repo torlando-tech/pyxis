@@ -519,6 +519,16 @@ test('rejects traversal, duplicate keys, unsupported compression, and malformed 
   }), /PNG/i);
 });
 
+test('install rejects signature-valid PNGs the firmware cannot decode', async () => {
+  const wrongSize = Buffer.from(PNG);
+  wrongSize.writeUInt32BE(128, 16);
+  wrongSize.writeUInt32BE(crc32(wrongSize.subarray(12, 29)), 29);
+  await assert.rejects(installMuiZip({
+    archive:storedZip([['2/1/1.png', wrongSize]]),
+    rootDirectory:new MemoryDirectoryHandle(), metadata,
+  }), /256x256/i);
+});
+
 test('removes only its receipt-owned contents after an interrupted write', async () => {
   const archive = storedZip([
     ['2/1/1.png', PNG],
