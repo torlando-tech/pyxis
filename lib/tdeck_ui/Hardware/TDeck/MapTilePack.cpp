@@ -95,7 +95,8 @@ const char MapTilePack::ACTIVE_PACK_SLOT_1_PATH[] = "/pyxis-map/active-pack.1";
 
 MapTilePack::MapTilePack(MapTileStorage& storage)
     : storage_(storage), manifest_(), active_packs_(), active_pack_count_(0U),
-      map_set_active_(false), selection_generation_(0U),
+      map_set_active_(false), map_set_indexless_(false), resolution_cache_(),
+      selection_generation_(0U),
       status_(MapTilePackStatus::UNINITIALIZED),
       stream_open_(false), stream_remaining_(0U), selection_buffers_(),
       active_selection_buffer_(0U) {
@@ -104,6 +105,7 @@ MapTilePack::MapTilePack(MapTileStorage& storage)
         2U * ACTIVE_SELECTION_SIZE + MANIFEST_BUFFER_CAPACITY,
         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
 #endif
+    clearResolutionCache();
 }
 
 MapTilePack::~MapTilePack() {
@@ -232,15 +234,23 @@ MapTilePackResult MapTilePack::validateMapSet(MapTileStorage& storage,
                                                 : MapTilePackResult::IO_ERROR;
         }
         Pyxis::MapPackManifest manifest = {};
-        if (Pyxis::MapPackManifest::parse(scratch, length, manifest) !=
-                Pyxis::ManifestResult::OK ||
-            manifest.format_version != Pyxis::MapPackManifest::FORMAT_VERSION ||
+        const bool indexless =
+            view.format_version == ActiveMapSetCodec::INDEXLESS_FORMAT_VERSION;
+        const Pyxis::ManifestResult parsed =
+            Pyxis::MapPackManifest::parse(scratch, length, manifest);
+        const bool compatible_manifest_version = indexless
+            ? (manifest.format_version == Pyxis::MapPackManifest::FORMAT_VERSION ||
+               manifest.format_version == Pyxis::MapPackManifest::INDEXLESS_FORMAT_VERSION)
+            : manifest.format_version == Pyxis::MapPackManifest::FORMAT_VERSION;
+        if (parsed != Pyxis::ManifestResult::OK ||
+            !compatible_manifest_version ||
             std::strcmp(manifest.pack_id, view.packs[index].pack_id) != 0 ||
             std::strcmp(manifest.attribution, view.attribution) != 0 ||
-            manifest.row_span_count != view.packs[index].span_count ||
-            std::memcmp(manifest.row_span_bytes, view.packs[index].span_bytes,
-                        static_cast<std::size_t>(manifest.row_span_count) *
-                            ActiveMapSetCodec::ROW_SPAN_SIZE) != 0) {
+            (!indexless &&
+             (manifest.row_span_count != view.packs[index].span_count ||
+              std::memcmp(manifest.row_span_bytes, view.packs[index].span_bytes,
+                          static_cast<std::size_t>(manifest.row_span_count) *
+                              ActiveMapSetCodec::ROW_SPAN_SIZE) != 0))) {
             return MapTilePackResult::INVALID_MANIFEST;
         }
         if (legacy_bright) {
@@ -259,11 +269,13 @@ MapTilePackResult MapTilePack::validateMapSet(MapTileStorage& storage,
 bool MapTilePack::parseMapSetSelection(const std::uint8_t* input, std::size_t length,
                                        std::uint32_t& generation,
                                        Pyxis::MapPackManifest& metadata,
-                                       ActivePackView* packs, std::uint8_t& pack_count) {
+                                       ActivePackView* packs, std::uint8_t& pack_count,
+                                       bool& indexless) {
     if (packs == NULL) return false;
     ActiveMapSetView view = {};
     if (!ActiveMapSetCodec::decode(input, length, view)) return false;
     generation = view.generation;
+    indexless = view.format_version == ActiveMapSetCodec::INDEXLESS_FORMAT_VERSION;
     metadata = Pyxis::MapPackManifest();
     std::strcpy(metadata.pack_id, view.map_set_id);
     std::strncpy(metadata.name, metadata.pack_id, sizeof(metadata.name) - 1U);
@@ -292,6 +304,110 @@ bool MapTilePack::spanCovers(const ActivePackView& pack, const TileKey& key) {
         }
     }
     return false;
+}
+
+bool MapTilePack::sameKey(const TileKey& left, const TileKey& right) {
+    return left.zoom == right.zoom && left.x == right.x && left.y == right.y;
+}
+
+void MapTilePack::clearResolutionCache() {
+    for (std::size_t index = 0U; index < RESOLUTION_CACHE_CAPACITY; ++index) {
+        resolution_cache_[index].valid = false;
+        resolution_cache_[index].pack_index = 0xffU;
+        resolution_cache_[index].rank = 0U;
+        resolution_cache_[index].key = TileKey{0U, 0U, 0U};
+    }
+}
+
+int MapTilePack::findResolution(const TileKey& key) {
+    for (std::size_t index = 0U; index < RESOLUTION_CACHE_CAPACITY; ++index) {
+        if (!resolution_cache_[index].valid ||
+            !sameKey(resolution_cache_[index].key, key)) continue;
+        const std::uint8_t previous_rank = resolution_cache_[index].rank;
+        for (std::size_t other = 0U; other < RESOLUTION_CACHE_CAPACITY; ++other) {
+            if (other != index && resolution_cache_[other].valid &&
+                resolution_cache_[other].rank < previous_rank) {
+                ++resolution_cache_[other].rank;
+            }
+        }
+        resolution_cache_[index].rank = 0U;
+        return static_cast<int>(index);
+    }
+    return -1;
+}
+
+void MapTilePack::rememberResolution(const TileKey& key, std::uint8_t pack_index) {
+    std::size_t target = 0U;
+    bool found = false;
+    std::uint8_t oldest = 0U;
+    for (std::size_t index = 0U; index < RESOLUTION_CACHE_CAPACITY; ++index) {
+        if (!resolution_cache_[index].valid) {
+            target = index; found = true; break;
+        }
+        if (resolution_cache_[index].rank >= oldest) {
+            oldest = resolution_cache_[index].rank; target = index;
+        }
+    }
+    (void)found;
+    for (std::size_t index = 0U; index < RESOLUTION_CACHE_CAPACITY; ++index) {
+        if (index != target && resolution_cache_[index].valid &&
+            resolution_cache_[index].rank < 0xffU) {
+            ++resolution_cache_[index].rank;
+        }
+    }
+    resolution_cache_[target].key = key;
+    resolution_cache_[target].pack_index = pack_index;
+    resolution_cache_[target].rank = 0U;
+    resolution_cache_[target].valid = true;
+}
+
+MapTilePackResult MapTilePack::beginIndexless(const TileKey& key, std::uint32_t& size) {
+    const int cached = findResolution(key);
+    if (cached >= 0) {
+        const std::uint8_t pack_index =
+            resolution_cache_[static_cast<std::size_t>(cached)].pack_index;
+        if (pack_index == 0xffU) return MapTilePackResult::UNCOVERED;
+        if (pack_index >= active_pack_count_) {
+            resolution_cache_[static_cast<std::size_t>(cached)].valid = false;
+        } else {
+            char path[PATH_CAPACITY];
+            MapTilePackResult result = tilePath(active_packs_[pack_index].pack_id,
+                                                key, path, sizeof(path));
+            if (result != MapTilePackResult::OK) return result;
+            std::uint32_t candidate_size = 0U;
+            const TileStoreResult begin = storage_.beginRead(path, candidate_size);
+            if (begin == TileStoreResult::OK) {
+                stream_open_ = true; stream_remaining_ = candidate_size; size = candidate_size;
+                return MapTilePackResult::OK;
+            }
+            if (begin != TileStoreResult::MISS) {
+                if (begin == TileStoreResult::STORAGE_UNAVAILABLE)
+                    return MapTilePackResult::STORAGE_UNAVAILABLE;
+                if (begin == TileStoreResult::BUSY) return MapTilePackResult::BUSY;
+                return MapTilePackResult::IO_ERROR;
+            }
+            resolution_cache_[static_cast<std::size_t>(cached)].valid = false;
+        }
+    }
+
+    for (std::uint8_t index = 0U; index < active_pack_count_; ++index) {
+        char path[PATH_CAPACITY];
+        MapTilePackResult result = tilePath(active_packs_[index].pack_id,
+                                            key, path, sizeof(path));
+        if (result != MapTilePackResult::OK) return result;
+        std::uint32_t candidate_size = 0U;
+        const TileStoreResult begin = storage_.beginRead(path, candidate_size);
+        if (begin == TileStoreResult::MISS) continue;
+        if (begin == TileStoreResult::STORAGE_UNAVAILABLE)
+            return MapTilePackResult::STORAGE_UNAVAILABLE;
+        if (begin == TileStoreResult::BUSY) return MapTilePackResult::BUSY;
+        if (begin != TileStoreResult::OK) return MapTilePackResult::IO_ERROR;
+        rememberResolution(key, index);
+        stream_open_ = true; stream_remaining_ = candidate_size; size = candidate_size;
+        return MapTilePackResult::OK;
+    }
+    rememberResolution(key, 0xffU);
+    return MapTilePackResult::UNCOVERED;
 }
 
 MapTilePackResult MapTilePack::makePath(const char* pack_id, const TileKey* key,
@@ -405,11 +521,13 @@ MapTilePackResult MapTilePack::initialize() {
             Pyxis::MapPackManifest map_set_metadata = {};
             ActivePackView map_set_packs[MAX_ACTIVE_PACKS] = {};
             std::uint8_t map_set_pack_count = 0U;
+            bool map_set_indexless = false;
             if (decodeSelection(selectionBuffer(candidate_buffer), record_length,
                                 legacy_id, slot_generations[slot]) ||
                 parseMapSetSelection(selectionBuffer(candidate_buffer), record_length,
                                      slot_generations[slot], map_set_metadata,
-                                     map_set_packs, map_set_pack_count)) {
+                                     map_set_packs, map_set_pack_count,
+                                     map_set_indexless)) {
                 slot_valid[slot] = true;
                 slot_lengths[slot] = record_length;
             }
@@ -457,11 +575,13 @@ MapTilePackResult MapTilePack::initialize() {
             Pyxis::MapPackManifest map_set_metadata = {};
             ActivePackView map_set_packs[MAX_ACTIVE_PACKS] = {};
             std::uint8_t map_set_pack_count = 0U;
+            bool map_set_indexless = false;
             ActiveMapSetView map_set_view = {};
             if (ActiveMapSetCodec::decode(selectionBuffer(candidate_buffer), record_length,
                                           map_set_view) &&
                 parseMapSetSelection(selectionBuffer(candidate_buffer), record_length, generation,
-                                     map_set_metadata, map_set_packs, map_set_pack_count)) {
+                                     map_set_metadata, map_set_packs, map_set_pack_count,
+                                     map_set_indexless)) {
                 result = validateMapSet(storage_, map_set_view, manifestBuffer(),
                                         MANIFEST_BUFFER_CAPACITY);
                 if (result == MapTilePackResult::OK) {
@@ -470,6 +590,8 @@ MapTilePackResult MapTilePack::initialize() {
                                 static_cast<std::size_t>(map_set_pack_count) * sizeof(ActivePackView));
                     active_pack_count_ = map_set_pack_count;
                     map_set_active_ = true;
+                    map_set_indexless_ = map_set_indexless;
+                    clearResolutionCache();
                     selection_generation_ = generation;
                     active_selection_buffer_ = candidate_buffer;
                     status_ = MapTilePackStatus::READY;
@@ -503,6 +625,8 @@ MapTilePackResult MapTilePack::initialize() {
                         manifest_ = candidate;
                         active_pack_count_ = 0U;
                         map_set_active_ = false;
+                        map_set_indexless_ = false;
+                        clearResolutionCache();
                         selection_generation_ = generation;
                         active_selection_buffer_ = candidate_buffer;
                         status_ = MapTilePackStatus::READY;
@@ -539,6 +663,8 @@ MapTilePackResult MapTilePack::initialize() {
         manifest_ = Pyxis::MapPackManifest();
         active_pack_count_ = 0U;
         map_set_active_ = false;
+        map_set_indexless_ = false;
+        clearResolutionCache();
         selection_generation_ = 0U;
         status_ = MapTilePackStatus::NO_SELECTION;
         return MapTilePackResult::NO_SELECTION;
@@ -585,6 +711,8 @@ MapTilePackResult MapTilePack::initialize() {
     manifest_ = candidate;
     active_pack_count_ = 0U;
     map_set_active_ = false;
+    map_set_indexless_ = false;
+    clearResolutionCache();
     selection_generation_ = selected_generation;
     active_selection_buffer_ = candidate_buffer;
     status_ = MapTilePackStatus::READY;
@@ -598,6 +726,7 @@ MapTilePackResult MapTilePack::beginGet(const TileKey& key, std::uint32_t& size)
     if (!storage_.isAvailable()) return MapTilePackResult::STORAGE_UNAVAILABLE;
 
     if (map_set_active_) {
+        if (map_set_indexless_) return beginIndexless(key, size);
         bool covered = false;
         for (std::uint8_t index = 0U; index < active_pack_count_; ++index) {
             if (!spanCovers(active_packs_[index], key)) continue;

@@ -201,6 +201,21 @@ ManifestResult validateSparse(const MapPackManifest& manifest,
     return ManifestResult::OK;
 }
 
+ManifestResult validateIndexless(const MapPackManifest& manifest) {
+    std::size_t ignored = 0U;
+    if (checkedStringLength(manifest.pack_id, sizeof(manifest.pack_id), true, ignored) != ManifestResult::OK ||
+        checkedStringLength(manifest.name, sizeof(manifest.name), false, ignored) != ManifestResult::OK ||
+        checkedStringLength(manifest.attribution, sizeof(manifest.attribution), false, ignored) != ManifestResult::OK ||
+        checkedStringLength(manifest.source, sizeof(manifest.source), false, ignored) != ManifestResult::OK ||
+        checkedStringLength(manifest.license, sizeof(manifest.license), false, ignored) != ManifestResult::OK) {
+        return ManifestResult::INVALID_STRING;
+    }
+    if (manifest.min_zoom > manifest.max_zoom || manifest.max_zoom > MapPackManifest::MAX_ZOOM) {
+        return ManifestResult::INVALID_ZOOM;
+    }
+    return manifest.tile_count == 0U ? ManifestResult::INVALID_TILE_COUNT : ManifestResult::OK;
+}
+
 void writeString(std::uint8_t* output, std::size_t& position,
                  const char* text, std::size_t length) {
     output[position++] = static_cast<std::uint8_t>(length);
@@ -331,13 +346,54 @@ ManifestResult MapPackManifest::serializeSparse(const MapPackManifest& manifest,
     return ManifestResult::OK;
 }
 
+ManifestResult MapPackManifest::serializeIndexless(const MapPackManifest& manifest,
+                                                   std::uint8_t* output,
+                                                   std::size_t capacity,
+                                                   std::size_t& written) {
+    written = 0U;
+    const ManifestResult validity = validateIndexless(manifest);
+    if (validity != ManifestResult::OK) return validity;
+    std::size_t lengths[5] = {0U, 0U, 0U, 0U, 0U};
+    (void)checkedStringLength(manifest.pack_id, sizeof(manifest.pack_id), true, lengths[0]);
+    (void)checkedStringLength(manifest.name, sizeof(manifest.name), false, lengths[1]);
+    (void)checkedStringLength(manifest.attribution, sizeof(manifest.attribution), false, lengths[2]);
+    (void)checkedStringLength(manifest.source, sizeof(manifest.source), false, lengths[3]);
+    (void)checkedStringLength(manifest.license, sizeof(manifest.license), false, lengths[4]);
+    std::size_t required = HEADER_SIZE + CRC_SIZE + 6U;
+    for (std::size_t index = 0U; index < 5U; ++index) required += 1U + lengths[index];
+    if (output == 0 || capacity < required) return ManifestResult::INSUFFICIENT_CAPACITY;
+
+    std::uint8_t temporary[MAX_SERIALIZED_SIZE] = {};
+    std::memcpy(temporary, MAGIC, sizeof(MAGIC));
+    temporary[4] = INDEXLESS_FORMAT_VERSION;
+    temporary[5] = 0U;
+    putU16(temporary + 6U, static_cast<std::uint16_t>(HEADER_SIZE));
+    putU32(temporary + 8U, static_cast<std::uint32_t>(required));
+    putU32(temporary + 12U, 0U);
+    std::size_t position = HEADER_SIZE;
+    writeString(temporary, position, manifest.pack_id, lengths[0]);
+    writeString(temporary, position, manifest.name, lengths[1]);
+    writeString(temporary, position, manifest.attribution, lengths[2]);
+    writeString(temporary, position, manifest.source, lengths[3]);
+    writeString(temporary, position, manifest.license, lengths[4]);
+    temporary[position++] = manifest.min_zoom;
+    temporary[position++] = manifest.max_zoom;
+    putU32(temporary + position, manifest.tile_count); position += 4U;
+    putU32(temporary + position, crc32(temporary, position)); position += CRC_SIZE;
+    if (position != required) return ManifestResult::BAD_LENGTH;
+    std::memcpy(output, temporary, required);
+    written = required;
+    return ManifestResult::OK;
+}
+
 ManifestResult MapPackManifest::parse(const std::uint8_t* input,
                                       std::size_t length,
                                       MapPackManifest& output) {
     if (input == 0 || length < HEADER_SIZE + CRC_SIZE) return ManifestResult::BAD_LENGTH;
     if (std::memcmp(input, MAGIC, sizeof(MAGIC)) != 0) return ManifestResult::BAD_MAGIC;
     const std::uint8_t version = input[4];
-    if (version != LEGACY_FORMAT_VERSION && version != FORMAT_VERSION) {
+    if (version != LEGACY_FORMAT_VERSION && version != FORMAT_VERSION &&
+        version != INDEXLESS_FORMAT_VERSION) {
         return ManifestResult::UNSUPPORTED_VERSION;
     }
     if (input[5] != 0U || getU16(input + 6U) != HEADER_SIZE || getU32(input + 12U) != 0U) {
@@ -383,7 +439,7 @@ ManifestResult MapPackManifest::parse(const std::uint8_t* input,
         }
         if (position != payload_end) return ManifestResult::BAD_LENGTH;
         result = validate(candidate);
-    } else {
+    } else if (version == FORMAT_VERSION) {
         if (payload_end - position < 8U) return ManifestResult::BAD_LENGTH;
         candidate.min_zoom = input[position++];
         candidate.max_zoom = input[position++];
@@ -433,6 +489,16 @@ ManifestResult MapPackManifest::parse(const std::uint8_t* input,
         result = zoom_mask != expected_mask ? ManifestResult::INVALID_ZOOM :
             (candidate.tile_count == 0U || total != candidate.tile_count
                 ? ManifestResult::INVALID_TILE_COUNT : ManifestResult::OK);
+    } else {
+        if (payload_end - position != 6U) return ManifestResult::BAD_LENGTH;
+        candidate.min_zoom = input[position++];
+        candidate.max_zoom = input[position++];
+        candidate.tile_count = getU32(input + position); position += 4U;
+        candidate.extent_count = 0U;
+        candidate.row_span_count = 0U;
+        candidate.row_span_bytes = 0;
+        result = position != payload_end ? ManifestResult::BAD_LENGTH
+                                        : validateIndexless(candidate);
     }
     if (result != ManifestResult::OK) return result;
     output = candidate;
@@ -444,6 +510,7 @@ bool MapPackManifest::covers(const Hardware::TDeck::TileKey& key) const {
     const std::uint32_t world_size = UINT32_C(1) << key.zoom;
     if (key.x >= world_size || key.y >= world_size ||
         key.zoom < min_zoom || key.zoom > max_zoom) return false;
+    if (format_version == INDEXLESS_FORMAT_VERSION) return false;
     if (format_version == FORMAT_VERSION) {
         if (row_span_bytes == 0 || row_span_count == 0U || row_span_count > MAX_ROW_SPANS) return false;
         for (std::size_t index = 0U; index < row_span_count; ++index) {

@@ -136,7 +136,7 @@ void testMagicVersionHeaderAndLengthRejected() {
         std::vector<std::uint8_t> bad = valid; bad[index] ^= 1U;
         CHECK(MapPackManifest::parse(&bad[0], bad.size(), output) == ManifestResult::BAD_MAGIC);
     }
-    std::vector<std::uint8_t> bad = valid; bad[4] = 3U; refreshCrc(bad);
+    std::vector<std::uint8_t> bad = valid; bad[4] = 4U; refreshCrc(bad);
     CHECK(MapPackManifest::parse(&bad[0], bad.size(), output) == ManifestResult::UNSUPPORTED_VERSION);
     bad = valid; bad[6] = 15U; refreshCrc(bad);
     CHECK(MapPackManifest::parse(&bad[0], bad.size(), output) == ManifestResult::BAD_HEADER);
@@ -363,6 +363,29 @@ void testSparseRowSpansMustBeCanonicalAndBounded() {
     CHECK(MapPackManifest::serializeSparse(manifest, reversed, 2U, storage,
                                            sizeof(storage), written) == ManifestResult::INVALID_EXTENT);
 }
+
+void testIndexlessManifestRoundTripKeepsMetadataWithoutClaimingCoverage() {
+    beginTest();
+    MapPackManifest manifest = sample();
+    manifest.min_zoom = 0U;
+    manifest.max_zoom = 9U;
+    manifest.tile_count = 83567U;
+    manifest.extent_count = 0U;
+    std::uint8_t storage[MapPackManifest::MAX_SERIALIZED_SIZE] = {};
+    std::size_t written = 0U;
+    CHECK(MapPackManifest::serializeIndexless(
+        manifest, storage, sizeof(storage), written) == ManifestResult::OK);
+    CHECK(written < 512U);
+
+    MapPackManifest parsed = {};
+    CHECK(MapPackManifest::parse(storage, written, parsed) == ManifestResult::OK);
+    CHECK(parsed.format_version == MapPackManifest::INDEXLESS_FORMAT_VERSION);
+    CHECK(parsed.min_zoom == 0U);
+    CHECK(parsed.max_zoom == 9U);
+    CHECK(parsed.tile_count == 83567U);
+    CHECK(parsed.row_span_count == 0U);
+    CHECK(!parsed.covers(TileKey{9U, 150U, 100U}));
+}
 }  // namespace
 
 int main() {
@@ -381,6 +404,7 @@ int main() {
     testMaximumSerializedSizeRoundTrip();
     testSparseRowSpanRoundTripAndExactCoverage();
     testSparseRowSpansMustBeCanonicalAndBounded();
+    testIndexlessManifestRoundTripKeepsMetadataWithoutClaimingCoverage();
     std::cout << "map pack manifest: " << tests_run << " tests passed\n";
     return 0;
 }

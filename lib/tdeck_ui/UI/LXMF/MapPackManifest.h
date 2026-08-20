@@ -58,6 +58,7 @@ struct RowSpan {
 struct MapPackManifest {
     static const std::uint8_t LEGACY_FORMAT_VERSION = 1U;
     static const std::uint8_t FORMAT_VERSION = 2U;
+    static const std::uint8_t INDEXLESS_FORMAT_VERSION = 3U;
     static const std::uint8_t MAX_ZOOM = 22U;
     static const std::size_t MAX_ZOOM_LEVELS = 23U;
     static const std::size_t PACK_ID_CAPACITY = 32U;
@@ -94,6 +95,10 @@ struct MapPackManifest {
                                           std::uint8_t* output,
                                           std::size_t capacity,
                                           std::size_t& written);
+    static ManifestResult serializeIndexless(const MapPackManifest& manifest,
+                                             std::uint8_t* output,
+                                             std::size_t capacity,
+                                             std::size_t& written);
     static ManifestResult parse(const std::uint8_t* input,
                                 std::size_t length,
                                 MapPackManifest& output);

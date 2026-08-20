@@ -19,6 +19,7 @@ struct ActiveMapSetPackView {
 };
 
 struct ActiveMapSetView {
+    std::uint8_t format_version;
     std::uint32_t generation;
     char map_set_id[Pyxis::MapPackManifest::PACK_ID_CAPACITY];
     char attribution[Pyxis::MapPackManifest::ATTRIBUTION_CAPACITY];
@@ -27,9 +28,11 @@ struct ActiveMapSetView {
     ActiveMapSetPackView packs[8];
 };
 
-/** Strict, allocation-free codec for canonical PMAS version-2 records. */
+/** Strict, allocation-free codec for span-indexed v2 and indexless v3 PMAS records. */
 class ActiveMapSetCodec {
 public:
+    static const std::uint8_t SPAN_FORMAT_VERSION = 2U;
+    static const std::uint8_t INDEXLESS_FORMAT_VERSION = 3U;
     static const std::size_t MAX_SERIALIZED_SIZE = 7105U;
     static const std::size_t MAX_PACKS = 8U;
     static const std::size_t MAX_ROW_SPANS = 512U;
