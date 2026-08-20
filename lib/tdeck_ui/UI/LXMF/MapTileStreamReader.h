@@ -16,6 +16,7 @@ enum class MapTileStreamResult : std::uint8_t {
     MISS,
     STORAGE_UNAVAILABLE,
     TOO_LARGE,
+    CANCELLED,
     IO_ERROR
 };
 
@@ -60,7 +61,7 @@ public:
         while (total < declared) {
             if (stop.stopRequested()) {
                 stream.end();
-                return MapTileStreamResult::IO_ERROR;
+                return MapTileStreamResult::CANCELLED;
             }
             const std::size_t remaining = static_cast<std::size_t>(declared) - total;
             const std::size_t capacity = remaining < chunk_size ? remaining : chunk_size;
@@ -74,7 +75,7 @@ public:
             total += count;
         }
         stream.end();
-        if (stop.stopRequested()) return MapTileStreamResult::IO_ERROR;
+        if (stop.stopRequested()) return MapTileStreamResult::CANCELLED;
         return MapTileStreamResult::OK;
     }
 };

@@ -97,6 +97,33 @@ export function suggestMapIdentity(filename) {
 
 function u16(view, offset) { return view.getUint16(offset, true); }
 function u32(view, offset) { return view.getUint32(offset, true); }
+function u64(view, offset) {
+  const value = view.getBigUint64(offset, true);
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) fail('ZIP64 value exceeds safe integer range');
+  return Number(value);
+}
+function readZip64Extra(view, extraOffset, extraLength, sentinels) {
+  let position = 0;
+  let resolved = null;
+  while (position < extraLength) {
+    if (position + 4 > extraLength) fail('ZIP extra field is truncated');
+    const id = u16(view, extraOffset + position);
+    const length = u16(view, extraOffset + position + 2);
+    const data = extraOffset + position + 4;
+    if (position + 4 + length > extraLength) fail('ZIP extra field is truncated');
+    if (id === 0x0001) {
+      let cursor = data;
+      const end = data + length;
+      const output = {};
+      if (sentinels.size) { if(cursor+8>end)fail('ZIP64 extra field is truncated');output.size=u64(view,cursor);cursor+=8; }
+      if (sentinels.compressed) { if(cursor+8>end)fail('ZIP64 extra field is truncated');output.compressedSize=u64(view,cursor);cursor+=8; }
+      if (sentinels.offset) { if(cursor+8>end)fail('ZIP64 extra field is truncated');output.localOffset=u64(view,cursor);cursor+=8; }
+      resolved = output;
+    }
+    position += 4 + length;
+  }
+  return resolved;
+}
 function putU16(view, offset, value) { view.setUint16(offset, value, true); }
 function putU32(view, offset, value) { view.setUint32(offset, value >>> 0, true); }
 
@@ -150,18 +177,34 @@ async function parseZipDirectory(archive) {
   const tail = await blobBytes(archive, tailStart);
   const eocdOffset = findEocd(tail, tailStart);
   const eocd = new DataView((await blobBytes(archive, eocdOffset, eocdOffset + 22)).buffer);
-  if (u16(eocd, 4) !== 0 || u16(eocd, 6) !== 0) fail('Multi-disk ZIPs are unsupported');
-  const diskCount = u16(eocd, 8);
-  const count = u16(eocd, 10);
-  const centralSize = u32(eocd, 12);
-  const centralOffset = u32(eocd, 16);
+  const classicDisk = u16(eocd, 4), classicCentralDisk = u16(eocd, 6);
+  const classicDiskCount = u16(eocd, 8), classicCount = u16(eocd, 10);
+  const classicCentralSize = u32(eocd, 12), classicCentralOffset = u32(eocd, 16);
   const commentLength = u16(eocd, 20);
   if (commentLength !== 0 || eocdOffset + 22 !== archive.size) fail('ZIP comments are unsupported');
-  if (diskCount !== count || count === 0 || count === 0xffff || count > MAX_ZIP_ENTRIES ||
-      centralSize === 0xffffffff || centralOffset === 0xffffffff) {
-    fail('ZIP entry count exceeds the bounded limit or requires ZIP64');
+  let diskCount=classicDiskCount,count=classicCount,centralSize=classicCentralSize,centralOffset=classicCentralOffset;
+  let centralEnd=eocdOffset;
+  const needsZip64 = classicDisk===0xffff||classicCentralDisk===0xffff||
+    classicDiskCount===0xffff||classicCount===0xffff||
+    classicCentralSize===0xffffffff||classicCentralOffset===0xffffffff;
+  if (needsZip64) {
+    if (eocdOffset < 20) fail('ZIP64 locator is missing');
+    const locator = new DataView((await blobBytes(archive,eocdOffset-20,eocdOffset)).buffer);
+    if (u32(locator,0)!==0x07064b50||u32(locator,4)!==0||u32(locator,16)!==1) fail('Multi-disk ZIP64 archives are unsupported');
+    const recordOffset=u64(locator,8);
+    const header=new DataView((await blobBytes(archive,recordOffset,recordOffset+56)).buffer);
+    if(u32(header,0)!==0x06064b50)fail('ZIP64 end record is malformed');
+    const tailSize=u64(header,4);
+    if(recordOffset+12+tailSize!==eocdOffset-20||u32(header,16)!==0||u32(header,20)!==0)fail('ZIP64 end record bounds are invalid');
+    diskCount=u64(header,24);count=u64(header,32);centralSize=u64(header,40);centralOffset=u64(header,48);
+    centralEnd=recordOffset;
+  } else if (classicDisk !== 0 || classicCentralDisk !== 0) {
+    fail('Multi-disk ZIPs are unsupported');
   }
-  if (centralOffset + centralSize !== eocdOffset || centralOffset + centralSize > archive.size) {
+  if (diskCount !== count || count === 0 || count > MAX_ZIP_ENTRIES) {
+    fail(`ZIP entry count exceeds the bounded limit (${count} > ${MAX_ZIP_ENTRIES})`);
+  }
+  if (centralOffset + centralSize !== centralEnd || centralOffset + centralSize > archive.size) {
     fail('ZIP central directory bounds are invalid');
   }
   if (centralSize > MAX_CENTRAL_BYTES) fail('ZIP central directory exceeds the bounded limit');
@@ -175,23 +218,31 @@ async function parseZipDirectory(archive) {
     const flags = u16(view, position + 8);
     const method = u16(view, position + 10);
     const checksum = u32(view, position + 16);
-    const compressedSize = u32(view, position + 20);
-    const size = u32(view, position + 24);
+    let compressedSize = u32(view, position + 20);
+    let size = u32(view, position + 24);
     const nameLength = u16(view, position + 28);
     const extraLength = u16(view, position + 30);
     const commentLength = u16(view, position + 32);
     const disk = u16(view, position + 34);
     const externalAttributes = u32(view, position + 38);
-    const localOffset = u32(view, position + 42);
+    let localOffset = u32(view, position + 42);
     const end = position + 46 + nameLength + extraLength + commentLength;
     if (end > central.length || nameLength === 0 || nameLength > MAX_ZIP_NAME_BYTES ||
-        extraLength !== 0 || commentLength !== 0 || disk !== 0) {
+        commentLength !== 0 || disk !== 0) {
       fail('ZIP entry metadata or extra fields are unsupported');
+    }
+    if (extraLength !== 0) {
+      const sentinels={size:size===0xffffffff,compressed:compressedSize===0xffffffff,offset:localOffset===0xffffffff};
+      const resolved=readZip64Extra(view,position+46+nameLength,extraLength,sentinels);
+      if((sentinels.size||sentinels.compressed||sentinels.offset)&&!resolved)fail('ZIP64 entry extra field is missing');
+      if(resolved?.size!==undefined)size=resolved.size;
+      if(resolved?.compressedSize!==undefined)compressedSize=resolved.compressedSize;
+      if(resolved?.localOffset!==undefined)localOffset=resolved.localOffset;
     }
     if ((flags & 1) !== 0) fail('Encrypted ZIP entries are unsupported');
     if ((flags & ~0x0808) !== 0) fail('ZIP entry uses unsupported flags');
-    if (method !== 0 || compressedSize !== size) fail('Only stored MUI PNG ZIP entries are supported');
-    if (size === 0 || size > MAX_TILE_BYTES) fail('ZIP tile exceeds the per-tile size limit');
+    if (![0,8].includes(method) || (method===0&&compressedSize!==size)) fail('ZIP entry uses unsupported compression');
+    if (size === 0 || size > MAX_TILE_BYTES || compressedSize > MAX_TILE_BYTES) fail('ZIP entry exceeds the per-entry size limit');
     const unixMode = externalAttributes >>> 16;
     if ((externalAttributes & 0x10) !== 0) fail('ZIP directory entries are forbidden');
     if ((unixMode & 0xf000) === 0xa000) fail('ZIP symlinks are forbidden');
@@ -225,15 +276,18 @@ async function locateEntry(archive, record, centralOffset) {
   }
   const nameLength = u16(header, 26);
   const extraLength = u16(header, 28);
-  if (nameLength === 0 || nameLength > MAX_ZIP_NAME_BYTES || extraLength !== 0) {
-    fail(`ZIP local extra fields are unsupported: ${record.name}`);
+  if (nameLength === 0 || nameLength > MAX_ZIP_NAME_BYTES) fail(`ZIP local header is invalid: ${record.name}`);
+  if (extraLength !== 0) {
+    const extraBytes=await blobBytes(archive,record.localOffset+30+nameLength,record.localOffset+30+nameLength+extraLength);
+    const extraView=new DataView(extraBytes.buffer,extraBytes.byteOffset,extraBytes.byteLength);
+    readZip64Extra(extraView,0,extraLength,{size:localSize===0xffffffff,compressed:localCompressed===0xffffffff,offset:false});
   }
   const nameBytes = await blobBytes(archive, record.localOffset + 30, record.localOffset + 30 + nameLength);
   let localName;
   try { localName = textDecoder.decode(nameBytes); } catch { fail('ZIP local filename is invalid'); }
   if (localName !== record.name) fail(`ZIP local filename mismatch: ${record.name}`);
   const dataOffset = record.localOffset + 30 + nameLength + extraLength;
-  if (dataOffset + record.size > centralOffset) fail(`ZIP payload exceeds bounds: ${record.name}`);
+  if (dataOffset + record.compressedSize > centralOffset) fail(`ZIP payload exceeds bounds: ${record.name}`);
   return {...record, dataOffset};
 }
 
@@ -383,6 +437,14 @@ export async function validatePng(bytes, label = 'tile') {
   return {bitDepth, colorType};
 }
 
+function validatePngSignature(bytes, label) {
+  const signature = [137,80,78,71,13,10,26,10];
+  if (!(bytes instanceof Uint8Array) || bytes.length < 24 || bytes.length > MAX_TILE_BYTES ||
+      !signature.every((byte,index)=>bytes[index]===byte)) {
+    fail(`Invalid PNG signature: ${label}`);
+  }
+}
+
 function tilePath(name) {
   const match = /^(.*?)(\d+)\/(\d+)\/(\d+)\.png$/.exec(name);
   if (!match) fail(`Unexpected ZIP entry; expected XYZ PNG: ${name}`);
@@ -421,9 +483,9 @@ async function validateZipLayout(archive, records, centralOffset) {
   if (ordered[0].localOffset !== 0) fail('ZIP preambles are unsupported');
   for (let index = 0; index < ordered.length; index++) {
     const record = ordered[index];
-    const dataEnd = record.dataOffset + record.size;
+    const dataEnd = record.dataOffset + record.compressedSize;
     const nextOffset = index + 1 < ordered.length ? ordered[index + 1].localOffset : centralOffset;
-    if (record.localOffset < (index ? ordered[index - 1].dataOffset + ordered[index - 1].size : 0) || dataEnd > nextOffset) {
+    if (record.localOffset < (index ? ordered[index - 1].dataOffset + ordered[index - 1].compressedSize : 0) || dataEnd > nextOffset) {
       fail(`Overlapping ZIP entries: ${record.name}`);
     }
     const descriptorLength = nextOffset - dataEnd;
@@ -453,6 +515,13 @@ export async function inspectMuiZip(archive, {onProgress = () => {}} = {}) {
   let totalBytes = 0;
   for (let index = 0; index < locatedRecords.length; index++) {
     const located = locatedRecords[index];
+    if (located.name === 'metadata.json') {
+      onProgress({phase:'validate', completed:index + 1, total:records.length});
+      continue;
+    }
+    if (located.method !== 0 || located.compressedSize !== located.size) {
+      fail(`Map tile must be stored without ZIP compression: ${located.name}`);
+    }
     const xyz = tilePath(located.name);
     if (prefix === null) prefix = xyz.prefix;
     if (prefix !== xyz.prefix) fail('ZIP contains multiple tile roots or styles');
@@ -461,57 +530,47 @@ export async function inspectMuiZip(archive, {onProgress = () => {}} = {}) {
     tileKeys.add(key);
     totalBytes += located.size;
     if (entries.length >= MAX_TILES || totalBytes > MAX_TOTAL_BYTES) fail('ZIP exceeds map-pack quota');
-    const bytes = await blobBytes(archive, located.dataOffset, located.dataOffset + located.size);
-    if (crc32(bytes) !== located.checksum) fail(`ZIP CRC mismatch: ${located.name}`);
-    await validatePng(bytes, located.name);
     entries.push({...located, ...xyz});
     onProgress({phase:'validate', completed:index + 1, total:records.length});
   }
   entries.sort((a,b) => a.zoom-b.zoom || a.x-b.x || a.y-b.y);
+  if (entries.length === 0) fail('ZIP contains no XYZ PNG tiles');
   const zooms = [...new Set(entries.map(entry => entry.zoom))].sort((a,b) => a-b);
   if (zooms.some((zoom,index) => zoom !== zooms[0] + index)) fail('ZIP zoom levels must be contiguous');
   const styleId = prefix ? prefix.slice('maps/'.length, -1) : null;
-  return {entries, rowSpans:makeRowSpans(entries), tileCount:entries.length,
+  return {entries, tileCount:entries.length,
           totalBytes, minZoom:zooms[0], maxZoom:zooms.at(-1), prefix, styleId};
 }
 
-export function serializeSparseManifest(metadata, rowSpans, tileCount) {
+export function serializeIndexlessManifest(metadata, minZoom, maxZoom, tileCount) {
   const fields = validateMetadata(metadata);
-  if (!rowSpans.length || rowSpans.length > MAX_ROW_SPANS) fail('Invalid row-span count');
-  let total = 0;
-  for (let index = 0; index < rowSpans.length; index++) {
-    const span = rowSpans[index];
-    const world = 2 ** span.zoom;
-    if (!Number.isInteger(span.zoom) || !Number.isInteger(span.y) || !Number.isInteger(span.xMinimum) ||
-        !Number.isInteger(span.xMaximum) || span.zoom < 0 || span.zoom > MAX_ZOOM || span.y < 0 ||
-        span.y >= world || span.xMinimum < 0 || span.xMinimum > span.xMaximum || span.xMaximum >= world) fail('Invalid row span');
-    if (index && (span.zoom < rowSpans[index-1].zoom ||
-        (span.zoom === rowSpans[index-1].zoom && span.y < rowSpans[index-1].y) ||
-        (span.zoom === rowSpans[index-1].zoom && span.y === rowSpans[index-1].y && span.xMinimum <= rowSpans[index-1].xMaximum + 1))) fail('Noncanonical row spans');
-    total += span.xMaximum - span.xMinimum + 1;
+  if (!Number.isInteger(minZoom) || !Number.isInteger(maxZoom) || minZoom < 0 ||
+      minZoom > maxZoom || maxZoom > MAX_ZOOM || !Number.isInteger(tileCount) || tileCount <= 0) {
+    fail('Invalid indexless manifest range or tile count');
   }
-  if (total !== tileCount || tileCount <= 0) fail('Manifest tile count mismatch');
   const stringsSize = Object.values(fields).reduce((sum, bytes) => sum + 1 + bytes.length, 0);
-  const length = 16 + stringsSize + 8 + rowSpans.length * 13 + 4;
+  const length = 16 + stringsSize + 6 + 4;
   const bytes = new Uint8Array(length); const view = new DataView(bytes.buffer);
-  putU32(view, 0, MANIFEST_MAGIC); bytes[4] = 2; putU16(view, 6, 16); putU32(view, 8, length);
+  putU32(view, 0, MANIFEST_MAGIC); bytes[4] = 3; putU16(view, 6, 16); putU32(view, 8, length);
   let position = 16;
   for (const field of ['packId','name','attribution','source','license']) { const value=fields[field]; bytes[position++]=value.length; bytes.set(value,position); position+=value.length; }
-  bytes[position++] = rowSpans[0].zoom; bytes[position++] = rowSpans.at(-1).zoom;
-  putU16(view, position, rowSpans.length); position += 2; putU32(view, position, tileCount); position += 4;
-  for (const span of rowSpans) { bytes[position++]=span.zoom; putU32(view,position,span.y); position+=4; putU32(view,position,span.xMinimum); position+=4; putU32(view,position,span.xMaximum); position+=4; }
+  bytes[position++] = minZoom; bytes[position++] = maxZoom;
+  putU32(view, position, tileCount); position += 4;
   putU32(view, position, crc32(bytes.subarray(0, position)));
   return bytes;
 }
 
 export function parseSparseManifest(bytes) {
   bytes = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  if (bytes.length < 28 || bytes.length > 7100) fail('Manifest length is invalid');
+  if (bytes.length < 26 || bytes.length > 7100) fail('Manifest length is invalid');
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (u32(view,0)!==MANIFEST_MAGIC || bytes[4]!==2 || bytes[5]!==0 || u16(view,6)!==16 || u32(view,8)!==bytes.length || u32(view,12)!==0 || u32(view,bytes.length-4)!==crc32(bytes.subarray(0,-4))) fail('Manifest header or CRC is invalid');
+  const version=bytes[4];
+  if (u32(view,0)!==MANIFEST_MAGIC || ![2,3].includes(version) || bytes[5]!==0 || u16(view,6)!==16 || u32(view,8)!==bytes.length || u32(view,12)!==0 || u32(view,bytes.length-4)!==crc32(bytes.subarray(0,-4))) fail('Manifest header or CRC is invalid');
   let position=16; const names=['packId','name','attribution','source','license']; const values={};
   for (const name of names) { if(position>=bytes.length-4) fail('Manifest string truncated'); const size=bytes[position++]; if(!size||position+size>bytes.length-4) fail('Manifest string truncated'); values[name]=textDecoder.decode(bytes.subarray(position,position+size)); position+=size; }
-  if(position+8>bytes.length-4) fail('Manifest fields truncated'); const minZoom=bytes[position++], maxZoom=bytes[position++]; const count=u16(view,position); position+=2; const tileCount=u32(view,position); position+=4;
+  if(position+(version===3?6:8)>bytes.length-4) fail('Manifest fields truncated'); const minZoom=bytes[position++], maxZoom=bytes[position++];
+  if(version===3){const tileCount=u32(view,position);position+=4;if(position!==bytes.length-4||minZoom>maxZoom||maxZoom>MAX_ZOOM||!tileCount)fail('Indexless manifest fields invalid');return{...values,minZoom,maxZoom,tileCount,rowSpans:[]};}
+  const count=u16(view,position); position+=2; const tileCount=u32(view,position); position+=4;
   if(!count||count>MAX_ROW_SPANS||position+count*13!==bytes.length-4) fail('Manifest span count invalid'); const rowSpans=[];
   for(let i=0;i<count;i++){ const zoom=bytes[position++], y=u32(view,position); position+=4; const xMinimum=u32(view,position); position+=4; const xMaximum=u32(view,position); position+=4; rowSpans.push({zoom,y,xMinimum,xMaximum}); }
   if(minZoom!==rowSpans[0].zoom||maxZoom!==rowSpans.at(-1).zoom) fail('Manifest zoom range invalid');
@@ -542,34 +601,30 @@ export function encodeActiveMapSet({generation, mapSetId, attribution, packs}) {
       generation > 0xffffffff || !Array.isArray(packs) || packs.length === 0 || packs.length > 8) {
     fail('Invalid active map set');
   }
-  const seen = new Set(); let spanTotal = 0; let length = 12 + 1 + mapSet.length + 1 + credit.length + 1 + 4;
+  const seen = new Set(); let length = 12 + 1 + mapSet.length + 1 + credit.length + 1 + 4;
   const encodedPacks = packs.map(pack => {
     const id = checkedAscii('Pack ID', pack.packId, 31);
     if (!/^[a-z0-9_-]{1,31}$/.test(pack.packId) || seen.has(pack.packId)) fail('Invalid or duplicate active map-set pack');
-    seen.add(pack.packId); validateSelectionSpans(pack.rowSpans); spanTotal += pack.rowSpans.length;
-    if (spanTotal > MAX_ROW_SPANS) fail('Active map set exceeds the total row-span limit');
-    length += 1 + id.length + 2 + pack.rowSpans.length * 13;
-    return {id, pack};
+    seen.add(pack.packId);
+    length += 1 + id.length;
+    return id;
   });
   const bytes = new Uint8Array(length); const view = new DataView(bytes.buffer);
-  putU32(view,0,SELECTION_MAGIC); bytes[4]=2; putU16(view,6,length); putU32(view,8,generation);
+  putU32(view,0,SELECTION_MAGIC); bytes[4]=3; putU16(view,6,length); putU32(view,8,generation);
   let position=12; bytes[position++]=mapSet.length; bytes.set(mapSet,position); position+=mapSet.length;
   bytes[position++]=credit.length; bytes.set(credit,position); position+=credit.length; bytes[position++]=encodedPacks.length;
-  for (const {id,pack} of encodedPacks) {
-    bytes[position++]=id.length; bytes.set(id,position); position+=id.length; putU16(view,position,pack.rowSpans.length); position+=2;
-    for (const span of pack.rowSpans) {bytes[position++]=span.zoom;putU32(view,position,span.y);position+=4;putU32(view,position,span.xMinimum);position+=4;putU32(view,position,span.xMaximum);position+=4;}
-  }
+  for (const id of encodedPacks) {bytes[position++]=id.length;bytes.set(id,position);position+=id.length;}
   putU32(view,position,crc32(bytes.subarray(0,position))); return bytes;
 }
 
 export function decodeActiveSelection(bytes) {
   bytes=bytes instanceof Uint8Array?bytes:new Uint8Array(bytes); if(bytes.length<16||bytes.length>7105)fail('Invalid active selection length'); const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
-  const version=bytes[4]; if(u32(view,0)!==SELECTION_MAGIC||![1,2].includes(version)||bytes[5]!==0||u16(view,6)!==bytes.length||u32(view,bytes.length-4)!==crc32(bytes.subarray(0,-4)))fail('Invalid active selection record');
+  const version=bytes[4]; if(u32(view,0)!==SELECTION_MAGIC||![1,2,3].includes(version)||bytes[5]!==0||u16(view,6)!==bytes.length||u32(view,bytes.length-4)!==crc32(bytes.subarray(0,-4)))fail('Invalid active selection record');
   const generation=u32(view,8);if(!generation)fail('Invalid active selection generation');
   if(version===1){if(bytes.length!==48)fail('Invalid active selection length');const size=bytes[12];if(!size||size>31||[...bytes.subarray(13+size,44)].some(byte=>byte!==0))fail('Invalid active selection pack ID');const packId=textDecoder.decode(bytes.subarray(13,13+size));if(!/^[a-z0-9_-]{1,31}$/.test(packId))fail('Invalid active selection pack ID');return{version,packId,generation};}
   let position=12;const readText=(label,maximum,grammar=false)=>{if(position>=bytes.length-4)fail(`${label} is truncated`);const size=bytes[position++];if(!size||size>maximum||position+size>bytes.length-4)fail(`${label} is invalid`);const value=textDecoder.decode(bytes.subarray(position,position+size));position+=size;if([...textEncoder.encode(value)].some(byte=>byte<0x20||byte>0x7e)||(grammar&&!/^[a-z0-9_-]{1,31}$/.test(value)))fail(`${label} is invalid`);return value;};
   const mapSetId=readText('Map set ID',31,true),attribution=readText('Attribution',127);if(position>=bytes.length-4)fail('Active map-set pack count is truncated');const count=bytes[position++];if(!count||count>8)fail('Active map-set pack count is invalid');const packs=[],seen=new Set();let total=0;
-  for(let packIndex=0;packIndex<count;packIndex++){const packId=readText('Pack ID',31,true);if(seen.has(packId))fail('Duplicate active map-set pack');seen.add(packId);if(position+2>bytes.length-4)fail('Active map-set span count is truncated');const spanCount=u16(view,position);position+=2;if(!spanCount||spanCount>MAX_ROW_SPANS||position+spanCount*13>bytes.length-4)fail('Active map-set span count is invalid');const rowSpans=[];for(let index=0;index<spanCount;index++){const zoom=bytes[position++],y=u32(view,position);position+=4;const xMinimum=u32(view,position);position+=4;const xMaximum=u32(view,position);position+=4;rowSpans.push({zoom,y,xMinimum,xMaximum});}validateSelectionSpans(rowSpans);total+=spanCount;if(total>MAX_ROW_SPANS)fail('Active map set exceeds the total row-span limit');packs.push({packId,rowSpans});}
+  for(let packIndex=0;packIndex<count;packIndex++){const packId=readText('Pack ID',31,true);if(seen.has(packId))fail('Duplicate active map-set pack');seen.add(packId);if(version===3){packs.push({packId});continue;}if(position+2>bytes.length-4)fail('Active map-set span count is truncated');const spanCount=u16(view,position);position+=2;if(!spanCount||spanCount>MAX_ROW_SPANS||position+spanCount*13>bytes.length-4)fail('Active map-set span count is invalid');const rowSpans=[];for(let index=0;index<spanCount;index++){const zoom=bytes[position++],y=u32(view,position);position+=4;const xMinimum=u32(view,position);position+=4;const xMaximum=u32(view,position);position+=4;rowSpans.push({zoom,y,xMinimum,xMaximum});}validateSelectionSpans(rowSpans);total+=spanCount;if(total>MAX_ROW_SPANS)fail('Active map set exceeds the total row-span limit');packs.push({packId,rowSpans});}
   if(position!==bytes.length-4)fail('Active map-set record has trailing data');return{version,mapSetId,attribution,packs,generation};
 }
 
@@ -603,51 +658,66 @@ async function removeOwnedPack(packs,packId,pack,receiptName,receipt,entries){
   }catch{return false;}
 }
 
-async function prepareActiveMapSet(pyxis,metadata,rowSpans){
+async function prepareActiveMapSet(pyxis,metadata){
   const slots=await Promise.all([readSelection(pyxis,'active-pack.0'),readSelection(pyxis,'active-pack.1')]);
   if(slots[0]&&slots[1]&&slots[0].generation===slots[1].generation&&JSON.stringify(slots[0])!==JSON.stringify(slots[1]))fail('Conflicting active map-set records');
   const valid=slots.filter(Boolean);const highest=Math.max(0,...valid.map(slot=>slot.generation));if(highest===0xffffffff)fail('Active selection generation is exhausted');
   const current=valid.sort((left,right)=>right.generation-left.generation)[0];
   const mapSets=await getDirectory(pyxis,'map-sets');const styleName=`${metadata.mapSetId}.pmas`;
   const installed=await readStyleSelection(mapSets,styleName);
-  if(installed&&(installed.version!==2||installed.mapSetId!==metadata.mapSetId||installed.attribution!==metadata.attribution))fail('Installed style record does not match selected map set');
-  const composition=installed||(current?.version===2&&current.mapSetId===metadata.mapSetId?current:null);
+  if(installed&&(![2,3].includes(installed.version)||installed.mapSetId!==metadata.mapSetId||installed.attribution!==metadata.attribution))fail('Installed style record does not match selected map set');
+  const composition=installed||([2,3].includes(current?.version)&&current.mapSetId===metadata.mapSetId?current:null);
   let packs=[];
   if(composition){
     if(composition.attribution!==metadata.attribution)fail('Installed map set attribution does not match');
     packs=composition.packs.filter(pack=>pack.packId!==metadata.packId);
   }
-  packs.unshift({packId:metadata.packId,rowSpans});
+  packs.unshift({packId:metadata.packId});
   const target=!slots[0]?'active-pack.0':!slots[1]?'active-pack.1':slots[0].generation<=slots[1].generation?'active-pack.0':'active-pack.1';
   const record=encodeActiveMapSet({generation:highest+1,mapSetId:metadata.mapSetId,attribution:metadata.attribution,packs});
   return {target,record,packs,mapSets,styleName};
 }
 
-async function activateMapSet(pyxis,metadata,rowSpans){
-  const {target,record,mapSets,styleName}=await prepareActiveMapSet(pyxis,metadata,rowSpans);
+async function activateMapSet(pyxis,metadata){
+  const {target,record,mapSets,styleName}=await prepareActiveMapSet(pyxis,metadata);
   await writeVerified(mapSets,styleName,record);const installed=decodeActiveSelection(await fileBytes(mapSets,styleName));
-  if(installed.version!==2||installed.mapSetId!==metadata.mapSetId||installed.packs[0].packId!==metadata.packId)fail('Style map-set verification failed');
+  if(installed.version!==3||installed.mapSetId!==metadata.mapSetId||installed.packs[0].packId!==metadata.packId)fail('Style map-set verification failed');
   await writeVerified(pyxis,target,record);const selected=decodeActiveSelection(await fileBytes(pyxis,target));
-  if(selected.version!==2||selected.mapSetId!==metadata.mapSetId||selected.packs[0].packId!==metadata.packId)fail('Active map-set verification failed');
+  if(selected.version!==3||selected.mapSetId!==metadata.mapSetId||selected.packs[0].packId!==metadata.packId)fail('Active map-set verification failed');
   return {selectionFile:target,styleFile:styleName,enabledPacks:selected.packs.map(pack=>pack.packId)};
+}
+
+async function verifyExactDirectory(directory, expected, label){
+  const remaining=new Map(expected);
+  for await(const [name,handle] of directory.entries()){
+    const kind=remaining.get(name);
+    if(!kind||handle.kind!==kind)fail(`Unexpected existing pack entry: ${label}/${name}`);
+    remaining.delete(name);
+  }
+  if(remaining.size)fail(`Existing pack is missing: ${label}/${remaining.keys().next().value}`);
 }
 
 async function verifyExistingPack(pack,archive,report,manifest){
   if(!equalBytes(await fileBytes(pack,'manifest.pmp'),manifest))fail('Existing pack does not match this ZIP and metadata');
+  await verifyExactDirectory(pack,new Map([['manifest.pmp','file'],['tiles','directory']]),'pack');
   const tiles=await getDirectory(pack,'tiles',false);
-  for(const entry of report.entries){const zoom=await getDirectory(tiles,String(entry.zoom),false);const x=await getDirectory(zoom,String(entry.x),false);const actual=await fileBytes(x,`${entry.y}.png`);const expected=await blobBytes(archive,entry.dataOffset,entry.dataOffset+entry.size);if(!equalBytes(actual,expected))fail(`Existing pack tile differs: ${entry.name}`);}
+  const hierarchy=new Map();
+  for(const entry of report.entries){const zoom=String(entry.zoom),x=String(entry.x),name=`${entry.y}.png`;if(!hierarchy.has(zoom))hierarchy.set(zoom,new Map());if(!hierarchy.get(zoom).has(x))hierarchy.get(zoom).set(x,new Set());hierarchy.get(zoom).get(x).add(name);}
+  await verifyExactDirectory(tiles,new Map([...hierarchy.keys()].map(name=>[name,'directory'])),'tiles');
+  for(const [zoomName,xs] of hierarchy){const zoom=await getDirectory(tiles,zoomName,false);await verifyExactDirectory(zoom,new Map([...xs.keys()].map(name=>[name,'directory'])),`tiles/${zoomName}`);for(const [xName,names] of xs){const x=await getDirectory(zoom,xName,false);await verifyExactDirectory(x,new Map([...names].map(name=>[name,'file'])),`tiles/${zoomName}/${xName}`);}}
+  for(const entry of report.entries){const zoom=await getDirectory(tiles,String(entry.zoom),false);const x=await getDirectory(zoom,String(entry.x),false);const actual=await fileBytes(x,`${entry.y}.png`);const expected=await blobBytes(archive,entry.dataOffset,entry.dataOffset+entry.size);if(crc32(actual)!==entry.checksum)fail(`Existing pack tile checksum differs: ${entry.name}`);await validatePng(actual,entry.name);if(!equalBytes(actual,expected))fail(`Existing pack tile differs: ${entry.name}`);}
 }
 
 async function installMuiZipLocked({archive,rootDirectory,metadata,onProgress=()=>{}}){
   validateMetadata(metadata);if(!/^[a-z0-9_-]{1,31}$/.test(metadata.mapSetId||''))fail('Map set ID is invalid');const profile=getMuiStyleProfile(metadata.mapSetId);if(metadata.attribution!==profile.attribution||metadata.source!==profile.source||metadata.license!==profile.license)fail('Required style attribution or provenance was changed');if(!rootDirectory||rootDirectory.kind!=='directory')fail('Choose an SD-card directory');
   const report=await inspectMuiZip(archive,{onProgress});
   if(report.styleId&&report.styleId!==metadata.mapSetId)fail('MUI ZIP style does not match the selected map set');
-  const manifest=serializeSparseManifest(metadata,report.rowSpans,report.tileCount);const pyxis=await getDirectory(rootDirectory,'pyxis-map');
-  await prepareActiveMapSet(pyxis,metadata,report.rowSpans);const packs=await getDirectory(pyxis,'packs');
+  const manifest=serializeIndexlessManifest(metadata,report.minZoom,report.maxZoom,report.tileCount);const pyxis=await getDirectory(rootDirectory,'pyxis-map');
+  await prepareActiveMapSet(pyxis,metadata);const packs=await getDirectory(pyxis,'packs');
   let existing=null;try{existing=await packs.getDirectoryHandle(metadata.packId);}catch(error){if(error?.name!=='NotFoundError')throw error;}
   if(existing){
     let empty=true;for await(const _entry of existing.entries()){empty=false;break;}
-    if(!empty){await verifyExistingPack(existing,archive,report,manifest);try{const active=await activateMapSet(pyxis,metadata,report.rowSpans);return{...report,manifestBytes:manifest.length,resumed:true,...active};}catch(error){throw new Error(`Map pack is installed and verified, but activation failed: ${error.message}`);}}
+    if(!empty){await verifyExistingPack(existing,archive,report,manifest);try{const active=await activateMapSet(pyxis,metadata);return{...report,manifestBytes:manifest.length,resumed:true,...active};}catch(error){throw new Error(`Map pack is installed and verified, but activation failed: ${error.message}`);}}
   }
   const pack=existing||await getDirectory(packs,metadata.packId);await verifyNamedDirectory(packs,metadata.packId,pack,[]);let published=false;const receipt=new Uint8Array(16);crypto.getRandomValues(receipt);const receiptName=`.pyxis-install-owner-${[...receipt].map(byte=>byte.toString(16).padStart(2,'0')).join('')}`;
   try{
@@ -656,7 +726,7 @@ async function installMuiZipLocked({archive,rootDirectory,metadata,onProgress=()
     for(let index=0;index<report.entries.length;index++){const entry=report.entries[index];const zoom=await getDirectory(tiles,String(entry.zoom));const x=await getDirectory(zoom,String(entry.x));const bytes=await blobBytes(archive,entry.dataOffset,entry.dataOffset+entry.size);if(crc32(bytes)!==entry.checksum)fail(`ZIP changed during installation: ${entry.name}`);await validatePng(bytes,entry.name);await writeVerified(x,`${entry.y}.png`,bytes);onProgress({phase:'write',completed:index+1,total:report.tileCount});}
     await writeVerified(pack,'manifest.pmp',manifest);parseSparseManifest(await fileBytes(pack,'manifest.pmp'));published=true;
     try{await pack.removeEntry(receiptName);}catch(error){throw new Error(`Map pack is installed and verified, but its ownership receipt could not be removed: ${error.message}`);}
-    try{const active=await activateMapSet(pyxis,metadata,report.rowSpans);return{...report,manifestBytes:manifest.length,resumed:false,...active};}
+    try{const active=await activateMapSet(pyxis,metadata);return{...report,manifestBytes:manifest.length,resumed:false,...active};}
     catch(error){throw new Error(`Map pack is installed and verified, but activation failed; retry with the same ZIP and pack ID: ${error.message}`);}
   }catch(error){
     if(!published&&!(await removeOwnedPack(packs,metadata.packId,pack,receiptName,receipt,report.entries))){

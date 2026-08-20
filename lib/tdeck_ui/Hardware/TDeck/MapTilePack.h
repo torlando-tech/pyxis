@@ -62,6 +62,7 @@ public:
     static const std::size_t ACTIVE_SELECTION_SIZE = ActiveMapSetCodec::MAX_SERIALIZED_SIZE;
     static const std::size_t MAX_ACTIVE_PACKS = ActiveMapSetCodec::MAX_PACKS;
     static const std::size_t MAX_ACTIVE_ROW_SPANS = ActiveMapSetCodec::MAX_ROW_SPANS;
+    static const std::size_t RESOLUTION_CACHE_CAPACITY = 32U;
     static const std::size_t PATH_CAPACITY = 80U;
     static const std::size_t MANIFEST_BUFFER_CAPACITY = Pyxis::MapPackManifest::MAX_SERIALIZED_SIZE;
 
@@ -114,11 +115,20 @@ private:
         const std::uint8_t* span_bytes;
     };
 
+    struct ResolutionEntry {
+        TileKey key;
+        std::uint8_t pack_index;
+        std::uint8_t rank;
+        bool valid;
+    };
+
     MapTileStorage& storage_;
     Pyxis::MapPackManifest manifest_;
     ActivePackView active_packs_[MAX_ACTIVE_PACKS];
     std::uint8_t active_pack_count_;
     bool map_set_active_;
+    bool map_set_indexless_;
+    ResolutionEntry resolution_cache_[RESOLUTION_CACHE_CAPACITY];
     std::uint32_t selection_generation_;
     MapTilePackStatus status_;
     bool stream_open_;
@@ -147,8 +157,14 @@ private:
     static bool parseMapSetSelection(const std::uint8_t* input, std::size_t length,
                                      std::uint32_t& generation,
                                      Pyxis::MapPackManifest& metadata,
-                                     ActivePackView* packs, std::uint8_t& pack_count);
+                                     ActivePackView* packs, std::uint8_t& pack_count,
+                                     bool& indexless);
     static bool spanCovers(const ActivePackView& pack, const TileKey& key);
+    static bool sameKey(const TileKey& left, const TileKey& right);
+    void clearResolutionCache();
+    int findResolution(const TileKey& key);
+    void rememberResolution(const TileKey& key, std::uint8_t pack_index);
+    MapTilePackResult beginIndexless(const TileKey& key, std::uint32_t& size);
     static MapTilePackResult makePath(const char* pack_id, const TileKey* key,
                                       bool manifest, char* output, std::size_t capacity);
 };

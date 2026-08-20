@@ -77,6 +77,25 @@ def test_worker_predecodes_and_render_path_has_no_io():
     assert "MAX_COMPLETIONS_PER_TICK = 1" in text(UI / "MapScreen.h")
 
 
+def test_worker_stages_pixels_until_current_completion_is_admitted():
+    source = text(UI / "MapScreen.cpp")
+    header = text(UI / "MapScreen.h")
+    read_tile = function_body(source, "Pyxis::MapTileLoadResult MapScreen::readTile(")
+    compressed = function_body(
+        source, "Pyxis::MapTileLoadResult MapScreen::readCompressedTile(")
+    worker = function_body(source, "void MapScreen::workerLoop()")
+
+    assert "lv_color_t* worker_pixels_;" in header
+    assert "worker_pixels_" in read_tile
+    assert "worker_pixels_" in compressed
+    assert "tile_pixels_" not in read_tile
+    assert "tile_pixels_" not in compressed
+    assert "presenter_.publishCompletion(completion)" in worker
+    assert "std::memcpy(tile_pixels_[completion.slot_index], worker_pixels_" in worker
+    assert (worker.index("presenter_.publishCompletion(completion)") <
+            worker.index("std::memcpy(tile_pixels_[completion.slot_index], worker_pixels_"))
+
+
 def test_unchanged_model_does_not_starve_released_tile_requests():
     source = text(UI / "MapScreen.cpp")
     presenter = text(UI / "MapScreenPresenter.h")

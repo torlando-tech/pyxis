@@ -99,7 +99,9 @@ private:
     std::uint32_t style_lifecycle_epoch_;
     bool style_lifecycle_exhausted_;
     std::atomic<std::uint32_t> pack_refresh_epoch_;
+    std::atomic<std::uint32_t> requested_frame_epoch_;
     std::uint8_t* compressed_staging_;
+    lv_color_t* worker_pixels_;
     SemaphoreHandle_t state_mutex_;
     TaskHandle_t worker_task_;
     std::atomic<bool> stop_requested_;
@@ -126,6 +128,7 @@ private:
     void stopWorker();
     bool lockState(TickType_t ticks = portMAX_DELAY);
     void unlockState();
+    void publishFrameEpoch();
     void setPlaceholder(std::size_t index);
     void setStatusFor(Pyxis::MapTileLoadResult result);
     void refreshVisibleStatus();
