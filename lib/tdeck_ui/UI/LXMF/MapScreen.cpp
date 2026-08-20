@@ -60,12 +60,19 @@ private:
 
 class AtomicStopSource final : public Pyxis::MapTileStopSource {
 public:
-    explicit AtomicStopSource(const std::atomic<bool>& stop) : stop_(stop) {}
+    AtomicStopSource(const std::atomic<bool>& stop,
+                     const std::atomic<std::uint32_t>& frame_epoch,
+                     std::uint32_t expected_frame_epoch)
+        : stop_(stop), frame_epoch_(frame_epoch),
+          expected_frame_epoch_(expected_frame_epoch) {}
     bool stopRequested() const override {
-        return stop_.load(std::memory_order_acquire);
+        return stop_.load(std::memory_order_acquire) ||
+            frame_epoch_.load(std::memory_order_acquire) != expected_frame_epoch_;
     }
 private:
     const std::atomic<bool>& stop_;
+    const std::atomic<std::uint32_t>& frame_epoch_;
+    std::uint32_t expected_frame_epoch_;
 };
 
 lv_obj_t* createToolbarButton(lv_obj_t* parent, const char* text,
@@ -112,7 +119,8 @@ MapScreen::MapScreen(lv_obj_t* parent)
       pack_attribution_{},
       screen_visible_(false), style_lifecycle_epoch_(0U),
       style_lifecycle_exhausted_(false), pack_refresh_epoch_(0U),
-      compressed_staging_(nullptr),
+      requested_frame_epoch_(0U),
+      compressed_staging_(nullptr), worker_pixels_(nullptr),
       state_mutex_(nullptr), worker_task_(nullptr),
       worker_exited_(true), worker_started_(false),
       requests_released_(false),
@@ -120,10 +128,13 @@ MapScreen::MapScreen(lv_obj_t* parent)
       last_drag_point_{0, 0}, back_callback_() {
     LVGL_LOCK();
     state_mutex_ = xSemaphoreCreateMutex();
-    // Reserve the mandatory SD/PNG staging buffer before optional decoded
-    // cache entries. A partial cache must never prevent the worker starting.
+    // Reserve mandatory compressed and RGB565 worker staging before optional
+    // decoded-cache entries. Stale work must never touch a visible LVGL buffer.
     compressed_staging_ = static_cast<std::uint8_t*>(heap_caps_malloc(
         MAX_COMPRESSED_TILE_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    worker_pixels_ = static_cast<lv_color_t*>(heap_caps_malloc(
+        TILE_PIXEL_COUNT * sizeof(lv_color_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
 
     screen_ = lv_obj_create(parent ? parent : lv_scr_act());
     lv_obj_set_size(screen_, 320, 240);
@@ -292,6 +303,8 @@ MapScreen::~MapScreen() {
     }
     if (compressed_staging_) heap_caps_free(compressed_staging_);
     compressed_staging_ = nullptr;
+    if (worker_pixels_) heap_caps_free(worker_pixels_);
+    worker_pixels_ = nullptr;
     if (state_mutex_) vSemaphoreDelete(state_mutex_);
     state_mutex_ = nullptr;
 }
@@ -304,9 +317,14 @@ void MapScreen::unlockState() {
     xSemaphoreGive(state_mutex_);
 }
 
+void MapScreen::publishFrameEpoch() {
+    requested_frame_epoch_.store(presenter_.frameEpoch(), std::memory_order_release);
+    if (worker_task_) xTaskNotifyGive(worker_task_);
+}
+
 bool MapScreen::startWorker() {
     if (worker_started_) return true;
-    if (!state_mutex_ || !compressed_staging_) return false;
+    if (!state_mutex_ || !compressed_staging_ || !worker_pixels_) return false;
     stop_requested_.store(false, std::memory_order_release);
     worker_exited_.store(false, std::memory_order_release);
     const BaseType_t created = xTaskCreatePinnedToCore(
@@ -521,6 +539,7 @@ void MapScreen::workerLoop() {
                 }
                 if (success) {
                     presenter_.invalidateTiles();
+                    publishFrameEpoch();
                     requests_released_ = false;
                 }
                 unlockState();
@@ -563,7 +582,16 @@ void MapScreen::workerLoop() {
         completion.key = request.key;
         completion.result = loadTile(request);
         if (lockState(portMAX_DELAY)) {
-            (void)presenter_.publishCompletion(completion);
+            if (completion.result == Pyxis::MapTileLoadResult::READY &&
+                (completion.slot_index >= TILE_COUNT ||
+                 !tile_pixels_[completion.slot_index])) {
+                completion.result = Pyxis::MapTileLoadResult::IO_ERROR;
+            }
+            const bool published = presenter_.publishCompletion(completion);
+            if (published && completion.result == Pyxis::MapTileLoadResult::READY) {
+                std::memcpy(tile_pixels_[completion.slot_index], worker_pixels_,
+                            TILE_PIXEL_COUNT * sizeof(lv_color_t));
+            }
             unlockState();
         }
     }
@@ -578,10 +606,8 @@ Pyxis::MapTileLoadResult MapScreen::loadTile(
 
 Pyxis::MapTileLoadResult MapScreen::readTile(
     const Pyxis::MapTileRequest& request) {
-    if (request.slot_index < TILE_COUNT && tile_pixels_[request.slot_index] &&
-        decoded_tile_cache_.get(
-            request.key,
-            reinterpret_cast<std::uint16_t*>(tile_pixels_[request.slot_index]),
+    if (worker_pixels_ && decoded_tile_cache_.get(
+            request.key, reinterpret_cast<std::uint16_t*>(worker_pixels_),
             TILE_PIXEL_COUNT)) {
         return Pyxis::MapTileLoadResult::READY;
     }
@@ -592,7 +618,7 @@ Pyxis::MapTileLoadResult MapScreen::readTile(
 Pyxis::MapTileLoadResult MapScreen::readCompressedTile(
     const Pyxis::MapTileRequest& request) {
     PackReadStream pack_stream(pack_);
-    AtomicStopSource stop(stop_requested_);
+    AtomicStopSource stop(stop_requested_, requested_frame_epoch_, request.frame_epoch);
     std::size_t total = 0U;
     const Pyxis::MapTileStreamResult read = Pyxis::MapTileStreamReader::readExact(
         pack_stream, stop, request.key, compressed_staging_, MAX_COMPRESSED_TILE_BYTES,
@@ -606,10 +632,14 @@ Pyxis::MapTileLoadResult MapScreen::readCompressedTile(
     if (read == Pyxis::MapTileStreamResult::TOO_LARGE) {
         return Pyxis::MapTileLoadResult::TOO_LARGE;
     }
+    if (read == Pyxis::MapTileStreamResult::CANCELLED) {
+        return Pyxis::MapTileLoadResult::CANCELLED;
+    }
     if (read != Pyxis::MapTileStreamResult::OK) {
         return Pyxis::MapTileLoadResult::IO_ERROR;
     }
 
+    if (stop.stopRequested()) return Pyxis::MapTileLoadResult::CANCELLED;
     unsigned char* rgb = nullptr;
     unsigned width = 0U;
     unsigned height = 0U;
@@ -633,19 +663,27 @@ Pyxis::MapTileLoadResult MapScreen::readCompressedTile(
         if (rgb) lv_mem_free(rgb);
         return Pyxis::MapTileLoadResult::INVALID_PNG;
     }
-    if (request.slot_index >= TILE_COUNT || !tile_pixels_[request.slot_index]) {
+    if (stop.stopRequested()) {
+        lv_mem_free(rgb);
+        return Pyxis::MapTileLoadResult::CANCELLED;
+    }
+    if (!worker_pixels_) {
         lv_mem_free(rgb);
         return Pyxis::MapTileLoadResult::IO_ERROR;
     }
-    lv_color_t* pixels = tile_pixels_[request.slot_index];
     for (std::size_t index = 0; index < TILE_PIXEL_COUNT; ++index) {
+        if ((index & 255U) == 0U && stop.stopRequested()) {
+            lv_mem_free(rgb);
+            return Pyxis::MapTileLoadResult::CANCELLED;
+        }
         const std::size_t source = index * 3U;
-        pixels[index] = lv_color_make(rgb[source], rgb[source + 1U],
-                                      rgb[source + 2U]);
+        worker_pixels_[index] = lv_color_make(rgb[source], rgb[source + 1U],
+                                              rgb[source + 2U]);
     }
     lv_mem_free(rgb);
+    if (stop.stopRequested()) return Pyxis::MapTileLoadResult::CANCELLED;
     (void)decoded_tile_cache_.put(
-        request.key, reinterpret_cast<const std::uint16_t*>(pixels),
+        request.key, reinterpret_cast<const std::uint16_t*>(worker_pixels_),
         TILE_PIXEL_COUNT);
     return Pyxis::MapTileLoadResult::READY;
 }
@@ -667,6 +705,7 @@ void MapScreen::updateModel(const Pyxis::MapView::Request& request) {
         requests_released_ = false;
     }
     (void)presenter_.buildFrame(request);
+    publishFrameEpoch();
     unlockState();
 }
 
@@ -750,8 +789,8 @@ void MapScreen::applyFrame() {
     } else if (style_selector_.state() == Pyxis::MapStyleSelector::State::ERROR) {
         lv_label_set_text(status_label_, "Style switch failed");
     }
-    // Non-ready images are now detached under LVGL_LOCK, so the worker may
-    // safely decode into their permanent buffers without a draw race.
+    // Non-ready images are detached under LVGL_LOCK before requests are
+    // released. The worker still publishes only from its private staging buffer.
     requests_released_ = true;
     unlockState();
     if (worker_task_) xTaskNotifyGive(worker_task_);
@@ -819,6 +858,7 @@ void MapScreen::show() {
     if (worker_task_) xTaskNotifyGive(worker_task_);
     if (lockState(pdMS_TO_TICKS(100))) {
         presenter_.show();
+        publishFrameEpoch();
         unlockState();
     }
     lv_obj_clear_flag(screen_, LV_OBJ_FLAG_HIDDEN);
@@ -850,6 +890,7 @@ void MapScreen::hide() {
         }
         (void)style_selector_.clearError();
         presenter_.hide();
+        publishFrameEpoch();
         unlockState();
     }
     if (worker_task_) xTaskNotifyGive(worker_task_);
@@ -873,6 +914,7 @@ void MapScreen::pan(double dx, double dy) {
     if (!lockState(pdMS_TO_TICKS(100))) return;
     center_initialized_ = true;
     (void)presenter_.panPixels(dx, dy);
+    publishFrameEpoch();
     unlockState();
 }
 
@@ -886,6 +928,7 @@ void MapScreen::onZoomIn(lv_event_t* event) {
     if (screen && screen->lockState(pdMS_TO_TICKS(100))) {
         screen->center_initialized_ = true;
         (void)screen->presenter_.zoomBy(1);
+        screen->publishFrameEpoch();
         screen->unlockState();
     }
 }
@@ -895,6 +938,7 @@ void MapScreen::onZoomOut(lv_event_t* event) {
     if (screen && screen->lockState(pdMS_TO_TICKS(100))) {
         screen->center_initialized_ = true;
         (void)screen->presenter_.zoomBy(-1);
+        screen->publishFrameEpoch();
         screen->unlockState();
     }
 }
@@ -905,6 +949,7 @@ void MapScreen::onRecenter(lv_event_t* event) {
     const bool centered = screen->presenter_.recenter(
         screen->has_location_fix_, screen->current_location_);
     if (centered) screen->center_initialized_ = true;
+    screen->publishFrameEpoch();
     screen->unlockState();
     if (!centered) lv_label_set_text(screen->status_label_, "No GPS fix");
 }

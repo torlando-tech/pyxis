@@ -85,7 +85,7 @@ void testEveryOpenedFailureCloses() {
 
 void testStopMidReadCloses() {
     beginTest(); Stop stop; Stream stream; stream.stop = &stop; std::uint8_t output[8] = {}; std::size_t total = 0U;
-    CHECK(MapTileStreamReader::readExact(stream, stop, TileKey{1U,0U,0U}, output, sizeof(output), 1U, total) == MapTileStreamResult::IO_ERROR);
+    CHECK(MapTileStreamReader::readExact(stream, stop, TileKey{1U,0U,0U}, output, sizeof(output), 1U, total) == MapTileStreamResult::CANCELLED);
     CHECK(stream.read_calls == 1U && stream.end_calls == 1U);
 }
 }
