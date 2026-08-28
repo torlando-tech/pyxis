@@ -253,6 +253,9 @@
         }
         .map-field label { display: block; color: var(--muted); font-size: 0.875rem; margin-bottom: 0.4rem; }
         .map-field input, .map-field select { width: 100%; box-sizing: border-box; color: var(--text); background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; padding: 0.65rem; }
+        .map-field input[type="file"] { background: transparent; border: none; border-radius: 0; padding: 0; }
+        .map-archive-filename { font-size: 0.8rem; color: var(--muted); margin-top: 0.4rem; overflow-wrap: anywhere; }
+        .map-archive-filename:empty { display: none; }
         .map-field select { color-scheme: dark; }
         .map-field select option { color: var(--text); background: var(--card); }
         .map-status { margin: 0.8rem 0; color: var(--muted); overflow-wrap: anywhere; }
@@ -342,6 +345,7 @@
                 <div class="map-field">
                     <label for="map-archive">Map tile ZIP</label>
                     <input id="map-archive" type="file" accept=".zip,application/zip">
+                    <div id="map-archive-filename" class="map-archive-filename"></div>
                 </div>
                 <div class="map-field">
                     <label for="map-style">Map style</label>
@@ -363,7 +367,7 @@
                 </div>
             </div>
             <p class="map-note">
-                Source profile and style are read from the selected MUI ZIP. Rootless XYZ ZIPs use the style selected above.<br>
+                Source profile and style are read from the selected MUI ZIP. Rootless XYZ ZIPs default to OSM Bright; change the style above if needed.<br>
                 Attribution: Map data (c) OpenStreetMap contributors — ODbL-1.0 data; style terms at source.<br>
                 Compatible packs of the same style are enabled together. The newest pack takes priority where coverage overlaps.
             </p>
@@ -422,6 +426,7 @@
         const customFirmwareInput = document.getElementById('custom-firmware');
         const customFirmwareStatus = document.getElementById('custom-firmware-status');
         const mapArchiveInput = document.getElementById('map-archive');
+        const mapArchiveFilename = document.getElementById('map-archive-filename');
         const mapStyleSelect = document.getElementById('map-style');
         const mapPackNameInput = document.getElementById('map-pack-name');
         const mapPackIdInput = document.getElementById('map-pack-id');
@@ -448,6 +453,10 @@
             mapInstallStatus.className = `map-status ${state}`.trim();
         }
 
+        function setMapArchiveFilename(file) {
+            mapArchiveFilename.textContent = file ? `Selected: ${file.name}` : '';
+        }
+
         function slugifyMapName(value) {
             return value.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 31);
         }
@@ -458,7 +467,7 @@
         mapPackIdInput.addEventListener('input', () => { mapPackIdInput.dataset.edited = 'true'; });
 
         function setReadyMapStatus(report, style) {
-            setMapStatus(`Ready: ${style.label}, ${report.tileCount} tiles, zoom ${report.minZoom}-${report.maxZoom}, ${report.rowSpans.length} sparse row spans, ${report.totalBytes.toLocaleString()} bytes.`, 'success');
+            setMapStatus(`Ready: ${style.label}, ${report.tileCount} tiles, zoom ${report.minZoom}-${report.maxZoom}, ${report.totalBytes.toLocaleString()} bytes.`, 'success');
         }
 
         mapStyleSelect.addEventListener('change', () => {
@@ -476,7 +485,8 @@
             mapStyleSelect.disabled = false;
             mapStyleSelect.value = '';
             const file = this.files?.[0];
-            if (!file) { setMapStatus('Choose a ZIP to validate it locally. No tiles are uploaded.'); return; }
+            if (!file) { setMapStatus('Choose a ZIP to validate it locally. No tiles are uploaded.'); setMapArchiveFilename(null); return; }
+            setMapArchiveFilename(file);
             const suggestion = suggestMapIdentity(file.name);
             mapPackNameInput.value = suggestion.name;
             mapPackIdInput.value = suggestion.packId;
@@ -501,11 +511,15 @@
                     mapInstallBtn.disabled = false;
                     setReadyMapStatus(report, style);
                 } else {
-                    setMapStatus('Select map style to enable this validated rootless XYZ ZIP.');
+                    const defaultStyle = resolveMuiStyleProfile(null, 'osm-bright');
+                    mapStyleSelect.value = defaultStyle.id;
+                    mapInstallBtn.disabled = false;
+                    setReadyMapStatus(report, defaultStyle);
                 }
             } catch (error) {
                 if (token !== mapSelectionToken) return;
                 this.value = '';
+                setMapArchiveFilename(null);
                 mapStyleSelect.disabled = false;
                 setMapStatus(error.message, 'error');
             }

@@ -66,12 +66,15 @@ bool ActiveMapSetCodec::decode(const std::uint8_t* input, std::size_t length,
                                ActiveMapSetView& output) {
     static const std::uint8_t magic[4] = {'P', 'M', 'A', 'S'};
     if (input == NULL || length < 16U || length > MAX_SERIALIZED_SIZE ||
-        std::memcmp(input, magic, sizeof(magic)) != 0 || input[4] != 2U || input[5] != 0U ||
+        std::memcmp(input, magic, sizeof(magic)) != 0 ||
+        (input[4] != SPAN_FORMAT_VERSION && input[4] != INDEXLESS_FORMAT_VERSION) ||
+        input[5] != 0U ||
         readU16(input + 6U) != length || readU32(input + length - 4U) != crc32(input, length - 4U)) {
         return false;
     }
 
     ActiveMapSetView candidate = {};
+    candidate.format_version = input[4];
     candidate.generation = readU32(input + 8U);
     if (candidate.generation == 0U) return false;
     const std::size_t end = length - 4U;
@@ -89,6 +92,11 @@ bool ActiveMapSetCodec::decode(const std::uint8_t* input, std::size_t length,
         if (!readString(input, end, position, pack.pack_id, sizeof(pack.pack_id), true)) return false;
         for (std::uint8_t previous = 0U; previous < pack_index; ++previous) {
             if (std::strcmp(pack.pack_id, candidate.packs[previous].pack_id) == 0) return false;
+        }
+        if (candidate.format_version == INDEXLESS_FORMAT_VERSION) {
+            pack.span_count = 0U;
+            pack.span_bytes = NULL;
+            continue;
         }
         if (position > end || end - position < 2U) return false;
         pack.span_count = readU16(input + position); position += 2U;

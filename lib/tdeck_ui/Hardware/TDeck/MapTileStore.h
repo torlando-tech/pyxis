@@ -70,7 +70,12 @@ public:
 class MapTileStore {
 public:
     static const std::uint8_t MAX_ZOOM = 22U;
-    static const std::size_t PATH_CAPACITY = 64U;
+    // Mount prefix ("/sd" + NUL) plus the longest device-relative path:
+    // /pyxis-map/packs/<31-char pack ID>/tiles/<z>/<x>/<y>.png with
+    // full-width tile coordinates (80 characters, 81 with NUL). 80 gives an
+    // 84-byte mount buffer; MapTilePack::PATH_CAPACITY (80) is sized for
+    // the device-relative form and matches this bound.
+    static const std::size_t PATH_CAPACITY = 80U;
     static const std::uint16_t HARD_MAX_ENTRIES = 128U;
 
     MapTileStore(MapTileStorage& storage, const TileStoreConfig& config);

@@ -264,13 +264,17 @@ test('rejects altered required style attribution before touching the SD root', a
   assert.equal(root.children.has('pyxis-map'), false);
 });
 
-test('active map-set wire format matches the cross-language golden record', () => {
+test('indexless active map-set wire format contains ordered pack IDs only', () => {
   const record = encodeActiveMapSet({generation:1,mapSetId:'osm-bright',attribution:'Map data attribution',packs:[
-    {packId:'detail',rowSpans:[{zoom:2,y:1,xMinimum:1,xMaximum:1},{zoom:4,y:5,xMinimum:5,xMaximum:5}]},
-    {packId:'state',rowSpans:[{zoom:2,y:1,xMinimum:1,xMaximum:2}]},
+    {packId:'detail'},
+    {packId:'overview'},
   ]});
-  assert.equal(Buffer.from(record).toString('hex'), '504d415302006900010000000a6f736d2d627269676874144d61702064617461206174747269627574696f6e020664657461696c020002010000000100000001000000040500000005000000050000000573746174650100020100000001000000020000009de230d6');
-  assert.deepEqual(decodeActiveSelection(record).packs.map(pack => pack.packId), ['detail','state']);
+  const decoded = decodeActiveSelection(record);
+  assert.equal(decoded.version, 3);
+  assert.deepEqual(decoded.packs.map(pack => pack.packId), ['detail','overview']);
+  assert(record.length < 256);
+  assert.equal(Buffer.from(record).toString('hex'),
+    '504d415303004100010000000a6f736d2d627269676874144d61702064617461206174747269627574696f6e020664657461696c086f766572766965772bbcaa3f');
 });
 
 test('accepts a sanitized downloader-shaped rootless stored ZIP fixture', async () => {
@@ -363,11 +367,7 @@ test('accepts a sanitized downloader-shaped rootless stored ZIP fixture', async 
   assert.equal(report.tileCount, 3);
   assert.equal(report.minZoom, 0);
   assert.equal(report.maxZoom, 2);
-  assert.deepEqual(report.rowSpans, [
-    {zoom: 0, y: 0, xMinimum: 0, xMaximum: 0},
-    {zoom: 1, y: 0, xMinimum: 0, xMaximum: 0},
-    {zoom: 2, y: 1, xMinimum: 1, xMaximum: 1},
-  ]);
+  assert.equal('rowSpans' in report, false);
 
   const root = new MemoryDirectoryHandle();
   const result = await installMuiZip({archive, rootDirectory: root, metadata});
@@ -389,10 +389,7 @@ test('inspects and transactionally installs a sparse stored MUI XYZ ZIP', async 
   assert.equal(report.minZoom, 2);
   assert.equal(report.maxZoom, 2);
   assert.equal(report.styleId, null);
-  assert.deepEqual(report.rowSpans, [
-    {zoom: 2, y: 1, xMinimum: 1, xMaximum: 2},
-    {zoom: 2, y: 2, xMinimum: 1, xMaximum: 1},
-  ]);
+  assert.equal('rowSpans' in report, false);
 
   const root = new MemoryDirectoryHandle();
   const result = await installMuiZip({archive, rootDirectory: root, metadata});
@@ -400,12 +397,12 @@ test('inspects and transactionally installs a sparse stored MUI XYZ ZIP', async 
   const pack = await child(root, 'pyxis-map/packs/overview');
   const manifest = pack.children.get('manifest.pmp').bytes;
   assert.equal(Buffer.from(manifest.subarray(0, 4)).toString('ascii'), 'PMPK');
-  assert.equal(manifest[4], 2);
+  assert.equal(manifest[4], 3);
   const parsed = parseSparseManifest(manifest);
   assert.equal(parsed.tileCount, 3);
-  assert.equal(parsed.rowSpans.length, 2);
+  assert.equal(parsed.rowSpans.length, 0);
   const selection = decodeActiveSelection((await child(root, 'pyxis-map/active-pack.0')).bytes);
-  assert.equal(selection.version, 2);
+  assert.equal(selection.version, 3);
   assert.equal(selection.mapSetId, 'osm-bright');
   assert.deepEqual(selection.packs.map(pack => pack.packId), ['overview']);
   assert.equal(selection.generation, 1);
@@ -449,6 +446,39 @@ test('inspects and transactionally installs a sparse stored MUI XYZ ZIP', async 
   assert.deepEqual(resumedSelection.packs.map(pack => pack.packId), ['overview-two','overview-three','overview']);
 });
 
+test('resume rejects extra files that indexless firmware could display', async () => {
+  const archive = storedZip([['2/1/1.png', PNG]]);
+  const root = new MemoryDirectoryHandle();
+  await installMuiZip({archive, rootDirectory:root, metadata});
+  const tiles = await child(root, 'pyxis-map/packs/overview/tiles');
+  const zoom = await tiles.getDirectoryHandle('9', {create:true});
+  const x = await zoom.getDirectoryHandle('1', {create:true});
+  const extra = await x.getFileHandle('1.png', {create:true});
+  extra.bytes = new Uint8Array(PNG);
+
+  await assert.rejects(
+    installMuiZip({archive, rootDirectory:root, metadata}),
+    /unexpected existing pack entry/i,
+  );
+});
+
+test('resume repeats PNG signature admission against the selected ZIP', async () => {
+  const validArchive = storedZip([['2/1/1.png', PNG]]);
+  const root = new MemoryDirectoryHandle();
+  await installMuiZip({archive:validArchive, rootDirectory:root, metadata});
+
+  const malformed = Buffer.from(PNG);
+  malformed[0] ^= 0xff;
+  const installed = await child(root, 'pyxis-map/packs/overview/tiles/2/1/1.png');
+  installed.bytes = new Uint8Array(malformed);
+  const forgedArchive = storedZip([['2/1/1.png', malformed]]);
+
+  await assert.rejects(
+    installMuiZip({archive:forgedArchive, rootDirectory:root, metadata}),
+    /invalid PNG signature/i,
+  );
+});
+
 test('preserves separate installed-style PMAS snapshots when activation changes', async () => {
   const root = new MemoryDirectoryHandle();
   const bright = getMuiStyleProfile('osm-bright');
@@ -482,14 +512,21 @@ test('preserves separate installed-style PMAS snapshots when activation changes'
 test('rejects traversal, duplicate keys, unsupported compression, and malformed PNGs', async () => {
   await assert.rejects(inspectMuiZip(storedZip([['../2/1/1.png', PNG]])), /path|traversal/i);
   await assert.rejects(inspectMuiZip(storedZip([['2/1/1.png', PNG], ['2/1/1.png', PNG]])), /duplicate/i);
-  const malformed = Buffer.from(PNG); malformed[12] ^= 1;
-  await assert.rejects(inspectMuiZip(storedZip([['2/1/1.png', malformed]])), /PNG/i);
-  const invalidTransparency = pngWithChunkBeforeIdat(PNG, 'tRNS', [0]);
-  await assert.rejects(inspectMuiZip(storedZip([['2/1/1.png', invalidTransparency]])), /transparency/i);
-  const badAdler = rewriteFirstIdat(PNG, payload => {const changed=Buffer.from(payload);changed[changed.length-1]^=1;return changed;});
-  await assert.rejects(inspectMuiZip(storedZip([['2/1/1.png', badAdler]])), /checksum|zlib|deflate/i);
-  const trailingDeflate = rewriteFirstIdat(PNG, payload => Buffer.concat([payload.subarray(0,-4),Buffer.from([0]),payload.subarray(-4)]));
-  await assert.rejects(inspectMuiZip(storedZip([['2/1/1.png', trailingDeflate]])), /trailing|zlib|deflate/i);
+  const malformed = Buffer.from(PNG); malformed[0] ^= 1;
+  await assert.rejects(installMuiZip({
+    archive:storedZip([['2/1/1.png', malformed]]),
+    rootDirectory:new MemoryDirectoryHandle(), metadata,
+  }), /PNG/i);
+});
+
+test('install rejects signature-valid PNGs the firmware cannot decode', async () => {
+  const wrongSize = Buffer.from(PNG);
+  wrongSize.writeUInt32BE(128, 16);
+  wrongSize.writeUInt32BE(crc32(wrongSize.subarray(12, 29)), 29);
+  await assert.rejects(installMuiZip({
+    archive:storedZip([['2/1/1.png', wrongSize]]),
+    rootDirectory:new MemoryDirectoryHandle(), metadata,
+  }), /256x256/i);
 });
 
 test('removes only its receipt-owned contents after an interrupted write', async () => {
@@ -671,7 +708,7 @@ test('map-set capacity is checked before a ninth pack is published', async () =>
   const slot = await pyxis.getFileHandle('active-pack.0', {create:true});
   const writable = await slot.createWritable();
   await writable.write(encodeActiveMapSet({generation:8,mapSetId:'osm-bright',attribution:metadata.attribution,packs:
-    Array.from({length:8}, (_,index) => ({packId:`pack-${index}`,rowSpans:[{zoom:2,y:1,xMinimum:1,xMaximum:1}]}))}));
+    Array.from({length:8}, (_,index) => ({packId:`pack-${index}`}))}));
   await writable.close();
   await assert.rejects(installMuiZip({archive,rootDirectory:root,metadata:{...metadata,packId:'pack-nine',name:'Pack Nine'}}), /active map set/i);
   assert.equal(pyxis.children.has('packs'), false);
