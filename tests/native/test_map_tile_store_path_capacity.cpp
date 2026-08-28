@@ -64,7 +64,7 @@ void beginTest() { ++tests_run; }
 
 const char* const kPackId = "world-osm-bright-z0-z9-20260801";  // 31 chars (max)
 const char* const kMapSetId = "osm-bright";
-const char* const kAttribution = "Map data (c) OpenStreetMap contributors";
+const char* const kAttribution = "(c) OpenMapTiles (c) OpenStreetMap contributors";
 
 // The production mount buffer (MapTileStoreSD.cpp): PATH_CAPACITY + 4 bytes
 // for the "/sd" prefix. The model store below pins the pre-fix width so the
@@ -419,8 +419,9 @@ int main(int argc, char** argv) {
         write_file(pmap + "/packs/" + kPackId + "/manifest.pmp", manifest);
         const auto write_tile = [&](std::uint8_t z, std::uint32_t x, std::uint32_t y,
                                     std::uint8_t seed) {
-            // The production store reads the literal "/sd" mount point.
-            write_file(tilePathFor(kPackId, z, x, y), make_tile(seed));
+            // The production store reads the literal "/sd" mount point, so the
+            // fixture must place tiles under /sd (device-relative path + prefix).
+            write_file(std::string("/sd") + tilePathFor(kPackId, z, x, y), make_tile(seed));
         };
         write_tile(3U, 7U, 7U, 0xA1U);
         write_tile(4U, 9U, 9U, 0xA4U);
