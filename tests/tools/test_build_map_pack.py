@@ -872,6 +872,115 @@ def test_activation_conflicting_slots_rejected_before_publishing(tmp_path: Path)
     assert not (sd / "pyxis-map/packs/conflict-pack").exists()
 
 
+def test_interrupted_activation_retry_converges_records(tmp_path: Path) -> None:
+    # A run interrupted between the style-record and slot-record commits
+    # leaves a published pack with stale records; re-running the same
+    # source must verify the existing pack and converge both records
+    # (Greploop round 3).
+    tool = load_tool()
+    policy = tool.STYLE_POLICIES["osm-bright"]
+    sd = tmp_path / "sd"
+    (sd / "pyxis-map").mkdir(parents=True)
+    source = tmp_path / "xyz"
+    put_tile(source, 1, 0, 0)
+
+    real_renameat2 = tool._renameat2
+    interrupted = {"done": False}
+
+    def interrupted_renameat2(oldfd, oldpath, newfd, newpath, flags):
+        # Interrupt only the slot-record replacement (flags 0, newpath is
+        # an active-pack slot). Pack staging (flags 1) and the style-record
+        # commit (flags 0, newpath osm-bright.pmas) must proceed so the
+        # failure lands between the two record commits.
+        if not interrupted["done"] and flags == 0 and newpath in (b"active-pack.0",
+                                                                  b"active-pack.1"):
+            interrupted["done"] = True
+            raise OSError("injected interruption between record commits")
+        return real_renameat2(oldfd, oldpath, newfd, newpath, flags)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(tool, "_renameat2", interrupted_renameat2)
+    try:
+        with pytest.raises(tool.PackError, match="cannot atomically replace"):
+            tool.build_map_pack(source, sd, pack_id="resume-pack", name="R",
+                                attribution=policy["attribution"], source=policy["source"],
+                                license=policy["license"], style="osm-bright", activate=True)
+    finally:
+        monkeypatch.undo()
+
+    # The pack published; the style record committed; the slot did not.
+    assert (sd / "pyxis-map/packs/resume-pack/manifest.pmp").is_file()
+    style_path = sd / "pyxis-map/map-sets/osm-bright.pmas"
+    assert style_path.is_file()
+    assert not (sd / "pyxis-map/active-pack.0").exists()
+    assert not (sd / "pyxis-map/active-pack.1").exists()
+
+    # Retry with the same source: the pack verifies byte-identical and
+    # the records converge.
+    result = tool.build_map_pack(source, sd, pack_id="resume-pack", name="R",
+                                 attribution=policy["attribution"], source=policy["source"],
+                                 license=policy["license"], style="osm-bright", activate=True)
+    assert result == sd / "pyxis-map/packs/resume-pack"
+    slot_data = (sd / "pyxis-map/active-pack.0").read_bytes()
+    decoded = tool.decode_active_selection(slot_data)
+    assert decoded["packs"][0] == "resume-pack"
+    assert tool.decode_active_selection(style_path.read_bytes()) == decoded
+    assert not (sd / "pyxis-map/.pyxis-install-owner").exists()
+
+
+def test_concurrent_activation_is_serialized_by_lock(tmp_path: Path) -> None:
+    # A second builder cannot activate while the first holds the install
+    # lock; a crashed builder's stale lock is reclaimed (Greploop round 3).
+    tool = load_tool()
+    policy = tool.STYLE_POLICIES["osm-bright"]
+    sd = tmp_path / "sd"
+    (sd / "pyxis-map").mkdir(parents=True)
+    source = tmp_path / "xyz"
+    put_tile(source, 1, 0, 0)
+
+    # Live lock holder: own pid in the lock file blocks the second build.
+    (sd / "pyxis-map/.pyxis-install-owner").write_bytes(str(os.getpid()).encode("ascii"))
+    with pytest.raises(tool.PackError, match="already running"):
+        tool.build_map_pack(source, sd, pack_id="locked-pack", name="L",
+                            attribution=policy["attribution"], source=policy["source"],
+                            license=policy["license"], style="osm-bright", activate=True)
+    assert not (sd / "pyxis-map/packs/locked-pack").exists()
+
+    # Stale lock: owner pid is dead, so it is reclaimed and the build proceeds.
+    (sd / "pyxis-map/.pyxis-install-owner").write_bytes(b"4294000000")
+    assert not tool._pid_alive(4294000000)
+    result = tool.build_map_pack(source, sd, pack_id="locked-pack", name="L",
+                                 attribution=policy["attribution"], source=policy["source"],
+                                 license=policy["license"], style="osm-bright", activate=True)
+    assert (sd / "pyxis-map/packs/locked-pack/manifest.pmp").is_file()
+    assert (sd / "pyxis-map/active-pack.0").is_file()
+    assert not (sd / "pyxis-map/.pyxis-install-owner").exists()
+
+
+def test_existing_pack_rejects_different_source(tmp_path: Path) -> None:
+    # Resume is only allowed for a byte-identical republish; a different
+    # source must fail before touching the pack or the records.
+    tool = load_tool()
+    policy = tool.STYLE_POLICIES["osm-bright"]
+    sd = tmp_path / "sd"
+    (sd / "pyxis-map").mkdir(parents=True)
+    source = tmp_path / "xyz"
+    put_tile(source, 1, 0, 0)
+    tool.build_map_pack(source, sd, pack_id="dup-pack", name="D",
+                        attribution=policy["attribution"], source=policy["source"],
+                        license=policy["license"])
+    pack_before = (sd / "pyxis-map/packs/dup-pack/manifest.pmp").read_bytes()
+
+    different = tmp_path / "xyz2"
+    put_tile(different, 1, 0, 1)  # different tile -> different manifest
+    with pytest.raises(tool.PackError, match="does not match this source"):
+        tool.build_map_pack(different, sd, pack_id="dup-pack", name="D",
+                            attribution=policy["attribution"], source=policy["source"],
+                            license=policy["license"], style="osm-bright", activate=True)
+    assert (sd / "pyxis-map/packs/dup-pack/manifest.pmp").read_bytes() == pack_before
+    assert not (sd / "pyxis-map/map-sets").exists()
+
+
 def test_decode_selection_handles_v1_and_v2(tmp_path: Path) -> None:
     tool = load_tool()
     # v1: 48 bytes, magic, version 1, len 48, generation, then id at 12..44

@@ -20,6 +20,7 @@ Coverage models:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ctypes
 from dataclasses import dataclass
 import errno
@@ -1042,6 +1043,58 @@ def validate_pack(pack_directory: Path, max_bytes: int = DEFAULT_MAX_BYTES) -> d
         os.close(descriptor)
 
 
+def _existing_pack_fd(packs_fd: int, pack_id: str) -> int | None:
+    """Open a published pack directory if it exists; None otherwise."""
+    try:
+        return os.open(pack_id, _DIRECTORY_FLAGS, dir_fd=packs_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise PackError(f"existing pack is not a real directory: {pack_id}: {exc}") from exc
+
+
+def _verify_existing_pack(source_fd: int, pack_fd: int, pack_id: str,
+                          expected_manifest: bytes, tiles: list[Tile],
+                          max_bytes: int) -> None:
+    """Verify a published pack byte-for-byte against the source tiles.
+
+    Mirrors the web flasher's verifyExistingPack: a pack that already
+    exists may only be resumed when its manifest and every tile match the
+    input exactly, so a resume never republishes different content under
+    an existing name.
+    """
+    try:
+        raw_manifest = _read_file_at(pack_fd, "manifest.pmp", MAX_MANIFEST_BYTES)
+    except FileNotFoundError:
+        raise PackError(f"existing pack {pack_id} is incomplete: manifest.pmp missing") from None
+    if raw_manifest != expected_manifest:
+        raise PackError(f"existing pack {pack_id} does not match this source and "
+                        "cannot be resumed")
+    tiles_fd, _ = _open_child_directory(pack_fd, "tiles", f"{pack_id}/tiles")
+    try:
+        actual = _discover_tiles_fd(tiles_fd, Path(pack_id) / "tiles", len(tiles), max_bytes)
+    finally:
+        os.close(tiles_fd)
+    if len(actual) != len(tiles):
+        raise PackError(f"existing pack {pack_id} tile count does not match this source")
+    input_by_key = {(tile.zoom, tile.x, tile.y): tile for tile in tiles}
+    for actual_tile in actual:
+        key = (actual_tile.zoom, actual_tile.x, actual_tile.y)
+        source_tile = input_by_key.get(key)
+        if source_tile is None:
+            raise PackError(f"existing pack {pack_id} contains a tile this source does not")
+        existing_bytes = _read_file_at(pack_fd, f"tiles/{actual_tile.zoom}/"
+                                                f"{actual_tile.x}/{actual_tile.y}.png", max_bytes)
+        input_fd = _open_verified_tile(source_fd, source_tile)
+        try:
+            input_bytes = _read_exact(input_fd, source_tile.size, str(source_tile.path))
+        finally:
+            os.close(input_fd)
+        if existing_bytes != input_bytes:
+            raise PackError(f"existing pack {pack_id} tile {actual_tile.zoom}/"
+                            f"{actual_tile.x}/{actual_tile.y}.png differs from this source")
+
+
 STYLE_POLICIES: dict[str, dict[str, str]] = {
     "osm-bright": {
         "attribution": "(c) OpenMapTiles (c) OpenStreetMap contributors",
@@ -1193,6 +1246,73 @@ def _unlink_quietly_at(parent_fd: int, name: str) -> None:
         pass
 
 
+_INSTALL_LOCK_NAME = ".pyxis-install-owner"
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0 or pid > 0x7FFFFFFF:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+@contextlib.contextmanager
+def _install_lock_at(pyxis_fd: int):
+    """Hold the exclusive on-disk install lock across preflight-to-activation.
+
+    The web flasher serializes concurrent installers through the Web Locks
+    API; this CLI needs an equivalent because two concurrent --activate
+    builds could otherwise both pass the preflight and each clobber the
+    other's records. The lock is a single well-known file in pyxis-map/,
+    so every builder on the card sees it. A lock left behind by a crashed
+    builder is reclaimed when its owner pid is dead; a live owner blocks
+    (pid reuse is resolved conservatively -- block rather than corrupt).
+    The lock file is removed on every exit path.
+    """
+    for attempt in range(4):
+        try:
+            descriptor = os.open(_INSTALL_LOCK_NAME,
+                                 os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_CLOEXEC,
+                                 0o644, dir_fd=pyxis_fd)
+            try:
+                _write_all(descriptor, str(os.getpid()).encode("ascii"),
+                           _INSTALL_LOCK_NAME)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            break
+        except FileExistsError:
+            try:
+                raw = _read_file_at(pyxis_fd, _INSTALL_LOCK_NAME, 32)
+            except (PackError, FileNotFoundError):
+                raw = b""
+            owner_pid = 0
+            try:
+                owner_pid = int(raw.decode("ascii"))
+            except ValueError:
+                owner_pid = 0
+            if _pid_alive(owner_pid):
+                raise PackError("another map installer is already running on "
+                                "this card; wait for it to finish and retry") from None
+            _unlink_quietly_at(pyxis_fd, _INSTALL_LOCK_NAME)
+            _fsync_directory_fd(pyxis_fd)
+        except OSError as exc:
+            raise PackError(f"cannot acquire the map-install lock: {exc}") from exc
+    else:
+        raise PackError("cannot acquire the map-install lock")
+    _fsync_directory_fd(pyxis_fd)
+    try:
+        yield _INSTALL_LOCK_NAME
+    finally:
+        _unlink_quietly_at(pyxis_fd, _INSTALL_LOCK_NAME)
+        _fsync_directory_fd(pyxis_fd)
+
+
 def _remove_tree_at(parent_fd: int, name: str) -> None:
     try:
         descriptor = os.open(name, _DIRECTORY_FLAGS, dir_fd=parent_fd)
@@ -1320,7 +1440,7 @@ def build_map_pack(source_directory: Path, output_root: Path, *, pack_id: str, n
     output_root = Path(output_root)
     target = output_root / "pyxis-map" / "packs" / pack_id
     source_fd = _open_path(source_directory)
-    output_fd = pyxis_fd = packs_fd = stage_fd = -1
+    output_fd = pyxis_fd = packs_fd = stage_fd = pack_fd = -1
     temporary = ""
     committed = False
     try:
@@ -1360,53 +1480,122 @@ def build_map_pack(source_directory: Path, output_root: Path, *, pack_id: str, n
         output_fd = _open_path(output_root, create=True)
         pyxis_fd, pyxis_identity = _mkdir_open(output_fd, "pyxis-map")
         packs_fd, packs_identity = _mkdir_open(pyxis_fd, "packs")
+        existing = _existing_pack_fd(packs_fd, pack_id)
+        resumed = False
+        if existing is not None:
+            if not activate:
+                # Without --activate a resume would leave the card exactly
+                # as it was, so an existing pack is simply refused.
+                if existing >= 0:
+                    os.close(existing)
+                    existing = -1
+                raise PackError(f"output already exists: {target}")
+            # The pack already exists on the card. This is either a retry
+            # of a run interrupted between pack publication and activation
+            # (the style/slot records may be stale or split), or an exact
+            # duplicate run. Mirroring the web flasher, resume is allowed
+            # only when the published pack is byte-identical to this
+            # source; then re-activating (or activating for the first
+            # time) converges the records to this run's generation.
+            _verify_existing_pack(source_fd, existing, pack_id, manifest, tiles, max_bytes)
+            pack_fd = existing
+            resumed = True
         if activate:
             assert style is not None
-            _preflight_activation(pyxis_fd, pack_id=pack_id, map_set_id=style,
-                                  attribution=attribution)
-        temporary, stage_fd = _temporary_directory(packs_fd, pack_id)
-        copied = 0
-        for tile in tiles:
-            copy_tile(source_fd, tile, stage_fd, max_bytes - copied)
-            copied += tile.size
-        manifest_fd = os.open("manifest.pmp", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
-                              0o644, dir_fd=stage_fd)
-        try:
-            _write_all(manifest_fd, manifest, "manifest.pmp")
-            os.fsync(manifest_fd)
-        finally:
-            os.close(manifest_fd)
-        _fsync_directory_fd(stage_fd)
-        _validate_pack_fd(stage_fd, target, max_bytes)
-        _verify_output_chain(output_root, output_fd, pyxis_fd, pyxis_identity, packs_identity)
-        _rename_noreplace(packs_fd, temporary, pack_id, target)
-        committed = True
-        try:
-            _verify_output_chain(output_root, output_fd, pyxis_fd, pyxis_identity, packs_identity)
-        except BaseException as exc:
+            # Hold the install lock from the preflight through activation:
+            # two concurrent builders could otherwise both pass the
+            # preflight and each clobber the other's records.
+            with _install_lock_at(pyxis_fd):
+                _preflight_activation(pyxis_fd, pack_id=pack_id, map_set_id=style,
+                                      attribution=attribution)
+                if not resumed:
+                    temporary, stage_fd = _temporary_directory(packs_fd, pack_id)
+                    copied = 0
+                    for tile in tiles:
+                        copy_tile(source_fd, tile, stage_fd, max_bytes - copied)
+                        copied += tile.size
+                    manifest_fd = os.open("manifest.pmp", os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                                           | os.O_CLOEXEC, 0o644, dir_fd=stage_fd)
+                    try:
+                        _write_all(manifest_fd, manifest, "manifest.pmp")
+                        os.fsync(manifest_fd)
+                    finally:
+                        os.close(manifest_fd)
+                    _fsync_directory_fd(stage_fd)
+                    _validate_pack_fd(stage_fd, target, max_bytes)
+                    _verify_output_chain(output_root, output_fd, pyxis_fd, pyxis_identity,
+                                         packs_identity)
+                    _rename_noreplace(packs_fd, temporary, pack_id, target)
+                    committed = True
+                    try:
+                        _verify_output_chain(output_root, output_fd, pyxis_fd,
+                                             pyxis_identity, packs_identity)
+                    except BaseException as exc:
+                        try:
+                            _remove_tree_at(packs_fd, pack_id)
+                            _fsync_directory_fd(packs_fd)
+                            committed = False
+                        except BaseException as cleanup_error:
+                            raise PublishedDurabilityError(target, OSError(
+                                f"publication location changed and rollback failed: "
+                                f"{cleanup_error}")) from exc
+                        raise PackError("output directory changed during publication; "
+                                        "rolled back") from exc
+                    try:
+                        os.close(stage_fd)
+                    except OSError as exc:
+                        stage_fd = -1
+                        raise PublishedDurabilityError(target, exc) from exc
+                    stage_fd = -1
+                slot_name, _enabled = activate_map_set(pyxis_fd, pack_id=pack_id,
+                                                       map_set_id=style,
+                                                       attribution=attribution)
+        else:
+            temporary, stage_fd = _temporary_directory(packs_fd, pack_id)
+            copied = 0
+            for tile in tiles:
+                copy_tile(source_fd, tile, stage_fd, max_bytes - copied)
+                copied += tile.size
+            manifest_fd = os.open("manifest.pmp", os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                                   | os.O_CLOEXEC, 0o644, dir_fd=stage_fd)
             try:
-                _remove_tree_at(packs_fd, pack_id)
-                _fsync_directory_fd(packs_fd)
-                committed = False
-            except BaseException as cleanup_error:
-                raise PublishedDurabilityError(target, OSError(
-                    f"publication location changed and rollback failed: {cleanup_error}")) from exc
-            raise PackError("output directory changed during publication; rolled back") from exc
-        if activate:
-            assert style is not None
-            slot_name, _enabled = activate_map_set(pyxis_fd, pack_id=pack_id,
-                                                   map_set_id=style,
-                                                   attribution=attribution)
-        try:
-            os.close(stage_fd)
-        except OSError as exc:
+                _write_all(manifest_fd, manifest, "manifest.pmp")
+                os.fsync(manifest_fd)
+            finally:
+                os.close(manifest_fd)
+            _fsync_directory_fd(stage_fd)
+            _validate_pack_fd(stage_fd, target, max_bytes)
+            _verify_output_chain(output_root, output_fd, pyxis_fd, pyxis_identity,
+                                 packs_identity)
+            _rename_noreplace(packs_fd, temporary, pack_id, target)
+            committed = True
+            try:
+                _verify_output_chain(output_root, output_fd, pyxis_fd, pyxis_identity,
+                                     packs_identity)
+            except BaseException as exc:
+                try:
+                    _remove_tree_at(packs_fd, pack_id)
+                    _fsync_directory_fd(packs_fd)
+                    committed = False
+                except BaseException as cleanup_error:
+                    raise PublishedDurabilityError(target, OSError(
+                        f"publication location changed and rollback failed: "
+                        f"{cleanup_error}")) from exc
+                raise PackError("output directory changed during publication; "
+                                "rolled back") from exc
+            try:
+                os.close(stage_fd)
+            except OSError as exc:
+                stage_fd = -1
+                raise PublishedDurabilityError(target, exc) from exc
             stage_fd = -1
-            raise PublishedDurabilityError(target, exc) from exc
-        stage_fd = -1
         try:
             _fsync_directory_fd(packs_fd)
         except OSError as exc:
             raise PublishedDurabilityError(target, exc) from exc
+        if resumed and pack_fd >= 0:
+            os.close(pack_fd)
+            pack_fd = -1
         return target
     finally:
         active_exception = sys.exc_info()[0] is not None
@@ -1418,7 +1607,7 @@ def build_map_pack(source_directory: Path, output_root: Path, *, pack_id: str, n
                 close_error = exc
         if temporary and not committed and packs_fd >= 0:
             _remove_tree_at(packs_fd, temporary)
-        for descriptor in (packs_fd, pyxis_fd, output_fd, source_fd):
+        for descriptor in (pack_fd, packs_fd, pyxis_fd, output_fd, source_fd):
             if descriptor >= 0:
                 try:
                     os.close(descriptor)
