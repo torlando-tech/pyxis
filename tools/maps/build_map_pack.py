@@ -1128,17 +1128,19 @@ def activate_map_set(pyxis_fd: int, *, pack_id: str, map_set_id: str, attributio
     read both slots, reject conflicting same-generation records, resolve
     the pack list from the installed style record (falling back to the
     highest-generation slot of the same style), then publish the record to
-    the chosen active-pack slot FIRST and the style record under map-sets/
+    the style record under map-sets/ first and the chosen active-pack slot
     second. Both writes go through _write_atomic_at (exclusive temp file,
     fsync, rename, read-back) so an interrupted activation never truncates
-    or leaves a partial record: a crash mid-write leaves the previous record
-    intact and a retry repairs the style record. The slot is authoritative
-    in the firmware (tile serving reads only the active slots, and the style
-    catalog tolerates a missing style record), so slot-first ordering means
-    an interruption between the two commits leaves the map ACTIVE with the
-    style record one build stale, rather than dropping the active pack. The
-    final pack list is validated against the firmware's pack limit before any
-    byte is written, so a rejected activation cannot orphan a published pack.
+    or leaves a partial record: a crash mid-write leaves the previous
+    record intact and a retry (or the device's own style re-activation)
+    completes the activation. The style record is written first because the
+    firmware's device-side style activation (MapStyleCatalog::activate)
+    resequences the style record's composition into the active slot, so the
+    style record must never be older than the slot -- otherwise a stale
+    style record would reseed the slot and drop a newly installed pack.
+    The final pack list is validated against the firmware's pack limit
+    before any byte is written, so a rejected activation cannot orphan a
+    published pack.
     Returns (slot_name, enabled_packs).
     """
     slot_names = ("active-pack.0", "active-pack.1")
@@ -1189,17 +1191,22 @@ def activate_map_set(pyxis_fd: int, *, pack_id: str, map_set_id: str, attributio
         else:
             target = slot_names[0] if cast(int, slots[0]["generation"]) <= \
                     cast(int, slots[1]["generation"]) else slot_names[1]
-        # Slot first, style record second. The firmware's tile path
-        # (MapTilePack::initialize) reads only the active slots, and its
-        # style catalog (MapStyleCatalog::discover) tolerates a MISSING
-        # style record -- synthesizing the candidate from the active slot --
-        # while aborting only on a CORRUPT one. Because both records carry
-        # the identical PMAS payload, writing the authoritative slot first
-        # makes the worst interruption "map active, style record one build
-        # stale (self-heals on the next activation or retry)" instead of
-        # "no active pack, map unusable until retry".
-        _write_atomic_at(pyxis_fd, target, record)
+        # Style record first, active slot second (the web flasher's order).
+        # The firmware's device-side style activation
+        # (MapStyleCatalog::activate) reads the style record as the source
+        # of truth and resequences its composition into the active slot.
+        # If the style record were ever older than the slot, that path
+        # would reseed the slot from the stale composition and drop a
+        # newly installed pack. Writing the style record first guarantees
+        # the style record is never older than the slot, so every recovery
+        # path (CLI retry, device-side style re-activation) converges
+        # forward to the newest composition. The worst interruption is
+        # "slot one build stale, style record current" -- the map still
+        # serves from the previous pack and the next style cycle or
+        # builder retry completes the new activation. Both records carry
+        # the identical PMAS payload.
         _write_atomic_at(map_sets_fd, style_name, record)
+        _write_atomic_at(pyxis_fd, target, record)
     finally:
         os.close(map_sets_fd)
     return target, packs

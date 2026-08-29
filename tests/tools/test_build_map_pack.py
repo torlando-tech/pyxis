@@ -900,13 +900,16 @@ def test_activation_exhausted_generation_rejected_before_publishing(tmp_path: Pa
 
 
 def test_interrupted_activation_retry_converges_records(tmp_path: Path) -> None:
-    # A run interrupted between the slot-record and style-record commits
-    # leaves a published, ACTIVE pack (slot committed) with a missing style
-    # record. The firmware keeps serving tiles from the authoritative slot
-    # and tolerates the missing style record (MapStyleCatalog::discover
-    # synthesizes the candidate from the slot); re-running the same source
-    # verifies the existing pack and converges the style record
-    # (Greploop round 3 + round 4: slot-first ordering).
+    # A run interrupted between the style-record commit and the slot-record
+    # commit leaves the style record current but the active slot not yet
+    # committed. Both recovery paths then converge forward: the CLI retry
+    # (this test) re-runs activation against the verified pack, and the
+    # firmware's device-side style re-activation
+    # (MapStyleCatalog::activate) resequences the current style record into
+    # the slot. The style record must never be older than the slot, because
+    # the device-side path would otherwise reseed the slot from stale
+    # composition and drop a newly installed pack (Greploop rounds 3-6:
+    # the web flasher's style-first order).
     tool = load_tool()
     policy = tool.STYLE_POLICIES["osm-bright"]
     sd = tmp_path / "sd"
@@ -918,12 +921,12 @@ def test_interrupted_activation_retry_converges_records(tmp_path: Path) -> None:
     interrupted = {"done": False}
 
     def interrupted_renameat2(oldfd, oldpath, newfd, newpath, flags):
-        # Interrupt only the style-record replacement (flags 0, newpath is
-        # the .pmas). Pack staging (flags 1) and the slot-record commit
-        # (flags 0, newpath an active-pack slot) must proceed so the
-        # failure lands between the two record commits, leaving the map
-        # active but the style record stale.
-        if not interrupted["done"] and flags == 0 and newpath.endswith(b".pmas"):
+        # Interrupt only the slot-record replacement (flags 0, newpath an
+        # active-pack slot). Pack staging (flags 1) and the style-record
+        # commit (flags 0, newpath the .pmas) must proceed so the failure
+        # lands between the two record commits: style record current, slot
+        # not yet committed.
+        if not interrupted["done"] and flags == 0 and newpath.startswith(b"active-pack"):
             interrupted["done"] = True
             raise OSError("injected interruption between record commits")
         return real_renameat2(oldfd, oldpath, newfd, newpath, flags)
@@ -938,28 +941,25 @@ def test_interrupted_activation_retry_converges_records(tmp_path: Path) -> None:
     finally:
         monkeypatch.undo()
 
-    # The pack published and the authoritative slot committed; the style
-    # record did not. The map is therefore active, not broken.
+    # The pack published and the style record committed; the slot did not.
+    # The style record is current (never older than the slot), so no
+    # recovery path can reseed the slot from stale data.
     assert (sd / "pyxis-map/packs/resume-pack/manifest.pmp").is_file()
     style_path = sd / "pyxis-map/map-sets/osm-bright.pmas"
-    assert not style_path.exists()
-    assert (sd / "pyxis-map/active-pack.0").read_bytes() is not None
+    assert style_path.exists()
+    style = tool.decode_active_selection(style_path.read_bytes())
+    assert style["packs"][0] == "resume-pack"
+    assert not (sd / "pyxis-map/active-pack.0").exists()
 
-    # Retry with the same source: the pack verifies byte-identical and
-    # converges the style record. The retry writes the free slot
-    # (active-pack.1) at a higher generation than the interrupted first run
-    # left in active-pack.0, and the style record matches the authoritative
-    # (highest-generation) slot.
+    # Retry with the same source: the pack verifies byte-identical and the
+    # slot converges to the style record's composition.
     result = tool.build_map_pack(source, sd, pack_id="resume-pack", name="R",
                                  attribution=policy["attribution"], source=policy["source"],
                                  license=policy["license"], style="osm-bright", activate=True)
     assert result == sd / "pyxis-map/packs/resume-pack"
-    slot0 = tool.decode_active_selection((sd / "pyxis-map/active-pack.0").read_bytes())
-    slot1 = tool.decode_active_selection((sd / "pyxis-map/active-pack.1").read_bytes())
-    authoritative = slot1 if slot1["generation"] > slot0["generation"] else slot0
-    style = tool.decode_active_selection(style_path.read_bytes())
-    assert style == authoritative
-    assert style["packs"][0] == "resume-pack"
+    slot = tool.decode_active_selection((sd / "pyxis-map/active-pack.0").read_bytes())
+    assert slot == tool.decode_active_selection(style_path.read_bytes())
+    assert slot["packs"][0] == "resume-pack"
 
 
 def _flock_holder(path: str) -> subprocess.Popen:
