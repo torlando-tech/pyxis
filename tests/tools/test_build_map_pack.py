@@ -756,6 +756,92 @@ def test_activation_requires_style(tmp_path: Path) -> None:
         tool.build_map_pack(source, tmp_path / "sd", **metadata(), activate=True)
 
 
+def _seed_style_pack(tool, tmp_path: Path, sd: Path, index: int, pack_id: str) -> None:
+    source = tmp_path / f"seed{index}"
+    put_tile(source, 1, index % 2, index % 2)
+    policy = tool.STYLE_POLICIES["osm-bright"]
+    tool.build_map_pack(source, sd, pack_id=pack_id, name=f"Seed {index}",
+                        attribution=policy["attribution"], source=policy["source"],
+                        license=policy["license"], style="osm-bright", activate=True)
+
+
+def test_interrupted_activation_replacement_keeps_previous_records(tmp_path: Path,
+                                                                  monkeypatch: pytest.MonkeyPatch) -> None:
+    # Simulating a crash between the temp write and its rename must never
+    # truncate the previous style record or active slot (P1: non-atomic
+    # O_TRUNC replacement corrupts style discovery).
+    tool = load_tool()
+    policy = tool.STYLE_POLICIES["osm-bright"]
+    source = tmp_path / "xyz"
+    put_tile(source, 1, 0, 0)
+    sd = tmp_path / "sd"
+    tool.build_map_pack(source, sd, pack_id="pack-a", name="A",
+                        attribution=policy["attribution"], source=policy["source"],
+                        license=policy["license"], style="osm-bright", activate=True)
+    style_path = sd / "pyxis-map/map-sets/osm-bright.pmas"
+    slot_path = sd / "pyxis-map/active-pack.0"
+    style_before = style_path.read_bytes()
+    slot_before = slot_path.read_bytes()
+
+    real_renameat2 = tool._renameat2
+
+    def interrupted_renameat2(fd, src, dst, dirfd, flags):
+        # Interrupt only the record replacement (flags 0); pack staging
+        # (RENAME_NOREPLACE, flags 1) must proceed so the failure lands
+        # after publication, exactly like a crash mid-activation.
+        if flags == 0:
+            raise OSError("injected interruption before rename")
+        return real_renameat2(fd, src, dst, dirfd, flags)
+
+    monkeypatch.setattr(tool, "_renameat2", interrupted_renameat2)
+    source2 = tmp_path / "xyz2"
+    put_tile(source2, 1, 1, 1)
+    with pytest.raises(tool.PackError, match="cannot atomically replace"):
+        tool.build_map_pack(source2, sd, pack_id="pack-b", name="B",
+                            attribution=policy["attribution"], source=policy["source"],
+                            license=policy["license"], style="osm-bright", activate=True)
+
+    # Previous records are byte-identical; no staging debris is left behind.
+    assert style_path.read_bytes() == style_before
+    assert slot_path.read_bytes() == slot_before
+    assert tool.decode_active_selection(style_before)["packs"] == ["pack-a"]
+    assert not list((sd / "pyxis-map/map-sets").glob(".osm-bright.pmas.tmp-*"))
+    assert not list((sd / "pyxis-map").glob("active-pack.1.tmp-*"))
+    # The just-published pack stays valid on disk; the failure is confined to
+    # the record publication, which a later run can repair.
+    assert (sd / "pyxis-map/packs/pack-b/manifest.pmp").is_file()
+
+
+def test_activation_ninth_distinct_pack_fails_before_publishing(tmp_path: Path) -> None:
+    # The firmware rejects PMAS records with more than MAX_PACKS entries, so
+    # the writer must validate the inherited composition before the new pack
+    # is permanently published -- otherwise the failure orphans the pack
+    # (P1: activation failure leaves orphan pack).
+    tool = load_tool()
+    assert tool.MAX_ACTIVE_PACKS == 8
+    policy = tool.STYLE_POLICIES["osm-bright"]
+    sd = tmp_path / "sd"
+    for index in range(tool.MAX_ACTIVE_PACKS):
+        _seed_style_pack(tool, tmp_path, sd, index, f"seed-{index}")
+    style_path = sd / "pyxis-map/map-sets/osm-bright.pmas"
+    slots = [sd / f"pyxis-map/active-pack.{i}" for i in range(2)]
+    style_before = style_path.read_bytes()
+    slots_before = [slot.read_bytes() for slot in slots]
+    assert tool.decode_active_selection(style_before)["generation"] == tool.MAX_ACTIVE_PACKS
+
+    source = tmp_path / "ninth"
+    put_tile(source, 1, 0, 1)
+    with pytest.raises(tool.PackError, match="pack limit exceeded"):
+        tool.build_map_pack(source, sd, pack_id="ninth-pack", name="Ninth",
+                            attribution=policy["attribution"], source=policy["source"],
+                            license=policy["license"], style="osm-bright", activate=True)
+
+    # No record was rewritten and the rejected pack was not published.
+    assert style_path.read_bytes() == style_before
+    assert [slot.read_bytes() for slot in slots] == slots_before
+    assert not (sd / "pyxis-map/packs/ninth-pack").exists()
+
+
 def test_decode_selection_handles_v1_and_v2(tmp_path: Path) -> None:
     tool = load_tool()
     # v1: 48 bytes, magic, version 1, len 48, generation, then id at 12..44

@@ -43,6 +43,7 @@ EXTENT_SIZE = 26
 ROW_SPAN_SIZE = 13
 MAX_ROW_SPANS = 512
 MAX_ZOOM = 22
+MAX_ACTIVE_PACKS = 8  # firmware ActiveMapSetCodec::MAX_PACKS
 DEFAULT_MAX_TILES = 100_000
 DEFAULT_MAX_BYTES = 8 * 1024 * 1024 * 1024
 MAX_VISITED_ENTRIES_BASE = 64
@@ -778,8 +779,8 @@ def encode_active_map_set(*, generation: int, map_set_id: str, attribution: str,
         raise PackError("active map-set generation is invalid")
     map_set = _checked_text("map_set_id", map_set_id)
     credit = _checked_text("attribution", attribution)
-    if not PACK_ID_RE.fullmatch(map_set_id) or len(pack_ids) == 0 or len(pack_ids) > 8:
-        raise PackError("invalid active map-set packs")
+    if not PACK_ID_RE.fullmatch(map_set_id) or not pack_ids or len(pack_ids) > MAX_ACTIVE_PACKS:
+        raise PackError(f"invalid active map-set packs (limit {MAX_ACTIVE_PACKS})")
     seen: set[str] = set()
     encoded_packs: list[bytes] = []
     for pack_id in pack_ids:
@@ -1073,8 +1074,14 @@ def activate_map_set(pyxis_fd: int, *, pack_id: str, map_set_id: str, attributio
     read both slots, reject conflicting same-generation records, resolve
     the pack list from the installed style record (falling back to the
     highest-generation slot of the same style), write the style record
-    under map-sets/ and then the chosen active-pack slot, each with fsync
-    plus byte-exact read-back. Returns (slot_name, enabled_packs).
+    under map-sets/ and then the chosen active-pack slot. Both writes go
+    through _write_atomic_at (exclusive temp file, fsync, rename,
+    read-back) so an interrupted activation never truncates or leaves a
+    partial record: a crash mid-write leaves the previous record intact
+    and a retry repairs the slot. The final pack list is validated
+    against the firmware's pack limit before any byte is written, so a
+    rejected activation cannot orphan a just-published pack. Returns
+    (slot_name, enabled_packs).
     """
     slot_names = ("active-pack.0", "active-pack.1")
     slots: list[dict[str, object] | None] = [None, None]
@@ -1112,9 +1119,12 @@ def activate_map_set(pyxis_fd: int, *, pack_id: str, map_set_id: str, attributio
                 raise PackError("installed map set attribution does not match")
             packs = [value for value in cast(list[str], composition["packs"]) if value != pack_id]
         packs.insert(0, pack_id)
+        if len(packs) > MAX_ACTIVE_PACKS:
+            raise PackError(f"active map-set pack limit exceeded: {len(packs)} > "
+                            f"{MAX_ACTIVE_PACKS}; remove an installed pack before activating")
         record = encode_active_map_set(generation=highest + 1, map_set_id=map_set_id,
                                        attribution=attribution, pack_ids=packs)
-        _write_verified_at(map_sets_fd, style_name, record)
+        _write_atomic_at(map_sets_fd, style_name, record)
         if slots[0] is None:
             target = slot_names[0]
         elif slots[1] is None:
@@ -1122,7 +1132,7 @@ def activate_map_set(pyxis_fd: int, *, pack_id: str, map_set_id: str, attributio
         else:
             target = slot_names[0] if cast(int, slots[0]["generation"]) <= \
                     cast(int, slots[1]["generation"]) else slot_names[1]
-        _write_verified_at(pyxis_fd, target, record)
+        _write_atomic_at(pyxis_fd, target, record)
     finally:
         os.close(map_sets_fd)
     return target, packs
@@ -1143,6 +1153,61 @@ def _write_verified_at(parent_fd: int, name: str, data: bytes) -> None:
     actual = _read_file_at(parent_fd, name, len(data))
     if actual != data:
         raise PackError(f"read-back verification failed for {name}")
+
+
+def _write_atomic_at(parent_fd: int, name: str, data: bytes) -> None:
+    """Atomically replace ``name`` with ``data`` using an exclusive temp file.
+
+    Writes to a per-process temp name, fsyncs it, then renameat()s it over
+    the destination. Because rename is atomic, a crash at any point leaves
+    either the old record (temp not yet renamed) or the new record (rename
+    done) in place -- never a truncated or partial one. The temp file is
+    created with O_EXCL so concurrent activations cannot clobber each
+    other's staging. Activation correctness depends on atomicity, so an
+    unsupported host fails closed.
+    """
+    if _renameat2 is None:
+        raise PackError("atomic record replacement unsupported on this host")
+    marker = os.getpid()
+    for attempt in range(256):
+        temp_name = f".{name}.tmp-{marker:x}-{attempt:02x}"
+        try:
+            descriptor = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                                 0o600, dir_fd=parent_fd)
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise PackError(f"cannot write {name}: {exc}") from exc
+        break
+    else:
+        raise PackError(f"cannot allocate temporary record file for {name}")
+    try:
+        _write_all(descriptor, data, name)
+        os.fsync(descriptor)
+    except Exception as exc:
+        os.close(descriptor)
+        _unlink_quietly_at(parent_fd, temp_name)
+        raise PackError(f"cannot write {name}: {exc}") from exc
+    os.close(descriptor)
+    try:
+        result = _renameat2(parent_fd, os.fsencode(temp_name), parent_fd, os.fsencode(name), 0)
+        if result != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error), name)
+        _fsync_directory_fd(parent_fd)
+    except Exception as exc:
+        _unlink_quietly_at(parent_fd, temp_name)
+        raise PackError(f"cannot atomically replace {name}: {exc}") from exc
+    actual = _read_file_at(parent_fd, name, len(data))
+    if actual != data:
+        raise PackError(f"read-back verification failed for {name}")
+
+
+def _unlink_quietly_at(parent_fd: int, name: str) -> None:
+    try:
+        os.unlink(name, dir_fd=parent_fd)
+    except OSError:
+        pass
 
 
 def _remove_tree_at(parent_fd: int, name: str) -> None:
@@ -1203,6 +1268,46 @@ def _verify_output_chain(output_root: Path, root_fd: int, pyxis_fd: int, pyxis_i
         raise PackError(f"output directory changed before publication: {exc}") from exc
     if _identity(pyxis_info)[:3] != pyxis_identity[:3] or _identity(packs_info)[:3] != packs_identity[:3]:
         raise PackError("output directory changed before publication")
+
+
+def _preflight_activation(pyxis_fd: int, *, pack_id: str, map_set_id: str, attribution: str) -> None:
+    """Reject an activation whose inherited composition exceeds the limit.
+
+    Runs before any tile is staged or the pack is published, so a rejected
+    activation leaves the card exactly as it was found -- no published pack,
+    no rewritten record. Mirrors the composition rules in activate_map_set.
+    """
+    slot_names = ("active-pack.0", "active-pack.1")
+    slots: list[dict[str, object] | None] = [None, None]
+    for index, slot_name in enumerate(slot_names):
+        raw = _read_selection_at(pyxis_fd, slot_name)
+        if raw is not None:
+            slots[index] = decode_active_selection(raw)
+    valid = [slot for slot in slots if slot is not None]
+    map_sets_fd, _ = _mkdir_open(pyxis_fd, "map-sets")
+    try:
+        style_name = f"{map_set_id}.pmas"
+        installed_raw = _read_selection_at(map_sets_fd, style_name)
+        installed = decode_active_selection(installed_raw) if installed_raw is not None else None
+        if installed is not None:
+            if installed["format_version"] not in (2, 3) or installed["map_set_id"] != map_set_id \
+                    or installed["attribution"] != attribution:
+                raise PackError("installed style record does not match selected map set")
+        composition = installed
+        if composition is None and valid:
+            current = max(valid, key=lambda slot: cast(int, slot["generation"]))
+            if current["format_version"] in (2, 3) and current["map_set_id"] == map_set_id:
+                composition = current
+        if composition is not None:
+            if composition["attribution"] != attribution:
+                raise PackError("installed map set attribution does not match")
+            packs = [value for value in cast(list[str], composition["packs"]) if value != pack_id]
+            packs.insert(0, pack_id)
+            if len(packs) > MAX_ACTIVE_PACKS:
+                raise PackError(f"active map-set pack limit exceeded: {len(packs)} > "
+                                f"{MAX_ACTIVE_PACKS}; remove an installed pack before activating")
+    finally:
+        os.close(map_sets_fd)
 
 
 def build_map_pack(source_directory: Path, output_root: Path, *, pack_id: str, name: str,
@@ -1269,6 +1374,10 @@ def build_map_pack(source_directory: Path, output_root: Path, *, pack_id: str, n
         output_fd = _open_path(output_root, create=True)
         pyxis_fd, pyxis_identity = _mkdir_open(output_fd, "pyxis-map")
         packs_fd, packs_identity = _mkdir_open(pyxis_fd, "packs")
+        if activate:
+            assert style is not None
+            _preflight_activation(pyxis_fd, pack_id=pack_id, map_set_id=style,
+                                  attribution=attribution)
         temporary, stage_fd = _temporary_directory(packs_fd, pack_id)
         copied = 0
         for tile in tiles:
