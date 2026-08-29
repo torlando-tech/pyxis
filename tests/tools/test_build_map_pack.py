@@ -1362,3 +1362,44 @@ def test_long_publication_marker_stays_live_past_ttl(
     assert not (sd / "pyxis-map/.pyxis-installing").exists()
     # Sanity on the TTL constant the boundary above used.
     assert ttl_ms == 900 * 1000
+
+
+def test_marker_renewal_refuses_to_steal_reclaimed_claim(
+        tmp_path: Path) -> None:
+    # Round 10 (Greptile): a blind heartbeat would let a stalled installer
+    # steal back a marker that a second producer LEGITIMATELY reclaimed
+    # after our TTL expired. The renewal must be ownership-checked:
+    # foreign owner -> abort (PackError), the foreign claim is left
+    # intact for the other installer to finish.
+    tool = load_tool()
+    card = tmp_path / "sd"
+    card.mkdir()
+    pyxis = card / "pyxis-map"
+    pyxis.mkdir()
+    pyxis_fd = os.open(str(pyxis), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        # Producer B reclaims after our (producer A) marker aged out.
+        (pyxis / ".pyxis-installing").write_text(
+            f"PYXI 1 cli-other {int(__import__('time').time() * 1000)}\n")
+        # Renewing as a DIFFERENT owner must abort...
+        with pytest.raises(tool.PackError, match="reclaimed during installation"):
+            tool._renew_install_marker(pyxis_fd, "cli-us")
+        # ...and must leave B's claim untouched.
+        raw = (pyxis / ".pyxis-installing").read_text().strip().split(" ")
+        assert raw[2] == "cli-other"
+        # Renewing as the SAME owner is allowed and advances the epoch.
+        before = int(raw[3])
+        tool._renew_install_marker(pyxis_fd, "cli-other")
+        after = (pyxis / ".pyxis-installing").read_text().strip().split(" ")
+        assert int(after[3]) >= before
+        # A missing or corrupt marker is also refused (claim void), never
+        # overwritten.
+        (pyxis / ".pyxis-installing").unlink()
+        with pytest.raises(tool.PackError, match="reclaimed during installation"):
+            tool._renew_install_marker(pyxis_fd, "cli-other")
+        assert not (pyxis / ".pyxis-installing").exists()
+        (pyxis / ".pyxis-installing").write_text("garbage\n")
+        with pytest.raises(tool.PackError, match="reclaimed during installation"):
+            tool._renew_install_marker(pyxis_fd, "cli-other")
+    finally:
+        os.close(pyxis_fd)

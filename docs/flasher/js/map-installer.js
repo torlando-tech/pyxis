@@ -133,16 +133,26 @@ async function releaseInstallMarker(pyxis, token) {
 }
 
 // Heartbeat: renew our marker's epoch during long publications (a full
-// world pack on slow SD storage can outlive the TTL). Best effort; the
-// commit-time revalidation is the backstop.
+// world pack on slow SD storage can outlive the TTL).
+//
+// The renewal is ownership-checked, never a blind overwrite: if the
+// marker no longer carries OUR owner (it aged out and another producer
+// legitimately reclaimed it, was deleted, or is corrupt), our claim is
+// void and the install aborts. Overwriting a foreign claim would steal
+// the card mid-install; the (possibly partially published) pack stays
+// device-harmless and the user retries after the other installer
+// finishes.
 export async function renewInstallMarker(pyxis, owner) {
-  try {
-    const token = `PYXI 1 ${owner} ${Date.now()}`;
-    const handle = await pyxis.getFileHandle(INSTALL_MARKER_NAME);
-    const writable = await handle.createWritable({keepExistingData: false});
-    try { await writable.write(textEncoder.encode(token)); await writable.close(); }
-    catch (error) { try { await writable.abort(); } catch {} throw error; }
-  } catch {}
+  const current = await readInstallMarker(pyxis);
+  const parsed = current ? parseInstallMarker(current) : null;
+  if (!parsed || parsed.owner !== owner) {
+    fail('The map-install marker was reclaimed during installation; wait for the other installer to finish and retry');
+  }
+  const token = `PYXI 1 ${owner} ${Date.now()}`;
+  const handle = await pyxis.getFileHandle(INSTALL_MARKER_NAME);
+  const writable = await handle.createWritable({keepExistingData: false});
+  try { await writable.write(textEncoder.encode(token)); await writable.close(); }
+  catch (error) { try { await writable.abort(); } catch {} throw error; }
 }
 
 // Commit-time revalidation: the slot/style records were derived by

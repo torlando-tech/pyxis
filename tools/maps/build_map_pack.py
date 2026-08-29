@@ -1443,21 +1443,37 @@ def _renew_install_marker(pyxis_fd: int, owner: str) -> None:
     and a second producer could reclaim our live claim. The rewrite
     keeps our owner identity and advances the epoch; the release path
     and the commit-time check compare the owner, so renewed markers are
-    still recognized as ours. Best effort: a failed renewal is retried
-    on the next tile and the commit-time marker check is the backstop.
+    still recognized as ours.
+
+    The renewal is ownership-checked, never a blind overwrite: if the
+    marker no longer carries OUR owner -- it aged out and another
+    producer legitimately reclaimed it, was deleted, or is corrupt --
+    our claim is void. Overwriting a foreign claim would steal the
+    card mid-install, so the install aborts instead; the (possibly
+    partially published) pack stays device-harmless and the user
+    retries after the other installer finishes. A transient I/O error
+    on the marker read/write also aborts: an unverifiable claim is no
+    safer than a lost one.
     """
+    current = _read_selection_at(pyxis_fd, _INSTALL_MARKER_NAME)
+    if current is None:
+        raise PackError("the map-install marker was reclaimed during "
+                        "installation; wait for the other installer to "
+                        "finish and retry")
+    parsed = _parse_marker(current)
+    if parsed is None or parsed[0] != owner:
+        raise PackError("the map-install marker was reclaimed during "
+                        "installation; wait for the other installer to "
+                        "finish and retry")
+    token = _marker_token(owner)
+    descriptor = os.open(_INSTALL_MARKER_NAME,
+                         os.O_WRONLY | os.O_TRUNC | os.O_CLOEXEC,
+                         dir_fd=pyxis_fd)
     try:
-        token = _marker_token(owner)
-        descriptor = os.open(_INSTALL_MARKER_NAME,
-                             os.O_WRONLY | os.O_TRUNC | os.O_CLOEXEC,
-                             dir_fd=pyxis_fd)
-        try:
-            _write_all(descriptor, token.encode("ascii"), _INSTALL_MARKER_NAME)
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-    except OSError:
-        pass
+        _write_all(descriptor, token.encode("ascii"), _INSTALL_MARKER_NAME)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _release_install_marker(pyxis_fd: int, token: str) -> None:

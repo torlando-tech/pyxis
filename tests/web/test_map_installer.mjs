@@ -859,3 +859,43 @@ test('renewing a live marker advances the epoch but keeps the owner', async () =
   assert.ok(parsed.epochMs >= Date.now() - 1000, 'renewal refreshes the epoch');
   assert.ok(installMarkerIsFresh(parsed.epochMs), 'a renewed marker is live again');
 });
+
+
+// --- Round 10 (Greptile): a heartbeat must never steal back a
+// legitimately reclaimed marker. If our marker aged out and another
+// producer reclaimed it, the renewal aborts and leaves the foreign
+// claim intact; the install then fails and the user retries after the
+// other installer finishes.
+test('marker renewal refuses to steal a reclaimed claim', async () => {
+  const root = new MemoryDirectoryHandle('sd');
+  const pyxis = await root.getDirectoryHandle('pyxis-map', {create: true});
+  const writeMarker = async text => {
+    const writable = await (await pyxis.getFileHandle('.pyxis-installing', {create: true})).createWritable({keepExistingData: false});
+    await writable.write(new TextEncoder().encode(text));
+    await writable.close();
+  };
+  const readMarker = async () => {
+    let handle = null; try { handle = await pyxis.getFileHandle('.pyxis-installing'); } catch { return null; }
+    const file = await handle.getFile();
+    return new TextDecoder('utf-8').decode(new Uint8Array(await file.arrayBuffer()));
+  };
+  // Producer B reclaims after producer A's marker aged out.
+  await writeMarker(`PYXI 1 cli-other ${Date.now()}`);
+  // A's heartbeat must abort without touching B's claim.
+  await assert.rejects(
+    () => renewInstallMarker(pyxis, 'web-ours'),
+    error => error.message.includes('reclaimed during installation'),
+  );
+  assert.equal(parseInstallMarker(await readMarker()).owner, 'cli-other');
+  // Renewing as the same owner is fine.
+  await renewInstallMarker(pyxis, 'cli-other');
+  const renewed = parseInstallMarker(await readMarker());
+  assert.equal(renewed.owner, 'cli-other');
+  assert.ok(installMarkerIsFresh(renewed.epochMs));
+  // Missing or corrupt marker: refused, never overwritten.
+  await pyxis.removeEntry('.pyxis-installing');
+  await assert.rejects(() => renewInstallMarker(pyxis, 'cli-other'));
+  assert.equal(await readMarker(), null);
+  await writeMarker('garbage');
+  await assert.rejects(() => renewInstallMarker(pyxis, 'cli-other'));
+});
