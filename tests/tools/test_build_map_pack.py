@@ -1571,3 +1571,57 @@ def test_commit_abort_when_own_marker_was_reclaimed(
     finally:
         os.close(pyxis_fd)
         os.close(map_sets_fd)
+
+
+
+
+def test_expired_claim_between_style_and_slot_writes_aborts_before_slot_write(
+        tmp_path: Path) -> None:
+    # Round 13 (Greptile): the pre-write revalidation can sit a long
+    # time before the slot write (a stalled card slows the style
+    # write + read-back). If the claim EXPIRES in that gap, a
+    # cross-producer is entitled to reclaim it and commit, and our
+    # slot write would clobber its newer record. The FINAL
+    # revalidation (immediately before the slot write) must abort
+    # there: the style record may already be written (the documented
+    # style-first point), but the slot byte never lands.
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 1, 0, 0)
+    policy = tool.STYLE_POLICIES["osm-bright"]
+    sd = tmp_path / "sd"
+    real_fresh = tool._own_marker_is_fresh
+    calls = {"n": 0}
+
+    def flaky_fresh(raw):
+        calls["n"] += 1
+        # Call 1 = the pre-style verify (claim fresh); call 2 = the
+        # FINAL pre-slot verify (claim expired in the gap).
+        return calls["n"] == 1
+
+    tool._own_marker_is_fresh = flaky_fresh
+    try:
+        with pytest.raises(tool.PackError, match="expired|reclaimed|another map installer"):
+            tool.build_map_pack(source, sd, pack_id="pack-a", name="A",
+                                attribution=policy["attribution"], source=policy["source"],
+                                license=policy["license"], style="osm-bright", activate=True)
+    finally:
+        tool._own_marker_is_fresh = real_fresh
+    assert calls["n"] >= 2, "the final pre-slot revalidation ran"
+    # The style record was written (style-first); the slot records were
+    # NOT: the abort landed between the two writes, so no active
+    # selection from this run exists -- the card is device-safe (the
+    # device serves its current/absent slot; the newer style record is
+    # completed by the retry).
+    assert (sd / "pyxis-map/map-sets/osm-bright.pmas").is_file()
+    assert not (sd / "pyxis-map/active-pack.0").exists()
+    assert not (sd / "pyxis-map/active-pack.1").exists()
+    assert (sd / "pyxis-map/packs/pack-a/manifest.pmp").is_file()
+    assert not (sd / "pyxis-map/.pyxis-installing-cli").exists()
+    # The retry re-derives and converges on a clean activation.
+    result = tool.build_map_pack(source, sd, pack_id="pack-a", name="A",
+                                 attribution=policy["attribution"], source=policy["source"],
+                                 license=policy["license"], style="osm-bright", activate=True)
+    record = tool.decode_active_selection((sd / "pyxis-map/active-pack.0").read_bytes())
+    assert record["packs"] == ["pack-a"]
+    assert Path(result) == sd / "pyxis-map" / "packs" / "pack-a"

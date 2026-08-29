@@ -901,6 +901,22 @@ async function activateMapSet(pyxis,metadata,markerToken=null){
   await verifyActivationState(pyxis,mapSets,styleName,markerToken,{slotBytes,styleBytes});
   await writeVerified(mapSets,styleName,record);const installed=decodeActiveSelection(await fileBytes(mapSets,styleName));
   if(installed.version!==3||installed.mapSetId!==metadata.mapSetId||installed.packs[0].packId!==metadata.packId)fail('Style map-set verification failed');
+  // FINAL revalidation immediately before the slot write (round 13):
+  // the check above can sit a long time before the slot write (a
+  // stalled card slows the style write and read-back), so the claim
+  // may have expired in between -- a cross-producer could then
+  // legitimately reclaim it and commit, and our slot write would
+  // clobber its newer record. The slot record IS the active selection
+  // (what the device reads), so this is the clobber point: the slot is
+  // CAS'd against the derivation snapshot and the style is compared
+  // against the record we JUST wrote (a self-check that catches a
+  // cross-producer style write landing after ours). A missing/
+  // foreign/expired claim or any mismatch aborts before the slot byte
+  // is written; an abort here leaves either our own (newer) style
+  // record over the old slot (the documented style-first worst case,
+  // completed by the retry or device re-activation) or the cross
+  // producer's consistent pair.
+  await verifyActivationState(pyxis,mapSets,styleName,markerToken,{slotBytes,styleBytes:record});
   await writeVerified(pyxis,target,record);const selected=decodeActiveSelection(await fileBytes(pyxis,target));
   if(selected.version!==3||selected.mapSetId!==metadata.mapSetId||selected.packs[0].packId!==metadata.packId)fail('Active map-set verification failed');
   return {selectionFile:target,styleFile:styleName,enabledPacks:selected.packs.map(pack=>pack.packId)};

@@ -1029,3 +1029,60 @@ test('commit-time verification aborts when the own marker is missing', async () 
   await writeMarker(token);
   await verifyActivationState(pyxis, mapSets, 'osm-bright.pmas', token, {slotBytes: [null, null], styleBytes: null});
 });
+
+
+// --- Round 13 (Greptile): the pre-write revalidation sits a long time
+// before the slot write (a stalled card slows the style write +
+// read-back). If the claim expires in that gap, a cross-producer is
+// entitled to reclaim it and commit, and the slot write would clobber
+// its newer record. activateMapSet therefore re-verifies IMMEDIATELY
+// before the slot write: the slot is still CAS'd against the
+// derivation snapshot, and the style is compared against the record
+// that was just written. An expired claim must abort THERE.
+test('an expired claim at the final pre-slot revalidation aborts the slot write', async () => {
+  const root = new MemoryDirectoryHandle('sd');
+  const pyxis = await root.getDirectoryHandle('pyxis-map', {create: true});
+  const mapSets = await pyxis.getDirectoryHandle('map-sets', {create: true});
+  const gen1 = encodeActiveMapSet({generation: 1, mapSetId: metadata.mapSetId, attribution: metadata.attribution, packs: [{packId: 'old'}]});
+  const slot1 = await (await pyxis.getFileHandle('active-pack.0', {create: true})).createWritable({keepExistingData: false});
+  await slot1.write(gen1); await slot1.close();
+  const style1 = await (await mapSets.getFileHandle('osm-bright.pmas', {create: true})).createWritable({keepExistingData: false});
+  await style1.write(gen1); await style1.close();
+  const token = `PYXI 1 web-a ${Date.now()}`;
+  await (async text => {
+    const h = await pyxis.getFileHandle(MARKER, {create: true});
+    const w = await h.createWritable({keepExistingData: false});
+    await w.write(new TextEncoder().encode(text)); await w.close();
+  })(token);
+  // First verification (before the style write): fresh claim, unchanged
+  // records -> passes.
+  await verifyActivationState(pyxis, mapSets, 'osm-bright.pmas', token, {slotBytes: [gen1, null], styleBytes: gen1});
+  // The style write lands (record = what activateMapSet would write).
+  const record = encodeActiveMapSet({generation: 2, mapSetId: metadata.mapSetId, attribution: metadata.attribution, packs: [{packId: 'new'}, {packId: 'old'}]});
+  const style2 = await (await mapSets.getFileHandle('osm-bright.pmas', {create: true})).createWritable({keepExistingData: false});
+  await style2.write(record); await style2.close();
+  // The gap: the claim expires while the slot write is still pending.
+  await (async text => {
+    const h = await pyxis.getFileHandle(MARKER, {create: true});
+    const w = await h.createWritable({keepExistingData: false});
+    await w.write(new TextEncoder().encode(text)); await w.close();
+  })(`PYXI 1 web-a ${Date.now() - 16 * 60 * 1000}`);
+  // FINAL pre-slot revalidation: slot still CAS'd against the
+  // derivation snapshot, style compared against the record just
+  // written. The expired claim must abort before the slot byte.
+  await assert.rejects(
+    verifyActivationState(pyxis, mapSets, 'osm-bright.pmas', token, {slotBytes: [gen1, null], styleBytes: record}),
+    MapInstallerError, 'an expired claim must abort at the final pre-slot revalidation');
+  // The slot record was never written over the old selection.
+  const untouched = await decodeActiveSelection(pyxis.children.get('active-pack.0').bytes);
+  assert.equal(untouched.generation, 1, 'the slot record is untouched');
+  assert.deepEqual(untouched.packs.map(p => p.packId), ['old']);
+  // A fresh claim at the same boundary passes (the style self-check
+  // accepts the record that was just written).
+  await (async text => {
+    const h = await pyxis.getFileHandle(MARKER, {create: true});
+    const w = await h.createWritable({keepExistingData: false});
+    await w.write(new TextEncoder().encode(text)); await w.close();
+  })(token);
+  await verifyActivationState(pyxis, mapSets, 'osm-bright.pmas', token, {slotBytes: [gen1, null], styleBytes: record});
+});

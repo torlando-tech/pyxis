@@ -1231,6 +1231,30 @@ def activate_map_set(pyxis_fd: int, *, pack_id: str, map_set_id: str, attributio
         # builder retry completes the new activation. Both records carry
         # the identical PMAS payload.
         _write_atomic_at(map_sets_fd, style_name, record)
+        # FINAL revalidation immediately before the slot write (round
+        # 13): the check above can sit a long time before the slot
+        # write (the style write and the slot write are each atomic,
+        # but a stalled card can delay either one), so the claim may
+        # have expired in between -- a cross-producer could then
+        # legitimately reclaim it and commit, and our slot write would
+        # clobber its newer record. The slot record IS the active
+        # selection (what the device reads), so THIS is the clobber
+        # point and the freshness + CAS boundary belongs here. The
+        # slot is still CAS'd against the derivation snapshot; the
+        # style is compared against the record we JUST wrote -- a
+        # self-check that catches a cross-producer style write that
+        # landed after ours (same-generation split state), because
+        # installed_raw is stale after our own style write. A missing/
+        # foreign/expired claim or any mismatch aborts before the slot
+        # byte is written. An abort here leaves either our own
+        # (newer) style record over the old slot, or the cross
+        # producer's consistent pair -- both device-safe: the first is
+        # the documented style-first worst case that the next retry or
+        # device style re-activation completes, the second is already
+        # converged.
+        _verify_activation_state_at(pyxis_fd, map_sets_fd, slot_raw=slot_raw,
+                                    style_raw=record, style_name=style_name,
+                                    marker_token=marker_token)
         _write_atomic_at(pyxis_fd, target, record)
     finally:
         os.close(map_sets_fd)
@@ -1561,6 +1585,19 @@ def _release_install_marker(pyxis_fd: int, token: str) -> None:
                 pass
 
 
+def _own_marker_is_fresh(raw: bytes) -> bool:
+    """Freshness check for OUR OWN marker at a commit boundary.
+
+    Isolated from _marker_is_fresh (which also serves cross-producer
+    checks) so tests can model claim expiry inside the two-record
+    commit without disturbing the cross checks.
+    """
+    parsed = _parse_marker(raw)
+    if parsed is None:
+        return False
+    return _marker_is_fresh(parsed[1])
+
+
 def _verify_activation_state_at(pyxis_fd: int, map_sets_fd: int, *,
                                 slot_raw: list[bytes | None],
                                 style_raw: bytes | None, style_name: str,
@@ -1598,7 +1635,7 @@ def _verify_activation_state_at(pyxis_fd: int, map_sets_fd: int, *,
             raise PackError("the map-install marker was reclaimed during "
                             "installation; wait for the other installer "
                             "to finish and retry")
-        if not _marker_is_fresh(parsed[1]):
+        if not _own_marker_is_fresh(marker_raw):
             # The owner matches but the claim has aged out: a
             # cross-producer is entitled to reclaim it right now, so
             # committing against the pre-reclaim state would race the
