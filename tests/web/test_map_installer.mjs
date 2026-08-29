@@ -1011,4 +1011,21 @@ test('commit-time verification aborts when the own marker is missing', async () 
   await assert.rejects(
     verifyActivationState(pyxis, mapSets, 'osm-bright.pmas', token, {slotBytes: [null, null], styleBytes: null}),
     MapInstallerError, 'a reclaimed claim must abort the commit');
+  // Round 12 (Greptile): an EXPIRED own marker (same owner, aged past
+  // the TTL) is equally an abort: the claim is reclaimable right now,
+  // so committing would race a reclaiming cross-producer.
+  const writeMarker = async text => {
+    const h = await pyxis.getFileHandle(MARKER, {create: true});
+    const w = await h.createWritable({keepExistingData: false});
+    await w.write(new TextEncoder().encode(text));
+    await w.close();
+  };
+  await writeMarker(`PYXI 1 ${owner} ${Date.now() - 16 * 60 * 1000}`);
+  await assert.rejects(
+    verifyActivationState(pyxis, mapSets, 'osm-bright.pmas', token, {slotBytes: [null, null], styleBytes: null}),
+    MapInstallerError, 'an expired claim must abort the commit');
+  // A FRESH own marker (renewed just now) passes the marker check and
+  // the unchanged slot/style re-reads.
+  await writeMarker(token);
+  await verifyActivationState(pyxis, mapSets, 'osm-bright.pmas', token, {slotBytes: [null, null], styleBytes: null});
 });

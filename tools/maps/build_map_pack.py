@@ -1598,6 +1598,16 @@ def _verify_activation_state_at(pyxis_fd: int, map_sets_fd: int, *,
             raise PackError("the map-install marker was reclaimed during "
                             "installation; wait for the other installer "
                             "to finish and retry")
+        if not _marker_is_fresh(parsed[1]):
+            # The owner matches but the claim has aged out: a
+            # cross-producer is entitled to reclaim it right now, so
+            # committing against the pre-reclaim state would race the
+            # new holder. Aborting on a live (fresh) claim boundary is
+            # the safe direction; the pack stays published and a retry
+            # re-derives after the other installer finishes.
+            raise PackError("the install claim expired during "
+                            "installation; wait for the other installer "
+                            "to finish and retry")
     elif marker_raw is not None:
         # No token was acquired (resume path without a marker): only a
         # FRESH marker in our own file is a live foreign claim; a

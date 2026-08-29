@@ -235,6 +235,12 @@ export async function verifyActivationState(pyxis, mapSets, styleName, markerTok
     if (!parsed || parsed.owner !== ours.owner) {
       fail('The map-install marker was reclaimed during installation; wait for the other installer to finish and retry');
     }
+    if (!installMarkerIsFresh(parsed.epochMs)) {
+      // The owner matches but the claim has aged out: a cross-producer
+      // is entitled to reclaim it right now, so committing against the
+      // pre-reclaim state would race the new holder. Abort instead.
+      fail('The install claim expired during installation; wait for the other installer to finish and retry');
+    }
   } else if (marker !== null) {
     // No token was acquired (resume path without a marker): only a
     // FRESH marker in our own file is a live foreign claim.

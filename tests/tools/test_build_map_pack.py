@@ -1548,9 +1548,20 @@ def test_commit_abort_when_own_marker_was_reclaimed(
                 pyxis_fd, map_sets_fd,
                 slot_raw=[None, None], style_raw=None,
                 style_name="osm-bright.pmas", marker_token=token)
-        # Our own marker (any epoch: renewals advance it): passes the
-        # marker check; the slot/style re-reads against identical state
-        # still pass.
+        # An EXPIRED own marker (same owner, aged past the TTL): the
+        # claim is no longer protected from reclamation, so committing
+        # would race a reclaiming cross-producer. Abort instead.
+        # (Round 12, Greptile.)
+        (sd / "pyxis-map/.pyxis-installing-cli").write_text(
+            f"PYXI 1 cli-self {int(time.time() * 1000) - 16 * 60 * 1000}\n")
+        with pytest.raises(tool.PackError, match="claim expired during installation"):
+            tool._verify_activation_state_at(
+                pyxis_fd, map_sets_fd,
+                slot_raw=[None, None], style_raw=None,
+                style_name="osm-bright.pmas", marker_token=token)
+        # Our own FRESH marker (renewed just now): passes the marker
+        # check; the slot/style re-reads against identical state still
+        # pass.
         (sd / "pyxis-map/.pyxis-installing-cli").write_text(
             f"PYXI 1 cli-self {int(time.time() * 1000)}\n")
         tool._verify_activation_state_at(
