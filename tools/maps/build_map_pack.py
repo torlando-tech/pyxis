@@ -1138,23 +1138,6 @@ def activate_map_set(pyxis_fd: int, *, pack_id: str, map_set_id: str, attributio
     return target, packs
 
 
-def _write_verified_at(parent_fd: int, name: str, data: bytes) -> None:
-    try:
-        descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o644,
-                             dir_fd=parent_fd)
-    except OSError as exc:
-        raise PackError(f"cannot write {name}: {exc}") from exc
-    try:
-        _write_all(descriptor, data, name)
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    _fsync_directory_fd(parent_fd)
-    actual = _read_file_at(parent_fd, name, len(data))
-    if actual != data:
-        raise PackError(f"read-back verification failed for {name}")
-
-
 def _write_atomic_at(parent_fd: int, name: str, data: bytes) -> None:
     """Atomically replace ``name`` with ``data`` using an exclusive temp file.
 
