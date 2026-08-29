@@ -68,7 +68,18 @@ function fail(message) { throw new MapInstallerError(message); }
 // installer; older ones are abandoned (crashed builder, closed tab) and are
 // reclaimed. A future epoch (the other writer's clock ahead of ours) counts
 // as fresh: refusing is the safe direction.
-const INSTALL_MARKER_NAME = '.pyxis-installing';
+// Each producer writes ONLY its own marker file -- no producer ever
+// writes a file it does not own, so a stalled installer's renewal can
+// never clobber a claim the other producer just made (the shared-file
+// check-then-act window is gone by construction):
+//   .pyxis-installing-web   this flasher
+//   .pyxis-installing-cli   the CLI builder
+//   .pyxis-installing       legacy shared marker (pre-per-file
+//                           producers); honored -- fresh ones refuse,
+//                           stale ones are reclaimed -- but never
+//                           written
+const INSTALL_MARKER_NAME = '.pyxis-installing-web';
+const CROSS_INSTALL_MARKERS = ['.pyxis-installing-cli', '.pyxis-installing'];
 const INSTALL_MARKER_TTL_MS = 15 * 60 * 1000;
 
 export function parseInstallMarker(text) {
@@ -84,14 +95,35 @@ export function installMarkerIsFresh(epochMs, nowMs = Date.now()) {
   return nowMs - epochMs <= INSTALL_MARKER_TTL_MS;
 }
 
-async function readInstallMarker(pyxis) {
-  let handle; try { handle = await pyxis.getFileHandle(INSTALL_MARKER_NAME); }
+async function readInstallMarker(pyxis, name = INSTALL_MARKER_NAME) {
+  let handle; try { handle = await pyxis.getFileHandle(name); }
   catch (error) { if (error?.name === 'NotFoundError') return null; throw error; }
   return new TextDecoder('utf-8').decode(new Uint8Array(await (await handle.getFile()).arrayBuffer()));
 }
 
+// Respect the other producers' marker files. A fresh cross marker (the
+// CLI builder's, or the legacy shared one) means a live cross-producer
+// installer: refuse. A stale or malformed one is an abandoned install;
+// reclaim it only when reclaim is true (at acquire). Fresh cross
+// markers are never touched.
+async function checkCrossInstallers(pyxis, reclaim) {
+  for (const name of CROSS_INSTALL_MARKERS) {
+    const raw = await readInstallMarker(pyxis, name);
+    if (raw === null) continue;
+    const parsed = parseInstallMarker(raw);
+    if (parsed && installMarkerIsFresh(parsed.epochMs)) {
+      fail('Another map installer is already running on this card; wait for it to finish and retry');
+    }
+    if (reclaim) { try { await pyxis.removeEntry(name); } catch {} }
+  }
+}
+
 async function acquireInstallMarker(pyxis, owner) {
   const token = `PYXI 1 ${owner} ${Date.now()}`;
+  // Check the cross producers first: a fresh foreign marker refuses the
+  // install up front, and stale cross markers (dead CLI run, old
+  // producer) are reclaimed so they cannot block a legitimate install.
+  await checkCrossInstallers(pyxis, true);
   const existing = await readInstallMarker(pyxis);
   if (existing !== null) {
     const parsed = parseInstallMarker(existing);
@@ -135,19 +167,25 @@ async function releaseInstallMarker(pyxis, token) {
 // Heartbeat: renew our marker's epoch during long publications (a full
 // world pack on slow SD storage can outlive the TTL).
 //
-// The renewal is ownership-checked, never a blind overwrite: if the
+// The renewal is ownership-checked, never a blind overwrite: if our own
 // marker no longer carries OUR owner (it aged out and another producer
 // legitimately reclaimed it, was deleted, or is corrupt), our claim is
 // void and the install aborts. Overwriting a foreign claim would steal
 // the card mid-install; the (possibly partially published) pack stays
 // device-harmless and the user retries after the other installer
 // finishes.
+//
+// The cross producers are re-checked on every renewal too: if the other
+// installer acquired DURING our install (a gap the acquire-time check
+// cannot cover), the heartbeat detects it and aborts instead of
+// continuing a conflicting publication.
 export async function renewInstallMarker(pyxis, owner) {
   const current = await readInstallMarker(pyxis);
   const parsed = current ? parseInstallMarker(current) : null;
   if (!parsed || parsed.owner !== owner) {
     fail('The map-install marker was reclaimed during installation; wait for the other installer to finish and retry');
   }
+  await checkCrossInstallers(pyxis, false);
   const token = `PYXI 1 ${owner} ${Date.now()}`;
   const handle = await pyxis.getFileHandle(INSTALL_MARKER_NAME);
   const writable = await handle.createWritable({keepExistingData: false});
@@ -164,6 +202,9 @@ export async function renewInstallMarker(pyxis, owner) {
 // converges (a pack no record names is device-harmless: the firmware only
 // reads packs enumerated in the active selection).
 async function verifyActivationState(pyxis, mapSets, styleName, markerToken, state) {
+  // Cross producers: a fresh marker in the CLI/legacy files means the
+  // other installer started after we acquired.
+  await checkCrossInstallers(pyxis, false);
   const marker = await readInstallMarker(pyxis);
   if (marker !== null) {
     // Compare by owner: our own marker may carry a renewed (newer) epoch.
@@ -792,17 +833,22 @@ async function removeOwnedPack(packs,packId,pack,receiptName,receipt,entries){
 }
 
 async function prepareActiveMapSet(pyxis,metadata){
-  const slots=await Promise.all([readSelection(pyxis,'active-pack.0'),readSelection(pyxis,'active-pack.1')]);
-  if(slots[0]&&slots[1]&&slots[0].generation===slots[1].generation&&JSON.stringify(slots[0])!==JSON.stringify(slots[1]))fail('Conflicting active map-set records');
-  // Raw slot bytes at derivation time: the commit-time revalidation in
-  // activateMapSet aborts if they change before the record writes.
+  // Raw slot bytes at derivation time. The commit-time revalidation in
+  // activateMapSet aborts if they change before the record writes -- so
+  // the derivation below decodes FROM these exact bytes. Decoding a
+  // separate read (readSelection) would let a concurrent swap between
+  // the two reads derive a record from stale state that the raw
+  // snapshot no longer matches.
   const slotBytes=[];for(let index=0;index<2;index+=1){let raw;try{raw=new Uint8Array(await (await (await pyxis.getFileHandle(`active-pack.${index}`)).getFile()).arrayBuffer());}catch(error){if(error?.name==='NotFoundError')raw=null;else throw error;}slotBytes.push(raw);}
+  const slots=slotBytes.map(raw=>{if(raw===null)return null;try{return decodeActiveSelection(raw);}catch{return null;}});
+  if(slots[0]&&slots[1]&&slots[0].generation===slots[1].generation&&JSON.stringify(slots[0])!==JSON.stringify(slots[1]))fail('Conflicting active map-set records');
   const valid=slots.filter(Boolean);const highest=Math.max(0,...valid.map(slot=>slot.generation));if(highest===0xffffffff)fail('Active selection generation is exhausted');
   const current=valid.sort((left,right)=>right.generation-left.generation)[0];
   const mapSets=await getDirectory(pyxis,'map-sets');const styleName=`${metadata.mapSetId}.pmas`;
-  const installed=await readStyleSelection(mapSets,styleName);
-  if(installed&&(![2,3].includes(installed.version)||installed.mapSetId!==metadata.mapSetId||installed.attribution!==metadata.attribution))fail('Installed style record does not match selected map set');
   let styleBytes=null;try{styleBytes=new Uint8Array(await (await (await mapSets.getFileHandle(styleName)).getFile()).arrayBuffer());}catch(error){if(error?.name!=='NotFoundError')throw error;}
+  let installed=null;
+  if(styleBytes!==null){try{installed=decodeActiveSelection(styleBytes);}catch{fail(`Installed style record is invalid: ${styleName}`);}}
+  if(installed&&(![2,3].includes(installed.version)||installed.mapSetId!==metadata.mapSetId||installed.attribution!==metadata.attribution))fail('Installed style record does not match selected map set');
   const composition=installed||([2,3].includes(current?.version)&&current.mapSetId===metadata.mapSetId?current:null);
   let packs=[];
   if(composition){

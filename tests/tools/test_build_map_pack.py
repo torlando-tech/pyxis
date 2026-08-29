@@ -1134,32 +1134,38 @@ def test_indexed_png_fast_path_accepts_in_range_and_rejects_out_of_range(tmp_pat
 
 def test_fresh_foreign_install_marker_is_refused_before_any_publication(
         tmp_path: Path) -> None:
-    # A live cross-producer installer (the web flasher holds a Web Locks
-    # name, which this process's flock cannot see) is announced by a fresh
-    # on-disk marker in pyxis-map/. The builder must refuse up front,
-    # before staging tiles or publishing.
+    # A live cross-producer installer (the web flasher holds a Web
+    # Locks name, which this process's flock cannot see) is announced
+    # by a fresh on-disk marker in pyxis-map/. The builder must refuse
+    # up front, before staging tiles or publishing. Both cross files
+    # are covered: the flasher's own file and the legacy shared one.
     tool = load_tool()
     source = tmp_path / "xyz"
     put_tile(source, 1, 0, 0)
     policy = tool.STYLE_POLICIES["osm-bright"]
-    sd = tmp_path / "sd"
-    (sd / "pyxis-map").mkdir(parents=True)
-    (sd / "pyxis-map/.pyxis-installing").write_text(
-        "PYXI 1 web-deadbeef " + str(int(__import__("time").time() * 1000)))
-    with pytest.raises(tool.PackError, match="already running"):
-        tool.build_map_pack(source, sd, pack_id="pack-a", name="A",
-                            attribution=policy["attribution"], source=policy["source"],
-                            license=policy["license"], style="osm-bright", activate=True)
-    # Nothing was staged, published, or activated: no pack, no
-    # records. The empty packs/ directory is created before the
-    # marker check and is harmless (the firmware reads only fixed
-    # named paths). The foreign marker is left in place: the other
-    # installer is live.
-    assert not (sd / "pyxis-map/packs/pack-a").exists()
-    assert not (sd / "pyxis-map/active-pack.0").exists()
-    assert not (sd / "pyxis-map/map-sets").exists()
-    # The foreign marker was not touched: the other installer is live.
-    assert (sd / "pyxis-map/.pyxis-installing").is_file()
+    now_ms = int(__import__("time").time() * 1000)
+    for marker_name in ("web-deadbeef", "web-legacy"):
+        sd = tmp_path / f"sd-{marker_name}"
+        (sd / "pyxis-map").mkdir(parents=True)
+        marker_path = (sd / "pyxis-map" /
+                       (".pyxis-installing-web" if marker_name == "web-deadbeef"
+                        else ".pyxis-installing"))
+        marker_path.write_text(f"PYXI 1 {marker_name} {now_ms}")
+        with pytest.raises(tool.PackError, match="already running"):
+            tool.build_map_pack(source, sd, pack_id="pack-a", name="A",
+                                attribution=policy["attribution"], source=policy["source"],
+                                license=policy["license"], style="osm-bright", activate=True)
+        # Nothing was staged, published, or activated: no pack, no
+        # records. The empty packs/ directory is created before the
+        # marker check and is harmless (the firmware reads only fixed
+        # named paths). The foreign marker is left in place: the other
+        # installer is live.
+        assert not (sd / "pyxis-map/packs/pack-a").exists()
+        assert not (sd / "pyxis-map/active-pack.0").exists()
+        assert not (sd / "pyxis-map/map-sets").exists()
+        # The foreign marker was not touched: the other installer is live.
+        assert marker_path.is_file()
+        assert marker_path.read_text() == f"PYXI 1 {marker_name} {now_ms}"
 
 
 def test_stale_install_marker_is_reclaimed_and_released(tmp_path: Path) -> None:
@@ -1173,14 +1179,14 @@ def test_stale_install_marker_is_reclaimed_and_released(tmp_path: Path) -> None:
     sd = tmp_path / "sd"
     (sd / "pyxis-map").mkdir(parents=True)
     stale = int(__import__("time").time() * 1000) - 24 * 3600 * 1000
-    (sd / "pyxis-map/.pyxis-installing").write_text(f"PYXI 1 cli-{stale:x} {stale}")
+    (sd / "pyxis-map/.pyxis-installing-cli").write_text(f"PYXI 1 cli-{stale:x} {stale}")
     tool.build_map_pack(source, sd, pack_id="pack-a", name="A",
                         attribution=policy["attribution"], source=policy["source"],
                         license=policy["license"], style="osm-bright", activate=True)
     assert (sd / "pyxis-map/packs/pack-a/manifest.pmp").is_file()
     assert (sd / "pyxis-map/active-pack.0").is_file()
     # The builder released its own marker; nothing is left behind.
-    assert not (sd / "pyxis-map/.pyxis-installing").exists()
+    assert not (sd / "pyxis-map/.pyxis-installing-cli").exists()
 
 
 def test_release_never_deletes_a_foreign_marker(tmp_path: Path) -> None:
@@ -1194,9 +1200,9 @@ def test_release_never_deletes_a_foreign_marker(tmp_path: Path) -> None:
         token = tool._acquire_install_marker(pyxis_fd)
         # A later installer overwrote our claim.
         foreign = "PYXI 1 web-cafebabe " + str(int(__import__("time").time() * 1000))
-        (sd / "pyxis-map/.pyxis-installing").write_text(foreign)
+        (sd / "pyxis-map/.pyxis-installing-cli").write_text(foreign)
         tool._release_install_marker(pyxis_fd, token)
-        assert (sd / "pyxis-map/.pyxis-installing").read_text() == foreign
+        assert (sd / "pyxis-map/.pyxis-installing-cli").read_text() == foreign
     finally:
         os.close(pyxis_fd)
 
@@ -1271,7 +1277,7 @@ def test_commit_time_revalidation_aborts_and_retry_converges(tmp_path: Path) -> 
     assert (sd / "pyxis-map/map-sets/osm-bright.pmas").read_bytes() == raced_record
     assert not (sd / "pyxis-map/active-pack.1").exists()
     # No marker is left behind.
-    assert not (sd / "pyxis-map/.pyxis-installing").exists()
+    assert not (sd / "pyxis-map/.pyxis-installing-cli").exists()
     # Retry: the pack verifies, records converge, and the new selection
     # includes both packs with pack-a at the front.
     result = tool.build_map_pack(source, sd, pack_id="pack-a", name="A",
@@ -1303,7 +1309,7 @@ def test_marker_is_renewed_during_long_publication_and_released_by_owner(
 
     def counting_renew(pyxis_fd, owner):
         original_renew(pyxis_fd, owner)
-        raw = (sd / "pyxis-map" / ".pyxis-installing").read_text()
+        raw = (sd / "pyxis-map" / ".pyxis-installing-cli").read_text()
         parts = raw.strip().split(" ")
         assert parts[0] == "PYXI" and parts[1] == "1" and parts[2] == owner
         renewals.append((owner, int(parts[3])))
@@ -1325,7 +1331,7 @@ def test_marker_is_renewed_during_long_publication_and_released_by_owner(
     # though renewals advanced the epoch past the acquired token.
     assert (sd / "pyxis-map/packs/pack-a/manifest.pmp").is_file()
     assert (sd / "pyxis-map/active-pack.0").is_file()
-    assert not (sd / "pyxis-map/.pyxis-installing").exists()
+    assert not (sd / "pyxis-map/.pyxis-installing-cli").exists()
 
 
 def test_long_publication_marker_stays_live_past_ttl(
@@ -1354,12 +1360,12 @@ def test_long_publication_marker_stays_live_past_ttl(
     sd = tmp_path / "sd"
     (sd / "pyxis-map").mkdir(parents=True)
     stale = now_ms - 16 * 60 * 1000
-    (sd / "pyxis-map/.pyxis-installing").write_text(f"PYXI 1 cli-crash {stale}")
+    (sd / "pyxis-map/.pyxis-installing-cli").write_text(f"PYXI 1 cli-crash {stale}")
     tool.build_map_pack(source, sd, pack_id="pack-a", name="A",
                         attribution=policy["attribution"], source=policy["source"],
                         license=policy["license"], style="osm-bright", activate=True)
     assert (sd / "pyxis-map/packs/pack-a/manifest.pmp").is_file()
-    assert not (sd / "pyxis-map/.pyxis-installing").exists()
+    assert not (sd / "pyxis-map/.pyxis-installing-cli").exists()
     # Sanity on the TTL constant the boundary above used.
     assert ttl_ms == 900 * 1000
 
@@ -1379,27 +1385,98 @@ def test_marker_renewal_refuses_to_steal_reclaimed_claim(
     pyxis_fd = os.open(str(pyxis), os.O_RDONLY | os.O_DIRECTORY)
     try:
         # Producer B reclaims after our (producer A) marker aged out.
-        (pyxis / ".pyxis-installing").write_text(
+        (pyxis / ".pyxis-installing-cli").write_text(
             f"PYXI 1 cli-other {int(__import__('time').time() * 1000)}\n")
         # Renewing as a DIFFERENT owner must abort...
         with pytest.raises(tool.PackError, match="reclaimed during installation"):
             tool._renew_install_marker(pyxis_fd, "cli-us")
         # ...and must leave B's claim untouched.
-        raw = (pyxis / ".pyxis-installing").read_text().strip().split(" ")
+        raw = (pyxis / ".pyxis-installing-cli").read_text().strip().split(" ")
         assert raw[2] == "cli-other"
         # Renewing as the SAME owner is allowed and advances the epoch.
         before = int(raw[3])
         tool._renew_install_marker(pyxis_fd, "cli-other")
-        after = (pyxis / ".pyxis-installing").read_text().strip().split(" ")
+        after = (pyxis / ".pyxis-installing-cli").read_text().strip().split(" ")
         assert int(after[3]) >= before
         # A missing or corrupt marker is also refused (claim void), never
         # overwritten.
-        (pyxis / ".pyxis-installing").unlink()
+        (pyxis / ".pyxis-installing-cli").unlink()
         with pytest.raises(tool.PackError, match="reclaimed during installation"):
             tool._renew_install_marker(pyxis_fd, "cli-other")
-        assert not (pyxis / ".pyxis-installing").exists()
-        (pyxis / ".pyxis-installing").write_text("garbage\n")
+        assert not (pyxis / ".pyxis-installing-cli").exists()
+        (pyxis / ".pyxis-installing-cli").write_text("garbage\n")
         with pytest.raises(tool.PackError, match="reclaimed during installation"):
             tool._renew_install_marker(pyxis_fd, "cli-other")
     finally:
         os.close(pyxis_fd)
+
+
+def test_stale_cross_marker_is_reclaimed_at_acquire(tmp_path: Path) -> None:
+    # Round 11 (Greptile): an abandoned cross-producer install (a dead
+    # flasher tab or a legacy builder) leaves a stale marker in the
+    # other producer's file. The builder reclaims it at acquire so it
+    # cannot block a legitimate install, and its own file is released
+    # on completion.
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 1, 0, 0)
+    policy = tool.STYLE_POLICIES["osm-bright"]
+    for legacy in (True, False):
+        sd = tmp_path / ("sd-legacy" if legacy else "sd-web")
+        (sd / "pyxis-map").mkdir(parents=True)
+        name = ".pyxis-installing" if legacy else ".pyxis-installing-web"
+        (sd / "pyxis-map" / name).write_text(
+            f"PYXI 1 web-crash {int(__import__('time').time() * 1000) - 16 * 60 * 1000}")
+        tool.build_map_pack(source, sd, pack_id="pack-a", name="A",
+                            attribution=policy["attribution"], source=policy["source"],
+                            license=policy["license"], style="osm-bright", activate=True)
+        assert (sd / "pyxis-map/packs/pack-a/manifest.pmp").is_file()
+        # The stale cross marker was reclaimed and our own released.
+        assert not (sd / "pyxis-map" / name).exists()
+        assert not (sd / "pyxis-map/.pyxis-installing-cli").exists()
+
+
+def test_fresh_cross_marker_during_install_aborts_at_renewal(
+        tmp_path: Path) -> None:
+    # Round 11 (Greptile): the acquire-time cross check cannot see an
+    # installer that starts DURING our install. The per-tile renewal
+    # re-checks the cross producers, so a fresh web marker that appears
+    # mid-publication aborts the install before any record is written --
+    # instead of continuing a conflicting publication.
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    for x in range(30):
+        put_tile(source, 5, x, 0)
+    policy = tool.STYLE_POLICIES["osm-bright"]
+    sd = tmp_path / "sd"
+    (sd / "pyxis-map").mkdir(parents=True)
+    marker_path = sd / "pyxis-map" / ".pyxis-installing-web"
+
+    real_copy = tool.copy_tile
+    counts = {"n": 0}
+
+    def racing_copy(source_fd, tile, stage_fd, budget):
+        counts["n"] += 1
+        if counts["n"] == 12:
+            # The web flasher claims the card mid-publication.
+            marker_path.write_text(
+                f"PYXI 1 web-racer {int(__import__('time').time() * 1000)}")
+        return real_copy(source_fd, tile, stage_fd, budget)
+
+    tool.copy_tile = racing_copy
+    try:
+        with pytest.raises(tool.PackError, match="already running"):
+            tool.build_map_pack(source, sd, pack_id="pack-a", name="A",
+                                attribution=policy["attribution"], source=policy["source"],
+                                license=policy["license"], style="osm-bright", activate=True)
+    finally:
+        tool.copy_tile = real_copy
+    # The abort happened before activation: no records (the empty
+    # map-sets/ directory is created up front and is harmless, like
+    # packs/), and the racer's marker is untouched (the other installer
+    # is live).
+    assert not (sd / "pyxis-map/active-pack.0").exists()
+    assert not (sd / "pyxis-map/map-sets/osm-bright.pmas").exists()
+    assert "web-racer" in marker_path.read_text()
+    # Our own claim is released even on the abort.
+    assert not (sd / "pyxis-map/.pyxis-installing-cli").exists()

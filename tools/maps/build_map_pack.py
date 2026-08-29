@@ -1343,16 +1343,33 @@ def _install_lock_at(pyxis_fd: int):
         os.close(descriptor)
 
 
-# Cross-producer install marker.
+# Cross-producer install markers.
 #
 # The web flasher holds a Web Locks name and this CLI holds an advisory
 # flock: two unrelated locking namespaces, so each lock is invisible to
-# the other producer. The on-disk marker below is the one coordination
-# primitive both producers share -- the flasher writes the same file with
-# the same token format (docs/flasher/js/map-installer.js). A marker is a
-# small file containing: PYXI 1 <owner> <epoch_ms>.
+# the other producer. The on-disk marker files below are the one
+# coordination primitive both producers share. Each producer writes
+# ONLY its own marker file -- no producer ever writes a file it does
+# not own, so a stalled installer's renewal can never clobber a claim
+# the other producer just made (the shared-file check-then-act window
+# is gone by construction):
+#
+#   .pyxis-installing-cli   this builder
+#   .pyxis-installing-web   the web flasher
+#   .pyxis-installing       legacy shared marker (pre-per-file
+#                           producers); honored -- fresh ones refuse,
+#                           stale ones are reclaimed -- but never
+#                           written
+#
+# A marker is a small file containing: PYXI 1 <owner> <epoch_ms>.
 
-_INSTALL_MARKER_NAME = ".pyxis-installing"
+_INSTALL_MARKER_NAME = ".pyxis-installing-cli"
+_WEB_INSTALL_MARKER_NAME = ".pyxis-installing-web"
+_LEGACY_INSTALL_MARKER_NAME = ".pyxis-installing"
+# Cross-producer files this producer must respect: refuse when fresh,
+# reclaim when stale.
+_CROSS_INSTALL_MARKERS = (_WEB_INSTALL_MARKER_NAME,
+                          _LEGACY_INSTALL_MARKER_NAME)
 # A marker written within this window is a live installer. Installations
 # longer than this are treated as abandoned (crashed builder, closed tab)
 # and reclaimed. A future epoch (writer clock ahead of ours) counts as
@@ -1385,6 +1402,27 @@ def _marker_is_fresh(epoch_ms: int) -> bool:
     return (now_ms - epoch_ms) / 1000.0 <= _INSTALL_MARKER_TTL_SECONDS
 
 
+def _check_cross_installers(pyxis_fd: int, *, reclaim: bool) -> None:
+    """Respect the other producers' marker files.
+
+    A FRESH foreign marker (the web flasher's, or the legacy shared
+    one) means a live cross-producer installer: refuse. A stale or
+    malformed one is an abandoned install; reclaim it only when the
+    caller says so (at acquire, where claiming is the intent). Fresh
+    foreign markers are never touched.
+    """
+    for name in _CROSS_INSTALL_MARKERS:
+        raw = _read_selection_at(pyxis_fd, name)
+        if raw is None:
+            continue
+        parsed = _parse_marker(raw)
+        if parsed is not None and _marker_is_fresh(parsed[1]):
+            raise PackError("another map installer is already running on "
+                            "this card; wait for it to finish and retry")
+        if reclaim:
+            _unlink_quietly_at(pyxis_fd, name)
+
+
 def _acquire_install_marker(pyxis_fd: int) -> str:
     """Claim the cross-producer install marker; return our token.
 
@@ -1398,9 +1436,15 @@ def _acquire_install_marker(pyxis_fd: int) -> str:
     the commit-time revalidation in activate_map_set, which refuses to
     publish a record over activation state that moved since it was
     derived.
+
+    The other producers' marker files are checked first: a fresh
+    cross-producer marker refuses the install up front, and stale
+    cross markers (crashed flasher tab, dead legacy builder) are
+    reclaimed so they cannot block a legitimate install.
     """
     owner = f"cli-{os.getpid():x}"
     token = _marker_token(owner)
+    _check_cross_installers(pyxis_fd, reclaim=True)
     raw = _read_selection_at(pyxis_fd, _INSTALL_MARKER_NAME)
     if raw is not None:
         parsed = _parse_marker(raw)
@@ -1465,6 +1509,11 @@ def _renew_install_marker(pyxis_fd: int, owner: str) -> None:
         raise PackError("the map-install marker was reclaimed during "
                         "installation; wait for the other installer to "
                         "finish and retry")
+    # The cross producers are re-checked on every renewal too: if the
+    # other installer acquired DURING our install (a gap the
+    # acquire-time check cannot cover), the heartbeat detects it and
+    # aborts instead of continuing a conflicting publication.
+    _check_cross_installers(pyxis_fd, reclaim=False)
     token = _marker_token(owner)
     descriptor = os.open(_INSTALL_MARKER_NAME,
                          os.O_WRONLY | os.O_TRUNC | os.O_CLOEXEC,
@@ -1505,15 +1554,19 @@ def _verify_activation_state_at(pyxis_fd: int, map_sets_fd: int, *,
                                 marker_token: str | None) -> None:
     """Commit-time revalidation against a concurrent installer.
 
-    Re-reads the install marker and the raw activation records
+    Re-reads the install markers and the raw activation records
     immediately before the record writes. If a cross-producer installer
     (web flasher or another builder) committed since the records were
-    derived -- or holds a fresh install marker that is not ours -- the
+    derived -- or holds a fresh install marker that is not ours, in
+    this producer's own file or in the cross producers' files -- the
     activation is aborted before any byte is written. The published pack
     is kept; a retry re-derives from the new state and converges (the
     pack is device-harmless while it is not named by any record: the
     firmware only reads packs enumerated in the active selection).
     """
+    # Cross producers: a fresh marker in the web/legacy files means the
+    # other installer started (or is mid-install) after we acquired.
+    _check_cross_installers(pyxis_fd, reclaim=False)
     marker_raw = _read_selection_at(pyxis_fd, _INSTALL_MARKER_NAME)
     if marker_raw is not None:
         # Compare by owner, not the full token: we renew the marker's

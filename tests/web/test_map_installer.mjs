@@ -730,7 +730,7 @@ test('map-set capacity is checked before a ninth pack is published', async () =>
 // round-7 P1). The CLI builder claims the same on-disk marker token; the
 // Web Locks name alone cannot coordinate with it. ---
 
-const MARKER = '.pyxis-installing';
+const MARKER = '.pyxis-installing-web'; // this producer's own marker file
 
 function freshMarker(owner = 'cli-0') {
   return new TextEncoder().encode(`PYXI 1 ${owner} ${Date.now()}`);
@@ -738,22 +738,27 @@ function freshMarker(owner = 'cli-0') {
 
 test('a fresh foreign install marker is refused before any record is written', async () => {
   const archive = storedZip([['2/1/1.png', PNG]]);
-  const root = new MemoryDirectoryHandle('sd');
-  const pyxis = await root.getDirectoryHandle('pyxis-map', {create: true});
-  const originalMarker = freshMarker('cli-0');
-  const marker = new MemoryFileHandle(MARKER, root.log);
-  marker.bytes = originalMarker;
-  pyxis.children.set(MARKER, marker);
+  // Both cross-producer files must refuse: the CLI builder's own file
+  // and the legacy shared marker (old producers). Fresh markers are
+  // never touched: the other installer is live.
+  for (const foreignName of ['.pyxis-installing-cli', '.pyxis-installing']) {
+    const root = new MemoryDirectoryHandle('sd');
+    const pyxis = await root.getDirectoryHandle('pyxis-map', {create: true});
+    const originalMarker = freshMarker('cli-0');
+    const marker = new MemoryFileHandle(foreignName, root.log);
+    marker.bytes = originalMarker;
+    pyxis.children.set(foreignName, marker);
 
-  await assert.rejects(
-    installMuiZip({archive, rootDirectory: root, metadata}),
-    /another map installer is already running/i,
-  );
-  // Nothing was published or activated; the foreign marker is untouched.
-  assert.equal(pyxis.children.has(metadata.packId), false);
-  assert.equal(pyxis.children.has('map-sets'), false);
-  assert.equal(pyxis.children.has('active-pack.0'), false);
-  assert.deepEqual([...marker.bytes], [...originalMarker]);
+    await assert.rejects(
+      installMuiZip({archive, rootDirectory: root, metadata}),
+      /another map installer is already running/i,
+    );
+    // Nothing was published or activated; the foreign marker is untouched.
+    assert.equal(pyxis.children.has(metadata.packId), false);
+    assert.equal(pyxis.children.has('map-sets'), false);
+    assert.equal(pyxis.children.has('active-pack.0'), false);
+    assert.deepEqual([...marker.bytes], [...originalMarker]);
+  }
 });
 
 test('a stale install marker is reclaimed and the marker is released on success', async () => {
@@ -784,17 +789,19 @@ test('activation aborts when a cross-producer commit lands before the record wri
   seed(mapSets, `${metadata.mapSetId}.pmas`, gen1);
   const slot1 = seed(pyxis, 'active-pack.0', gen1);
 
-  // Deterministic seam: active-pack.0 is read plainly (no create) twice per
-  // prepare pass -- once by readSelection, once by the raw slot snapshot --
-  // and the two prepare passes (installMapPack, then activateMapSet) are
-  // followed by the commit-time verifyActivationState re-read. That is the
-  // fifth plain read overall; inject the racer's commit right before it,
-  // i.e. between the snapshot derive and its revalidation.
+  // Deterministic seam: prepareActiveMapSet now snapshots the raw slot
+  // bytes first and derives the decoded records FROM that same snapshot
+  // (round 11: no separate decode read), so active-pack.0 is read
+  // plainly once per prepare pass -- the two prepare passes
+  // (installMapPack, then activateMapSet) are followed by the
+  // commit-time verifyActivationState re-read. That is the third plain
+  // read overall; inject the racer's commit right before it, i.e.
+  // between the snapshot derive and its revalidation.
   let plainSlotReads = 0;
   const realGetFileHandle = pyxis.getFileHandle.bind(pyxis);
   pyxis.getFileHandle = async (name, options) => {
     if (name === 'active-pack.0' && !(options && options.create)) plainSlotReads += 1;
-    if (name === 'active-pack.0' && !(options && options.create) && plainSlotReads === 5) {
+    if (name === 'active-pack.0' && !(options && options.create) && plainSlotReads === 3) {
       const gen2 = encodeActiveMapSet({generation: 2, mapSetId: metadata.mapSetId, attribution: metadata.attribution, packs: [{packId: 'other'}, {packId: 'old'}]});
       slot1.bytes = gen2;
       seed(mapSets, `${metadata.mapSetId}.pmas`, gen2);
@@ -845,14 +852,14 @@ test('renewing a live marker advances the epoch but keeps the owner', async () =
   const pyxis = await root.getDirectoryHandle('pyxis-map', {create: true});
   const owner = `web-${Date.now().toString(16)}`;
   const token = `PYXI 1 ${owner} ${Date.now() - 16 * 60 * 1000}`; // 16 minutes old: past TTL
-  const handle = await pyxis.getFileHandle('.pyxis-installing', {create: true, exclusive: true});
+  const handle = await pyxis.getFileHandle(MARKER, {create: true, exclusive: true});
   const writable = await handle.createWritable({keepExistingData: false});
   await writable.write(new TextEncoder().encode(token));
   await writable.close();
   assert.equal(installMarkerIsFresh(Date.now() - 16 * 60 * 1000), false, '16 minutes old is past the TTL');
   // The heartbeat rewrites the marker with a fresh epoch, same owner.
   await renewInstallMarker(pyxis, owner);
-  const renewed = await pyxis.getFileHandle('.pyxis-installing');
+  const renewed = await pyxis.getFileHandle(MARKER);
   const text = new TextDecoder('utf-8').decode(new Uint8Array(await (await renewed.getFile()).arrayBuffer()));
   const parsed = parseInstallMarker(text);
   assert.equal(parsed.owner, owner, 'renewal keeps the owner identity');
@@ -870,12 +877,12 @@ test('marker renewal refuses to steal a reclaimed claim', async () => {
   const root = new MemoryDirectoryHandle('sd');
   const pyxis = await root.getDirectoryHandle('pyxis-map', {create: true});
   const writeMarker = async text => {
-    const writable = await (await pyxis.getFileHandle('.pyxis-installing', {create: true})).createWritable({keepExistingData: false});
+    const writable = await (await pyxis.getFileHandle(MARKER, {create: true})).createWritable({keepExistingData: false});
     await writable.write(new TextEncoder().encode(text));
     await writable.close();
   };
   const readMarker = async () => {
-    let handle = null; try { handle = await pyxis.getFileHandle('.pyxis-installing'); } catch { return null; }
+    let handle = null; try { handle = await pyxis.getFileHandle(MARKER); } catch { return null; }
     const file = await handle.getFile();
     return new TextDecoder('utf-8').decode(new Uint8Array(await file.arrayBuffer()));
   };
@@ -893,9 +900,42 @@ test('marker renewal refuses to steal a reclaimed claim', async () => {
   assert.equal(renewed.owner, 'cli-other');
   assert.ok(installMarkerIsFresh(renewed.epochMs));
   // Missing or corrupt marker: refused, never overwritten.
-  await pyxis.removeEntry('.pyxis-installing');
+  await pyxis.removeEntry(MARKER);
   await assert.rejects(() => renewInstallMarker(pyxis, 'cli-other'));
   assert.equal(await readMarker(), null);
   await writeMarker('garbage');
   await assert.rejects(() => renewInstallMarker(pyxis, 'cli-other'));
+});
+
+
+// --- Round 11 (Greptile): the acquire-time cross check cannot see an
+// installer that starts DURING our install. The per-tile heartbeat
+// re-checks the cross producers, so a fresh CLI marker that appears
+// mid-publication aborts the install before any record is written.
+test('a fresh cross marker during installation aborts at renewal', async () => {
+  const archive = storedZip([['2/1/1.png', PNG]]);
+  const root = new MemoryDirectoryHandle('sd');
+  let planted = false;
+  await assert.rejects(
+    installMuiZip({
+      archive, rootDirectory: root, metadata,
+      onProgress: state => {
+        if (!planted && state.phase === 'write' && state.completed === 1) {
+          planted = true;
+          const pyxis = root.children.get('pyxis-map');
+          const marker = new MemoryFileHandle('.pyxis-installing-cli', root.log);
+          marker.bytes = freshMarker('cli-racer');
+          pyxis.children.set('.pyxis-installing-cli', marker);
+        }
+      },
+    }),
+    /another map installer is already running/i,
+  );
+  const pyxis = root.children.get('pyxis-map');
+  // Aborted before activation: no records; the racer's marker is
+  // untouched (the other installer is live) and our own claim released.
+  assert.equal(pyxis.children.has('active-pack.0'), false);
+  assert.equal(pyxis.children.has('map-sets/osm-bright.pmas'), false);
+  assert.equal(pyxis.children.has('.pyxis-installing-cli'), true);
+  assert.equal(pyxis.children.has(MARKER), false, 'our marker released on abort');
 });
