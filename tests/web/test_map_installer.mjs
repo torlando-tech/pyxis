@@ -13,6 +13,7 @@ import {
   parseSparseManifest,
   resolveMuiStyleProfile,
   suggestMapIdentity,
+  MapInstallerError,
 } from '../../docs/flasher/js/map-installer.js';
 
 const PNG = Buffer.from(
@@ -143,6 +144,13 @@ class MemoryDirectoryHandle {
     const current = this.children.get(name);
     if (current) {
       if (current.kind !== 'file') throw new DOMException('type', 'TypeMismatchError');
+      // File System Access API: exclusive creation of an existing entry
+      // fails (FileExistsError). The install-marker protocol relies on it.
+      if (options.exclusive) {
+        const error = new Error('The file already exists.');
+        error.name = 'FileExistsError';
+        throw error;
+      }
       return current;
     }
     if (!options.create) throw new DOMException('missing', 'NotFoundError');
@@ -712,4 +720,113 @@ test('map-set capacity is checked before a ninth pack is published', async () =>
   await writable.close();
   await assert.rejects(installMuiZip({archive,rootDirectory:root,metadata:{...metadata,packId:'pack-nine',name:'Pack Nine'}}), /active map set/i);
   assert.equal(pyxis.children.has('packs'), false);
+});
+
+
+// --- Cross-producer install marker + commit-time revalidation (Greptile
+// round-7 P1). The CLI builder claims the same on-disk marker token; the
+// Web Locks name alone cannot coordinate with it. ---
+
+const MARKER = '.pyxis-installing';
+
+function freshMarker(owner = 'cli-0') {
+  return new TextEncoder().encode(`PYXI 1 ${owner} ${Date.now()}`);
+}
+
+test('a fresh foreign install marker is refused before any record is written', async () => {
+  const archive = storedZip([['2/1/1.png', PNG]]);
+  const root = new MemoryDirectoryHandle('sd');
+  const pyxis = await root.getDirectoryHandle('pyxis-map', {create: true});
+  const originalMarker = freshMarker('cli-0');
+  const marker = new MemoryFileHandle(MARKER, root.log);
+  marker.bytes = originalMarker;
+  pyxis.children.set(MARKER, marker);
+
+  await assert.rejects(
+    installMuiZip({archive, rootDirectory: root, metadata}),
+    /another map installer is already running/i,
+  );
+  // Nothing was published or activated; the foreign marker is untouched.
+  assert.equal(pyxis.children.has(metadata.packId), false);
+  assert.equal(pyxis.children.has('map-sets'), false);
+  assert.equal(pyxis.children.has('active-pack.0'), false);
+  assert.deepEqual([...marker.bytes], [...originalMarker]);
+});
+
+test('a stale install marker is reclaimed and the marker is released on success', async () => {
+  const archive = storedZip([['2/1/1.png', PNG]]);
+  const root = new MemoryDirectoryHandle('sd');
+  const pyxis = await root.getDirectoryHandle('pyxis-map', {create: true});
+  const marker = new MemoryFileHandle(MARKER, root.log);
+  marker.bytes = new TextEncoder().encode(`PYXI 1 cli-0 ${Date.now() - 24 * 60 * 60 * 1000}`);
+  pyxis.children.set(MARKER, marker);
+
+  const result = await installMuiZip({archive, rootDirectory: root, metadata});
+  assert.equal(result.tileCount, 1);
+  assert.equal(pyxis.children.has(MARKER), false);
+});
+
+test('activation aborts when a cross-producer commit lands before the record writes, then retry converges', async () => {
+  const archive = storedZip([['2/1/1.png', PNG]]);
+  const root = new MemoryDirectoryHandle('sd');
+  const pyxis = await root.getDirectoryHandle('pyxis-map', {create: true});
+  const mapSets = await pyxis.getDirectoryHandle('map-sets', {create: true});
+  const seed = (directory, name, bytes) => {
+    const file = new MemoryFileHandle(name, root.log);
+    file.bytes = bytes;
+    directory.children.set(name, file);
+    return file;
+  };
+  const gen1 = encodeActiveMapSet({generation: 1, mapSetId: metadata.mapSetId, attribution: metadata.attribution, packs: [{packId: 'old'}]});
+  seed(mapSets, `${metadata.mapSetId}.pmas`, gen1);
+  const slot1 = seed(pyxis, 'active-pack.0', gen1);
+
+  // Deterministic seam: active-pack.0 is read plainly (no create) twice per
+  // prepare pass -- once by readSelection, once by the raw slot snapshot --
+  // and the two prepare passes (installMapPack, then activateMapSet) are
+  // followed by the commit-time verifyActivationState re-read. That is the
+  // fifth plain read overall; inject the racer's commit right before it,
+  // i.e. between the snapshot derive and its revalidation.
+  let plainSlotReads = 0;
+  const realGetFileHandle = pyxis.getFileHandle.bind(pyxis);
+  pyxis.getFileHandle = async (name, options) => {
+    if (name === 'active-pack.0' && !(options && options.create)) plainSlotReads += 1;
+    if (name === 'active-pack.0' && !(options && options.create) && plainSlotReads === 5) {
+      const gen2 = encodeActiveMapSet({generation: 2, mapSetId: metadata.mapSetId, attribution: metadata.attribution, packs: [{packId: 'other'}, {packId: 'old'}]});
+      slot1.bytes = gen2;
+      seed(mapSets, `${metadata.mapSetId}.pmas`, gen2);
+    }
+    return realGetFileHandle(name, options);
+  };
+  try {
+    await assert.rejects(
+      installMuiZip({archive, rootDirectory: root, metadata}),
+      /changed during installation/i,
+    );
+    // The raced state is intact (no record was written over it) and our
+    // pack stays published under packs/ -- device-harmless until a record
+    // names it.
+    const packsDir = pyxis.children.get('packs');
+    assert.ok(packsDir, 'packs directory exists');
+    assert.equal(packsDir.children.has(metadata.packId), true);
+    const raced = await decodeActiveSelection(pyxis.children.get('active-pack.0').bytes);
+    assert.equal(raced.generation, 2);
+    assert.deepEqual(raced.packs.map(pack => pack.packId), ['other', 'old']);
+    const racedStyle = await decodeActiveSelection(mapSets.children.get(`${metadata.mapSetId}.pmas`).bytes);
+    assert.equal(racedStyle.generation, 2);
+    assert.equal(pyxis.children.has(MARKER), false, 'marker released even on abort');
+  } finally {
+    pyxis.getFileHandle = realGetFileHandle;
+  }
+  // The retry re-derives from the gen-2 state and converges to generation
+  // 3 in the free slot (the racer's gen-2 record keeps active-pack.0).
+  const retried = await installMuiZip({archive, rootDirectory: root, metadata});
+  assert.equal(retried.tileCount, 1);
+  const finalSlots = ['active-pack.0', 'active-pack.1']
+    .map(name => pyxis.children.get(name))
+    .filter(Boolean)
+    .map(handle => decodeActiveSelection(handle.bytes));
+  const newest = finalSlots.sort((left, right) => right.generation - left.generation)[0];
+  assert.equal(newest.generation, 3);
+  assert.deepEqual(newest.packs.map(pack => pack.packId), [metadata.packId, 'other', 'old']);
 });

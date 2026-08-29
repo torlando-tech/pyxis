@@ -32,6 +32,7 @@ import re
 import stat
 import struct
 import sys
+import time
 from typing import Any, cast, Iterable
 import zlib
 
@@ -1120,7 +1121,8 @@ STYLE_POLICIES: dict[str, dict[str, str]] = {
 }
 
 
-def activate_map_set(pyxis_fd: int, *, pack_id: str, map_set_id: str, attribution: str) -> tuple[str, list[str]]:
+def activate_map_set(pyxis_fd: int, *, pack_id: str, map_set_id: str, attribution: str,
+                     marker_token: str | None = None) -> tuple[str, list[str]]:
     """Publish the v3 active map-set record, mirroring the web flasher.
 
     pyxis_fd is the open pyxis-map/ directory. Slot and style-record
@@ -1141,12 +1143,25 @@ def activate_map_set(pyxis_fd: int, *, pack_id: str, map_set_id: str, attributio
     The final pack list is validated against the firmware's pack limit
     before any byte is written, so a rejected activation cannot orphan a
     published pack.
+
+    marker_token is the caller's cross-producer install-marker token (see
+    _acquire_install_marker). When given, the raw slot and style-record
+    bytes are captured when they are first read and re-read immediately
+    before the record writes: if another installer (the web flasher holds
+    a Web Locks name, which this process's flock cannot see) committed new
+    activation state -- or holds a fresh install marker that is not ours --
+    in the meantime, the publication is aborted before any byte is written.
+    The already-published pack is kept; a retry re-derives from the new
+    state and converges, and a pack that no record names is device-harmless
+    (MapTilePack only reads packs enumerated in the active selection).
     Returns (slot_name, enabled_packs).
     """
     slot_names = ("active-pack.0", "active-pack.1")
     slots: list[dict[str, object] | None] = [None, None]
+    slot_raw: list[bytes | None] = [None, None]
     for index, slot_name in enumerate(slot_names):
         raw = _read_selection_at(pyxis_fd, slot_name)
+        slot_raw[index] = raw
         if raw is not None:
             slots[index] = decode_active_selection(raw)
     if slots[0] is not None and slots[1] is not None \
@@ -1191,6 +1206,16 @@ def activate_map_set(pyxis_fd: int, *, pack_id: str, map_set_id: str, attributio
         else:
             target = slot_names[0] if cast(int, slots[0]["generation"]) <= \
                     cast(int, slots[1]["generation"]) else slot_names[1]
+        # Commit-time revalidation: the slot/style records were derived
+        # above; a concurrent cross-producer installer (the web flasher's
+        # Web Locks name is invisible to our flock) may have committed new
+        # activation state in the meantime. Re-reading the raw bytes here
+        # and aborting on any change guarantees this publication never
+        # overwrites a newer record with one derived from stale state.
+        # installed_raw is the style record's bytes as first read above.
+        _verify_activation_state_at(pyxis_fd, map_sets_fd, slot_raw=slot_raw,
+                                    style_raw=installed_raw, style_name=style_name,
+                                    marker_token=marker_token)
         # Style record first, active slot second (the web flasher's order).
         # The firmware's device-side style activation
         # (MapStyleCatalog::activate) reads the style record as the source
@@ -1316,6 +1341,149 @@ def _install_lock_at(pyxis_fd: int):
         except OSError:
             pass
         os.close(descriptor)
+
+
+# Cross-producer install marker.
+#
+# The web flasher holds a Web Locks name and this CLI holds an advisory
+# flock: two unrelated locking namespaces, so each lock is invisible to
+# the other producer. The on-disk marker below is the one coordination
+# primitive both producers share -- the flasher writes the same file with
+# the same token format (docs/flasher/js/map-installer.js). A marker is a
+# small file containing: PYXI 1 <owner> <epoch_ms>.
+
+_INSTALL_MARKER_NAME = ".pyxis-installing"
+# A marker written within this window is a live installer. Installations
+# longer than this are treated as abandoned (crashed builder, closed tab)
+# and reclaimed. A future epoch (writer clock ahead of ours) counts as
+# fresh: refusing is the safe direction.
+_INSTALL_MARKER_TTL_SECONDS = 900
+
+
+def _marker_token(owner: str) -> str:
+    return f"PYXI 1 {owner} {int(time.time() * 1000)}"
+
+
+def _parse_marker(raw: bytes) -> tuple[str, int] | None:
+    """Parse a marker token into (owner, epoch_ms); None if malformed."""
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    parts = text.strip().split(" ")
+    if len(parts) != 4 or parts[0] != "PYXI" or parts[1] != "1":
+        return None
+    if not parts[2] or len(parts[2]) > 64 or not parts[3].isdigit():
+        return None
+    return parts[2], int(parts[3])
+
+
+def _marker_is_fresh(epoch_ms: int) -> bool:
+    now_ms = int(time.time() * 1000)
+    if epoch_ms > now_ms:
+        return True
+    return (now_ms - epoch_ms) / 1000.0 <= _INSTALL_MARKER_TTL_SECONDS
+
+
+def _acquire_install_marker(pyxis_fd: int) -> str:
+    """Claim the cross-producer install marker; return our token.
+
+    Protocol (shared with the web flasher):
+      * no marker              -> create it;
+      * fresh foreign marker   -> refuse: another installer is live;
+      * stale or malformed     -> reclaim (unlink, then create).
+    After creation the file is read back and compared to our token: a
+    foreign content means we lost a simultaneous acquire race and we
+    abort. The marker is best-effort coordination -- the safety net is
+    the commit-time revalidation in activate_map_set, which refuses to
+    publish a record over activation state that moved since it was
+    derived.
+    """
+    owner = f"cli-{os.getpid():x}"
+    token = _marker_token(owner)
+    raw = _read_selection_at(pyxis_fd, _INSTALL_MARKER_NAME)
+    if raw is not None:
+        parsed = _parse_marker(raw)
+        if parsed is not None and _marker_is_fresh(parsed[1]):
+            raise PackError("another map installer is already running on "
+                            "this card; wait for it to finish and retry")
+        # Stale or malformed: reclaim. A malformed marker may be a live
+        # writer mid-write, but the read-back below fails loudly if so,
+        # and commit-time revalidation covers the rest.
+        _unlink_quietly_at(pyxis_fd, _INSTALL_MARKER_NAME)
+    try:
+        descriptor = os.open(_INSTALL_MARKER_NAME,
+                             os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                             0o644, dir_fd=pyxis_fd)
+    except FileExistsError:
+        raise PackError("another map installer is already running on "
+                        "this card; wait for it to finish and retry") from None
+    except OSError as exc:
+        raise PackError(f"cannot write the map-install marker: {exc}") from exc
+    try:
+        _write_all(descriptor, token.encode("ascii"), _INSTALL_MARKER_NAME)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    actual = _read_selection_at(pyxis_fd, _INSTALL_MARKER_NAME)
+    if actual != token.encode("ascii"):
+        # Someone overwrote (or removed) our marker while we acquired it.
+        # Never delete a foreign marker: our claim is void, abort.
+        raise PackError("the map-install marker was contested during "
+                        "acquisition; wait and retry")
+    _fsync_directory_fd(pyxis_fd)
+    return token
+
+
+def _release_install_marker(pyxis_fd: int, token: str) -> None:
+    """Remove our install marker -- and only ours.
+
+    If the marker content is not our own token (a later installer
+    reclaimed it after our install outlasted the TTL, or a crashed run
+    left a different claim), deleting it would drop that installer's
+    live claim. Leave it; the TTL reclaims it.
+    """
+    raw = _read_selection_at(pyxis_fd, _INSTALL_MARKER_NAME)
+    if raw == token.encode("ascii"):
+        try:
+            os.unlink(_INSTALL_MARKER_NAME, dir_fd=pyxis_fd)
+        except OSError:
+            pass
+
+
+def _verify_activation_state_at(pyxis_fd: int, map_sets_fd: int, *,
+                                slot_raw: list[bytes | None],
+                                style_raw: bytes | None, style_name: str,
+                                marker_token: str | None) -> None:
+    """Commit-time revalidation against a concurrent installer.
+
+    Re-reads the install marker and the raw activation records
+    immediately before the record writes. If a cross-producer installer
+    (web flasher or another builder) committed since the records were
+    derived -- or holds a fresh install marker that is not ours -- the
+    activation is aborted before any byte is written. The published pack
+    is kept; a retry re-derives from the new state and converges (the
+    pack is device-harmless while it is not named by any record: the
+    firmware only reads packs enumerated in the active selection).
+    """
+    marker_raw = _read_selection_at(pyxis_fd, _INSTALL_MARKER_NAME)
+    if marker_raw is not None:
+        own = marker_token.encode("ascii") if marker_token is not None else None
+        parsed = _parse_marker(marker_raw)
+        if parsed is not None and _marker_is_fresh(parsed[1]) \
+                and marker_raw != own:
+            raise PackError("another map installer is running on this card; "
+                            "wait for it to finish and retry")
+    for index, slot_name in enumerate(("active-pack.0", "active-pack.1")):
+        actual = _read_selection_at(pyxis_fd, slot_name)
+        if actual != slot_raw[index]:
+            raise PackError("active map-set records changed during "
+                            "installation; wait for the other installer "
+                            "to finish and retry")
+    actual_style = _read_selection_at(map_sets_fd, style_name)
+    if actual_style != style_raw:
+        raise PackError("installed style record changed during installation; "
+                        "wait for the other installer to finish and retry")
 
 
 def _remove_tree_at(parent_fd: int, name: str) -> None:
@@ -1512,52 +1680,68 @@ def build_map_pack(source_directory: Path, output_root: Path, *, pack_id: str, n
             assert style is not None
             # Hold the install lock from the preflight through activation:
             # two concurrent builders could otherwise both pass the
-            # preflight and each clobber the other's records.
+            # preflight and each clobber the other's records. The cross-
+            # producer install marker (shared with the web flasher, which
+            # holds a Web Locks name this flock cannot see) is claimed for
+            # the same span and released on every exit path.
             with _install_lock_at(pyxis_fd):
-                _preflight_activation(pyxis_fd, pack_id=pack_id, map_set_id=style,
-                                      attribution=attribution)
-                if not resumed:
-                    temporary, stage_fd = _temporary_directory(packs_fd, pack_id)
-                    copied = 0
-                    for tile in tiles:
-                        copy_tile(source_fd, tile, stage_fd, max_bytes - copied)
-                        copied += tile.size
-                    manifest_fd = os.open("manifest.pmp", os.O_WRONLY | os.O_CREAT | os.O_EXCL
-                                           | os.O_CLOEXEC, 0o644, dir_fd=stage_fd)
-                    try:
-                        _write_all(manifest_fd, manifest, "manifest.pmp")
-                        os.fsync(manifest_fd)
-                    finally:
-                        os.close(manifest_fd)
-                    _fsync_directory_fd(stage_fd)
-                    _validate_pack_fd(stage_fd, target, max_bytes)
-                    _verify_output_chain(output_root, output_fd, pyxis_fd, pyxis_identity,
-                                         packs_identity)
-                    _rename_noreplace(packs_fd, temporary, pack_id, target)
-                    committed = True
-                    try:
-                        _verify_output_chain(output_root, output_fd, pyxis_fd,
-                                             pyxis_identity, packs_identity)
-                    except BaseException as exc:
+                # Claim the cross-producer install marker FIRST, before any
+                # staging or publication: a live web-flasher install (which
+                # holds a Web Locks name this flock cannot see) is announced
+                # by its marker, and refusing up front avoids the wasted
+                # tile copies and -- more importantly -- avoids publishing a
+                # pack that activation would then have to abandon. Stale or
+                # malformed markers (crashed builder, closed tab) are
+                # reclaimed here; ours is released on every exit path.
+                marker_token = _acquire_install_marker(pyxis_fd)
+                try:
+                    _preflight_activation(pyxis_fd, pack_id=pack_id, map_set_id=style,
+                                          attribution=attribution)
+                    if not resumed:
+                        temporary, stage_fd = _temporary_directory(packs_fd, pack_id)
+                        copied = 0
+                        for tile in tiles:
+                            copy_tile(source_fd, tile, stage_fd, max_bytes - copied)
+                            copied += tile.size
+                        manifest_fd = os.open("manifest.pmp", os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                                               | os.O_CLOEXEC, 0o644, dir_fd=stage_fd)
                         try:
-                            _remove_tree_at(packs_fd, pack_id)
-                            _fsync_directory_fd(packs_fd)
-                            committed = False
-                        except BaseException as cleanup_error:
-                            raise PublishedDurabilityError(target, OSError(
-                                f"publication location changed and rollback failed: "
-                                f"{cleanup_error}")) from exc
-                        raise PackError("output directory changed during publication; "
-                                        "rolled back") from exc
-                    try:
-                        os.close(stage_fd)
-                    except OSError as exc:
+                            _write_all(manifest_fd, manifest, "manifest.pmp")
+                            os.fsync(manifest_fd)
+                        finally:
+                            os.close(manifest_fd)
+                        _fsync_directory_fd(stage_fd)
+                        _validate_pack_fd(stage_fd, target, max_bytes)
+                        _verify_output_chain(output_root, output_fd, pyxis_fd, pyxis_identity,
+                                             packs_identity)
+                        _rename_noreplace(packs_fd, temporary, pack_id, target)
+                        committed = True
+                        try:
+                            _verify_output_chain(output_root, output_fd, pyxis_fd,
+                                                 pyxis_identity, packs_identity)
+                        except BaseException as exc:
+                            try:
+                                _remove_tree_at(packs_fd, pack_id)
+                                _fsync_directory_fd(packs_fd)
+                                committed = False
+                            except BaseException as cleanup_error:
+                                raise PublishedDurabilityError(target, OSError(
+                                    f"publication location changed and rollback failed: "
+                                    f"{cleanup_error}")) from exc
+                            raise PackError("output directory changed during publication; "
+                                            "rolled back") from exc
+                        try:
+                            os.close(stage_fd)
+                        except OSError as exc:
+                            stage_fd = -1
+                            raise PublishedDurabilityError(target, exc) from exc
                         stage_fd = -1
-                        raise PublishedDurabilityError(target, exc) from exc
-                    stage_fd = -1
-                slot_name, _enabled = activate_map_set(pyxis_fd, pack_id=pack_id,
-                                                       map_set_id=style,
-                                                       attribution=attribution)
+                    slot_name, _enabled = activate_map_set(pyxis_fd, pack_id=pack_id,
+                                                           map_set_id=style,
+                                                           attribution=attribution,
+                                                           marker_token=marker_token)
+                finally:
+                    _release_install_marker(pyxis_fd, marker_token)
         else:
             temporary, stage_fd = _temporary_directory(packs_fd, pack_id)
             copied = 0

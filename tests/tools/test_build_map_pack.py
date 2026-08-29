@@ -1130,3 +1130,154 @@ def test_indexed_png_fast_path_accepts_in_range_and_rejects_out_of_range(tmp_pat
     put_tile(source_bad, 0, 0, 0, bad)
     with pytest.raises(tool.PackError, match="palette index out of range"):
         tool.build_map_pack(source_bad, tmp_path / "sd-bad", **metadata())
+
+
+def test_fresh_foreign_install_marker_is_refused_before_any_publication(
+        tmp_path: Path) -> None:
+    # A live cross-producer installer (the web flasher holds a Web Locks
+    # name, which this process's flock cannot see) is announced by a fresh
+    # on-disk marker in pyxis-map/. The builder must refuse up front,
+    # before staging tiles or publishing.
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 1, 0, 0)
+    policy = tool.STYLE_POLICIES["osm-bright"]
+    sd = tmp_path / "sd"
+    (sd / "pyxis-map").mkdir(parents=True)
+    (sd / "pyxis-map/.pyxis-installing").write_text(
+        "PYXI 1 web-deadbeef " + str(int(__import__("time").time() * 1000)))
+    with pytest.raises(tool.PackError, match="already running"):
+        tool.build_map_pack(source, sd, pack_id="pack-a", name="A",
+                            attribution=policy["attribution"], source=policy["source"],
+                            license=policy["license"], style="osm-bright", activate=True)
+    # Nothing was staged, published, or activated: no pack, no
+    # records. The empty packs/ directory is created before the
+    # marker check and is harmless (the firmware reads only fixed
+    # named paths). The foreign marker is left in place: the other
+    # installer is live.
+    assert not (sd / "pyxis-map/packs/pack-a").exists()
+    assert not (sd / "pyxis-map/active-pack.0").exists()
+    assert not (sd / "pyxis-map/map-sets").exists()
+    # The foreign marker was not touched: the other installer is live.
+    assert (sd / "pyxis-map/.pyxis-installing").is_file()
+
+
+def test_stale_install_marker_is_reclaimed_and_released(tmp_path: Path) -> None:
+    # An abandoned installer (crashed builder, closed tab) leaves a stale
+    # marker. The builder reclaims it, installs, and releases it on the
+    # happy path.
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 1, 0, 0)
+    policy = tool.STYLE_POLICIES["osm-bright"]
+    sd = tmp_path / "sd"
+    (sd / "pyxis-map").mkdir(parents=True)
+    stale = int(__import__("time").time() * 1000) - 24 * 3600 * 1000
+    (sd / "pyxis-map/.pyxis-installing").write_text(f"PYXI 1 cli-{stale:x} {stale}")
+    tool.build_map_pack(source, sd, pack_id="pack-a", name="A",
+                        attribution=policy["attribution"], source=policy["source"],
+                        license=policy["license"], style="osm-bright", activate=True)
+    assert (sd / "pyxis-map/packs/pack-a/manifest.pmp").is_file()
+    assert (sd / "pyxis-map/active-pack.0").is_file()
+    # The builder released its own marker; nothing is left behind.
+    assert not (sd / "pyxis-map/.pyxis-installing").exists()
+
+
+def test_release_never_deletes_a_foreign_marker(tmp_path: Path) -> None:
+    # If a later installer reclaimed the marker after ours outlasted the
+    # TTL, release must leave the foreign claim alone.
+    tool = load_tool()
+    sd = tmp_path / "sd"
+    (sd / "pyxis-map").mkdir(parents=True)
+    pyxis_fd = os.open(str(sd / "pyxis-map"), os.O_RDONLY)
+    try:
+        token = tool._acquire_install_marker(pyxis_fd)
+        # A later installer overwrote our claim.
+        foreign = "PYXI 1 web-cafebabe " + str(int(__import__("time").time() * 1000))
+        (sd / "pyxis-map/.pyxis-installing").write_text(foreign)
+        tool._release_install_marker(pyxis_fd, token)
+        assert (sd / "pyxis-map/.pyxis-installing").read_text() == foreign
+    finally:
+        os.close(pyxis_fd)
+
+
+def test_commit_time_revalidation_aborts_and_retry_converges(tmp_path: Path) -> None:
+    # Commit-time revalidation: if a cross-producer installer commits new
+    # activation state after our records were derived, the publication is
+    # aborted before any record write. The published pack is kept (device-
+    # harmless while no record names it) and a retry converges the records.
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 1, 0, 0)
+    policy = tool.STYLE_POLICIES["osm-bright"]
+    sd = tmp_path / "sd"
+    real_activate = tool.activate_map_set
+    real_verify = tool._verify_activation_state_at
+
+    def racing_activate(pyxis_fd, **kwargs):
+        # One-shot: fires only on the first (aborted) run.
+        if raced["fired"]:
+            real_activate(pyxis_fd, **kwargs)
+            return
+        raced["fired"] = True
+        # Derivation happens inside the real activate_map_set (raw slot and
+        # style bytes are read there); run it once so the snapshot is
+        # taken, then simulate a concurrent cross-producer commit landing
+        # between that read and the commit-time revalidation. A real
+        # installer commits both records (style first, slot second), so the
+        # simulated competitor does the same.
+        real_activate(pyxis_fd, **kwargs)
+        assert tool._read_selection_at(pyxis_fd, "active-pack.1") is None
+        record2 = tool.encode_active_map_set(
+            generation=2, map_set_id="osm-bright",
+            attribution=policy["attribution"], pack_ids=["other-pack", "raced-pack"])
+        map_sets_fd = tool._mkdir_open(pyxis_fd, "map-sets")[0]
+        try:
+            tool._write_atomic_at(map_sets_fd, "osm-bright.pmas", record2)
+            tool._write_atomic_at(pyxis_fd, "active-pack.0", record2)
+        finally:
+            os.close(map_sets_fd)
+        # Now run the commit-time revalidation for real: it must see the
+        # changed slot bytes (our derivation snapshot had both slots empty)
+        # and abort before any record write.
+        map_sets_fd = tool._mkdir_open(pyxis_fd, "map-sets")[0]
+        token = tool._read_selection_at(pyxis_fd, tool._INSTALL_MARKER_NAME).decode("ascii")
+        try:
+            real_verify(pyxis_fd, map_sets_fd,
+                        slot_raw=[None, None], style_raw=None,
+                        style_name="osm-bright.pmas", marker_token=token)
+            raise AssertionError("revalidation accepted a changed slot")
+        finally:
+            os.close(map_sets_fd)
+
+    raced = {"fired": False}
+
+    tool.activate_map_set = racing_activate
+    try:
+        with pytest.raises(tool.PackError, match="changed during installation"):
+            tool.build_map_pack(source, sd, pack_id="pack-a", name="A",
+                                attribution=policy["attribution"], source=policy["source"],
+                                license=policy["license"], style="osm-bright", activate=True)
+    finally:
+        tool.activate_map_set = real_activate
+    # The pack was published but no record was written by this run: the
+    # card holds exactly the raced installer's consistent gen-2 records
+    # (style first, slot second -- no split state from this aborted run).
+    assert (sd / "pyxis-map/packs/pack-a/manifest.pmp").is_file()
+    raced_record = tool.encode_active_map_set(
+        generation=2, map_set_id="osm-bright",
+        attribution=policy["attribution"], pack_ids=["other-pack", "raced-pack"])
+    assert (sd / "pyxis-map/active-pack.0").read_bytes() == raced_record
+    assert (sd / "pyxis-map/map-sets/osm-bright.pmas").read_bytes() == raced_record
+    assert not (sd / "pyxis-map/active-pack.1").exists()
+    # No marker is left behind.
+    assert not (sd / "pyxis-map/.pyxis-installing").exists()
+    # Retry: the pack verifies, records converge, and the new selection
+    # includes both packs with pack-a at the front.
+    result = tool.build_map_pack(source, sd, pack_id="pack-a", name="A",
+                                 attribution=policy["attribution"], source=policy["source"],
+                                 license=policy["license"], style="osm-bright", activate=True)
+    record3 = tool.decode_active_selection((sd / "pyxis-map/active-pack.1").read_bytes())
+    assert record3["generation"] == 3
+    assert record3["packs"] == ["pack-a", "other-pack", "raced-pack"]
+    assert Path(result) == sd / "pyxis-map" / "packs" / "pack-a"

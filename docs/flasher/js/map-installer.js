@@ -58,6 +58,106 @@ async function withInstallLock(rootDirectory, operation) {
 export class MapInstallerError extends Error {}
 function fail(message) { throw new MapInstallerError(message); }
 
+// Cross-producer install marker. The CLI builder (tools/maps/build_map_pack.py)
+// claims the same well-known file with the same token format before it
+// publishes or activates. The browser holds a Web Locks name, which the CLI's
+// flock cannot see, and the CLI holds a flock, which this tab cannot see:
+// neither lock coordinates across producers, so the on-disk marker is the
+// one shared coordination primitive. A marker contains: PYXI 1 <owner>
+// <epoch_ms>. A marker written within INSTALL_MARKER_TTL_MS is a live
+// installer; older ones are abandoned (crashed builder, closed tab) and are
+// reclaimed. A future epoch (the other writer's clock ahead of ours) counts
+// as fresh: refusing is the safe direction.
+const INSTALL_MARKER_NAME = '.pyxis-installing';
+const INSTALL_MARKER_TTL_MS = 15 * 60 * 1000;
+
+function parseInstallMarker(text) {
+  const parts = String(text).trim().split(' ');
+  if (parts.length !== 4 || parts[0] !== 'PYXI' || parts[1] !== '1') return null;
+  if (!parts[2] || parts[2].length > 64) return null;
+  if (!/^\d+$/.test(parts[3])) return null;
+  return {owner: parts[2], epochMs: Number(parts[3])};
+}
+
+function installMarkerIsFresh(epochMs, nowMs = Date.now()) {
+  if (epochMs > nowMs) return true;
+  return nowMs - epochMs <= INSTALL_MARKER_TTL_MS;
+}
+
+async function readInstallMarker(pyxis) {
+  let handle; try { handle = await pyxis.getFileHandle(INSTALL_MARKER_NAME); }
+  catch (error) { if (error?.name === 'NotFoundError') return null; throw error; }
+  return new TextDecoder('utf-8').decode(new Uint8Array(await (await handle.getFile()).arrayBuffer()));
+}
+
+async function acquireInstallMarker(pyxis, owner) {
+  const token = `PYXI 1 ${owner} ${Date.now()}`;
+  const existing = await readInstallMarker(pyxis);
+  if (existing !== null) {
+    const parsed = parseInstallMarker(existing);
+    if (parsed && installMarkerIsFresh(parsed.epochMs)) {
+      fail('Another map installer is already running on this card; wait for it to finish and retry');
+    }
+    // Stale or malformed: reclaim, then claim fresh below.
+    try { await pyxis.removeEntry(INSTALL_MARKER_NAME); } catch {}
+  }
+  let handle;
+  try { handle = await pyxis.getFileHandle(INSTALL_MARKER_NAME, {create: true, exclusive: true}); }
+  catch (error) {
+    if (error && error.name === 'FileExistsError') {
+      fail('Another map installer is already running on this card; wait for it to finish and retry');
+    }
+    throw error;
+  }
+  const writable = await handle.createWritable({keepExistingData: false});
+  try { await writable.write(textEncoder.encode(token)); await writable.close(); }
+  catch (error) { try { await writable.abort(); } catch {} throw error; }
+  // Read-back: a foreign content means we lost a simultaneous claim race.
+  // Never delete a foreign marker -- our claim is void.
+  const actual = await readInstallMarker(pyxis);
+  if (actual !== token) fail('The map-install marker was contested during acquisition; wait and retry');
+  return token;
+}
+
+async function releaseInstallMarker(pyxis, token) {
+  const actual = await readInstallMarker(pyxis);
+  if (actual === token) { try { await pyxis.removeEntry(INSTALL_MARKER_NAME); } catch {} }
+}
+
+// Commit-time revalidation: the slot/style records were derived by
+// prepareActiveMapSet; a cross-producer installer may have committed new
+// activation state since. Re-reading the raw bytes immediately before the
+// record writes and aborting on any change guarantees this publication never
+// overwrites a newer record with one derived from stale state. The
+// already-published pack is kept; a retry re-derives from the new state and
+// converges (a pack no record names is device-harmless: the firmware only
+// reads packs enumerated in the active selection).
+async function verifyActivationState(pyxis, mapSets, styleName, markerToken, state) {
+  const marker = await readInstallMarker(pyxis);
+  if (marker !== null) {
+    const parsed = parseInstallMarker(marker);
+    if (parsed && installMarkerIsFresh(parsed.epochMs) && marker !== markerToken) {
+      fail('Another map installer is running on this card; wait for it to finish and retry');
+    }
+  }
+  const sameRecord = (actual, expected) =>
+    (actual === null && expected === null) ||
+    (actual !== null && expected !== null && equalBytes(actual, expected));
+  for (let index = 0; index < 2; index += 1) {
+    const name = `active-pack.${index}`;
+    let actual; try { actual = new Uint8Array(await (await (await pyxis.getFileHandle(name)).getFile()).arrayBuffer()); }
+    catch (error) { if (error?.name === 'NotFoundError') actual = null; else throw error; }
+    if (!sameRecord(actual, state.slotBytes[index])) {
+      fail('Active map-set records changed during installation; wait for the other installer to finish and retry');
+    }
+  }
+  let styleActual; try { styleActual = new Uint8Array(await (await (await mapSets.getFileHandle(styleName)).getFile()).arrayBuffer()); }
+  catch (error) { if (error?.name === 'NotFoundError') styleActual = null; else throw error; }
+  if (!sameRecord(styleActual, state.styleBytes)) {
+    fail('Installed style record changed during installation; wait for the other installer to finish and retry');
+  }
+}
+
 const MUI_STYLE_PROFILES = Object.freeze({
   'osm-bright': Object.freeze({label:'OSM Bright',attribution:'(c) OpenMapTiles (c) OpenStreetMap contributors',license:'OSM ODbL; style CC-BY-4.0/BSD-3-Clause'}),
   'dark-matter': Object.freeze({label:'Dark Matter',attribution:'(c) OpenMapTiles (c) OpenStreetMap contributors; style (c) CARTO',license:'OSM ODbL; style CC-BY-4.0/BSD-3-Clause (CARTO CC-BY-3.0)'}),
@@ -661,11 +761,15 @@ async function removeOwnedPack(packs,packId,pack,receiptName,receipt,entries){
 async function prepareActiveMapSet(pyxis,metadata){
   const slots=await Promise.all([readSelection(pyxis,'active-pack.0'),readSelection(pyxis,'active-pack.1')]);
   if(slots[0]&&slots[1]&&slots[0].generation===slots[1].generation&&JSON.stringify(slots[0])!==JSON.stringify(slots[1]))fail('Conflicting active map-set records');
+  // Raw slot bytes at derivation time: the commit-time revalidation in
+  // activateMapSet aborts if they change before the record writes.
+  const slotBytes=[];for(let index=0;index<2;index+=1){let raw;try{raw=new Uint8Array(await (await (await pyxis.getFileHandle(`active-pack.${index}`)).getFile()).arrayBuffer());}catch(error){if(error?.name==='NotFoundError')raw=null;else throw error;}slotBytes.push(raw);}
   const valid=slots.filter(Boolean);const highest=Math.max(0,...valid.map(slot=>slot.generation));if(highest===0xffffffff)fail('Active selection generation is exhausted');
   const current=valid.sort((left,right)=>right.generation-left.generation)[0];
   const mapSets=await getDirectory(pyxis,'map-sets');const styleName=`${metadata.mapSetId}.pmas`;
   const installed=await readStyleSelection(mapSets,styleName);
   if(installed&&(![2,3].includes(installed.version)||installed.mapSetId!==metadata.mapSetId||installed.attribution!==metadata.attribution))fail('Installed style record does not match selected map set');
+  let styleBytes=null;try{styleBytes=new Uint8Array(await (await (await mapSets.getFileHandle(styleName)).getFile()).arrayBuffer());}catch(error){if(error?.name!=='NotFoundError')throw error;}
   const composition=installed||([2,3].includes(current?.version)&&current.mapSetId===metadata.mapSetId?current:null);
   let packs=[];
   if(composition){
@@ -675,11 +779,12 @@ async function prepareActiveMapSet(pyxis,metadata){
   packs.unshift({packId:metadata.packId});
   const target=!slots[0]?'active-pack.0':!slots[1]?'active-pack.1':slots[0].generation<=slots[1].generation?'active-pack.0':'active-pack.1';
   const record=encodeActiveMapSet({generation:highest+1,mapSetId:metadata.mapSetId,attribution:metadata.attribution,packs});
-  return {target,record,packs,mapSets,styleName};
+  return {target,record,packs,mapSets,styleName,slotBytes,styleBytes};
 }
 
-async function activateMapSet(pyxis,metadata){
-  const {target,record,mapSets,styleName}=await prepareActiveMapSet(pyxis,metadata);
+async function activateMapSet(pyxis,metadata,markerToken=null){
+  const {target,record,mapSets,styleName,slotBytes,styleBytes}=await prepareActiveMapSet(pyxis,metadata);
+  await verifyActivationState(pyxis,mapSets,styleName,markerToken,{slotBytes,styleBytes});
   await writeVerified(mapSets,styleName,record);const installed=decodeActiveSelection(await fileBytes(mapSets,styleName));
   if(installed.version!==3||installed.mapSetId!==metadata.mapSetId||installed.packs[0].packId!==metadata.packId)fail('Style map-set verification failed');
   await writeVerified(pyxis,target,record);const selected=decodeActiveSelection(await fileBytes(pyxis,target));
@@ -713,26 +818,38 @@ async function installMuiZipLocked({archive,rootDirectory,metadata,onProgress=()
   const report=await inspectMuiZip(archive,{onProgress});
   if(report.styleId&&report.styleId!==metadata.mapSetId)fail('MUI ZIP style does not match the selected map set');
   const manifest=serializeIndexlessManifest(metadata,report.minZoom,report.maxZoom,report.tileCount);const pyxis=await getDirectory(rootDirectory,'pyxis-map');
-  await prepareActiveMapSet(pyxis,metadata);const packs=await getDirectory(pyxis,'packs');
-  let existing=null;try{existing=await packs.getDirectoryHandle(metadata.packId);}catch(error){if(error?.name!=='NotFoundError')throw error;}
-  if(existing){
-    let empty=true;for await(const _entry of existing.entries()){empty=false;break;}
-    if(!empty){await verifyExistingPack(existing,archive,report,manifest);try{const active=await activateMapSet(pyxis,metadata);return{...report,manifestBytes:manifest.length,resumed:true,...active};}catch(error){throw new Error(`Map pack is installed and verified, but activation failed: ${error.message}`);}}
-  }
-  const pack=existing||await getDirectory(packs,metadata.packId);await verifyNamedDirectory(packs,metadata.packId,pack,[]);let published=false;const receipt=new Uint8Array(16);crypto.getRandomValues(receipt);const receiptName=`.pyxis-install-owner-${[...receipt].map(byte=>byte.toString(16).padStart(2,'0')).join('')}`;
+  // Claim the cross-producer install marker (shared on-disk token with the
+  // CLI builder; the Web Locks name above cannot coordinate with it) before
+  // any mutation of the card: a refusal here must not create packs/ or
+  // map-sets/. The marker is held until every activation record write
+  // completes; the commit-time revalidation in activateMapSet is the safety
+  // net if it is bypassed or outlived.
+  const markerToken=await acquireInstallMarker(pyxis,`web-${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`);
   try{
-    await writeVerified(pack,receiptName,receipt);await verifyNamedDirectory(packs,metadata.packId,pack,[receiptName]);
-    const tiles=await getDirectory(pack,'tiles');
-    for(let index=0;index<report.entries.length;index++){const entry=report.entries[index];const zoom=await getDirectory(tiles,String(entry.zoom));const x=await getDirectory(zoom,String(entry.x));const bytes=await blobBytes(archive,entry.dataOffset,entry.dataOffset+entry.size);if(crc32(bytes)!==entry.checksum)fail(`ZIP changed during installation: ${entry.name}`);await validatePng(bytes,entry.name);await writeVerified(x,`${entry.y}.png`,bytes);onProgress({phase:'write',completed:index+1,total:report.tileCount});}
-    await writeVerified(pack,'manifest.pmp',manifest);parseSparseManifest(await fileBytes(pack,'manifest.pmp'));published=true;
-    try{await pack.removeEntry(receiptName);}catch(error){throw new Error(`Map pack is installed and verified, but its ownership receipt could not be removed: ${error.message}`);}
-    try{const active=await activateMapSet(pyxis,metadata);return{...report,manifestBytes:manifest.length,resumed:false,...active};}
-    catch(error){throw new Error(`Map pack is installed and verified, but activation failed; retry with the same ZIP and pack ID: ${error.message}`);}
-  }catch(error){
-    if(!published&&!(await removeOwnedPack(packs,metadata.packId,pack,receiptName,receipt,report.entries))){
-      throw new Error(`${error.message}; the incomplete pack could not be safely removed because its ownership receipt was missing or cleanup failed`);
+    await prepareActiveMapSet(pyxis,metadata);
+    const packs=await getDirectory(pyxis,'packs');
+    let existing=null;try{existing=await packs.getDirectoryHandle(metadata.packId);}catch(error){if(error?.name!=='NotFoundError')throw error;}
+    if(existing){
+      let empty=true;for await(const _entry of existing.entries()){empty=false;break;}
+      if(!empty){await verifyExistingPack(existing,archive,report,manifest);try{const active=await activateMapSet(pyxis,metadata,markerToken);return{...report,manifestBytes:manifest.length,resumed:true,...active};}catch(error){throw new Error(`Map pack is installed and verified, but activation failed: ${error.message}`);}}
     }
-    throw error;
+    const pack=existing||await getDirectory(packs,metadata.packId);await verifyNamedDirectory(packs,metadata.packId,pack,[]);let published=false;const receipt=new Uint8Array(16);crypto.getRandomValues(receipt);const receiptName=`.pyxis-install-owner-${[...receipt].map(byte=>byte.toString(16).padStart(2,'0')).join('')}`;
+    try{
+      await writeVerified(pack,receiptName,receipt);await verifyNamedDirectory(packs,metadata.packId,pack,[receiptName]);
+      const tiles=await getDirectory(pack,'tiles');
+      for(let index=0;index<report.entries.length;index++){const entry=report.entries[index];const zoom=await getDirectory(tiles,String(entry.zoom));const x=await getDirectory(zoom,String(entry.x));const bytes=await blobBytes(archive,entry.dataOffset,entry.dataOffset+entry.size);if(crc32(bytes)!==entry.checksum)fail(`ZIP changed during installation: ${entry.name}`);await validatePng(bytes,entry.name);await writeVerified(x,`${entry.y}.png`,bytes);onProgress({phase:'write',completed:index+1,total:report.tileCount});}
+      await writeVerified(pack,'manifest.pmp',manifest);parseSparseManifest(await fileBytes(pack,'manifest.pmp'));published=true;
+      try{await pack.removeEntry(receiptName);}catch(error){throw new Error(`Map pack is installed and verified, but its ownership receipt could not be removed: ${error.message}`);}
+      try{const active=await activateMapSet(pyxis,metadata,markerToken);return{...report,manifestBytes:manifest.length,resumed:false,...active};}
+      catch(error){throw new Error(`Map pack is installed and verified, but activation failed; retry with the same ZIP and pack ID: ${error.message}`);}
+    }catch(error){
+      if(!published&&!(await removeOwnedPack(packs,metadata.packId,pack,receiptName,receipt,report.entries))){
+        throw new Error(`${error.message}; the incomplete pack could not be safely removed because its ownership receipt was missing or cleanup failed`);
+      }
+      throw error;
+    }
+  }finally{
+    await releaseInstallMarker(pyxis,markerToken);
   }
 }
 
