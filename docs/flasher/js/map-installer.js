@@ -100,13 +100,22 @@ async function readInstallMarker(pyxis, name = INSTALL_MARKER_NAME) {
   catch (error) { if (error?.name === 'NotFoundError') return null; throw error; }
   return new TextDecoder('utf-8').decode(new Uint8Array(await (await handle.getFile()).arrayBuffer()));
 }
+export {readInstallMarker};
 
 // Respect the other producers' marker files. A fresh cross marker (the
 // CLI builder's, or the legacy shared one) means a live cross-producer
 // installer: refuse. A stale or malformed one is an abandoned install;
 // reclaim it only when reclaim is true (at acquire). Fresh cross
 // markers are never touched.
-async function checkCrossInstallers(pyxis, reclaim) {
+//
+// Reclaim is conditional: the file is re-read immediately before
+// deletion and a token that became fresh after the original check (the
+// owner renewed while we were deciding) aborts the reclaim instead of
+// deleting a live claim. A sub-millisecond renewal can still land
+// between that final read and the removeEntry; the owner's commit-time
+// verification requires its own marker, so such an overlap aborts on
+// its side instead of proceeding.
+export async function checkCrossInstallers(pyxis, reclaim) {
   for (const name of CROSS_INSTALL_MARKERS) {
     const raw = await readInstallMarker(pyxis, name);
     if (raw === null) continue;
@@ -114,7 +123,14 @@ async function checkCrossInstallers(pyxis, reclaim) {
     if (parsed && installMarkerIsFresh(parsed.epochMs)) {
       fail('Another map installer is already running on this card; wait for it to finish and retry');
     }
-    if (reclaim) { try { await pyxis.removeEntry(name); } catch {} }
+    if (reclaim) {
+      const confirm = await readInstallMarker(pyxis, name);
+      const confirmParsed = confirm !== null ? parseInstallMarker(confirm) : null;
+      if (confirmParsed && installMarkerIsFresh(confirmParsed.epochMs)) {
+        fail('Another map installer is already running on this card; wait for it to finish and retry');
+      }
+      try { await pyxis.removeEntry(name); } catch {}
+    }
   }
 }
 
@@ -201,16 +217,29 @@ export async function renewInstallMarker(pyxis, owner) {
 // already-published pack is kept; a retry re-derives from the new state and
 // converges (a pack no record names is device-harmless: the firmware only
 // reads packs enumerated in the active selection).
-async function verifyActivationState(pyxis, mapSets, styleName, markerToken, state) {
+export async function verifyActivationState(pyxis, mapSets, styleName, markerToken, state) {
   // Cross producers: a fresh marker in the CLI/legacy files means the
   // other installer started after we acquired.
   await checkCrossInstallers(pyxis, false);
   const marker = await readInstallMarker(pyxis);
-  if (marker !== null) {
-    // Compare by owner: our own marker may carry a renewed (newer) epoch.
+  if (markerToken !== null) {
+    // Our own marker is REQUIRED: a missing file means the claim was
+    // reclaimed from under us (a cross-reclaimer raced our last
+    // renewal) and the activation would proceed alongside the new
+    // holder. Abort instead.
+    const ours = parseInstallMarker(markerToken);
+    if (marker === null) {
+      fail('The install claim was reclaimed during installation; wait for the other installer to finish and retry');
+    }
     const parsed = parseInstallMarker(marker);
-    const ours = markerToken !== null ? parseInstallMarker(markerToken) : null;
-    if (parsed && installMarkerIsFresh(parsed.epochMs) && (ours === null || parsed.owner !== ours.owner)) {
+    if (!parsed || parsed.owner !== ours.owner) {
+      fail('The map-install marker was reclaimed during installation; wait for the other installer to finish and retry');
+    }
+  } else if (marker !== null) {
+    // No token was acquired (resume path without a marker): only a
+    // FRESH marker in our own file is a live foreign claim.
+    const parsed = parseInstallMarker(marker);
+    if (parsed && installMarkerIsFresh(parsed.epochMs)) {
       fail('Another map installer is running on this card; wait for it to finish and retry');
     }
   }

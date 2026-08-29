@@ -1410,6 +1410,14 @@ def _check_cross_installers(pyxis_fd: int, *, reclaim: bool) -> None:
     malformed one is an abandoned install; reclaim it only when the
     caller says so (at acquire, where claiming is the intent). Fresh
     foreign markers are never touched.
+
+    Reclaim is conditional: the file is re-read immediately before
+    deletion and a token that became fresh after the original check
+    (the owner renewed while we were deciding) aborts the reclaim
+    instead of deleting a live claim. A sub-microsecond renewal can
+    still land between that final read and the unlink; the owner's
+    commit-time verification requires its own marker, so such an
+    overlap aborts on its side instead of proceeding.
     """
     for name in _CROSS_INSTALL_MARKERS:
         raw = _read_selection_at(pyxis_fd, name)
@@ -1420,6 +1428,11 @@ def _check_cross_installers(pyxis_fd: int, *, reclaim: bool) -> None:
             raise PackError("another map installer is already running on "
                             "this card; wait for it to finish and retry")
         if reclaim:
+            confirm = _read_selection_at(pyxis_fd, name)
+            confirm_parsed = _parse_marker(confirm) if confirm is not None else None
+            if confirm_parsed is not None and _marker_is_fresh(confirm_parsed[1]):
+                raise PackError("another map installer is already running on "
+                                "this card; wait for it to finish and retry")
             _unlink_quietly_at(pyxis_fd, name)
 
 
@@ -1563,22 +1576,34 @@ def _verify_activation_state_at(pyxis_fd: int, map_sets_fd: int, *,
     is kept; a retry re-derives from the new state and converges (the
     pack is device-harmless while it is not named by any record: the
     firmware only reads packs enumerated in the active selection).
+
+    The own marker is REQUIRED when this install acquired one: a missing
+    own file means the claim was reclaimed from under us (a stale
+    cross-reclaimer raced our last renewal) and the activation would
+    proceed alongside the new holder. Abort instead.
     """
     # Cross producers: a fresh marker in the web/legacy files means the
     # other installer started (or is mid-install) after we acquired.
     _check_cross_installers(pyxis_fd, reclaim=False)
     marker_raw = _read_selection_at(pyxis_fd, _INSTALL_MARKER_NAME)
-    if marker_raw is not None:
-        # Compare by owner, not the full token: we renew the marker's
-        # epoch during publication (heartbeat), so our own marker may
-        # carry a newer epoch than the one acquired at install start.
-        own_owner = None
-        if marker_token is not None:
-            parsed_own = _parse_marker(marker_token.encode("ascii"))
-            own_owner = parsed_own[0] if parsed_own is not None else None
+    if marker_token is not None:
+        parsed_own = _parse_marker(marker_token.encode("ascii"))
+        own_owner = parsed_own[0] if parsed_own is not None else None
+        if marker_raw is None:
+            raise PackError("the install claim was reclaimed during "
+                            "installation; wait for the other installer "
+                            "to finish and retry")
         parsed = _parse_marker(marker_raw)
-        if parsed is not None and _marker_is_fresh(parsed[1]) \
-                and parsed[0] != own_owner:
+        if parsed is None or parsed[0] != own_owner:
+            raise PackError("the map-install marker was reclaimed during "
+                            "installation; wait for the other installer "
+                            "to finish and retry")
+    elif marker_raw is not None:
+        # No token was acquired (resume path without a marker): only a
+        # FRESH marker in our own file is a live foreign claim; a
+        # stale one is an abandoned install we are resuming.
+        parsed = _parse_marker(marker_raw)
+        if parsed is not None and _marker_is_fresh(parsed[1]):
             raise PackError("another map installer is running on this card; "
                             "wait for it to finish and retry")
     for index, slot_name in enumerate(("active-pack.0", "active-pack.1")):

@@ -10,6 +10,7 @@ from pathlib import Path
 import struct
 import subprocess
 import sys
+import time
 import zlib
 
 import pytest
@@ -1480,3 +1481,82 @@ def test_fresh_cross_marker_during_install_aborts_at_renewal(
     assert "web-racer" in marker_path.read_text()
     # Our own claim is released even on the abort.
     assert not (sd / "pyxis-map/.pyxis-installing-cli").exists()
+
+
+def test_cross_reclaim_refuses_when_owner_renews_between_check_and_delete(
+        tmp_path: Path) -> None:
+    # Round 12 (Greptile): reclamation is check-then-act. If the
+    # cross-installer renews while we are deciding, the delete would
+    # clobber a live claim. The conditional re-read must see the fresh
+    # token and abort instead of deleting.
+    tool = load_tool()
+    sd = tmp_path / "sd"
+    sd.mkdir()
+    (sd / "pyxis-map").mkdir()
+    marker = sd / "pyxis-map/.pyxis-installing-web"
+    marker.write_text(f"PYXI 1 web-owner {int(time.time() * 1000) - 16 * 60 * 1000}\n")
+
+    real_read = tool._read_selection_at
+
+    def racing_read(parent_fd, name, _calls=[0]):
+        if name == ".pyxis-installing-web":
+            _calls[0] += 1
+            if _calls[0] == 2:
+                marker.write_text(f"PYXI 1 web-owner {int(time.time() * 1000)}\n")
+        return real_read(parent_fd, name)
+
+    tool._read_selection_at = racing_read
+    try:
+        pyxis_fd = os.open(str(sd / "pyxis-map"), os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        pyxis_fd = os.open(str(sd / "pyxis-map"), os.O_RDONLY)
+    try:
+        with pytest.raises(tool.PackError, match="another map installer is already running"):
+            tool._check_cross_installers(pyxis_fd, reclaim=True)
+        assert marker.exists()
+        assert tool._marker_is_fresh(
+            tool._parse_marker(marker.read_bytes())[1])
+    finally:
+        os.close(pyxis_fd)
+        tool._read_selection_at = real_read
+
+
+def test_commit_abort_when_own_marker_was_reclaimed(
+        tmp_path: Path) -> None:
+    # Round 12 (Greptile): a missing own marker at commit time means our
+    # claim was reclaimed from under us. Verification must abort, not
+    # proceed with the activation writes.
+    tool = load_tool()
+    sd = tmp_path / "sd"
+    sd.mkdir()
+    (sd / "pyxis-map").mkdir()
+    (sd / "pyxis-map/map-sets").mkdir()
+    token = "PYXI 1 cli-self 12345"
+    pyxis_fd = os.open(str(sd / "pyxis-map"), os.O_RDONLY | os.O_DIRECTORY)
+    map_sets_fd = os.open(str(sd / "pyxis-map/map-sets"), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        # No marker file exists at all: the claim was reclaimed.
+        with pytest.raises(tool.PackError, match="reclaimed during installation"):
+            tool._verify_activation_state_at(
+                pyxis_fd, map_sets_fd,
+                slot_raw=[None, None], style_raw=None,
+                style_name="osm-bright.pmas", marker_token=token)
+        # A foreign owner in our own file: also an abort.
+        (sd / "pyxis-map/.pyxis-installing-cli").write_text(token.replace("cli-self", "cli-other") + "\n")
+        with pytest.raises(tool.PackError, match="reclaimed during installation"):
+            tool._verify_activation_state_at(
+                pyxis_fd, map_sets_fd,
+                slot_raw=[None, None], style_raw=None,
+                style_name="osm-bright.pmas", marker_token=token)
+        # Our own marker (any epoch: renewals advance it): passes the
+        # marker check; the slot/style re-reads against identical state
+        # still pass.
+        (sd / "pyxis-map/.pyxis-installing-cli").write_text(
+            f"PYXI 1 cli-self {int(time.time() * 1000)}\n")
+        tool._verify_activation_state_at(
+            pyxis_fd, map_sets_fd,
+            slot_raw=[None, None], style_raw=None,
+            style_name="osm-bright.pmas", marker_token=token)
+    finally:
+        os.close(pyxis_fd)
+        os.close(map_sets_fd)

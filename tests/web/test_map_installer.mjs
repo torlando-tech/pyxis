@@ -939,3 +939,76 @@ test('a fresh cross marker during installation aborts at renewal', async () => {
   assert.equal(pyxis.children.has('.pyxis-installing-cli'), true);
   assert.equal(pyxis.children.has(MARKER), false, 'our marker released on abort');
 });
+
+
+// --- Round 12 (Greptile): the cross-marker reclaim is a check-then-act,
+// and the owner can renew in the window. Reclaim must therefore be
+// conditional: a token that became fresh between the original check and
+// the deletion aborts the reclaim (the claim is live again), and the
+// owner's commit-time verification must REQUIRE its own marker -- a
+// missing claim is an abort, not a pass.
+
+import {checkCrossInstallers, readInstallMarker, verifyActivationState} from '../../docs/flasher/js/map-installer.js';
+
+test('reclaim aborts when the owner renews between check and delete', async () => {
+  const root = new MemoryDirectoryHandle('sd');
+  const pyxis = await root.getDirectoryHandle('pyxis-map', {create: true});
+  const staleToken = `PYXI 1 cli-owner ${Date.now() - 16 * 60 * 1000}`;
+  const freshToken = `PYXI 1 cli-owner ${Date.now()}`;
+  const writeMarker = async text => {
+    // Overwrite semantics (the seam simulates the owner's renewal
+    // rewrite): no exclusive, since the file already holds the stale
+    // token.
+    const handle = await pyxis.getFileHandle('.pyxis-installing-cli', {create: true});
+    const writable = await handle.createWritable({keepExistingData: false});
+    await writable.write(new TextEncoder().encode(text));
+    await writable.close();
+  };
+  await writeMarker(staleToken);
+  // Deterministic seam: each marker read goes through
+  // pyxis.getFileHandle. The first call is the original check (stale
+  // token); the owner's renewal lands before the second call (the
+  // conditional re-read), which must see the fresh token and abort
+  // instead of deleting.
+  let readCount = 0;
+  const realGet = pyxis.getFileHandle.bind(pyxis);
+  pyxis.getFileHandle = async (name, options) => {
+    // Count plain reads only: the marker writes (create:true) are the
+    // test's own seam writes, not reclaim reads.
+    if (name === '.pyxis-installing-cli' && !options?.create) {
+      readCount += 1;
+      if (readCount === 2) await writeMarker(freshToken);
+    }
+    return realGet(name, options);
+  };
+  const realRemove = pyxis.removeEntry.bind(pyxis);
+  let removed = false;
+  pyxis.removeEntry = async name => { removed = true; return realRemove(name); };
+  try {
+    await assert.rejects(checkCrossInstallers(pyxis, true), MapInstallerError, 'renewal must abort the reclaim');
+    assert.equal(removed, false, 'the renewed live claim must not be deleted');
+    const surviving = await readInstallMarker(pyxis, '.pyxis-installing-cli');
+    assert.equal(surviving, freshToken, 'the renewed token survives the reclaim attempt');
+  } finally {
+    pyxis.removeEntry = realRemove;
+    pyxis.getFileHandle = realGet;
+  }
+});
+
+test('commit-time verification aborts when the own marker is missing', async () => {
+  const root = new MemoryDirectoryHandle('sd');
+  const pyxis = await root.getDirectoryHandle('pyxis-map', {create: true});
+  const mapSets = await pyxis.getDirectoryHandle('map-sets', {create: true});
+  const owner = `web-${Date.now().toString(16)}`;
+  const token = `PYXI 1 ${owner} ${Date.now()}`;
+  // The claim existed at acquire time but a cross-reclaimer deleted it
+  // after our last renewal: verify must abort, not proceed.
+  const handle = await pyxis.getFileHandle(MARKER, {create: true, exclusive: true});
+  const writable = await handle.createWritable({keepExistingData: false});
+  await writable.write(new TextEncoder().encode(token));
+  await writable.close();
+  await pyxis.removeEntry(MARKER);
+  await assert.rejects(
+    verifyActivationState(pyxis, mapSets, 'osm-bright.pmas', token, {slotBytes: [null, null], styleBytes: null}),
+    MapInstallerError, 'a reclaimed claim must abort the commit');
+});
