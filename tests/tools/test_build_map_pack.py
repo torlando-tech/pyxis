@@ -586,3 +586,265 @@ def test_post_commit_close_failure_is_typed_as_published(tmp_path: Path,
         tool.build_map_pack(source, output, **metadata())
     assert caught.value.published is True
     assert (output / "pyxis-map/packs/local-pack").is_dir()
+
+
+# --- PMPK v3 (indexless) + PMAS v3 (active map set) -------------------------
+
+def test_indexless_manifest_matches_js_flasher_byte_for_byte() -> None:
+    tool = load_tool()
+    fixture = bytes.fromhex(
+        "504d504b03001000d0000000000000001f776f726c642d6f736d2d6272696768742d7a30"
+        "2d7a392d323032363038303116576f726c64204f534d20427269676874207a302d7a392f"
+        "286329204f70656e4d617054696c657320286329204f70656e5374726565744d61702063"
+        "6f6e7472696275746f7273274f7865642773204d61702054696c6520446f776e6c6f6164"
+        "657220284f534d2042726967687429264f534d204f44624c3b207374796c652043432d"
+        "42592d342e302f4253442d332d436c6175736500096f460100e9a28313"
+    )
+    actual = tool.serialize_indexless_manifest(
+        pack_id="world-osm-bright-z0-z9-20260801",
+        name="World OSM Bright z0-z9",
+        attribution="(c) OpenMapTiles (c) OpenStreetMap contributors",
+        source="Oxed's Map Tile Downloader (OSM Bright)",
+        license="OSM ODbL; style CC-BY-4.0/BSD-3-Clause",
+        min_zoom=0,
+        max_zoom=9,
+        tile_count=83567,
+    )
+    assert actual == fixture
+    parsed = tool.parse_manifest(actual)
+    assert parsed["format_version"] == 3
+    assert parsed["tile_count"] == 83567
+    assert parsed["min_zoom"] == 0
+    assert parsed["max_zoom"] == 9
+    assert parsed["extents"] == [] and parsed["row_spans"] == []
+
+
+def test_indexless_manifest_rejects_bad_ranges() -> None:
+    tool = load_tool()
+    base = dict(pack_id="p", name="P", attribution="A", source="S", license="L")
+    with pytest.raises(tool.PackError, match="range or tile count"):
+        tool.serialize_indexless_manifest(min_zoom=3, max_zoom=1, tile_count=1, **base)
+    with pytest.raises(tool.PackError, match="range or tile count"):
+        tool.serialize_indexless_manifest(min_zoom=0, max_zoom=23, tile_count=1, **base)
+    with pytest.raises(tool.PackError, match="range or tile count"):
+        tool.serialize_indexless_manifest(min_zoom=0, max_zoom=2, tile_count=0, **base)
+
+
+def test_pmas_v3_matches_js_flasher_byte_for_byte() -> None:
+    tool = load_tool()
+    fixture = bytes.fromhex(
+        "504d415303007500070000000a6f736d2d6272696768742f286329204f70656e4d6170"
+        "54696c657320286329204f70656e5374726565744d617020636f6e7472696275746f72"
+        "73021f776f726c642d6f736d2d6272696768742d7a302d7a392d323032363038303108"
+        "76697267696e69619e5ec1bc"
+    )
+    actual = tool.encode_active_map_set(
+        generation=7,
+        map_set_id="osm-bright",
+        attribution="(c) OpenMapTiles (c) OpenStreetMap contributors",
+        pack_ids=["world-osm-bright-z0-z9-20260801", "virginia"],
+    )
+    assert actual == fixture
+    parsed = tool.parse_active_map_set(actual)
+    assert parsed["format_version"] == 3
+    assert parsed["generation"] == 7
+    assert parsed["map_set_id"] == "osm-bright"
+    assert parsed["packs"] == ["world-osm-bright-z0-z9-20260801", "virginia"]
+
+
+def test_pmas_rejects_duplicates_and_zero_generation() -> None:
+    tool = load_tool()
+    with pytest.raises(tool.PackError, match="duplicate"):
+        tool.encode_active_map_set(generation=1, map_set_id="s", attribution="a",
+                                   pack_ids=["p", "p"])
+    with pytest.raises(tool.PackError, match="generation"):
+        tool.encode_active_map_set(generation=0, map_set_id="s", attribution="a",
+                                   pack_ids=["p"])
+    with pytest.raises(tool.PackError, match="packs"):
+        tool.encode_active_map_set(generation=1, map_set_id="s", attribution="a",
+                                   pack_ids=[])
+
+
+def test_style_install_emits_indexless_v3_and_is_validated(tmp_path: Path) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    # Deliberately sparse: not a rectangle and not antimeridian, so v1 would fail.
+    for x, y in ((0, 0), (0, 3), (1, 1), (2, 2), (3, 0)):
+        put_tile(source, 2, x, y)
+    policy = tool.STYLE_POLICIES["osm-bright"]
+    built = tool.build_map_pack(
+        source, tmp_path / "sd", pack_id="world-osm-bright-z0-z9-20260801",
+        name="World OSM Bright z0-z9",
+        attribution=policy["attribution"], source=policy["source"],
+        license=policy["license"], style="osm-bright",
+    )
+    parsed = tool.validate_pack(built)
+    assert parsed["format_version"] == 3
+    assert parsed["tile_count"] == 5
+    assert parsed["min_zoom"] == 2 and parsed["max_zoom"] == 2
+
+
+def test_style_policy_mismatch_is_rejected(tmp_path: Path) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 0, 0, 0)
+    with pytest.raises(tool.PackError, match="style policy"):
+        tool.build_map_pack(source, tmp_path / "sd", pack_id="p", name="P",
+                            attribution="wrong", source="wrong", license="wrong",
+                            style="osm-bright")
+
+
+def test_sparse_beyond_span_cap_falls_back_to_indexless_v3(tmp_path: Path) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    # Every zoom is a single column (x = 0) with an even-y (noncontiguous)
+    # set, so no zoom is a rectangle and the sparse path is required:
+    #   zoom 10: 512 tiles (even y), 512 single-tile row spans
+    #   zoom 9:  256 tiles (even y), 256 spans
+    # 768 row spans > MAX_ROW_SPANS (512), so v2 cannot represent it and the
+    # builder must fall back to an indexless v3 pack.
+    for y in range(0, 1024, 2):
+        put_tile(source, 10, 0, y)
+    for y in range(0, 512, 2):
+        put_tile(source, 9, 0, y)
+    built = tool.build_map_pack(source, tmp_path / "sd", sparse=True, **metadata())
+    parsed = tool.validate_pack(built)
+    assert parsed["format_version"] == 3
+    assert parsed["tile_count"] == 768
+    assert parsed["min_zoom"] == 9 and parsed["max_zoom"] == 10
+
+
+def test_activation_publishes_pmas_and_is_idempotent_reorder(tmp_path: Path) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 1, 0, 0)
+    policy = tool.STYLE_POLICIES["osm-bright"]
+    sd = tmp_path / "sd"
+    tool.build_map_pack(source, sd, pack_id="pack-a", name="A",
+                        attribution=policy["attribution"], source=policy["source"],
+                        license=policy["license"], style="osm-bright", activate=True)
+    active = (sd / "pyxis-map/active-pack.0").read_bytes()
+    record = tool.decode_active_selection(active)
+    assert record["format_version"] == 3
+    assert record["generation"] == 1
+    assert record["map_set_id"] == "osm-bright"
+    assert record["packs"] == ["pack-a"]
+    style_record = (sd / "pyxis-map/map-sets/osm-bright.pmas").read_bytes()
+    assert style_record == active
+
+    # A second pack of the same style moves to the front, generation bumps.
+    source2 = tmp_path / "xyz2"
+    put_tile(source2, 1, 1, 1)
+    tool.build_map_pack(source2, sd, pack_id="pack-b", name="B",
+                        attribution=policy["attribution"], source=policy["source"],
+                        license=policy["license"], style="osm-bright", activate=True)
+    # Generation 2 goes into the other slot.
+    active2 = (sd / "pyxis-map/active-pack.1").read_bytes()
+    record2 = tool.decode_active_selection(active2)
+    assert record2["generation"] == 2
+    assert record2["packs"] == ["pack-b", "pack-a"]
+    # The old slot keeps its record; the firmware picks the higher generation.
+    assert (sd / "pyxis-map/active-pack.0").read_bytes() == active
+    assert (sd / "pyxis-map/map-sets/osm-bright.pmas").read_bytes() == active2
+
+
+def test_activation_requires_style(tmp_path: Path) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 0, 0, 0)
+    with pytest.raises(tool.PackError, match="requires --style"):
+        tool.build_map_pack(source, tmp_path / "sd", **metadata(), activate=True)
+
+
+def test_decode_selection_handles_v1_and_v2(tmp_path: Path) -> None:
+    tool = load_tool()
+    # v1: 48 bytes, magic, version 1, len 48, generation, then id at 12..44
+    pack = b"v1pack"
+    v1 = bytearray(b"PMAS")
+    v1 += bytes([1, 0])
+    v1 += struct.pack("<H", 48)
+    v1 += struct.pack("<I", 5)
+    v1 += bytes([len(pack)])
+    v1 += pack
+    v1 += bytes(44 - len(v1))
+    v1 += struct.pack("<I", zlib.crc32(bytes(v1)))
+    got = tool.decode_active_selection(bytes(v1))
+    assert got["format_version"] == 1
+    assert got["packs"] == ["v1pack"]
+    assert got["generation"] == 5
+
+    # v2: magic, version 2, reserved 0, len, generation, then
+    # map-set id, attribution, pack count, and one pack with one span.
+    v2 = bytearray(b"PMAS")
+    v2 += bytes([2, 0])
+    body = bytearray()
+    body += bytes([6]) + b"mapset"   # map_set_id (identifier grammar: 3+ chars)
+    body += bytes([1]) + b"a"        # attribution
+    body += bytes([1])               # pack count
+    body += bytes([2]) + b"p1"       # pack id
+    body += struct.pack("<H", 1)     # span count
+    body += bytes([1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0])  # one span z1 y0 x0..1
+    total = 12 + len(body) + 4
+    v2 += struct.pack("<H", total)
+    v2 += struct.pack("<I", 9)
+    v2 += body
+    v2 += struct.pack("<I", zlib.crc32(bytes(v2)))
+    got2 = tool.decode_active_selection(bytes(v2))
+    assert got2["format_version"] == 2
+    assert got2["packs"] == ["p1"]
+    assert got2["generation"] == 9
+
+
+def test_unfilter_fast_path_matches_slow_path() -> None:
+    tool = load_tool()
+    import random as _random
+    _random.seed(1234)
+    # All-None-filter decode must equal the generic predictor loop output.
+    rows = bytearray()
+    for _ in range(256):
+        rows += b"\x00" + bytes(_random.getrandbits(8) for _ in range(768))
+    fast = tool._unfilter_png_rows(bytes(rows), 768, 3, "fast")
+    slow = tool._unfilter_png_rows(bytes(rows), 768, 3, "slow")
+    assert fast == slow
+    # A mixed-filter image must still take the correct generic path.
+    mixed = bytearray(rows)
+    mixed[0] = 2  # Up filter on first row: value == above (zero row) => same pixels
+    assert tool._unfilter_png_rows(bytes(mixed), 768, 3, "mixed") == fast
+
+
+def test_metadata_json_is_ignored_but_validated(tmp_path: Path) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 0, 0, 0)
+    (source / "metadata.json").write_text('{"maxZoom": 0}', encoding="utf-8")
+    built = tool.build_map_pack(source, tmp_path / "sd", **metadata())
+    parsed = tool.validate_pack(built)
+    assert parsed["tile_count"] == 1
+    assert not (built / "tiles/metadata.json").exists()
+
+    bad = tmp_path / "xyz-bad"
+    put_tile(bad, 0, 0, 0)
+    (bad / "metadata.json").write_text("not json", encoding="utf-8")
+    with pytest.raises(tool.PackError, match="metadata.json is not valid JSON"):
+        tool.build_map_pack(bad, tmp_path / "sd-bad", **metadata())
+
+
+def test_indexed_png_fast_path_accepts_in_range_and_rejects_out_of_range(tmp_path: Path) -> None:
+    tool = load_tool()
+    # 8-bit indexed, 2-entry palette, indices 0/1 only -> in range, must pass.
+    good = png_chunks([(b"IHDR", ihdr(color_type=3)), (b"PLTE", b"\x00\x00\x00" * 2),
+                       (b"IDAT", zlib.compress(b"".join(b"\x00" + b"\x01\x00" * 128 for _ in range(256)))),
+                       (b"IEND", b"")])
+    source = tmp_path / "xyz"
+    put_tile(source, 0, 0, 0, good)
+    built = tool.build_map_pack(source, tmp_path / "sd", **metadata())
+    assert tool.validate_pack(built)["tile_count"] == 1
+
+    # Same tile but one pixel uses index 5 (>= 2 entries) -> must be rejected.
+    bad = png_chunks([(b"IHDR", ihdr(color_type=3)), (b"PLTE", b"\x00\x00\x00" * 2),
+                      (b"IDAT", zlib.compress(b"".join(b"\x00" + (b"\x05" + b"\x01" * 255) for _ in range(256)))),
+                      (b"IEND", b"")])
+    source_bad = tmp_path / "xyz-bad"
+    put_tile(source_bad, 0, 0, 0, bad)
+    with pytest.raises(tool.PackError, match="palette index out of range"):
+        tool.build_map_pack(source_bad, tmp_path / "sd-bad", **metadata())

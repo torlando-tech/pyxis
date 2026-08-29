@@ -5,6 +5,16 @@
 
 Security-sensitive filesystem operations intentionally support Linux only. PNG
 support is intentionally limited to non-interlaced images.
+
+Coverage models:
+- default: PMPK v1 rectangle extents (contiguous rectangles, optional
+  antimeridian splits)
+- --sparse: PMPK v2 row spans for sparse state/polygon coverage, falling
+  back to PMPK v3 indexless records when the coverage exceeds the 512-span
+  cap
+- --style: always emit an indexless PMPK v3 pack using the firmware's
+  canonical style policy metadata; --activate additionally publishes the
+  v3 active map-set record so the device renders the pack immediately
 """
 
 from __future__ import annotations
@@ -13,6 +23,7 @@ import argparse
 import ctypes
 from dataclasses import dataclass
 import errno
+import json
 import os
 from pathlib import Path
 import re
@@ -25,6 +36,8 @@ import zlib
 MAGIC = b"PMPK"
 FORMAT_VERSION = 1
 SPARSE_FORMAT_VERSION = 2
+INDEXLESS_FORMAT_VERSION = 3
+SELECTION_MAGIC = b"PMAS"
 HEADER_SIZE = 16
 EXTENT_SIZE = 26
 ROW_SPAN_SIZE = 13
@@ -35,7 +48,8 @@ DEFAULT_MAX_BYTES = 8 * 1024 * 1024 * 1024
 MAX_VISITED_ENTRIES_BASE = 64
 PACK_ID_RE = re.compile(r"[a-z0-9_-]{1,31}\Z")
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-_STRING_LIMITS = {"pack_id": 31, "name": 63, "attribution": 127, "source": 127, "license": 63}
+_STRING_LIMITS = {"pack_id": 31, "name": 63, "attribution": 127, "source": 127, "license": 63,
+                  "map_set_id": 31}
 MAX_MANIFEST_BYTES = 7100
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -203,9 +217,19 @@ def _inflate_block(inflater: Any, block: bytes, decoded: bytearray,
 
 def _unfilter_png_rows(decoded: bytes, row_bytes: int, bytes_per_pixel: int,
                        label: str) -> bytes:
+    stride = row_bytes + 1
+    rows = len(decoded) // stride
+    # Fast path: every row uses the None filter (the common case for
+    # rendered tile PNGs). A single bytes scan is orders of magnitude
+    # cheaper than the per-pixel predictor loop below.
+    filter_bytes = bytes(decoded[offset] for offset in range(0, rows * stride, stride))
+    if filter_bytes == b"\x00" * rows:
+        output = bytearray()
+        for offset in range(0, rows * stride, stride):
+            output.extend(decoded[offset + 1:offset + stride])
+        return bytes(output)
     output = bytearray()
     previous = bytearray(row_bytes)
-    stride = row_bytes + 1
     for offset in range(0, len(decoded), stride):
         filter_type = decoded[offset]
         if filter_type > 4:
@@ -328,14 +352,26 @@ def _validate_png_fd(descriptor: int, label: str, maximum_size: int) -> int:
         raise PackError(f"invalid PNG structure, deflate, or terminal state: {label}")
     pixels = _unfilter_png_rows(bytes(decoded), row_bytes, bytes_per_pixel, label)
     if color_type == 3:
-        for row in range(256):
-            packed = pixels[row * row_bytes:(row + 1) * row_bytes]
-            for column in range(256):
-                bit_offset = column * bit_depth
-                byte = packed[bit_offset // 8]
-                shift = 8 - bit_depth - (bit_offset % 8)
-                if ((byte >> shift) & ((1 << bit_depth) - 1)) >= palette_entries:
-                    raise PackError(f"indexed PNG palette index out of range: {label}")
+        if bit_depth == 8:
+            # Fast path: one C-level scan replaces the 65,536-iteration
+            # per-pixel loop. For 8-bit index PNGs the packed bytes ARE the
+            # indices, so any byte at or above the palette length is invalid.
+            # Single-pass scan via a lookup table: mark every out-of-range
+            # index byte, then reject if any appear.
+            bad = bytearray(256)
+            for index in range(palette_entries, 256):
+                bad[index] = 1
+            if bytes.translate(pixels, bytes(bad)).count(1) > 0:
+                raise PackError(f"indexed PNG palette index out of range: {label}")
+        else:
+            for row in range(256):
+                packed = pixels[row * row_bytes:(row + 1) * row_bytes]
+                for column in range(256):
+                    bit_offset = column * bit_depth
+                    byte = packed[bit_offset // 8]
+                    shift = 8 - bit_depth - (bit_offset % 8)
+                    if ((byte >> shift) & ((1 << bit_depth) - 1)) >= palette_entries:
+                        raise PackError(f"indexed PNG palette index out of range: {label}")
     after = os.fstat(descriptor)
     if _identity(before) != _identity(after):
         raise PackError(f"PNG changed while being validated: {label}")
@@ -371,6 +407,26 @@ def _discover_tiles_fd(source_fd: int, source_label: Path, max_tiles: int, max_b
         zoom_names = (entry.name for entry in os.scandir(source_fd))
         for zoom_name in zoom_names:
             visit()
+            if zoom_name == "metadata.json":
+                # Optional tile-provider metadata (e.g. Oxed's
+                # metadata.json). The manifest carries its own style
+                # metadata, so this file is validated as readable JSON and
+                # otherwise ignored.
+                try:
+                    metadata_fd = os.open(zoom_name, _FILE_FLAGS, dir_fd=source_fd)
+                except OSError as exc:
+                    raise PackError(f"metadata.json is not a regular file: {exc}") from exc
+                try:
+                    metadata_info = os.fstat(metadata_fd)
+                    if not stat.S_ISREG(metadata_info.st_mode) or metadata_info.st_size > 65536:
+                        raise PackError("metadata.json is oversized")
+                    try:
+                        json.loads(os.read(metadata_fd, metadata_info.st_size).decode("utf-8"))
+                    except (UnicodeDecodeError, ValueError) as exc:
+                        raise PackError(f"metadata.json is not valid JSON: {exc}") from exc
+                finally:
+                    os.close(metadata_fd)
+                continue
             zoom = _canonical_number(zoom_name, "zoom")
             if zoom > MAX_ZOOM:
                 raise PackError(f"zoom out of range: {zoom}")
@@ -549,6 +605,27 @@ def serialize_sparse_manifest(*, pack_id: str, name: str, attribution: str, sour
     return bytes(result)
 
 
+def serialize_indexless_manifest(*, pack_id: str, name: str, attribution: str, source: str,
+                                 license: str, min_zoom: int, max_zoom: int,
+                                 tile_count: int) -> bytes:
+    _validate_metadata(pack_id, name, attribution, source, license)
+    if min_zoom < 0 or min_zoom > max_zoom or max_zoom > MAX_ZOOM or tile_count <= 0:
+        raise PackError("indexless manifest range or tile count is invalid")
+    payload = bytearray()
+    for field, value in (("pack_id", pack_id), ("name", name), ("attribution", attribution),
+                         ("source", source), ("license", license)):
+        encoded = _checked_text(field, value)
+        payload.append(len(encoded))
+        payload.extend(encoded)
+    payload.extend((min_zoom, max_zoom))
+    payload.extend(struct.pack("<I", tile_count))
+    length = HEADER_SIZE + len(payload) + 4
+    result = bytearray(struct.pack("<4sBBHII", MAGIC, INDEXLESS_FORMAT_VERSION, 0, HEADER_SIZE, length, 0))
+    result.extend(payload)
+    result.extend(struct.pack("<I", zlib.crc32(result)))
+    return bytes(result)
+
+
 def _validate_manifest_values(extents: list[ZoomExtent], tile_count: int) -> None:
     if not extents or len(extents) > MAX_ZOOM + 1:
         raise PackError("manifest extent count is invalid")
@@ -607,7 +684,8 @@ def parse_manifest(data: bytes) -> dict[str, object]:
     if len(data) < 20 or len(data) > MAX_MANIFEST_BYTES:
         raise PackError("manifest is truncated or oversized")
     magic, version, reserved, header_size, length, reserved_word = struct.unpack("<4sBBHII", data[:16])
-    if magic != MAGIC or version not in (FORMAT_VERSION, SPARSE_FORMAT_VERSION) or \
+    if magic != MAGIC or version not in (FORMAT_VERSION, SPARSE_FORMAT_VERSION,
+                                         INDEXLESS_FORMAT_VERSION) or \
             (reserved, header_size, length, reserved_word) != (0, 16, len(data), 0):
         raise PackError("invalid manifest header")
     if zlib.crc32(data[:-4]) != struct.unpack("<I", data[-4:])[0]:
@@ -630,6 +708,18 @@ def parse_manifest(data: bytes) -> dict[str, object]:
         if field == "pack_id" and not PACK_ID_RE.fullmatch(value):
             raise PackError("invalid manifest pack ID")
         values[field] = value
+    if version == INDEXLESS_FORMAT_VERSION:
+        if position + 6 > len(data) - 4:
+            raise PackError("manifest indexless fields are truncated")
+        minimum, maximum = data[position:position + 2]
+        position += 2
+        tile_count = struct.unpack("<I", data[position:position + 4])[0]
+        position += 4
+        if position != len(data) - 4 or minimum > maximum or maximum > MAX_ZOOM or not tile_count:
+            raise PackError("invalid indexless manifest fields")
+        values.update(format_version=version, min_zoom=minimum, max_zoom=maximum,
+                      tile_count=tile_count, extents=[], row_spans=[])
+        return values
     if version == FORMAT_VERSION:
         if position + 7 > len(data) - 4:
             raise PackError("manifest fields are truncated")
@@ -673,6 +763,85 @@ def parse_manifest(data: bytes) -> dict[str, object]:
         values.update(format_version=version, min_zoom=minimum, max_zoom=maximum,
                       tile_count=tile_count, extents=[], row_spans=row_spans)
     return values
+
+
+def encode_active_map_set(*, generation: int, map_set_id: str, attribution: str,
+                          pack_ids: list[str]) -> bytes:
+    """Serialize a v3 (indexless) PMAS active map-set record.
+
+    Byte-compatible with the web flasher's encodeActiveMapSet and the
+    firmware's ActiveMapSetCodec (PMAS magic, version 3, u16 total length,
+    u32 generation, then length-prefixed map-set ID, attribution, pack
+    count, and ordered pack IDs, trailing CRC-32).
+    """
+    if not 1 <= generation <= 0xFFFFFFFF:
+        raise PackError("active map-set generation is invalid")
+    map_set = _checked_text("map_set_id", map_set_id)
+    credit = _checked_text("attribution", attribution)
+    if not PACK_ID_RE.fullmatch(map_set_id) or len(pack_ids) == 0 or len(pack_ids) > 8:
+        raise PackError("invalid active map-set packs")
+    seen: set[str] = set()
+    encoded_packs: list[bytes] = []
+    for pack_id in pack_ids:
+        identifier = _checked_text("pack_id", pack_id)
+        if not PACK_ID_RE.fullmatch(pack_id) or pack_id in seen:
+            raise PackError("invalid or duplicate active map-set pack")
+        seen.add(pack_id)
+        encoded_packs.append(identifier)
+    length = 12 + 1 + len(map_set) + 1 + len(credit) + 1 + sum(1 + len(item) for item in encoded_packs) + 4
+    result = bytearray(struct.pack("<4sBBHI", SELECTION_MAGIC, INDEXLESS_FORMAT_VERSION, 0, length, generation))
+    result.append(len(map_set)); result.extend(map_set)
+    result.append(len(credit)); result.extend(credit)
+    result.append(len(encoded_packs))
+    for identifier in encoded_packs:
+        result.append(len(identifier)); result.extend(identifier)
+    result.extend(struct.pack("<I", zlib.crc32(result)))
+    return bytes(result)
+
+
+def parse_active_map_set(data: bytes) -> dict[str, object]:
+    if len(data) < 16 or len(data) > 7105:
+        raise PackError("active map-set record length is invalid")
+    magic, version, reserved, length, generation = struct.unpack("<4sBBHI", data[:12])
+    if magic != SELECTION_MAGIC or version != INDEXLESS_FORMAT_VERSION or reserved != 0 \
+            or length != len(data) or generation == 0 \
+            or zlib.crc32(data[:-4]) != struct.unpack("<I", data[-4:])[0]:
+        raise PackError("invalid active map-set record")
+    position = 12
+
+    def read_text(label: str, maximum: int, identifier: bool) -> str:
+        nonlocal position
+        if position >= len(data) - 4:
+            raise PackError(f"{label} is truncated")
+        size = data[position]
+        position += 1
+        if size == 0 or size > maximum or position + size > len(data) - 4:
+            raise PackError(f"{label} is invalid")
+        value = data[position:position + size].decode("ascii")
+        position += size
+        if any(byte < 0x20 or byte > 0x7E for byte in value.encode("ascii")) or \
+                (identifier and not PACK_ID_RE.fullmatch(value)):
+            raise PackError(f"{label} is invalid")
+        return value
+
+    map_set_id = read_text("map set ID", 31, True)
+    attribution = read_text("attribution", 127, False)
+    if position >= len(data) - 4:
+        raise PackError("active map-set pack count is truncated")
+    count = data[position]
+    position += 1
+    if count == 0 or count > 8:
+        raise PackError("active map-set pack count is invalid")
+    packs: list[str] = []
+    for _ in range(count):
+        pack_id = read_text("pack ID", 31, True)
+        if pack_id in packs:
+            raise PackError("duplicate active map-set pack")
+        packs.append(pack_id)
+    if position != len(data) - 4:
+        raise PackError("active map-set record has trailing data")
+    return {"format_version": version, "generation": generation, "map_set_id": map_set_id,
+            "attribution": attribution, "packs": packs}
 
 
 def _open_verified_tile(source_fd: int, tile: Tile) -> int:
@@ -752,6 +921,90 @@ def _read_file_at(parent_fd: int, name: str, maximum: int) -> bytes:
         os.close(descriptor)
 
 
+def _read_selection_at(parent_fd: int, name: str) -> bytes | None:
+    try:
+        return _read_file_at(parent_fd, name, 7105)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise PackError(f"cannot read {name}: {exc}") from exc
+
+
+def decode_active_selection(data: bytes) -> dict[str, object]:
+    """Decode v1/v2/v3 PMAS active map-set records.
+
+    Byte-compatible with the firmware's ActiveMapSetCodec and the web
+    flasher's decodeActiveSelection. Row spans in v2 records are skipped
+    with bound checks only; this tool never emits spans.
+    """
+    if len(data) < 16 or len(data) > 7105:
+        raise PackError("active map-set record length is invalid")
+    magic, version, reserved, length, generation = struct.unpack("<4sBBHI", data[:12])
+    if magic != SELECTION_MAGIC or version not in (1, 2, 3) or reserved != 0 \
+            or length != len(data) or generation == 0 \
+            or zlib.crc32(data[:-4]) != struct.unpack("<I", data[-4:])[0]:
+        raise PackError("invalid active map-set record")
+    end = len(data) - 4
+    if version == 1:
+        if len(data) != 48:
+            raise PackError("invalid v1 active map-set length")
+        size = data[12]
+        if not 1 <= size <= 31:
+            raise PackError("invalid v1 active map-set pack ID")
+        pack_id = data[13:13 + size].decode("ascii")
+        if any(byte != 0 for byte in data[13 + size:end]) or not PACK_ID_RE.fullmatch(pack_id):
+            raise PackError("invalid v1 active map-set record")
+        return {"format_version": 1, "generation": generation, "map_set_id": None,
+                "attribution": None, "packs": [pack_id]}
+    position = 12
+
+    def read_text(label: str, maximum: int, identifier: bool) -> str:
+        nonlocal position
+        if position >= end:
+            raise PackError(f"{label} is truncated")
+        size = data[position]
+        position += 1
+        if size == 0 or size > maximum or position + size > end:
+            raise PackError(f"{label} is invalid")
+        value = data[position:position + size].decode("ascii")
+        position += size
+        if any(byte < 0x20 or byte > 0x7E for byte in value.encode("ascii")) or \
+                (identifier and not PACK_ID_RE.fullmatch(value)):
+            raise PackError(f"{label} is invalid")
+        return value
+
+    map_set_id = read_text("map set ID", 31, True)
+    attribution = read_text("attribution", 127, False)
+    if position >= end:
+        raise PackError("active map-set pack count is truncated")
+    count = data[position]
+    position += 1
+    if count == 0 or count > 8:
+        raise PackError("active map-set pack count is invalid")
+    packs: list[str] = []
+    total_spans = 0
+    for _ in range(count):
+        pack_id = read_text("pack ID", 31, True)
+        if pack_id in packs:
+            raise PackError("duplicate active map-set pack")
+        packs.append(pack_id)
+        if version == 3:
+            continue
+        if position + 2 > end:
+            raise PackError("active map-set span count is truncated")
+        span_count = struct.unpack("<H", data[position:position + 2])[0]
+        position += 2
+        if span_count == 0 or span_count > MAX_ROW_SPANS or total_spans > MAX_ROW_SPANS - span_count \
+                or position + span_count * ROW_SPAN_SIZE > end:
+            raise PackError("active map-set row-span count is invalid")
+        total_spans += span_count
+        position += span_count * ROW_SPAN_SIZE
+    if position != end:
+        raise PackError("active map-set record has trailing data")
+    return {"format_version": version, "generation": generation, "map_set_id": map_set_id,
+            "attribution": attribution, "packs": packs}
+
+
 def _validate_pack_fd(pack_fd: int, label: Path, max_bytes: int) -> dict[str, object]:
     parsed = parse_manifest(_read_file_at(pack_fd, "manifest.pmp", MAX_MANIFEST_BYTES))
     tiles_fd, _ = _open_child_directory(pack_fd, "tiles", f"{label}/tiles")
@@ -762,6 +1015,12 @@ def _validate_pack_fd(pack_fd: int, label: Path, max_bytes: int) -> dict[str, ob
         os.close(tiles_fd)
     if len(tiles) != tile_count:
         raise PackError("emitted tile tree does not match manifest")
+    if parsed["format_version"] == INDEXLESS_FORMAT_VERSION:
+        zooms = sorted({tile.zoom for tile in tiles})
+        if (cast(int, parsed["min_zoom"]), cast(int, parsed["max_zoom"])) != (zooms[0], zooms[-1]) \
+                or zooms != list(range(zooms[0], zooms[-1] + 1)):
+            raise PackError("emitted tile tree does not match indexless manifest")
+        return parsed
     if parsed["format_version"] == FORMAT_VERSION:
         expected_extents = cast(list[ZoomExtent], parsed["extents"])
         extents = calculate_extents(tiles, {item.zoom for item in expected_extents if len(item.intervals) == 2})
@@ -780,6 +1039,110 @@ def validate_pack(pack_directory: Path, max_bytes: int = DEFAULT_MAX_BYTES) -> d
         return _validate_pack_fd(descriptor, Path(pack_directory), max_bytes)
     finally:
         os.close(descriptor)
+
+
+STYLE_POLICIES: dict[str, dict[str, str]] = {
+    "osm-bright": {
+        "attribution": "(c) OpenMapTiles (c) OpenStreetMap contributors",
+        "source": "Oxed's Map Tile Downloader (OSM Bright)",
+        "license": "OSM ODbL; style CC-BY-4.0/BSD-3-Clause",
+    },
+    "dark-matter": {
+        "attribution": "(c) OpenMapTiles (c) OpenStreetMap contributors; style (c) CARTO",
+        "source": "Oxed's Map Tile Downloader (Dark Matter)",
+        "license": "OSM ODbL; style CC-BY-4.0/BSD-3-Clause (CARTO CC-BY-3.0)",
+    },
+    "positron": {
+        "attribution": "(c) OpenMapTiles (c) OpenStreetMap contributors; style (c) CARTO",
+        "source": "Oxed's Map Tile Downloader (Positron)",
+        "license": "OSM ODbL; style CC-BY-4.0/BSD-3-Clause (CARTO CC-BY-3.0)",
+    },
+    "toner": {
+        "attribution": "(c) MapTiler (c) OpenStreetMap contributors",
+        "source": "Oxed's Map Tile Downloader (Toner)",
+        "license": "OSM ODbL; style CC-BY-4.0/BSD-3-Clause (Stamen ISC)",
+    },
+}
+
+
+def activate_map_set(pyxis_fd: int, *, pack_id: str, map_set_id: str, attribution: str) -> tuple[str, list[str]]:
+    """Publish the v3 active map-set record, mirroring the web flasher.
+
+    pyxis_fd is the open pyxis-map/ directory. Slot and style-record
+    selection follows the flasher's prepareActiveMapSet/activateMapSet:
+    read both slots, reject conflicting same-generation records, resolve
+    the pack list from the installed style record (falling back to the
+    highest-generation slot of the same style), write the style record
+    under map-sets/ and then the chosen active-pack slot, each with fsync
+    plus byte-exact read-back. Returns (slot_name, enabled_packs).
+    """
+    slot_names = ("active-pack.0", "active-pack.1")
+    slots: list[dict[str, object] | None] = [None, None]
+    for index, slot_name in enumerate(slot_names):
+        raw = _read_selection_at(pyxis_fd, slot_name)
+        if raw is not None:
+            slots[index] = decode_active_selection(raw)
+    if slots[0] is not None and slots[1] is not None \
+            and slots[0]["generation"] == slots[1]["generation"] and slots[0] != slots[1]:
+        raise PackError("conflicting active map-set records")
+    valid = [slot for slot in slots if slot is not None]
+    highest = max([0] + [cast(int, slot["generation"]) for slot in valid])
+    if highest == 0xFFFFFFFF:
+        raise PackError("active selection generation is exhausted")
+    current = max(valid, key=lambda slot: cast(int, slot["generation"])) if valid else None
+
+    map_sets_fd, _ = _mkdir_open(pyxis_fd, "map-sets")
+    try:
+        style_name = f"{map_set_id}.pmas"
+        installed: dict[str, object] | None = None
+        installed_raw = _read_selection_at(map_sets_fd, style_name)
+        if installed_raw is not None:
+            installed = decode_active_selection(installed_raw)
+            if installed["format_version"] not in (2, 3) \
+                    or installed["map_set_id"] != map_set_id \
+                    or installed["attribution"] != attribution:
+                raise PackError("installed style record does not match selected map set")
+        composition: dict[str, object] | None = installed
+        if composition is None and current is not None \
+                and current["format_version"] in (2, 3) and current["map_set_id"] == map_set_id:
+            composition = current
+        packs: list[str] = []
+        if composition is not None:
+            if composition["attribution"] != attribution:
+                raise PackError("installed map set attribution does not match")
+            packs = [value for value in cast(list[str], composition["packs"]) if value != pack_id]
+        packs.insert(0, pack_id)
+        record = encode_active_map_set(generation=highest + 1, map_set_id=map_set_id,
+                                       attribution=attribution, pack_ids=packs)
+        _write_verified_at(map_sets_fd, style_name, record)
+        if slots[0] is None:
+            target = slot_names[0]
+        elif slots[1] is None:
+            target = slot_names[1]
+        else:
+            target = slot_names[0] if cast(int, slots[0]["generation"]) <= \
+                    cast(int, slots[1]["generation"]) else slot_names[1]
+        _write_verified_at(pyxis_fd, target, record)
+    finally:
+        os.close(map_sets_fd)
+    return target, packs
+
+
+def _write_verified_at(parent_fd: int, name: str, data: bytes) -> None:
+    try:
+        descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC, 0o644,
+                             dir_fd=parent_fd)
+    except OSError as exc:
+        raise PackError(f"cannot write {name}: {exc}") from exc
+    try:
+        _write_all(descriptor, data, name)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    _fsync_directory_fd(parent_fd)
+    actual = _read_file_at(parent_fd, name, len(data))
+    if actual != data:
+        raise PackError(f"read-back verification failed for {name}")
 
 
 def _remove_tree_at(parent_fd: int, name: str) -> None:
@@ -846,13 +1209,22 @@ def build_map_pack(source_directory: Path, output_root: Path, *, pack_id: str, n
                    attribution: str, source: str, license: str,
                    max_tiles: int = DEFAULT_MAX_TILES, max_bytes: int = DEFAULT_MAX_BYTES,
                    antimeridian_zooms: set[int] | None = None,
-                   sparse: bool = False) -> Path:
+                   sparse: bool = False, style: str | None = None,
+                   activate: bool = False) -> Path:
     if not sys.platform.startswith("linux"):
         raise PackError("secure importer supports Linux hosts only")
     _validate_metadata(pack_id, name, attribution, source, license)
     antimeridian_zooms = set() if antimeridian_zooms is None else set(antimeridian_zooms)
     if any(zoom < 0 or zoom > MAX_ZOOM for zoom in antimeridian_zooms):
         raise PackError("antimeridian zoom is out of range")
+    if style is not None:
+        if style not in STYLE_POLICIES:
+            raise PackError(f"unsupported map style: {style}")
+        policy = STYLE_POLICIES[style]
+        if (attribution, source, license) != (policy["attribution"], policy["source"], policy["license"]):
+            raise PackError("metadata does not match the selected style policy")
+    if activate and style is None:
+        raise PackError("--activate requires --style so the map-set ID is a firmware style policy")
     source_directory = Path(source_directory)
     output_root = Path(output_root)
     target = output_root / "pyxis-map" / "packs" / pack_id
@@ -862,18 +1234,38 @@ def build_map_pack(source_directory: Path, output_root: Path, *, pack_id: str, n
     committed = False
     try:
         tiles = _discover_tiles_fd(source_fd, source_directory, max_tiles, max_bytes)
-        try:
-            extents = calculate_extents(tiles, antimeridian_zooms)
-        except PackError as exc:
-            if not sparse or antimeridian_zooms or not str(exc).startswith("incomplete rectangle"):
-                raise
-            row_spans = calculate_row_spans(tiles)
-            manifest = serialize_sparse_manifest(pack_id=pack_id, name=name, attribution=attribution,
-                                                 source=source, license=license,
-                                                 row_spans=row_spans, tile_count=len(tiles))
+        zooms = sorted({tile.zoom for tile in tiles})
+        if style is not None:
+            # Style installs always publish indexless v3 packs, mirroring
+            # the web flasher: no row spans, no coverage caps.
+            manifest = serialize_indexless_manifest(pack_id=pack_id, name=name,
+                                                    attribution=attribution, source=source,
+                                                    license=license, min_zoom=zooms[0],
+                                                    max_zoom=zooms[-1], tile_count=len(tiles))
         else:
-            manifest = serialize_manifest(pack_id=pack_id, name=name, attribution=attribution, source=source,
-                                          license=license, extents=extents, tile_count=len(tiles))
+            try:
+                extents = calculate_extents(tiles, antimeridian_zooms)
+            except PackError as exc:
+                if not sparse or antimeridian_zooms or not str(exc).startswith("incomplete rectangle"):
+                    raise
+                try:
+                    row_spans = calculate_row_spans(tiles)
+                    manifest = serialize_sparse_manifest(pack_id=pack_id, name=name,
+                                                         attribution=attribution, source=source,
+                                                         license=license, row_spans=row_spans,
+                                                         tile_count=len(tiles))
+                except PackError as span_exc:
+                    if "row-span limit" not in str(span_exc):
+                        raise
+                    # Sparse coverage beyond the v2 span cap falls back to
+                    # an indexless v3 pack.
+                    manifest = serialize_indexless_manifest(pack_id=pack_id, name=name,
+                                                            attribution=attribution, source=source,
+                                                            license=license, min_zoom=zooms[0],
+                                                            max_zoom=zooms[-1], tile_count=len(tiles))
+            else:
+                manifest = serialize_manifest(pack_id=pack_id, name=name, attribution=attribution, source=source,
+                                              license=license, extents=extents, tile_count=len(tiles))
         output_fd = _open_path(output_root, create=True)
         pyxis_fd, pyxis_identity = _mkdir_open(output_fd, "pyxis-map")
         packs_fd, packs_identity = _mkdir_open(pyxis_fd, "packs")
@@ -905,6 +1297,11 @@ def build_map_pack(source_directory: Path, output_root: Path, *, pack_id: str, n
                 raise PublishedDurabilityError(target, OSError(
                     f"publication location changed and rollback failed: {cleanup_error}")) from exc
             raise PackError("output directory changed during publication; rolled back") from exc
+        if activate:
+            assert style is not None
+            slot_name, _enabled = activate_map_set(pyxis_fd, pack_id=pack_id,
+                                                   map_set_id=style,
+                                                   attribution=attribution)
         try:
             os.close(stage_fd)
         except OSError as exc:
@@ -943,27 +1340,44 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("output_root", type=Path, help="SD-card root under which pyxis-map/packs is created")
     parser.add_argument("--pack-id", required=True)
     parser.add_argument("--name", required=True)
-    parser.add_argument("--attribution", required=True)
-    parser.add_argument("--source", required=True)
-    parser.add_argument("--license", required=True)
+    parser.add_argument("--attribution")
+    parser.add_argument("--source")
+    parser.add_argument("--license")
     parser.add_argument("--max-tiles", type=int, default=DEFAULT_MAX_TILES)
     parser.add_argument("--max-bytes", type=int, default=DEFAULT_MAX_BYTES)
     parser.add_argument("--antimeridian-zoom", action="append", type=int, default=[])
     parser.add_argument("--sparse", action="store_true",
                         help="explicitly admit sparse state/polygon coverage and emit PMPK v2")
+    parser.add_argument("--style", choices=sorted(STYLE_POLICIES),
+                        help="firmware style policy; supplies canonical attribution/source/license, "
+                             "emits an indexless PMPK v3 pack")
+    parser.add_argument("--activate", action="store_true",
+                        help="also publish the v3 active map-set record (active-pack slot + map-sets/<style>.pmas)")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
+    if arguments.style is not None:
+        policy = STYLE_POLICIES[arguments.style]
+        attribution = arguments.attribution or policy["attribution"]
+        source = arguments.source or policy["source"]
+        license = arguments.license or policy["license"]
+    else:
+        if not (arguments.attribution and arguments.source and arguments.license):
+            print("error: --attribution, --source, and --license are required unless --style is given",
+                  file=sys.stderr)
+            return 2
+        attribution, source, license = arguments.attribution, arguments.source, arguments.license
     try:
         target = build_map_pack(arguments.xyz_directory, arguments.output_root,
                                 pack_id=arguments.pack_id, name=arguments.name,
-                                attribution=arguments.attribution, source=arguments.source,
-                                license=arguments.license, max_tiles=arguments.max_tiles,
+                                attribution=attribution, source=source,
+                                license=license, max_tiles=arguments.max_tiles,
                                 max_bytes=arguments.max_bytes,
                                 antimeridian_zooms=set(arguments.antimeridian_zoom),
-                                sparse=arguments.sparse)
+                                sparse=arguments.sparse, style=arguments.style,
+                                activate=arguments.activate)
     except PublishedDurabilityError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 3
