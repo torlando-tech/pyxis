@@ -24,6 +24,7 @@ import contextlib
 import ctypes
 from dataclasses import dataclass
 import errno
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -1126,15 +1127,19 @@ def activate_map_set(pyxis_fd: int, *, pack_id: str, map_set_id: str, attributio
     selection follows the flasher's prepareActiveMapSet/activateMapSet:
     read both slots, reject conflicting same-generation records, resolve
     the pack list from the installed style record (falling back to the
-    highest-generation slot of the same style), write the style record
-    under map-sets/ and then the chosen active-pack slot. Both writes go
-    through _write_atomic_at (exclusive temp file, fsync, rename,
-    read-back) so an interrupted activation never truncates or leaves a
-    partial record: a crash mid-write leaves the previous record intact
-    and a retry repairs the slot. The final pack list is validated
-    against the firmware's pack limit before any byte is written, so a
-    rejected activation cannot orphan a just-published pack. Returns
-    (slot_name, enabled_packs).
+    highest-generation slot of the same style), then publish the record to
+    the chosen active-pack slot FIRST and the style record under map-sets/
+    second. Both writes go through _write_atomic_at (exclusive temp file,
+    fsync, rename, read-back) so an interrupted activation never truncates
+    or leaves a partial record: a crash mid-write leaves the previous record
+    intact and a retry repairs the style record. The slot is authoritative
+    in the firmware (tile serving reads only the active slots, and the style
+    catalog tolerates a missing style record), so slot-first ordering means
+    an interruption between the two commits leaves the map ACTIVE with the
+    style record one build stale, rather than dropping the active pack. The
+    final pack list is validated against the firmware's pack limit before any
+    byte is written, so a rejected activation cannot orphan a published pack.
+    Returns (slot_name, enabled_packs).
     """
     slot_names = ("active-pack.0", "active-pack.1")
     slots: list[dict[str, object] | None] = [None, None]
@@ -1177,7 +1182,6 @@ def activate_map_set(pyxis_fd: int, *, pack_id: str, map_set_id: str, attributio
                             f"{MAX_ACTIVE_PACKS}; remove an installed pack before activating")
         record = encode_active_map_set(generation=highest + 1, map_set_id=map_set_id,
                                        attribution=attribution, pack_ids=packs)
-        _write_atomic_at(map_sets_fd, style_name, record)
         if slots[0] is None:
             target = slot_names[0]
         elif slots[1] is None:
@@ -1185,7 +1189,17 @@ def activate_map_set(pyxis_fd: int, *, pack_id: str, map_set_id: str, attributio
         else:
             target = slot_names[0] if cast(int, slots[0]["generation"]) <= \
                     cast(int, slots[1]["generation"]) else slot_names[1]
+        # Slot first, style record second. The firmware's tile path
+        # (MapTilePack::initialize) reads only the active slots, and its
+        # style catalog (MapStyleCatalog::discover) tolerates a MISSING
+        # style record -- synthesizing the candidate from the active slot --
+        # while aborting only on a CORRUPT one. Because both records carry
+        # the identical PMAS payload, writing the authoritative slot first
+        # makes the worst interruption "map active, style record one build
+        # stale (self-heals on the next activation or retry)" instead of
+        # "no active pack, map unusable until retry".
         _write_atomic_at(pyxis_fd, target, record)
+        _write_atomic_at(map_sets_fd, style_name, record)
     finally:
         os.close(map_sets_fd)
     return target, packs
@@ -1246,19 +1260,7 @@ def _unlink_quietly_at(parent_fd: int, name: str) -> None:
         pass
 
 
-_INSTALL_LOCK_NAME = ".pyxis-install-owner"
-
-
-def _pid_alive(pid: int) -> bool:
-    if pid <= 0 or pid > 0x7FFFFFFF:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+_INSTALL_LOCK_NAME = ".pyxis-install.lock"
 
 
 @contextlib.contextmanager
@@ -1268,49 +1270,45 @@ def _install_lock_at(pyxis_fd: int):
     The web flasher serializes concurrent installers through the Web Locks
     API; this CLI needs an equivalent because two concurrent --activate
     builds could otherwise both pass the preflight and each clobber the
-    other's records. The lock is a single well-known file in pyxis-map/,
-    so every builder on the card sees it. A lock left behind by a crashed
-    builder is reclaimed when its owner pid is dead; a live owner blocks
-    (pid reuse is resolved conservatively -- block rather than corrupt).
-    The lock file is removed on every exit path.
+    other's records.
+
+    The lock is an advisory fcntl.flock(LOCK_EX | LOCK_NB) on a single
+    well-known file in pyxis-map/, so every builder on the card serializes
+    on the same inode. flock is the race-free primitive here:
+      * acquisition is a single atomic kernel operation, so there is no
+        create-then-write-PID window for a second builder to observe an
+        empty/partial lock and classify it as stale;
+      * the kernel releases the lock when the holder exits or is killed,
+        so a crashed builder cannot wedge the card -- there is no stale
+        lock to reclaim, and no pid-reuse window;
+      * the file is deliberately persistent and never unlinked: unlinking a
+        flock'd file is the classic inode race (a second process would flock
+        a *new* inode and not conflict with the first's held inode). The
+        lock file is invisible to the firmware and flasher, which only read
+        fixed named paths under pyxis-map/ (never a root directory listing).
     """
-    for attempt in range(4):
+    try:
+        descriptor = os.open(_INSTALL_LOCK_NAME,
+                             os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o644,
+                             dir_fd=pyxis_fd)
+    except OSError as exc:
+        raise PackError(f"cannot open the map-install lock: {exc}") from exc
+    try:
         try:
-            descriptor = os.open(_INSTALL_LOCK_NAME,
-                                 os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_CLOEXEC,
-                                 0o644, dir_fd=pyxis_fd)
-            try:
-                _write_all(descriptor, str(os.getpid()).encode("ascii"),
-                           _INSTALL_LOCK_NAME)
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-            break
-        except FileExistsError:
-            try:
-                raw = _read_file_at(pyxis_fd, _INSTALL_LOCK_NAME, 32)
-            except (PackError, FileNotFoundError):
-                raw = b""
-            owner_pid = 0
-            try:
-                owner_pid = int(raw.decode("ascii"))
-            except ValueError:
-                owner_pid = 0
-            if _pid_alive(owner_pid):
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
                 raise PackError("another map installer is already running on "
                                 "this card; wait for it to finish and retry") from None
-            _unlink_quietly_at(pyxis_fd, _INSTALL_LOCK_NAME)
-            _fsync_directory_fd(pyxis_fd)
-        except OSError as exc:
             raise PackError(f"cannot acquire the map-install lock: {exc}") from exc
-    else:
-        raise PackError("cannot acquire the map-install lock")
-    _fsync_directory_fd(pyxis_fd)
-    try:
         yield _INSTALL_LOCK_NAME
     finally:
-        _unlink_quietly_at(pyxis_fd, _INSTALL_LOCK_NAME)
-        _fsync_directory_fd(pyxis_fd)
+        # Closing releases the flock. Do NOT unlink: see the docstring.
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(descriptor)
 
 
 def _remove_tree_at(parent_fd: int, name: str) -> None:

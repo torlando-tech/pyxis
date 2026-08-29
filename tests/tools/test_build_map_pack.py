@@ -873,10 +873,13 @@ def test_activation_conflicting_slots_rejected_before_publishing(tmp_path: Path)
 
 
 def test_interrupted_activation_retry_converges_records(tmp_path: Path) -> None:
-    # A run interrupted between the style-record and slot-record commits
-    # leaves a published pack with stale records; re-running the same
-    # source must verify the existing pack and converge both records
-    # (Greploop round 3).
+    # A run interrupted between the slot-record and style-record commits
+    # leaves a published, ACTIVE pack (slot committed) with a missing style
+    # record. The firmware keeps serving tiles from the authoritative slot
+    # and tolerates the missing style record (MapStyleCatalog::discover
+    # synthesizes the candidate from the slot); re-running the same source
+    # verifies the existing pack and converges the style record
+    # (Greploop round 3 + round 4: slot-first ordering).
     tool = load_tool()
     policy = tool.STYLE_POLICIES["osm-bright"]
     sd = tmp_path / "sd"
@@ -888,12 +891,12 @@ def test_interrupted_activation_retry_converges_records(tmp_path: Path) -> None:
     interrupted = {"done": False}
 
     def interrupted_renameat2(oldfd, oldpath, newfd, newpath, flags):
-        # Interrupt only the slot-record replacement (flags 0, newpath is
-        # an active-pack slot). Pack staging (flags 1) and the style-record
-        # commit (flags 0, newpath osm-bright.pmas) must proceed so the
-        # failure lands between the two record commits.
-        if not interrupted["done"] and flags == 0 and newpath in (b"active-pack.0",
-                                                                  b"active-pack.1"):
+        # Interrupt only the style-record replacement (flags 0, newpath is
+        # the .pmas). Pack staging (flags 1) and the slot-record commit
+        # (flags 0, newpath an active-pack slot) must proceed so the
+        # failure lands between the two record commits, leaving the map
+        # active but the style record stale.
+        if not interrupted["done"] and flags == 0 and newpath.endswith(b".pmas"):
             interrupted["done"] = True
             raise OSError("injected interruption between record commits")
         return real_renameat2(oldfd, oldpath, newfd, newpath, flags)
@@ -908,53 +911,80 @@ def test_interrupted_activation_retry_converges_records(tmp_path: Path) -> None:
     finally:
         monkeypatch.undo()
 
-    # The pack published; the style record committed; the slot did not.
+    # The pack published and the authoritative slot committed; the style
+    # record did not. The map is therefore active, not broken.
     assert (sd / "pyxis-map/packs/resume-pack/manifest.pmp").is_file()
     style_path = sd / "pyxis-map/map-sets/osm-bright.pmas"
-    assert style_path.is_file()
-    assert not (sd / "pyxis-map/active-pack.0").exists()
-    assert not (sd / "pyxis-map/active-pack.1").exists()
+    assert not style_path.exists()
+    assert (sd / "pyxis-map/active-pack.0").read_bytes() is not None
 
     # Retry with the same source: the pack verifies byte-identical and
-    # the records converge.
+    # converges the style record. The retry writes the free slot
+    # (active-pack.1) at a higher generation than the interrupted first run
+    # left in active-pack.0, and the style record matches the authoritative
+    # (highest-generation) slot.
     result = tool.build_map_pack(source, sd, pack_id="resume-pack", name="R",
                                  attribution=policy["attribution"], source=policy["source"],
                                  license=policy["license"], style="osm-bright", activate=True)
     assert result == sd / "pyxis-map/packs/resume-pack"
-    slot_data = (sd / "pyxis-map/active-pack.0").read_bytes()
-    decoded = tool.decode_active_selection(slot_data)
-    assert decoded["packs"][0] == "resume-pack"
-    assert tool.decode_active_selection(style_path.read_bytes()) == decoded
-    assert not (sd / "pyxis-map/.pyxis-install-owner").exists()
+    slot0 = tool.decode_active_selection((sd / "pyxis-map/active-pack.0").read_bytes())
+    slot1 = tool.decode_active_selection((sd / "pyxis-map/active-pack.1").read_bytes())
+    authoritative = slot1 if slot1["generation"] > slot0["generation"] else slot0
+    style = tool.decode_active_selection(style_path.read_bytes())
+    assert style == authoritative
+    assert style["packs"][0] == "resume-pack"
+
+
+def _flock_holder(path: str) -> subprocess.Popen:
+    # Spawn a subprocess that takes an exclusive flock on the lock file and
+    # signals readiness over stdout. This is the only way to exercise a real
+    # concurrent lock holder: flock is a per-process kernel state, so a fake
+    # pid in a file cannot hold it.
+    code = (
+        "import fcntl, os, sys, time\n"
+        "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+        "sys.stdout.write('ready\\n')\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(60)\n"
+    )
+    return subprocess.Popen([sys.executable, "-c", code, path],
+                            stdout=subprocess.PIPE, text=True)
 
 
 def test_concurrent_activation_is_serialized_by_lock(tmp_path: Path) -> None:
     # A second builder cannot activate while the first holds the install
-    # lock; a crashed builder's stale lock is reclaimed (Greploop round 3).
+    # flock; when the holder exits, the kernel releases the lock and the
+    # build proceeds (Greploop round 3 + round 4: lock must be a real,
+    # race-free kernel primitive, not a pid file).
     tool = load_tool()
     policy = tool.STYLE_POLICIES["osm-bright"]
     sd = tmp_path / "sd"
     (sd / "pyxis-map").mkdir(parents=True)
+    lock_file = sd / "pyxis-map/.pyxis-install.lock"
     source = tmp_path / "xyz"
     put_tile(source, 1, 0, 0)
 
-    # Live lock holder: own pid in the lock file blocks the second build.
-    (sd / "pyxis-map/.pyxis-install-owner").write_bytes(str(os.getpid()).encode("ascii"))
-    with pytest.raises(tool.PackError, match="already running"):
-        tool.build_map_pack(source, sd, pack_id="locked-pack", name="L",
-                            attribution=policy["attribution"], source=policy["source"],
-                            license=policy["license"], style="osm-bright", activate=True)
-    assert not (sd / "pyxis-map/packs/locked-pack").exists()
+    holder = _flock_holder(str(lock_file))
+    try:
+        assert holder.stdout.readline().strip() == "ready"
+        with pytest.raises(tool.PackError, match="already running"):
+            tool.build_map_pack(source, sd, pack_id="locked-pack", name="L",
+                                attribution=policy["attribution"], source=policy["source"],
+                                license=policy["license"], style="osm-bright", activate=True)
+        assert not (sd / "pyxis-map/packs/locked-pack").exists()
+    finally:
+        holder.terminate()
+        holder.wait()
 
-    # Stale lock: owner pid is dead, so it is reclaimed and the build proceeds.
-    (sd / "pyxis-map/.pyxis-install-owner").write_bytes(b"4294000000")
-    assert not tool._pid_alive(4294000000)
+    # Holder exited: the kernel released the flock, so the build now proceeds.
     result = tool.build_map_pack(source, sd, pack_id="locked-pack", name="L",
                                  attribution=policy["attribution"], source=policy["source"],
                                  license=policy["license"], style="osm-bright", activate=True)
     assert (sd / "pyxis-map/packs/locked-pack/manifest.pmp").is_file()
     assert (sd / "pyxis-map/active-pack.0").is_file()
-    assert not (sd / "pyxis-map/.pyxis-install-owner").exists()
+    # The lock file is persistent (never unlinked) -- see _install_lock_at.
+    assert lock_file.exists()
 
 
 def test_existing_pack_rejects_different_source(tmp_path: Path) -> None:
