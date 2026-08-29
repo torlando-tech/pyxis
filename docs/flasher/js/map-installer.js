@@ -71,7 +71,7 @@ function fail(message) { throw new MapInstallerError(message); }
 const INSTALL_MARKER_NAME = '.pyxis-installing';
 const INSTALL_MARKER_TTL_MS = 15 * 60 * 1000;
 
-function parseInstallMarker(text) {
+export function parseInstallMarker(text) {
   const parts = String(text).trim().split(' ');
   if (parts.length !== 4 || parts[0] !== 'PYXI' || parts[1] !== '1') return null;
   if (!parts[2] || parts[2].length > 64) return null;
@@ -79,7 +79,7 @@ function parseInstallMarker(text) {
   return {owner: parts[2], epochMs: Number(parts[3])};
 }
 
-function installMarkerIsFresh(epochMs, nowMs = Date.now()) {
+export function installMarkerIsFresh(epochMs, nowMs = Date.now()) {
   if (epochMs > nowMs) return true;
   return nowMs - epochMs <= INSTALL_MARKER_TTL_MS;
 }
@@ -120,8 +120,29 @@ async function acquireInstallMarker(pyxis, owner) {
 }
 
 async function releaseInstallMarker(pyxis, token) {
+  // Compare by owner, not the full token: renewals advance the epoch, so
+  // an exact match would fail once a long install has renewed its marker.
+  // A different owner means a later installer reclaimed our aged marker
+  // and its claim must survive.
+  const ours = parseInstallMarker(token);
   const actual = await readInstallMarker(pyxis);
-  if (actual === token) { try { await pyxis.removeEntry(INSTALL_MARKER_NAME); } catch {} }
+  if (actual !== null && ours) {
+    const current = parseInstallMarker(actual);
+    if (current && current.owner === ours.owner) { try { await pyxis.removeEntry(INSTALL_MARKER_NAME); } catch {} }
+  }
+}
+
+// Heartbeat: renew our marker's epoch during long publications (a full
+// world pack on slow SD storage can outlive the TTL). Best effort; the
+// commit-time revalidation is the backstop.
+export async function renewInstallMarker(pyxis, owner) {
+  try {
+    const token = `PYXI 1 ${owner} ${Date.now()}`;
+    const handle = await pyxis.getFileHandle(INSTALL_MARKER_NAME);
+    const writable = await handle.createWritable({keepExistingData: false});
+    try { await writable.write(textEncoder.encode(token)); await writable.close(); }
+    catch (error) { try { await writable.abort(); } catch {} throw error; }
+  } catch {}
 }
 
 // Commit-time revalidation: the slot/style records were derived by
@@ -135,8 +156,10 @@ async function releaseInstallMarker(pyxis, token) {
 async function verifyActivationState(pyxis, mapSets, styleName, markerToken, state) {
   const marker = await readInstallMarker(pyxis);
   if (marker !== null) {
+    // Compare by owner: our own marker may carry a renewed (newer) epoch.
     const parsed = parseInstallMarker(marker);
-    if (parsed && installMarkerIsFresh(parsed.epochMs) && marker !== markerToken) {
+    const ours = markerToken !== null ? parseInstallMarker(markerToken) : null;
+    if (parsed && installMarkerIsFresh(parsed.epochMs) && (ours === null || parsed.owner !== ours.owner)) {
       fail('Another map installer is running on this card; wait for it to finish and retry');
     }
   }
@@ -837,7 +860,9 @@ async function installMuiZipLocked({archive,rootDirectory,metadata,onProgress=()
     try{
       await writeVerified(pack,receiptName,receipt);await verifyNamedDirectory(packs,metadata.packId,pack,[receiptName]);
       const tiles=await getDirectory(pack,'tiles');
-      for(let index=0;index<report.entries.length;index++){const entry=report.entries[index];const zoom=await getDirectory(tiles,String(entry.zoom));const x=await getDirectory(zoom,String(entry.x));const bytes=await blobBytes(archive,entry.dataOffset,entry.dataOffset+entry.size);if(crc32(bytes)!==entry.checksum)fail(`ZIP changed during installation: ${entry.name}`);await validatePng(bytes,entry.name);await writeVerified(x,`${entry.y}.png`,bytes);onProgress({phase:'write',completed:index+1,total:report.tileCount});}
+      const markerOwner=markerToken?parseInstallMarker(markerToken)?.owner:null;
+      for(let index=0;index<report.entries.length;index++){const entry=report.entries[index];const zoom=await getDirectory(tiles,String(entry.zoom));const x=await getDirectory(zoom,String(entry.x));const bytes=await blobBytes(archive,entry.dataOffset,entry.dataOffset+entry.size);if(crc32(bytes)!==entry.checksum)fail(`ZIP changed during installation: ${entry.name}`);await validatePng(bytes,entry.name);await writeVerified(x,`${entry.y}.png`,bytes);onProgress({phase:'write',completed:index+1,total:report.tileCount});if(markerOwner&&index%25===24)await renewInstallMarker(pyxis,markerOwner);}
+      if(markerOwner&&report.entries.length)await renewInstallMarker(pyxis,markerOwner);
       await writeVerified(pack,'manifest.pmp',manifest);parseSparseManifest(await fileBytes(pack,'manifest.pmp'));published=true;
       try{await pack.removeEntry(receiptName);}catch(error){throw new Error(`Map pack is installed and verified, but its ownership receipt could not be removed: ${error.message}`);}
       try{const active=await activateMapSet(pyxis,metadata,markerToken);return{...report,manifestBytes:manifest.length,resumed:false,...active};}

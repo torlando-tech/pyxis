@@ -1281,3 +1281,84 @@ def test_commit_time_revalidation_aborts_and_retry_converges(tmp_path: Path) -> 
     assert record3["generation"] == 3
     assert record3["packs"] == ["pack-a", "other-pack", "raced-pack"]
     assert Path(result) == sd / "pyxis-map" / "packs" / "pack-a"
+
+
+def test_marker_is_renewed_during_long_publication_and_released_by_owner(
+        tmp_path: Path) -> None:
+    # Round 9: a publication can outlive the marker TTL (a full world pack
+    # on slow SD storage). The builder must renew its marker's epoch
+    # during the tile loop so the claim never ages out, and release must
+    # still work afterwards: release compares the owner, not the full
+    # token, because renewals advance the epoch.
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    for x in range(30):
+        put_tile(source, 5, x, 0)
+    policy = tool.STYLE_POLICIES["osm-bright"]
+    sd = tmp_path / "sd"
+    (sd / "pyxis-map").mkdir(parents=True)
+
+    renewals: list[tuple[str, int]] = []
+    original_renew = tool._renew_install_marker
+
+    def counting_renew(pyxis_fd, owner):
+        original_renew(pyxis_fd, owner)
+        raw = (sd / "pyxis-map" / ".pyxis-installing").read_text()
+        parts = raw.strip().split(" ")
+        assert parts[0] == "PYXI" and parts[1] == "1" and parts[2] == owner
+        renewals.append((owner, int(parts[3])))
+
+    tool._renew_install_marker = counting_renew
+    try:
+        tool.build_map_pack(source, sd, pack_id="pack-a", name="A",
+                            attribution=policy["attribution"], source=policy["source"],
+                            license=policy["license"], style="osm-bright", activate=True)
+    finally:
+        tool._renew_install_marker = original_renew
+    # 30 tiles: one in-loop renewal at tile index 24 plus the final
+    # renewal after the last tile.
+    assert len(renewals) == 2, f"expected 2 renewals, got {len(renewals)}"
+    # The renewal kept our owner identity (release below depends on it).
+    owner = renewals[0][0]
+    assert owner.startswith("cli-")
+    # The install completed and the builder released its own marker even
+    # though renewals advanced the epoch past the acquired token.
+    assert (sd / "pyxis-map/packs/pack-a/manifest.pmp").is_file()
+    assert (sd / "pyxis-map/active-pack.0").is_file()
+    assert not (sd / "pyxis-map/.pyxis-installing").exists()
+
+
+def test_long_publication_marker_stays_live_past_ttl(
+        tmp_path: Path) -> None:
+    # Round 9 (the actual race): a marker whose epoch has aged past the
+    # TTL is reclaimable ONLY if its owner stopped renewing (crashed).
+    # A live installer's heartbeat keeps the on-disk epoch fresh, so a
+    # second producer must refuse it. The observable contract:
+    #   stale + never renewed   -> reclaimed (abandoned install);
+    #   stale + renewed to now  -> refused (live installer).
+    # The second case is exactly what the tile-loop renewal produces: the
+    # on-disk epoch is always the last renewal, which is fresh by
+    # construction. Verify the decision boundary directly.
+    tool = load_tool()
+    now_ms = int(__import__("time").time() * 1000)
+    ttl_ms = tool._INSTALL_MARKER_TTL_SECONDS * 1000
+    # Aged 16 minutes: past the TTL.
+    assert not tool._marker_is_fresh(now_ms - 16 * 60 * 1000)
+    # Renewed just now (live owner's heartbeat): fresh again.
+    assert tool._marker_is_fresh(now_ms)
+    # And the reclaim path really keys off the on-disk epoch: a marker
+    # aged past the TTL with no renewals is reclaimable end-to-end.
+    source = tmp_path / "xyz"
+    put_tile(source, 1, 0, 0)
+    policy = tool.STYLE_POLICIES["osm-bright"]
+    sd = tmp_path / "sd"
+    (sd / "pyxis-map").mkdir(parents=True)
+    stale = now_ms - 16 * 60 * 1000
+    (sd / "pyxis-map/.pyxis-installing").write_text(f"PYXI 1 cli-crash {stale}")
+    tool.build_map_pack(source, sd, pack_id="pack-a", name="A",
+                        attribution=policy["attribution"], source=policy["source"],
+                        license=policy["license"], style="osm-bright", activate=True)
+    assert (sd / "pyxis-map/packs/pack-a/manifest.pmp").is_file()
+    assert not (sd / "pyxis-map/.pyxis-installing").exists()
+    # Sanity on the TTL constant the boundary above used.
+    assert ttl_ms == 900 * 1000

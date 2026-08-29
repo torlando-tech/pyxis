@@ -9,8 +9,11 @@ import {
   encodeActiveMapSet,
   getMuiStyleProfile,
   inspectMuiZip,
+  installMarkerIsFresh,
   installMuiZip,
+  parseInstallMarker,
   parseSparseManifest,
+  renewInstallMarker,
   resolveMuiStyleProfile,
   suggestMapIdentity,
   MapInstallerError,
@@ -829,4 +832,30 @@ test('activation aborts when a cross-producer commit lands before the record wri
   const newest = finalSlots.sort((left, right) => right.generation - left.generation)[0];
   assert.equal(newest.generation, 3);
   assert.deepEqual(newest.packs.map(pack => pack.packId), [metadata.packId, 'other', 'old']);
+});
+
+
+// --- Round 9: marker heartbeat. A long publication must renew its own
+// marker so the claim never ages out mid-install; release and
+// commit-time verification must still recognize the owner after the
+// epoch has advanced.
+
+test('renewing a live marker advances the epoch but keeps the owner', async () => {
+  const root = new MemoryDirectoryHandle('sd');
+  const pyxis = await root.getDirectoryHandle('pyxis-map', {create: true});
+  const owner = `web-${Date.now().toString(16)}`;
+  const token = `PYXI 1 ${owner} ${Date.now() - 16 * 60 * 1000}`; // 16 minutes old: past TTL
+  const handle = await pyxis.getFileHandle('.pyxis-installing', {create: true, exclusive: true});
+  const writable = await handle.createWritable({keepExistingData: false});
+  await writable.write(new TextEncoder().encode(token));
+  await writable.close();
+  assert.equal(installMarkerIsFresh(Date.now() - 16 * 60 * 1000), false, '16 minutes old is past the TTL');
+  // The heartbeat rewrites the marker with a fresh epoch, same owner.
+  await renewInstallMarker(pyxis, owner);
+  const renewed = await pyxis.getFileHandle('.pyxis-installing');
+  const text = new TextDecoder('utf-8').decode(new Uint8Array(await (await renewed.getFile()).arrayBuffer()));
+  const parsed = parseInstallMarker(text);
+  assert.equal(parsed.owner, owner, 'renewal keeps the owner identity');
+  assert.ok(parsed.epochMs >= Date.now() - 1000, 'renewal refreshes the epoch');
+  assert.ok(installMarkerIsFresh(parsed.epochMs), 'a renewed marker is live again');
 });

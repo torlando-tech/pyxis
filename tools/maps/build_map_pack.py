@@ -1435,20 +1435,52 @@ def _acquire_install_marker(pyxis_fd: int) -> str:
     return token
 
 
+def _renew_install_marker(pyxis_fd: int, owner: str) -> None:
+    """Renew our marker's epoch during a long installation (heartbeat).
+
+    A publication can outlive _INSTALL_MARKER_TTL_SECONDS (a full world
+    pack on slow SD storage); without renewals the marker would age out
+    and a second producer could reclaim our live claim. The rewrite
+    keeps our owner identity and advances the epoch; the release path
+    and the commit-time check compare the owner, so renewed markers are
+    still recognized as ours. Best effort: a failed renewal is retried
+    on the next tile and the commit-time marker check is the backstop.
+    """
+    try:
+        token = _marker_token(owner)
+        descriptor = os.open(_INSTALL_MARKER_NAME,
+                             os.O_WRONLY | os.O_TRUNC | os.O_CLOEXEC,
+                             dir_fd=pyxis_fd)
+        try:
+            _write_all(descriptor, token.encode("ascii"), _INSTALL_MARKER_NAME)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError:
+        pass
+
+
 def _release_install_marker(pyxis_fd: int, token: str) -> None:
     """Remove our install marker -- and only ours.
 
-    If the marker content is not our own token (a later installer
-    reclaimed it after our install outlasted the TTL, or a crashed run
-    left a different claim), deleting it would drop that installer's
-    live claim. Leave it; the TTL reclaims it.
+    Comparison is by owner identity (the token's owner field), not the
+    full token: the epoch changes as we renew (heartbeat), so an exact
+    match would fail once a long install has renewed its marker. If the
+    marker now carries a DIFFERENT owner (a later installer reclaimed
+    it after our marker aged out, or a crashed run left a different
+    claim), deleting it would drop that installer's live claim. Leave
+    it; the TTL reclaims it.
     """
+    our_owner = _parse_marker(token.encode("ascii"))
+    our_owner = our_owner[0] if our_owner is not None else None
     raw = _read_selection_at(pyxis_fd, _INSTALL_MARKER_NAME)
-    if raw == token.encode("ascii"):
-        try:
-            os.unlink(_INSTALL_MARKER_NAME, dir_fd=pyxis_fd)
-        except OSError:
-            pass
+    if raw is not None:
+        current = _parse_marker(raw)
+        if current is not None and current[0] == our_owner:
+            try:
+                os.unlink(_INSTALL_MARKER_NAME, dir_fd=pyxis_fd)
+            except OSError:
+                pass
 
 
 def _verify_activation_state_at(pyxis_fd: int, map_sets_fd: int, *,
@@ -1468,10 +1500,16 @@ def _verify_activation_state_at(pyxis_fd: int, map_sets_fd: int, *,
     """
     marker_raw = _read_selection_at(pyxis_fd, _INSTALL_MARKER_NAME)
     if marker_raw is not None:
-        own = marker_token.encode("ascii") if marker_token is not None else None
+        # Compare by owner, not the full token: we renew the marker's
+        # epoch during publication (heartbeat), so our own marker may
+        # carry a newer epoch than the one acquired at install start.
+        own_owner = None
+        if marker_token is not None:
+            parsed_own = _parse_marker(marker_token.encode("ascii"))
+            own_owner = parsed_own[0] if parsed_own is not None else None
         parsed = _parse_marker(marker_raw)
         if parsed is not None and _marker_is_fresh(parsed[1]) \
-                and marker_raw != own:
+                and parsed[0] != own_owner:
             raise PackError("another map installer is running on this card; "
                             "wait for it to finish and retry")
     for index, slot_name in enumerate(("active-pack.0", "active-pack.1")):
@@ -1700,9 +1738,19 @@ def build_map_pack(source_directory: Path, output_root: Path, *, pack_id: str, n
                     if not resumed:
                         temporary, stage_fd = _temporary_directory(packs_fd, pack_id)
                         copied = 0
-                        for tile in tiles:
+                        # Heartbeat: renew our marker during long
+                        # publications so a full world pack on slow SD
+                        # storage cannot age out and be reclaimed by a
+                        # second producer mid-install (Greptile round 8).
+                        _marker_owner = _parse_marker(marker_token.encode("ascii"))
+                        _marker_owner = _marker_owner[0] if _marker_owner is not None else None
+                        for tile_index, tile in enumerate(tiles):
                             copy_tile(source_fd, tile, stage_fd, max_bytes - copied)
                             copied += tile.size
+                            if _marker_owner is not None and tile_index % 25 == 24:
+                                _renew_install_marker(pyxis_fd, _marker_owner)
+                        if tiles and _marker_owner is not None:
+                            _renew_install_marker(pyxis_fd, _marker_owner)
                         manifest_fd = os.open("manifest.pmp", os.O_WRONLY | os.O_CREAT | os.O_EXCL
                                                | os.O_CLOEXEC, 0o644, dir_fd=stage_fd)
                         try:
