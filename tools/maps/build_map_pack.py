@@ -1266,6 +1266,9 @@ def _preflight_activation(pyxis_fd: int, *, pack_id: str, map_set_id: str, attri
         raw = _read_selection_at(pyxis_fd, slot_name)
         if raw is not None:
             slots[index] = decode_active_selection(raw)
+    if slots[0] is not None and slots[1] is not None \
+            and slots[0]["generation"] == slots[1]["generation"] and slots[0] != slots[1]:
+        raise PackError("conflicting active map-set records")
     valid = [slot for slot in slots if slot is not None]
     map_sets_fd, _ = _mkdir_open(pyxis_fd, "map-sets")
     try:

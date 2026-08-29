@@ -842,6 +842,36 @@ def test_activation_ninth_distinct_pack_fails_before_publishing(tmp_path: Path) 
     assert not (sd / "pyxis-map/packs/ninth-pack").exists()
 
 
+def test_activation_conflicting_slots_rejected_before_publishing(tmp_path: Path) -> None:
+    # Two active slots at the same generation with different content is a
+    # conflict activate_map_set refuses -- the preflight must refuse it too,
+    # before the new pack is permanently published (Greploop round 2).
+    tool = load_tool()
+    policy = tool.STYLE_POLICIES["osm-bright"]
+    sd = tmp_path / "sd"
+    (sd / "pyxis-map").mkdir(parents=True)
+    slot0 = tool.encode_active_map_set(generation=5, map_set_id="osm-bright",
+                                       attribution=policy["attribution"],
+                                       pack_ids=["existing-a"])
+    slot1 = tool.encode_active_map_set(generation=5, map_set_id="osm-bright",
+                                       attribution=policy["attribution"],
+                                       pack_ids=["existing-b"])
+    (sd / "pyxis-map/active-pack.0").write_bytes(slot0)
+    (sd / "pyxis-map/active-pack.1").write_bytes(slot1)
+
+    source = tmp_path / "xyz"
+    put_tile(source, 1, 0, 0)
+    with pytest.raises(tool.PackError, match="conflicting active map-set records"):
+        tool.build_map_pack(source, sd, pack_id="conflict-pack", name="C",
+                            attribution=policy["attribution"], source=policy["source"],
+                            license=policy["license"], style="osm-bright", activate=True)
+
+    # The conflicting slots are untouched and nothing was published.
+    assert (sd / "pyxis-map/active-pack.0").read_bytes() == slot0
+    assert (sd / "pyxis-map/active-pack.1").read_bytes() == slot1
+    assert not (sd / "pyxis-map/packs/conflict-pack").exists()
+
+
 def test_decode_selection_handles_v1_and_v2(tmp_path: Path) -> None:
     tool = load_tool()
     # v1: 48 bytes, magic, version 1, len 48, generation, then id at 12..44
