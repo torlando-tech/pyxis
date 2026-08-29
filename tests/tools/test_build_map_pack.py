@@ -872,6 +872,33 @@ def test_activation_conflicting_slots_rejected_before_publishing(tmp_path: Path)
     assert not (sd / "pyxis-map/packs/conflict-pack").exists()
 
 
+def test_activation_exhausted_generation_rejected_before_publishing(tmp_path: Path) -> None:
+    # When the highest active slot is already at the maximum generation,
+    # activate_map_set rejects the activation. The preflight must reject it
+    # too, BEFORE the new pack is published -- otherwise the failure orphans
+    # the pack (Greploop round 5).
+    tool = load_tool()
+    policy = tool.STYLE_POLICIES["osm-bright"]
+    sd = tmp_path / "sd"
+    (sd / "pyxis-map").mkdir(parents=True)
+    exhausted = tool.encode_active_map_set(generation=0xFFFFFFFF,
+                                           map_set_id="osm-bright",
+                                           attribution=policy["attribution"],
+                                           pack_ids=["existing-a"])
+    (sd / "pyxis-map/active-pack.0").write_bytes(exhausted)
+
+    source = tmp_path / "xyz"
+    put_tile(source, 1, 0, 0)
+    with pytest.raises(tool.PackError, match="generation is exhausted"):
+        tool.build_map_pack(source, sd, pack_id="exhausted-pack", name="E",
+                            attribution=policy["attribution"], source=policy["source"],
+                            license=policy["license"], style="osm-bright", activate=True)
+
+    # The exhausted slot is untouched and nothing was published.
+    assert (sd / "pyxis-map/active-pack.0").read_bytes() == exhausted
+    assert not (sd / "pyxis-map/packs/exhausted-pack").exists()
+
+
 def test_interrupted_activation_retry_converges_records(tmp_path: Path) -> None:
     # A run interrupted between the slot-record and style-record commits
     # leaves a published, ACTIVE pack (slot committed) with a missing style

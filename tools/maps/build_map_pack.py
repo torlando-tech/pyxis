@@ -1388,6 +1388,9 @@ def _preflight_activation(pyxis_fd: int, *, pack_id: str, map_set_id: str, attri
             and slots[0]["generation"] == slots[1]["generation"] and slots[0] != slots[1]:
         raise PackError("conflicting active map-set records")
     valid = [slot for slot in slots if slot is not None]
+    highest = max([0] + [cast(int, slot["generation"]) for slot in valid])
+    if highest == 0xFFFFFFFF:
+        raise PackError("active selection generation is exhausted")
     map_sets_fd, _ = _mkdir_open(pyxis_fd, "map-sets")
     try:
         style_name = f"{map_set_id}.pmas"
