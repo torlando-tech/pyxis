@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import fcntl
 from pathlib import Path
 import struct
 import subprocess
@@ -373,6 +374,178 @@ def test_serialize_pmpk_v3_contains_no_span_payload() -> None:
     expected_length = 16 + sum(1 + len(entry[field].encode("ascii"))
                                for field in ("pack_id", "name", "attribution", "source", "license")) + 6 + 4
     assert len(data) == expected_length
+
+
+def style_metadata(tool, style: str = "osm-bright", **changes: str) -> dict[str, str]:
+    policy = dict(tool.STYLE_POLICIES[style])
+    values = {
+        "pack_id": "styled-pack",
+        "name": "Styled Pack",
+        "attribution": policy["attribution"],
+        "source": policy["source"],
+        "license": policy["license"],
+    }
+    values.update(changes)
+    return values
+
+
+def test_style_build_emits_pmpk_v3(tmp_path: Path) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    for x, y in ((0, 0), (0, 1), (3, 0)):
+        put_tile(source, 2, x, y)
+    # sparse source must still emit v3 when a style is requested
+    built = tool.build_map_pack(source, tmp_path / "sd", style="osm-bright",
+                                **style_metadata(tool))
+    parsed = tool.validate_pack(built)
+    assert parsed["format_version"] == 3
+    assert parsed["indexless"] is True
+    assert parsed["min_zoom"] == 2
+    assert parsed["max_zoom"] == 2
+    assert parsed["tile_count"] == 3
+
+
+def test_style_build_rejects_policy_metadata_mismatch(tmp_path: Path) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 0, 0, 0)
+    for field in ("attribution", "source", "license"):
+        with pytest.raises(tool.PackError, match=field):
+            tool.build_map_pack(source, tmp_path / f"sd-{field}", style="osm-bright",
+                                **style_metadata(tool, **{field: "Wrong value"}))
+    with pytest.raises(tool.PackError, match="unsupported map style"):
+        tool.build_map_pack(source, tmp_path / "sd-bad", style="vintage",
+                            **style_metadata(tool))
+
+
+def test_no_style_build_keeps_v1_v2_behavior(tmp_path: Path) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    make_rectangle(source)
+    rectangular = tool.build_map_pack(source, tmp_path / "sd-a", **metadata())
+    assert tool.validate_pack(rectangular)["format_version"] == 1
+    sparse_source = tmp_path / "sparse-xyz"
+    for x, y in ((1, 1), (1, 2), (2, 1)):
+        put_tile(sparse_source, 2, x, y)
+    sparse = tool.build_map_pack(sparse_source, tmp_path / "sd-b", sparse=True, **metadata())
+    assert tool.validate_pack(sparse)["format_version"] == 2
+
+
+def test_style_build_publishes_no_active_record(tmp_path: Path) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 0, 0, 0)
+    tool.build_map_pack(source, tmp_path / "sd", style="dark-matter",
+                        **style_metadata(tool, "dark-matter"))
+    pyxis_map = tmp_path / "sd/pyxis-map"
+    assert not (pyxis_map / "active-pack.0").exists()
+    assert not (pyxis_map / "active-pack.1").exists()
+    assert not (pyxis_map / "map-sets").exists()
+
+
+def _lock_holder_script(pyxis_map: Path, hold_seconds: float) -> str:
+    return (
+        "import fcntl, os, time\n"
+        f"fd = os.open(r'{pyxis_map}/{load_tool().INSTALL_LOCK_NAME}', os.O_RDWR | os.O_CREAT, 0o644)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+        "print('held', flush=True)\n"
+        f"time.sleep({hold_seconds})\n"
+    )
+
+
+def test_second_cli_process_is_refused_while_first_holds_lock(tmp_path: Path) -> None:
+    tool = load_tool()
+    source = tmp_path / "xyz"
+    put_tile(source, 0, 0, 0)
+    tool.build_map_pack(source, tmp_path / "sd", **metadata())
+    pyxis_map = tmp_path / "sd/pyxis-map"
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _lock_holder_script(pyxis_map, 5.0)],
+        stdout=subprocess.PIPE, text=True,
+    )
+    stdout = holder.stdout
+    assert stdout is not None
+    try:
+        assert stdout.readline().strip() == "held"
+        pyxis_fd = tool._open_path(pyxis_map)
+        try:
+            with pytest.raises(tool.PackError, match="another CLI map install is running"):
+                tool.acquire_install_lock(pyxis_fd)
+        finally:
+            os.close(pyxis_fd)
+        holder.terminate()
+        holder.wait(timeout=10)
+        pyxis_fd = tool._open_path(pyxis_map)
+        try:
+            lock_fd = tool.acquire_install_lock(pyxis_fd)
+            tool.release_install_lock(lock_fd)
+        finally:
+            os.close(pyxis_fd)
+    finally:
+        if holder.poll() is None:
+            holder.terminate()
+            holder.wait(timeout=10)
+
+
+def test_cli_lock_is_released_after_success(tmp_path: Path) -> None:
+    tool = load_tool()
+    pyxis_map = tmp_path / "sd/pyxis-map"
+    pyxis_map.mkdir(parents=True)
+    pyxis_fd = tool._open_path(pyxis_map)
+    try:
+        lock_fd = tool.acquire_install_lock(pyxis_fd)
+        tool.release_install_lock(lock_fd)
+        # A fresh descriptor can take the lock immediately.
+        lock_fd = tool.acquire_install_lock(pyxis_fd)
+        tool.release_install_lock(lock_fd)
+    finally:
+        os.close(pyxis_fd)
+
+
+def test_cli_lock_is_released_after_failure(tmp_path: Path) -> None:
+    tool = load_tool()
+    pyxis_map = tmp_path / "sd/pyxis-map"
+    pyxis_map.mkdir(parents=True)
+    holder_fd = os.open(pyxis_map / tool.INSTALL_LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(holder_fd, fcntl.LOCK_EX)
+        pyxis_fd = tool._open_path(pyxis_map)
+        try:
+            with pytest.raises(tool.PackError, match="another CLI map install is running"):
+                tool.acquire_install_lock(pyxis_fd)
+        finally:
+            os.close(pyxis_fd)
+    finally:
+        os.close(holder_fd)
+    # The failed acquire must not have left any lock held by this process.
+    pyxis_fd = tool._open_path(pyxis_map)
+    try:
+        lock_fd = tool.acquire_install_lock(pyxis_fd)
+        tool.release_install_lock(lock_fd)
+    finally:
+        os.close(pyxis_fd)
+
+
+def test_cli_lock_file_is_persistent_and_never_unlinked(tmp_path: Path) -> None:
+    tool = load_tool()
+    pyxis_map = tmp_path / "sd/pyxis-map"
+    pyxis_map.mkdir(parents=True)
+    pyxis_fd = tool._open_path(pyxis_map)
+    try:
+        lock_fd = tool.acquire_install_lock(pyxis_fd)
+        tool.release_install_lock(lock_fd)
+        lock_fd = tool.acquire_install_lock(pyxis_fd)
+        tool.release_install_lock(lock_fd)
+    finally:
+        os.close(pyxis_fd)
+    lock_path = pyxis_map / tool.INSTALL_LOCK_NAME
+    assert lock_path.is_file()
+    # The acquire/release code must not delete the persistent lock file.
+    acquire_source = TOOL.read_text(encoding="utf-8").split(
+        "def acquire_install_lock", 1)[1].split("\n\n\ndef ", 1)[0]
+    release_source = TOOL.read_text(encoding="utf-8").split(
+        "def release_install_lock", 1)[1].split("\n\n\ndef ", 1)[0]
+    assert "unlink(" not in acquire_source + release_source
 
 
 def test_valid_pack_is_deterministic_and_independently_validated(tmp_path: Path) -> None:

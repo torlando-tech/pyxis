@@ -13,6 +13,7 @@ import argparse
 import ctypes
 from dataclasses import dataclass
 import errno
+import fcntl
 import os
 from pathlib import Path
 import re
@@ -42,6 +43,29 @@ MAX_MANIFEST_BYTES = 7100
 MAX_ACTIVE_SELECTION_BYTES = 7105
 MAX_ACTIVE_PACKS = 8
 MAX_GENERATION = 0xFFFFFFFF
+INSTALL_LOCK_NAME = ".install.lock"
+STYLE_POLICIES: dict[str, dict[str, str]] = {
+    "osm-bright": {
+        "attribution": "(c) OpenMapTiles (c) OpenStreetMap contributors",
+        "source": "Oxed's Map Tile Downloader (OSM Bright)",
+        "license": "OSM ODbL; style CC-BY-4.0/BSD-3-Clause",
+    },
+    "dark-matter": {
+        "attribution": "(c) OpenMapTiles (c) OpenStreetMap contributors; style (c) CARTO",
+        "source": "Oxed's Map Tile Downloader (Dark Matter)",
+        "license": "OSM ODbL; style CC-BY-4.0/BSD-3-Clause (CARTO CC-BY-3.0)",
+    },
+    "positron": {
+        "attribution": "(c) OpenMapTiles (c) OpenStreetMap contributors; style (c) CARTO",
+        "source": "Oxed's Map Tile Downloader (Positron)",
+        "license": "OSM ODbL; style CC-BY-4.0/BSD-3-Clause (CARTO CC-BY-3.0)",
+    },
+    "toner": {
+        "attribution": "(c) MapTiler (c) OpenStreetMap contributors",
+        "source": "Oxed's Map Tile Downloader (Toner)",
+        "license": "OSM ODbL; style CC-BY-4.0/BSD-3-Clause (Stamen ISC)",
+    },
+}
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
@@ -842,6 +866,30 @@ def decode_active_selection(data: bytes) -> dict[str, object]:
             "attribution": attribution, "pack_ids": pack_ids, "row_spans": row_spans}
 
 
+def acquire_install_lock(pyxis_fd: int) -> int:
+    """Acquire the persistent CLI-to-CLI install lock.
+
+    The lock file lives inside the mounted pyxis-map directory and is never
+    unlinked: it exists only to carry an fcntl.flock that serializes CLI
+    processes. Returns the lock descriptor; closing it releases the lock.
+    """
+    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        lock_fd = os.open(INSTALL_LOCK_NAME, flags, 0o644, dir_fd=pyxis_fd)
+    except OSError as exc:
+        raise PackError(f"cannot open CLI install lock: {exc}") from exc
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(lock_fd)
+        raise PackError("another CLI map install is running; retry after it finishes") from exc
+    return lock_fd
+
+
+def release_install_lock(lock_fd: int) -> None:
+    os.close(lock_fd)
+
+
 def _open_verified_tile(source_fd: int, tile: Tile) -> int:
     zoom_fd, zoom_identity = _open_child_directory(source_fd, str(tile.zoom), str(tile.path.parent.parent))
     try:
@@ -929,11 +977,15 @@ def _validate_pack_fd(pack_fd: int, label: Path, max_bytes: int) -> dict[str, ob
         os.close(tiles_fd)
     if len(tiles) != tile_count:
         raise PackError("emitted tile tree does not match manifest")
-    if parsed["format_version"] == FORMAT_VERSION:
+    format_version = parsed["format_version"]
+    if format_version == FORMAT_VERSION:
         expected_extents = cast(list[ZoomExtent], parsed["extents"])
         extents = calculate_extents(tiles, {item.zoom for item in expected_extents if len(item.intervals) == 2})
         if extents != expected_extents:
             raise PackError("emitted tile tree does not match manifest")
+    elif format_version == INDEXLESS_FORMAT_VERSION:
+        if tiles[0].zoom != parsed["min_zoom"] or tiles[-1].zoom != parsed["max_zoom"]:
+            raise PackError("emitted tile tree does not match indexless manifest")
     else:
         expected_spans = cast(list[RowSpan], parsed["row_spans"])
         if calculate_row_spans(tiles) != expected_spans:
@@ -1013,10 +1065,19 @@ def build_map_pack(source_directory: Path, output_root: Path, *, pack_id: str, n
                    attribution: str, source: str, license: str,
                    max_tiles: int = DEFAULT_MAX_TILES, max_bytes: int = DEFAULT_MAX_BYTES,
                    antimeridian_zooms: set[int] | None = None,
-                   sparse: bool = False) -> Path:
+                   sparse: bool = False,
+                   style: str | None = None) -> Path:
     if not sys.platform.startswith("linux"):
         raise PackError("secure importer supports Linux hosts only")
+    if style is not None and style not in STYLE_POLICIES:
+        raise PackError(f"unsupported map style: {style}")
     _validate_metadata(pack_id, name, attribution, source, license)
+    if style is not None:
+        policy = STYLE_POLICIES[style]
+        for field, expected in policy.items():
+            if locals()[field] != expected:
+                raise PackError(
+                    f"--style {style} requires {field} exactly matching the firmware style policy")
     antimeridian_zooms = set() if antimeridian_zooms is None else set(antimeridian_zooms)
     if any(zoom < 0 or zoom > MAX_ZOOM for zoom in antimeridian_zooms):
         raise PackError("antimeridian zoom is out of range")
@@ -1029,18 +1090,24 @@ def build_map_pack(source_directory: Path, output_root: Path, *, pack_id: str, n
     committed = False
     try:
         tiles = _discover_tiles_fd(source_fd, source_directory, max_tiles, max_bytes)
-        try:
-            extents = calculate_extents(tiles, antimeridian_zooms)
-        except PackError as exc:
-            if not sparse or antimeridian_zooms or not str(exc).startswith("incomplete rectangle"):
-                raise
-            row_spans = calculate_row_spans(tiles)
-            manifest = serialize_sparse_manifest(pack_id=pack_id, name=name, attribution=attribution,
-                                                 source=source, license=license,
-                                                 row_spans=row_spans, tile_count=len(tiles))
+        if style is not None:
+            manifest = serialize_indexless_manifest(
+                pack_id=pack_id, name=name, attribution=attribution, source=source,
+                license=license, minimum_zoom=tiles[0].zoom, maximum_zoom=tiles[-1].zoom,
+                tile_count=len(tiles))
         else:
-            manifest = serialize_manifest(pack_id=pack_id, name=name, attribution=attribution, source=source,
-                                          license=license, extents=extents, tile_count=len(tiles))
+            try:
+                extents = calculate_extents(tiles, antimeridian_zooms)
+            except PackError as exc:
+                if not sparse or antimeridian_zooms or not str(exc).startswith("incomplete rectangle"):
+                    raise
+                row_spans = calculate_row_spans(tiles)
+                manifest = serialize_sparse_manifest(pack_id=pack_id, name=name, attribution=attribution,
+                                                     source=source, license=license,
+                                                     row_spans=row_spans, tile_count=len(tiles))
+            else:
+                manifest = serialize_manifest(pack_id=pack_id, name=name, attribution=attribution, source=source,
+                                              license=license, extents=extents, tile_count=len(tiles))
         output_fd = _open_path(output_root, create=True)
         pyxis_fd, pyxis_identity = _mkdir_open(output_fd, "pyxis-map")
         packs_fd, packs_identity = _mkdir_open(pyxis_fd, "packs")
@@ -1118,6 +1185,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--antimeridian-zoom", action="append", type=int, default=[])
     parser.add_argument("--sparse", action="store_true",
                         help="explicitly admit sparse state/polygon coverage and emit PMPK v2")
+    parser.add_argument("--style", choices=sorted(STYLE_POLICIES),
+                        help="firmware map style; metadata must exactly match the style policy and PMPK v3 is emitted")
     return parser
 
 
@@ -1130,7 +1199,7 @@ def main(argv: list[str] | None = None) -> int:
                                 license=arguments.license, max_tiles=arguments.max_tiles,
                                 max_bytes=arguments.max_bytes,
                                 antimeridian_zooms=set(arguments.antimeridian_zoom),
-                                sparse=arguments.sparse)
+                                sparse=arguments.sparse, style=arguments.style)
     except PublishedDurabilityError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 3
