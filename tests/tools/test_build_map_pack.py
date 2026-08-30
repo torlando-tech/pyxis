@@ -672,6 +672,287 @@ def test_plan_requires_exact_style_attribution(tool) -> None:
                              style_id="osm-bright", attribution="Someone else's maps")
 
 
+def _read_slot(pyxis_map: Path, name: str) -> bytes | None:
+    path = pyxis_map / name
+    if not path.is_file():
+        return None
+    return path.read_bytes()
+
+
+def _style_record_path(pyxis_map: Path, style_id: str) -> Path:
+    return pyxis_map / "map-sets" / f"{style_id}.pmas"
+
+
+def test_install_refuses_to_overwrite_last_valid_fallback_when_inherited_pack_is_missing(tool,
+                                                                                       tmp_path: Path) -> None:
+    source_a = tmp_path / "a"; source_b = tmp_path / "b"; source_c = tmp_path / "c"
+    for source in (source_a, source_b, source_c):
+        put_tile(source, 1, 0, 0)
+    for pack_id, source in (("pack-a", source_a), ("pack-b", source_b), ("pack-c", source_c)):
+        tool.build_map_pack(source, tmp_path / "sd", style="osm-bright",
+                            **style_metadata(tool, pack_id=pack_id))
+    pyxis_map = tmp_path / "sd/pyxis-map"
+    attribution = tool.STYLE_POLICIES["osm-bright"]["attribution"]
+    gen_1 = tool.encode_active_map_set(generation=1, map_set_id="osm-bright",
+                                       attribution=attribution, pack_ids=["pack-a"])
+    gen_2 = tool.encode_active_map_set(generation=2, map_set_id="osm-bright",
+                                       attribution=attribution, pack_ids=["pack-b", "pack-a"])
+    (pyxis_map / "active-pack.0").write_bytes(gen_1)
+    (pyxis_map / "active-pack.1").write_bytes(gen_2)
+    (pyxis_map / "packs/pack-a/manifest.pmp").unlink()
+
+    pyxis_fd = tool._open_path(pyxis_map)
+    try:
+        with pytest.raises(tool.PackError, match="missing inherited pack manifest"):
+            tool.publish_activation(
+                pyxis_fd, tool.plan_activation(slot_0=gen_1, slot_1=gen_2, new_pack_id="pack-c",
+                                               style_id="osm-bright", attribution=attribution),
+                tmp_path / "sd")
+    finally:
+        os.close(pyxis_fd)
+    # Both active-slot byte strings are unchanged and the style PMAS was not created.
+    assert (pyxis_map / "active-pack.0").read_bytes() == gen_1
+    assert (pyxis_map / "active-pack.1").read_bytes() == gen_2
+    assert not _style_record_path(pyxis_map, "osm-bright").exists()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda manifest: manifest[:-1], "manifest"),
+        (lambda manifest: manifest[:-4] + b"\x00\x00\x00\x00", "CRC"),
+        (lambda manifest: b"X" + manifest[1:], "invalid manifest"),
+    ],
+)
+def test_inherited_pack_corruption_is_a_hard_preflight_failure(tool, tmp_path: Path,
+                                                               mutation, message) -> None:
+    source = tmp_path / "xyz"
+    put_tile(source, 1, 0, 0)
+    tool.build_map_pack(source, tmp_path / "sd", style="osm-bright",
+                        **style_metadata(tool, pack_id="pack-a"))
+    pyxis_map = tmp_path / "sd/pyxis-map"
+    attribution = tool.STYLE_POLICIES["osm-bright"]["attribution"]
+    gen_1 = tool.encode_active_map_set(generation=1, map_set_id="osm-bright",
+                                       attribution=attribution, pack_ids=["pack-a"])
+    (pyxis_map / "active-pack.0").write_bytes(gen_1)
+    manifest_path = pyxis_map / "packs/pack-a/manifest.pmp"
+    manifest_path.write_bytes(mutation(manifest_path.read_bytes()))
+    pyxis_fd = tool._open_path(pyxis_map)
+    try:
+        with pytest.raises(tool.PackError, match=message):
+            tool.validate_active_pack_manifests_at(pyxis_fd, map_set_id="osm-bright",
+                                                   attribution=attribution, pack_ids=("pack-a",))
+    finally:
+        os.close(pyxis_fd)
+    assert (pyxis_map / "active-pack.0").read_bytes() == gen_1
+
+
+def test_inherited_pack_policy_mismatch_is_rejected(tool, tmp_path: Path) -> None:
+    source = tmp_path / "xyz"
+    put_tile(source, 1, 0, 0)
+    tool.build_map_pack(source, tmp_path / "sd", style="dark-matter",
+                        **style_metadata(tool, "dark-matter", pack_id="pack-a"))
+    pyxis_map = tmp_path / "sd/pyxis-map"
+    attribution = tool.STYLE_POLICIES["osm-bright"]["attribution"]
+    pyxis_fd = tool._open_path(pyxis_map)
+    try:
+        # pack-a is a dark-matter pack; osm-bright validation must refuse it.
+        with pytest.raises(tool.PackError, match="source/license|attribution"):
+            tool.validate_active_pack_manifests_at(pyxis_fd, map_set_id="osm-bright",
+                                                   attribution=attribution, pack_ids=("pack-a",))
+    finally:
+        os.close(pyxis_fd)
+
+
+def test_all_inherited_packs_valid_passes_preflight(tool, tmp_path: Path) -> None:
+    for pack_id in ("pack-a", "pack-b"):
+        source = tmp_path / f"src-{pack_id}"
+        put_tile(source, 1, 0, 0)
+        tool.build_map_pack(source, tmp_path / "sd", style="positron",
+                            **style_metadata(tool, "positron", pack_id=pack_id))
+    pyxis_map = tmp_path / "sd/pyxis-map"
+    attribution = tool.STYLE_POLICIES["positron"]["attribution"]
+    pyxis_fd = tool._open_path(pyxis_map)
+    try:
+        tool.validate_active_pack_manifests_at(pyxis_fd, map_set_id="positron",
+                                               attribution=attribution,
+                                               pack_ids=("pack-a", "pack-b"))
+    finally:
+        os.close(pyxis_fd)
+
+
+def _build_two_pack_card(tool, tmp_path: Path) -> tuple[Path, bytes, bytes]:
+    for pack_id in ("pack-a", "pack-b"):
+        source = tmp_path / f"src-{pack_id}"
+        put_tile(source, 1, 0, 0)
+        tool.build_map_pack(source, tmp_path / "sd", style="osm-bright",
+                            **style_metadata(tool, pack_id=pack_id))
+    pyxis_map = tmp_path / "sd/pyxis-map"
+    attribution = tool.STYLE_POLICIES["osm-bright"]["attribution"]
+    gen_1 = tool.encode_active_map_set(generation=1, map_set_id="osm-bright",
+                                       attribution=attribution, pack_ids=["pack-a"])
+    gen_2 = tool.encode_active_map_set(generation=2, map_set_id="osm-bright",
+                                       attribution=attribution, pack_ids=["pack-b", "pack-a"])
+    (pyxis_map / "active-pack.0").write_bytes(gen_1)
+    (pyxis_map / "active-pack.1").write_bytes(gen_2)
+    return pyxis_map, gen_1, gen_2
+
+
+def test_successful_activation_writes_exact_style_and_slot_bytes(tool, tmp_path: Path) -> None:
+    source_c = tmp_path / "src-c"
+    put_tile(source_c, 1, 0, 0)
+    tool.build_map_pack(source_c, tmp_path / "sd", style="osm-bright",
+                        **style_metadata(tool, pack_id="pack-c"))
+    pyxis_map, gen_1, gen_2 = _build_two_pack_card(tool, tmp_path)
+    pyxis_fd = tool._open_path(pyxis_map)
+    try:
+        plan = tool.plan_activation(slot_0=gen_1, slot_1=gen_2, new_pack_id="pack-c",
+                                    style_id="osm-bright",
+                                    attribution=tool.STYLE_POLICIES["osm-bright"]["attribution"])
+        tool.publish_activation(pyxis_fd, plan, tmp_path / "sd")
+    finally:
+        os.close(pyxis_fd)
+    assert plan.generation == 3
+    assert plan.target_slot == "active-pack.0"
+    assert plan.pack_ids == ("pack-c", "pack-b", "pack-a")
+    assert _style_record_path(pyxis_map, "osm-bright").read_bytes() == plan.record
+    assert (pyxis_map / "active-pack.0").read_bytes() == plan.record
+    # The peer slot (the higher-generation last-valid fallback) is untouched.
+    assert (pyxis_map / "active-pack.1").read_bytes() == gen_2
+
+
+def test_style_write_failure_changes_no_records(tool, tmp_path: Path, monkeypatch) -> None:
+    pyxis_map, gen_1, gen_2 = _build_two_pack_card(tool, tmp_path)
+    source_c = tmp_path / "src-c"
+    put_tile(source_c, 1, 0, 0)
+    tool.build_map_pack(source_c, tmp_path / "sd", style="osm-bright",
+                        **style_metadata(tool, pack_id="pack-c"))
+    monkeypatch.setattr(tool, "_rename_at",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("injected style rename failure")))
+    pyxis_fd = tool._open_path(pyxis_map)
+    try:
+        with pytest.raises(OSError, match="injected style rename failure"):
+            tool.publish_activation(
+                pyxis_fd,
+                tool.plan_activation(slot_0=gen_1, slot_1=gen_2, new_pack_id="pack-c",
+                                     style_id="osm-bright",
+                                     attribution=tool.STYLE_POLICIES["osm-bright"]["attribution"]),
+                tmp_path / "sd")
+    finally:
+        os.close(pyxis_fd)
+    assert (pyxis_map / "active-pack.0").read_bytes() == gen_1
+    assert (pyxis_map / "active-pack.1").read_bytes() == gen_2
+    assert not _style_record_path(pyxis_map, "osm-bright").exists()
+    assert not list((pyxis_map / "map-sets").glob("*.tmp-*")) if (pyxis_map / "map-sets").exists() else True
+
+
+def test_slot_write_failure_preserves_prior_active_selection(tool, tmp_path: Path, monkeypatch) -> None:
+    pyxis_map, gen_1, gen_2 = _build_two_pack_card(tool, tmp_path)
+    source_c = tmp_path / "src-c"
+    put_tile(source_c, 1, 0, 0)
+    tool.build_map_pack(source_c, tmp_path / "sd", style="osm-bright",
+                        **style_metadata(tool, pack_id="pack-c"))
+    rename_calls = {"count": 0}
+    real_rename = tool._rename_at
+
+    def failing_slot_rename(parent_fd, source, destination, target):
+        rename_calls["count"] += 1
+        if rename_calls["count"] == 2:
+            raise OSError("injected slot rename failure")
+        real_rename(parent_fd, source, destination, target)
+
+    monkeypatch.setattr(tool, "_rename_at", failing_slot_rename)
+    pyxis_fd = tool._open_path(pyxis_map)
+    try:
+        with pytest.raises(OSError, match="injected slot rename failure"):
+            tool.publish_activation(
+                pyxis_fd,
+                tool.plan_activation(slot_0=gen_1, slot_1=gen_2, new_pack_id="pack-c",
+                                     style_id="osm-bright",
+                                     attribution=tool.STYLE_POLICIES["osm-bright"]["attribution"]),
+                tmp_path / "sd")
+    finally:
+        os.close(pyxis_fd)
+    # Style snapshot is committed; the old slot 1 record (gen 2) is still the active selection.
+    assert _style_record_path(pyxis_map, "osm-bright").is_file()
+    assert (pyxis_map / "active-pack.1").read_bytes() == gen_2
+    assert (pyxis_map / "active-pack.0").read_bytes() == gen_1
+    assert not list((pyxis_map).glob("active-pack.1.tmp-*"))
+
+
+def test_retry_after_style_only_interruption_converges(tool, tmp_path: Path, monkeypatch) -> None:
+    pyxis_map, gen_1, gen_2 = _build_two_pack_card(tool, tmp_path)
+    source_c = tmp_path / "src-c"
+    put_tile(source_c, 1, 0, 0)
+    tool.build_map_pack(source_c, tmp_path / "sd", style="osm-bright",
+                        **style_metadata(tool, pack_id="pack-c"))
+    attribution = tool.STYLE_POLICIES["osm-bright"]["attribution"]
+    plan = tool.plan_activation(slot_0=gen_1, slot_1=gen_2, new_pack_id="pack-c",
+                                style_id="osm-bright", attribution=attribution)
+    rename_calls = {"count": 0}
+    real_rename = tool._rename_at
+
+    def failing_slot_rename(parent_fd, source, destination, target):
+        rename_calls["count"] += 1
+        if rename_calls["count"] == 2:
+            raise OSError("injected slot rename failure")
+        real_rename(parent_fd, source, destination, target)
+
+    monkeypatch.setattr(tool, "_rename_at", failing_slot_rename)
+    pyxis_fd = tool._open_path(pyxis_map)
+    try:
+        with pytest.raises(OSError, match="injected slot rename failure"):
+            tool.publish_activation(pyxis_fd, plan, tmp_path / "sd")
+        # Retry from the new raw snapshot: the style PMAS now carries gen 3,
+        # so the candidate generation is 4 and pack-c stays at priority zero
+        # without duplicating pack IDs.
+        retry_plan = tool.plan_activation(
+            slot_0=_read_slot(pyxis_map, "active-pack.0"),
+            slot_1=_read_slot(pyxis_map, "active-pack.1"),
+            style_record=_read_slot(pyxis_map, "map-sets/osm-bright.pmas"),
+            new_pack_id="pack-c", style_id="osm-bright", attribution=attribution)
+        tool.publish_activation(pyxis_fd, retry_plan, tmp_path / "sd")
+    finally:
+        os.close(pyxis_fd)
+    final_slot = tool.decode_active_selection((pyxis_map / "active-pack.0").read_bytes())
+    assert final_slot["generation"] == 4
+    assert final_slot["pack_ids"] == ["pack-c", "pack-b", "pack-a"]
+    assert len(set(final_slot["pack_ids"])) == len(final_slot["pack_ids"])
+    # The peer slot (last valid fallback) is untouched.
+    assert (pyxis_map / "active-pack.1").read_bytes() == gen_2
+    final_style = tool.decode_active_selection(
+        _style_record_path(pyxis_map, "osm-bright").read_bytes())
+    assert final_style["pack_ids"] == final_slot["pack_ids"]
+    assert final_style["generation"] == 4
+
+
+def test_read_back_mismatch_is_a_failure(tool, tmp_path: Path, monkeypatch) -> None:
+    pyxis_map, gen_1, gen_2 = _build_two_pack_card(tool, tmp_path)
+    source_c = tmp_path / "src-c"
+    put_tile(source_c, 1, 0, 0)
+    tool.build_map_pack(source_c, tmp_path / "sd", style="osm-bright",
+                        **style_metadata(tool, pack_id="pack-c"))
+    real_read = tool._read_file_at
+
+    def corrupted_slot_read(parent_fd, name, maximum):
+        if "active-pack" in name:
+            return b"\x00" * 48
+        return real_read(parent_fd, name, maximum)
+
+    monkeypatch.setattr(tool, "_read_file_at", corrupted_slot_read)
+    pyxis_fd = tool._open_path(pyxis_map)
+    try:
+        with pytest.raises(tool.PackError, match="read-back mismatch"):
+            tool.publish_activation(
+                pyxis_fd,
+                tool.plan_activation(slot_0=gen_1, slot_1=gen_2, new_pack_id="pack-c",
+                                     style_id="osm-bright",
+                                     attribution=tool.STYLE_POLICIES["osm-bright"]["attribution"]),
+                tmp_path / "sd")
+    finally:
+        os.close(pyxis_fd)
+
+
 def test_valid_pack_is_deterministic_and_independently_validated(tmp_path: Path) -> None:
     tool = load_tool()
     source = tmp_path / "xyz"

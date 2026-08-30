@@ -910,6 +910,153 @@ def _slot_state(raw: bytes | None) -> tuple[str, dict[str, object] | None]:
     return "present", values
 
 
+def _rename_at(parent_fd: int, source: str, destination: str, target: Path) -> None:
+    if _renameat2 is None:
+        raise PackError("atomic rename unsupported on this host")
+    result = _renameat2(parent_fd, os.fsencode(source), parent_fd, os.fsencode(destination), 0)
+    if result == 0:
+        return
+    error = ctypes.get_errno()
+    if error in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP):
+        raise PackError("atomic rename unsupported on this filesystem")
+    raise OSError(error, os.strerror(error), target)
+
+
+def _atomic_replace_file_at(parent_fd: int, name: str, data: bytes, target: Path) -> None:
+    """Publish data to name via private temp + fsync + atomic overwrite rename + parent fsync."""
+    temp_name = ""
+    temp_fd = -1
+    for attempt in range(256):
+        temp_name = f".{name}.tmp-{os.getpid():x}-{attempt:02x}"
+        try:
+            temp_fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                              0o644, dir_fd=parent_fd)
+            break
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise PackError(f"cannot stage {name}: {exc}") from exc
+    else:
+        raise PackError("cannot allocate temporary output file")
+    try:
+        try:
+            _write_all(temp_fd, data, name)
+            os.fsync(temp_fd)
+        finally:
+            os.close(temp_fd)
+        temp_fd = -1
+        _rename_at(parent_fd, temp_name, name, target)
+        temp_name = ""
+    finally:
+        if temp_fd >= 0:
+            try:
+                os.close(temp_fd)
+            except OSError:
+                pass
+        if temp_name:
+            try:
+                os.unlink(temp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+    try:
+        _fsync_directory_fd(parent_fd)
+    except OSError as exc:
+        raise PublishedDurabilityError(target, exc) from exc
+
+
+def _read_back_file_at(parent_fd: int, name: str, expected: bytes, target: Path,
+                       label: str) -> bytes:
+    data = _read_file_at(parent_fd, name, max(len(expected), MAX_ACTIVE_SELECTION_BYTES))
+    if data != expected:
+        raise PackError(f"{label} read-back mismatch for {target}")
+    return data
+
+
+def validate_active_pack_manifests_at(pyxis_fd: int, *, map_set_id: str, attribution: str,
+                                      pack_ids: tuple[str, ...]) -> None:
+    """Hard preflight: every referenced pack manifest must decode and match policy.
+
+    Mirrors firmware MapTilePack::validateMapSet() for indexless PMAS v3 sets:
+    missing, corrupt, or policy-incompatible inherited packs are preflight
+    failures and never silently dropped.
+    """
+    if not pack_ids:
+        raise PackError("map set composition is empty")
+    policy = STYLE_POLICIES.get(map_set_id)
+    if policy is None:
+        raise PackError(f"unsupported map style: {map_set_id}")
+    if attribution != policy["attribution"]:
+        raise PackError("active set attribution does not match the firmware style policy")
+    try:
+        packs_fd, _ = _open_child_directory(pyxis_fd, "packs", "pyxis-map/packs")
+    except FileNotFoundError as exc:
+        raise PackError(f"missing inherited pack manifest: packs/{pack_ids[0]}/manifest.pmp") from exc
+    try:
+        for pack_id in pack_ids:
+            try:
+                pack_fd = os.open(pack_id, _DIRECTORY_FLAGS, dir_fd=packs_fd)
+            except FileNotFoundError as exc:
+                raise PackError(
+                    f"missing inherited pack manifest: packs/{pack_id}/manifest.pmp") from exc
+            except OSError as exc:
+                raise PackError(f"invalid inherited pack directory: packs/{pack_id}: {exc}") from exc
+            try:
+                manifest_bytes = _read_file_at(pack_fd, "manifest.pmp", MAX_MANIFEST_BYTES)
+            except FileNotFoundError as exc:
+                raise PackError(
+                    f"missing inherited pack manifest: packs/{pack_id}/manifest.pmp") from exc
+            finally:
+                os.close(pack_fd)
+            parsed = parse_manifest(manifest_bytes)
+            if parsed["format_version"] != INDEXLESS_FORMAT_VERSION:
+                raise PackError(
+                    f"pack {pack_id} manifest is not PMPK v3; indexless activation requires v3")
+            if parsed["pack_id"] != pack_id:
+                raise PackError(f"pack {pack_id} manifest declares a different pack ID")
+            if parsed["attribution"] != attribution:
+                raise PackError(f"pack {pack_id} attribution does not match the active set")
+            if parsed["source"] != policy["source"] or parsed["license"] != policy["license"]:
+                raise PackError(
+                    f"pack {pack_id} source/license does not match the {map_set_id} style policy")
+    finally:
+        os.close(packs_fd)
+
+
+def publish_activation(pyxis_fd: int, plan: "ActivationPlan", output_root: Path) -> None:
+    """Validate every candidate pack, then publish style PMAS and target slot with read-back.
+
+    Order: full preflight, style record first, slot record second. The peer
+    active slot is never touched. A failed preflight changes no bytes.
+    """
+    validate_active_pack_manifests_at(
+        pyxis_fd, map_set_id=plan.style_name,
+        attribution=STYLE_POLICIES[plan.style_name]["attribution"], pack_ids=plan.pack_ids)
+    map_sets_fd, _ = _mkdir_open(pyxis_fd, "map-sets")
+    try:
+        style_target = output_root / "pyxis-map" / "map-sets" / f"{plan.style_name}.pmas"
+        _atomic_replace_file_at(map_sets_fd, f"{plan.style_name}.pmas", plan.record, style_target)
+        style_read_back = _read_back_file_at(
+            map_sets_fd, f"{plan.style_name}.pmas", plan.record, style_target, "style record")
+        decoded = decode_active_selection(style_read_back)
+        if (decoded["format_version"] != INDEXLESS_FORMAT_VERSION
+                or decoded["generation"] != plan.generation
+                or decoded["map_set_id"] != plan.style_name
+                or decoded["pack_ids"] != list(plan.pack_ids)):
+            raise PackError(f"style record read-back is not semantically identical: {style_target}")
+        slot_target = output_root / "pyxis-map" / plan.target_slot
+        _atomic_replace_file_at(pyxis_fd, plan.target_slot, plan.record, slot_target)
+        slot_read_back = _read_back_file_at(
+            pyxis_fd, plan.target_slot, plan.record, slot_target, "active slot record")
+        decoded = decode_active_selection(slot_read_back)
+        if (decoded["format_version"] != INDEXLESS_FORMAT_VERSION
+                or decoded["generation"] != plan.generation
+                or decoded["map_set_id"] != plan.style_name
+                or decoded["pack_ids"] != list(plan.pack_ids)):
+            raise PackError(f"active slot read-back is not semantically identical: {slot_target}")
+    finally:
+        os.close(map_sets_fd)
+
+
 def plan_activation(*, slot_0: bytes | None, slot_1: bytes | None,
                     style_record: bytes | None = None,
                     new_pack_id: str, style_id: str, attribution: str) -> ActivationPlan:
