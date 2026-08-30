@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import struct
@@ -54,9 +55,10 @@ def raw_rgb() -> bytes:
     return b"".join(b"\x00" + b"\x00\x00\x00" * 256 for _ in range(256))
 
 
-def rewrite_crc(data: bytearray) -> bytes:
-    data[-4:] = struct.pack("<I", zlib.crc32(data[:-4]))
-    return bytes(data)
+def rewrite_crc(data: bytearray | bytes) -> bytes:
+    mutable = bytearray(data)
+    mutable[-4:] = struct.pack("<I", zlib.crc32(mutable[:-4]))
+    return bytes(mutable)
 
 
 def put_tile(source: Path, z: int | str, x: int | str, y: int | str, data: bytes | None = None) -> Path:
@@ -92,6 +94,285 @@ def digest_tree(path: Path) -> str:
         if item.is_file():
             digest.update(item.read_bytes())
     return digest.hexdigest()
+
+
+V3_VECTORS = json.loads((ROOT / "tests/fixtures/map_pack_v3_vectors.json").read_text(encoding="utf-8"))
+
+
+def assert_versioned_header(data: bytes, magic: bytes, total_length_field: bool) -> None:
+    assert data[:4] == magic
+    assert data[4] == 3
+    assert data[5] == 0
+    if total_length_field:
+        # PMPK: u16 header size (16), u32 total length, reserved u32
+        assert struct.unpack("<H", data[6:8])[0] == 16
+        assert struct.unpack("<I", data[8:12])[0] == len(data)
+        assert struct.unpack("<I", data[12:16])[0] == 0
+    else:
+        # PMAS: u16 total length, u32 generation
+        assert struct.unpack("<H", data[6:8])[0] == len(data)
+        assert struct.unpack("<I", data[8:12])[0] >= 1
+    assert struct.unpack("<I", data[-4:])[0] == zlib.crc32(data[:-4])
+
+
+def test_frozen_v3_vectors_have_expected_header_length_and_crc() -> None:
+    for name, entry in V3_VECTORS.items():
+        data = bytes.fromhex(entry["hex"])
+        assert name.startswith(("pmpk_v3_", "pmas_v3_")), name
+        assert len(data) >= 20 and len(data) <= 7105
+        assert_versioned_header(data, b"PMPK" if name.startswith("pmpk") else b"PMAS",
+                                total_length_field=name.startswith("pmpk"))
+
+
+def test_decode_frozen_pmpk_v3_vectors() -> None:
+    tool = load_tool()
+    for name in ("pmpk_v3_one_tile", "pmpk_v3_multi_zoom"):
+        entry = V3_VECTORS[name]
+        values = tool.parse_manifest(bytes.fromhex(entry["hex"]))
+        assert values["format_version"] == 3
+        assert values["pack_id"] == entry["pack_id"]
+        assert values["name"] == entry["name"]
+        assert values["attribution"] == entry["attribution"]
+        assert values["source"] == entry["source"]
+        assert values["license"] == entry["license"]
+        assert values["min_zoom"] == entry["min_zoom"]
+        assert values["max_zoom"] == entry["max_zoom"]
+        assert values["tile_count"] == entry["tile_count"]
+        assert values["indexless"] is True
+        assert values["extents"] == []
+        assert values["row_spans"] == []
+
+
+def test_pmas_v1_v2_decode_unchanged() -> None:
+    tool = load_tool()
+    # Legacy v1: 48-byte fixed record, magic, version 1, zero reserved, u16 size,
+    # u32 generation, single pack ID at offset 13, zero padding to offset 44, CRC32.
+    body = bytearray(b"PMAS\x01\x00" + struct.pack("<H", 48) + struct.pack("<I", 5) + b"\x08")
+    body.extend(b"legacy-1")
+    body.extend(b"\x00" * (44 - len(body)))
+    legacy = bytes(body) + struct.pack("<I", zlib.crc32(body))
+    values = tool.decode_active_selection(legacy)
+    assert values["format_version"] == 1
+    assert values["generation"] == 5
+    assert values["map_set_id"] == "legacy-1"
+    assert values["pack_ids"] == ["legacy-1"]
+
+
+def test_encode_pmas_v3_matches_frozen_vector() -> None:
+    tool = load_tool()
+    for name in ("pmas_v3_one_pack", "pmas_v3_three_packs"):
+        entry = V3_VECTORS[name]
+        actual = tool.encode_active_map_set(
+            generation=entry["generation"], map_set_id=entry["map_set_id"],
+            attribution=entry["attribution"], pack_ids=list(entry["pack_ids"]),
+        )
+        assert actual == bytes.fromhex(entry["hex"])
+
+
+def test_pmas_v3_rejects_duplicate_pack_ids() -> None:
+    tool = load_tool()
+    with pytest.raises(tool.PackError, match="duplicate"):
+        tool.encode_active_map_set(generation=1, map_set_id="osm-bright",
+                                   attribution="Example", pack_ids=["same", "same"])
+    # Hand-built decode-side record with the same pack id twice (valid CRC).
+    body = bytearray(struct.pack("<4sBBHI", b"PMAS", 3, 0, 0, 1))
+    body.extend(b"\x0aosm-bright")
+    body.extend(b"\x07Example")
+    body.append(2)
+    body.extend(b"\x06detail")
+    body.extend(b"\x06detail")
+    total = len(body) + 4
+    record = bytes(body[:6]) + struct.pack("<H", total) + bytes(body[8:])
+    record += struct.pack("<I", zlib.crc32(record))
+    with pytest.raises(tool.PackError, match="duplicate"):
+        tool.decode_active_selection(record)
+
+
+def test_pmas_v3_rejects_generation_zero() -> None:
+    tool = load_tool()
+    with pytest.raises(tool.PackError, match="generation"):
+        tool.encode_active_map_set(generation=0, map_set_id="osm-bright",
+                                   attribution="Example", pack_ids=["detail"])
+    with pytest.raises(tool.PackError, match="generation"):
+        tool.encode_active_map_set(generation=1 << 32, map_set_id="osm-bright",
+                                   attribution="Example", pack_ids=["detail"])
+    entry = bytearray(bytes.fromhex(V3_VECTORS["pmas_v3_one_pack"]["hex"]))
+    struct.pack_into("<I", entry, 8, 0)
+    with pytest.raises(tool.PackError, match="generation"):
+        tool.decode_active_selection(rewrite_crc(bytes(entry)))
+
+
+def test_pmas_v3_rejects_more_than_eight_packs() -> None:
+    tool = load_tool()
+    with pytest.raises(tool.PackError, match="1..8"):
+        tool.encode_active_map_set(generation=1, map_set_id="osm-bright",
+                                   attribution="Example",
+                                   pack_ids=[f"pack-{index}" for index in range(9)])
+    with pytest.raises(tool.PackError, match="1..8"):
+        tool.encode_active_map_set(generation=1, map_set_id="osm-bright",
+                                   attribution="Example", pack_ids=[])
+    # hand-built decode-side record claiming nine packs is structurally impossible
+    # to pass CRC, so verify encode-side enforcement plus a trailing-byte reject
+    entry = bytearray(bytes.fromhex(V3_VECTORS["pmas_v3_one_pack"]["hex"]))
+    entry.append(0)
+    with pytest.raises(tool.PackError):
+        tool.decode_active_selection(rewrite_crc(bytes(entry)))
+
+
+def test_decode_pmas_v3_rejects_bad_crc_and_trailing_bytes() -> None:
+    tool = load_tool()
+    entry = bytes.fromhex(V3_VECTORS["pmas_v3_one_pack"]["hex"])
+    corrupted = entry[:-1] + bytes([entry[-1] ^ 1])
+    with pytest.raises(tool.PackError, match="CRC"):
+        tool.decode_active_selection(corrupted)
+    entry = bytearray(bytes.fromhex(V3_VECTORS["pmas_v3_one_pack"]["hex"]))
+    entry[13] = 0x01  # first map-set-id character becomes a control byte
+    with pytest.raises(tool.PackError):
+        tool.decode_active_selection(rewrite_crc(bytes(entry)))
+
+
+def test_decode_frozen_pmas_v3_vectors() -> None:
+    tool = load_tool()
+    for name in ("pmas_v3_one_pack", "pmas_v3_three_packs"):
+        entry = V3_VECTORS[name]
+        values = tool.decode_active_selection(bytes.fromhex(entry["hex"]))
+        assert values["format_version"] == 3
+        assert values["generation"] == entry["generation"]
+        assert values["map_set_id"] == entry["map_set_id"]
+        assert values["attribution"] == entry["attribution"]
+        assert values["pack_ids"] == entry["pack_ids"]
+
+
+def test_parse_pmpk_v3_frozen_vector() -> None:
+    tool = load_tool()
+    values = tool.parse_manifest(bytes.fromhex(V3_VECTORS["pmpk_v3_one_tile"]["hex"]))
+    assert values["format_version"] == 3
+    assert values["pack_id"] == "one-tile"
+    assert values["tile_count"] == 1
+    assert values["indexless"] is True
+    assert values["extents"] == [] and values["row_spans"] == []
+
+
+def _mutated_pmpk_v3(mutate) -> bytes:
+    data = bytearray(bytes.fromhex(V3_VECTORS["pmpk_v3_one_tile"]["hex"]))
+    mutate(data)
+    return rewrite_crc(data)
+
+
+def test_pmpk_v3_rejects_nonzero_reserved_byte() -> None:
+    tool = load_tool()
+    data = bytearray(bytes.fromhex(V3_VECTORS["pmpk_v3_one_tile"]["hex"]))
+    data[5] = 1
+    with pytest.raises(tool.PackError):
+        tool.parse_manifest(rewrite_crc(data))
+
+
+def test_pmpk_v3_rejects_trailing_bytes() -> None:
+    tool = load_tool()
+    data = bytearray(bytes.fromhex(V3_VECTORS["pmpk_v3_one_tile"]["hex"]))
+    data[-5:-1] = data[-5:-1] + b"junk"[:1]
+    data = data[:-4] + b"\x00\x00\x00\x00" + data[-4:]
+    # total length field now disagrees with actual size: header check rejects
+    with pytest.raises(tool.PackError):
+        tool.parse_manifest(rewrite_crc(data))
+
+
+def test_pmpk_v3_rejects_bad_crc() -> None:
+    tool = load_tool()
+    data = bytes.fromhex(V3_VECTORS["pmpk_v3_one_tile"]["hex"])
+    corrupted = data[:-1] + bytes([data[-1] ^ 1])
+    with pytest.raises(tool.PackError):
+        tool.parse_manifest(corrupted)
+
+
+def test_pmpk_v3_rejects_zero_tile_count_and_inverted_zooms() -> None:
+    tool = load_tool()
+    def zero_tiles(data: bytearray) -> None:
+        struct.pack_into("<I", data, len(data) - 8, 0)
+
+    def inverted_zooms(data: bytearray) -> None:
+        # max zoom becomes 1 while min stays 2: min > max
+        data[-9] = 1
+
+    for mutate in (zero_tiles, inverted_zooms):
+        with pytest.raises(tool.PackError):
+            tool.parse_manifest(_mutated_pmpk_v3(mutate))
+
+
+def test_pmpk_v1_v2_vectors_unchanged() -> None:
+    tool = load_tool()
+    v1 = tool.serialize_manifest(**metadata(), extents=[tool.ZoomExtent(0, ((0, 0),), 0, 0)], tile_count=1)
+    v1_values = tool.parse_manifest(v1)
+    assert v1_values["format_version"] == 1
+    assert v1_values["indexless"] is False
+    v2 = tool.serialize_sparse_manifest(
+        **metadata(), row_spans=[tool.RowSpan(1, 0, 0, 1)], tile_count=2)
+    v2_values = tool.parse_manifest(v2)
+    assert v2_values["format_version"] == 2
+    assert v2_values["indexless"] is False
+
+
+def test_serialize_pmpk_v3_matches_frozen_vector() -> None:
+    tool = load_tool()
+    entry = V3_VECTORS["pmpk_v3_one_tile"]
+    actual = tool.serialize_indexless_manifest(
+        pack_id=entry["pack_id"], name=entry["name"], attribution=entry["attribution"],
+        source=entry["source"], license=entry["license"],
+        minimum_zoom=entry["min_zoom"], maximum_zoom=entry["max_zoom"],
+        tile_count=entry["tile_count"],
+    )
+    assert actual == bytes.fromhex(entry["hex"])
+    parsed = tool.parse_manifest(actual)
+    assert parsed["indexless"] is True
+
+
+def test_serialize_pmpk_v3_is_deterministic() -> None:
+    tool = load_tool()
+    entry = V3_VECTORS["pmpk_v3_multi_zoom"]
+    first = tool.serialize_indexless_manifest(
+        pack_id=entry["pack_id"], name=entry["name"], attribution=entry["attribution"],
+        source=entry["source"], license=entry["license"],
+        minimum_zoom=entry["min_zoom"], maximum_zoom=entry["max_zoom"],
+        tile_count=entry["tile_count"],
+    )
+    second = tool.serialize_indexless_manifest(
+        pack_id=entry["pack_id"], name=entry["name"], attribution=entry["attribution"],
+        source=entry["source"], license=entry["license"],
+        minimum_zoom=entry["min_zoom"], maximum_zoom=entry["max_zoom"],
+        tile_count=entry["tile_count"],
+    )
+    assert first == second == bytes.fromhex(entry["hex"])
+
+
+def test_serialize_pmpk_v3_rejects_zero_tiles() -> None:
+    tool = load_tool()
+    with pytest.raises(tool.PackError, match="tile count"):
+        tool.serialize_indexless_manifest(**metadata(), minimum_zoom=1, maximum_zoom=1, tile_count=0)
+    with pytest.raises(tool.PackError, match="tile count"):
+        tool.serialize_indexless_manifest(**metadata(), minimum_zoom=1, maximum_zoom=1, tile_count=1 << 32)
+
+
+def test_serialize_pmpk_v3_rejects_invalid_zoom_range() -> None:
+    tool = load_tool()
+    with pytest.raises(tool.PackError, match="zoom range"):
+        tool.serialize_indexless_manifest(**metadata(), minimum_zoom=3, maximum_zoom=2, tile_count=1)
+    with pytest.raises(tool.PackError, match="zoom range"):
+        tool.serialize_indexless_manifest(**metadata(), minimum_zoom=0, maximum_zoom=tool.MAX_ZOOM + 1, tile_count=1)
+
+
+def test_serialize_pmpk_v3_contains_no_span_payload() -> None:
+    tool = load_tool()
+    entry = V3_VECTORS["pmpk_v3_one_tile"]
+    data = tool.serialize_indexless_manifest(
+        pack_id=entry["pack_id"], name=entry["name"], attribution=entry["attribution"],
+        source=entry["source"], license=entry["license"],
+        minimum_zoom=entry["min_zoom"], maximum_zoom=entry["max_zoom"],
+        tile_count=entry["tile_count"],
+    )
+    # v3 payload is exactly five length-prefixed strings plus min, max, tile_count
+    expected_length = 16 + sum(1 + len(entry[field].encode("ascii"))
+                               for field in ("pack_id", "name", "attribution", "source", "license")) + 6 + 4
+    assert len(data) == expected_length
 
 
 def test_valid_pack_is_deterministic_and_independently_validated(tmp_path: Path) -> None:

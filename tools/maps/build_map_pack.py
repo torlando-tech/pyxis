@@ -23,8 +23,10 @@ from typing import Any, cast, Iterable
 import zlib
 
 MAGIC = b"PMPK"
+ACTIVE_MAGIC = b"PMAS"
 FORMAT_VERSION = 1
 SPARSE_FORMAT_VERSION = 2
+INDEXLESS_FORMAT_VERSION = 3
 HEADER_SIZE = 16
 EXTENT_SIZE = 26
 ROW_SPAN_SIZE = 13
@@ -37,6 +39,9 @@ PACK_ID_RE = re.compile(r"[a-z0-9_-]{1,31}\Z")
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _STRING_LIMITS = {"pack_id": 31, "name": 63, "attribution": 127, "source": 127, "license": 63}
 MAX_MANIFEST_BYTES = 7100
+MAX_ACTIVE_SELECTION_BYTES = 7105
+MAX_ACTIVE_PACKS = 8
+MAX_GENERATION = 0xFFFFFFFF
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
@@ -603,11 +608,34 @@ def serialize_manifest(*, pack_id: str, name: str, attribution: str, source: str
     return bytes(result)
 
 
+def serialize_indexless_manifest(*, pack_id: str, name: str, attribution: str, source: str,
+                                 license: str, minimum_zoom: int, maximum_zoom: int,
+                                 tile_count: int) -> bytes:
+    _validate_metadata(pack_id, name, attribution, source, license)
+    if not 0 <= minimum_zoom <= maximum_zoom <= MAX_ZOOM:
+        raise PackError("invalid indexless zoom range")
+    if tile_count <= 0 or tile_count > 0xFFFFFFFF:
+        raise PackError("invalid indexless tile count")
+    payload = bytearray()
+    for field, value in (("pack_id", pack_id), ("name", name), ("attribution", attribution),
+                         ("source", source), ("license", license)):
+        encoded = _checked_text(field, value)
+        payload.append(len(encoded))
+        payload.extend(encoded)
+    payload.extend((minimum_zoom, maximum_zoom))
+    payload.extend(struct.pack("<I", tile_count))
+    length = HEADER_SIZE + len(payload) + 4
+    result = bytearray(struct.pack("<4sBBHII", MAGIC, INDEXLESS_FORMAT_VERSION, 0, HEADER_SIZE, length, 0))
+    result.extend(payload)
+    result.extend(struct.pack("<I", zlib.crc32(result)))
+    return bytes(result)
+
+
 def parse_manifest(data: bytes) -> dict[str, object]:
     if len(data) < 20 or len(data) > MAX_MANIFEST_BYTES:
         raise PackError("manifest is truncated or oversized")
     magic, version, reserved, header_size, length, reserved_word = struct.unpack("<4sBBHII", data[:16])
-    if magic != MAGIC or version not in (FORMAT_VERSION, SPARSE_FORMAT_VERSION) or \
+    if magic != MAGIC or version not in (FORMAT_VERSION, SPARSE_FORMAT_VERSION, INDEXLESS_FORMAT_VERSION) or \
             (reserved, header_size, length, reserved_word) != (0, 16, len(data), 0):
         raise PackError("invalid manifest header")
     if zlib.crc32(data[:-4]) != struct.unpack("<I", data[-4:])[0]:
@@ -652,7 +680,22 @@ def parse_manifest(data: bytes) -> dict[str, object]:
             raise PackError("invalid manifest length or zoom range")
         _validate_manifest_values(extents, tile_count)
         values.update(format_version=version, min_zoom=minimum, max_zoom=maximum,
-                      tile_count=tile_count, extents=extents, row_spans=[])
+                      tile_count=tile_count, extents=extents, row_spans=[], indexless=False)
+    elif version == INDEXLESS_FORMAT_VERSION:
+        if position + 6 > len(data) - 4:
+            raise PackError("manifest indexless fields are truncated")
+        minimum, maximum = data[position:position + 2]
+        position += 2
+        tile_count = struct.unpack("<I", data[position:position + 4])[0]
+        position += 4
+        if position != len(data) - 4:
+            raise PackError("manifest indexless record has trailing bytes")
+        if minimum > maximum or maximum > MAX_ZOOM:
+            raise PackError("invalid manifest zoom range")
+        if tile_count == 0:
+            raise PackError("invalid manifest tile count")
+        values.update(format_version=version, min_zoom=minimum, max_zoom=maximum,
+                      tile_count=tile_count, extents=[], row_spans=[], indexless=True)
     else:
         if position + 8 > len(data) - 4:
             raise PackError("manifest sparse fields are truncated")
@@ -671,8 +714,132 @@ def parse_manifest(data: bytes) -> dict[str, object]:
             raise PackError("invalid manifest length or zoom range")
         _validate_row_spans(row_spans, tile_count)
         values.update(format_version=version, min_zoom=minimum, max_zoom=maximum,
-                      tile_count=tile_count, extents=[], row_spans=row_spans)
+                      tile_count=tile_count, extents=[], row_spans=row_spans, indexless=False)
     return values
+
+
+def _validate_indexless_selection(generation: int, map_set_id: str, attribution: str,
+                                  pack_ids: list[str]) -> None:
+    if not 1 <= generation <= MAX_GENERATION:
+        raise PackError("active selection generation must be 1..0xFFFFFFFF")
+    if not PACK_ID_RE.fullmatch(map_set_id):
+        raise PackError("map set ID must match [a-z0-9_-]{1,31}")
+    _checked_text("attribution", attribution)
+    if not 1 <= len(pack_ids) <= MAX_ACTIVE_PACKS:
+        raise PackError("active selection must reference 1..8 packs")
+    seen: set[str] = set()
+    for pack_id in pack_ids:
+        if not PACK_ID_RE.fullmatch(pack_id):
+            raise PackError("pack ID must match [a-z0-9_-]{1,31}")
+        if pack_id in seen:
+            raise PackError("duplicate pack ID in active selection")
+        seen.add(pack_id)
+
+
+def encode_active_map_set(*, generation: int, map_set_id: str, attribution: str,
+                          pack_ids: list[str]) -> bytes:
+    _validate_indexless_selection(generation, map_set_id, attribution, pack_ids)
+    body = bytearray(struct.pack("<4sBBHI", ACTIVE_MAGIC, INDEXLESS_FORMAT_VERSION, 0, 0, generation))
+    for field, value in (("pack_id", map_set_id), ("attribution", attribution)):
+        encoded = _checked_text(field, value)
+        body.append(len(encoded))
+        body.extend(encoded)
+    body.append(len(pack_ids))
+    for pack_id in pack_ids:
+        encoded = pack_id.encode("ascii")
+        body.append(len(encoded))
+        body.extend(encoded)
+    total_length = len(body) + 4
+    header = bytes(body[:6]) + struct.pack("<H", total_length) + bytes(body[8:])
+    return header + struct.pack("<I", zlib.crc32(header))
+
+
+def _decode_pmas_string(data: bytes, position: int, end: int, *, capacity: int, identifier: bool) -> tuple[str, int]:
+    if position >= end:
+        raise PackError("active selection string is truncated")
+    size = data[position]
+    position += 1
+    if size == 0 or size >= capacity or size > end - position:
+        raise PackError("invalid active selection string")
+    try:
+        value = data[position:position + size].decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise PackError("invalid active selection string") from exc
+    if not all(0x20 <= byte <= 0x7E for byte in data[position:position + size]):
+        raise PackError("invalid active selection string")
+    if identifier and not PACK_ID_RE.fullmatch(value):
+        raise PackError("invalid active selection identifier")
+    return value, position + size
+
+
+def decode_active_selection(data: bytes) -> dict[str, object]:
+    if len(data) < 16 or len(data) > MAX_ACTIVE_SELECTION_BYTES:
+        raise PackError("active selection is truncated or oversized")
+    if data[:4] != ACTIVE_MAGIC or data[5] != 0:
+        raise PackError("invalid active selection header")
+    version = data[4]
+    if version not in (1, SPARSE_FORMAT_VERSION, INDEXLESS_FORMAT_VERSION):
+        raise PackError("unsupported active selection version")
+    if zlib.crc32(data[:-4]) != struct.unpack("<I", data[-4:])[0]:
+        raise PackError("invalid active selection CRC")
+    if version == 1:
+        if len(data) != 48:
+            raise PackError("legacy active selection must be 48 bytes")
+        if struct.unpack("<H", data[6:8])[0] != 48:
+            raise PackError("invalid legacy active selection header")
+        generation = struct.unpack("<I", data[8:12])[0]
+        if generation == 0:
+            raise PackError("invalid legacy active selection generation")
+        pack_id_size = data[12]
+        pack_id, = (data[13:13 + pack_id_size].decode("ascii"),)
+        if pack_id_size == 0 or pack_id_size >= 32 or not PACK_ID_RE.fullmatch(pack_id):
+            raise PackError("invalid legacy active selection pack ID")
+        if any(byte != 0 for byte in data[13 + pack_id_size:44]):
+            raise PackError("legacy active selection must be zero padded")
+        return {"format_version": 1, "generation": generation, "map_set_id": pack_id,
+                "attribution": "", "pack_ids": [pack_id], "row_spans": {}}
+    generation = struct.unpack("<I", data[8:12])[0]
+    if generation == 0:
+        raise PackError("invalid active selection generation")
+    if struct.unpack("<H", data[6:8])[0] != len(data):
+        raise PackError("invalid active selection length")
+    end = len(data) - 4
+    position = 12
+    map_set_id, position = _decode_pmas_string(data, position, end, capacity=32, identifier=True)
+    attribution, position = _decode_pmas_string(data, position, end, capacity=128, identifier=False)
+    if position >= end:
+        raise PackError("active selection pack count is truncated")
+    pack_count = data[position]
+    position += 1
+    if not 1 <= pack_count <= MAX_ACTIVE_PACKS:
+        raise PackError("invalid active selection pack count")
+    pack_ids: list[str] = []
+    row_spans: dict[str, list[tuple[int, int, int, int]]] = {}
+    for _ in range(pack_count):
+        pack_id, position = _decode_pmas_string(data, position, end, capacity=32, identifier=True)
+        if pack_id in pack_ids:
+            raise PackError("duplicate pack ID in active selection")
+        pack_ids.append(pack_id)
+        if version == SPARSE_FORMAT_VERSION:
+            if position + 2 > end:
+                raise PackError("active selection span count is truncated")
+            span_count = struct.unpack("<H", data[position:position + 2])[0]
+            position += 2
+            if span_count == 0 or span_count > MAX_ROW_SPANS:
+                raise PackError("invalid active selection span count")
+            if span_count * ROW_SPAN_SIZE > end - position:
+                raise PackError("active selection spans are truncated")
+            spans: list[tuple[int, int, int, int]] = []
+            for _span in range(span_count):
+                zoom, y, x_minimum, x_maximum = struct.unpack(
+                    "<BIII", data[position:position + ROW_SPAN_SIZE])
+                position += ROW_SPAN_SIZE
+                spans.append((zoom, y, x_minimum, x_maximum))
+            row_spans[pack_id] = spans
+    if position != end:
+        raise PackError("active selection has trailing bytes")
+    return {"format_version": version, "generation": generation, "map_set_id": map_set_id,
+            "attribution": attribution, "pack_ids": pack_ids, "row_spans": row_spans}
 
 
 def _open_verified_tile(source_fd: int, tile: Tile) -> int:
