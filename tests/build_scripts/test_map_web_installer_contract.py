@@ -76,3 +76,18 @@ def test_map_installer_javascript_behavior() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_map_installer_uses_no_invented_filesystem_api_options() -> None:
+    # The browser File System Access API has no `exclusive` getFileHandle
+    # option and no FileExistsError; the only legitimate `exclusive` is the
+    # Web Locks request mode. Production JS and the test mock must stay
+    # within that real contract.
+    installer = INSTALLER.read_text(encoding="utf-8")
+    test_source = NODE_TEST.read_text(encoding="utf-8")
+    for source in (installer, test_source):
+        assert "FileExistsError" not in source
+    # In the installer the only `exclusive` occurrence may be the Web Locks
+    # request options object; the test source may only pass it as an ignored
+    # unknown option (B1 harness test), never as an exception trigger.
+    assert 'exclusive' not in installer.replace("{mode:'exclusive'}", "")

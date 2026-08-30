@@ -192,6 +192,44 @@ async function child(root, path) {
   return current;
 }
 
+test('filesystem mock matches browser File System Access API semantics', async () => {
+  // Repeated create:true on an existing file must return the same handle,
+  // exactly like browsers (no exclusive-create behavior).
+  const root = new MemoryDirectoryHandle();
+  const first = await root.getFileHandle('a.pmas', {create: true});
+  const second = await root.getFileHandle('a.pmas', {create: true});
+  assert.equal(first, second);
+
+  // The File System Access API has no `exclusive` option; unknown options
+  // are ignored rather than converted into exceptions.
+  const ignored = await root.getFileHandle('a.pmas', {create: true, exclusive: true});
+  assert.equal(ignored, first);
+  const directoryFirst = await root.getDirectoryHandle('tiles', {create: true});
+  const directorySecond = await root.getDirectoryHandle('tiles', {create: true, exclusive: true});
+  assert.equal(directoryFirst, directorySecond);
+
+  // A file and directory sharing a name are TypeMismatchError in both
+  // directions; missing files without create are NotFoundError.
+  await assert.rejects(
+    root.getFileHandle('tiles', {create: true}),
+    error => error.name === 'TypeMismatchError',
+  );
+  const reverse = new MemoryDirectoryHandle();
+  await reverse.getDirectoryHandle('a.pmas', {create: true});
+  await assert.rejects(
+    reverse.getFileHandle('a.pmas', {create: true}),
+    error => error.name === 'TypeMismatchError',
+  );
+  await assert.rejects(
+    root.getFileHandle('missing.pmas'),
+    error => error.name === 'NotFoundError',
+  );
+  await assert.rejects(
+    root.getDirectoryHandle('missing-dir', {create: false}),
+    error => error.name === 'NotFoundError',
+  );
+});
+
 const metadata = {
   packId: 'overview',
   mapSetId: 'osm-bright',
