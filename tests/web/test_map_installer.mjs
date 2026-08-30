@@ -193,6 +193,15 @@ async function child(root, path) {
   return current;
 }
 
+async function fileAt(root, path) {
+  const parts = path.split('/');
+  let current = root;
+  for (const part of parts.slice(0, -1)) current = current.children.get(part);
+  const file = current.children.get(parts.at(-1));
+  if (!file || file.kind !== 'file') throw new Error(`test helper: not a file: ${path}`);
+  return new Uint8Array(await (await file.getFile()).arrayBuffer());
+}
+
 test('filesystem mock matches browser File System Access API semantics', async () => {
   // Repeated create:true on an existing file must return the same handle,
   // exactly like browsers (no exclusive-create behavior).
@@ -465,6 +474,99 @@ test('rejects installing a detected style into a different map set', async () =>
   await assert.rejects(
     installMuiZip({archive, rootDirectory:root, metadata}),
     /style.*selected map set/i,
+  );
+  assert.equal(root.children.has('pyxis-map'), false);
+});
+
+test('style-qualified MUI install publishes an indexless PMPK v3 manifest', async () => {
+  const archive = storedZip([
+    ['maps/osm-bright/2/1/1.png', PNG],
+    ['maps/osm-bright/2/1/0.png', PNG],
+  ]);
+  const root = new MemoryDirectoryHandle();
+  const result = await installMuiZip({archive, rootDirectory:root, metadata});
+  assert.equal(result.resumed, false);
+  const pack = await child(root, 'pyxis-map/packs/overview');
+  const stored = await fileAt(root, 'pyxis-map/packs/overview/manifest.pmp');
+  const parsed = parseSparseManifest(stored);
+  assert.equal(parsed.packId, 'overview');
+  assert.equal(parsed.name, 'Overview');
+  assert.equal(parsed.attribution, metadata.attribution);
+  assert.equal(parsed.source, metadata.source);
+  assert.equal(parsed.license, metadata.license);
+  assert.equal(parsed.minZoom, 2);
+  assert.equal(parsed.maxZoom, 2);
+  assert.equal(parsed.tileCount, 2);
+  assert.deepEqual(parsed.rowSpans, []);
+  // No ownership receipt or other stray entries may remain in the pack.
+  assert.deepEqual([...pack.children.keys()].sort(), ['manifest.pmp', 'tiles']);
+});
+
+test('rootless ZIP with a selected style publishes the matching PMPK v3 manifest', async () => {
+  const archive = storedZip([
+    ['0/0/0.png', PNG],
+    ['1/0/0.png', PNG],
+    ['1/1/0.png', PNG],
+    ['1/0/1.png', PNG],
+    ['1/1/1.png', PNG],
+  ]);
+  const root = new MemoryDirectoryHandle();
+  const style = resolveMuiStyleProfile(null, 'toner');
+  const result = await installMuiZip({archive, rootDirectory:root, metadata:{
+    ...metadata, mapSetId:style.id, attribution:style.attribution,
+    source:style.source, license:style.license,
+  }});
+  assert.equal(result.resumed, false);
+  const stored = await fileAt(root, 'pyxis-map/packs/overview/manifest.pmp');
+  const parsed = parseSparseManifest(stored);
+  assert.equal(parsed.attribution, style.attribution);
+  assert.equal(parsed.source, style.source);
+  assert.equal(parsed.license, style.license);
+  assert.equal(parsed.minZoom, 0);
+  assert.equal(parsed.maxZoom, 1);
+  assert.equal(parsed.tileCount, 5);
+  assert.deepEqual(parsed.rowSpans, []);
+});
+
+test('the PMPK v3 manifest is published after the last tile and read back', async () => {
+  const archive = storedZip([['2/1/1.png', PNG], ['2/1/0.png', PNG]]);
+  const root = new MemoryDirectoryHandle();
+  const writes = [];
+  const originalCreateWritable = MemoryFileHandle.prototype.createWritable;
+  MemoryFileHandle.prototype.createWritable = async function () {
+    const writable = await originalCreateWritable.call(this);
+    const name = this.name;
+    const originalClose = writable.close;
+    writable.close = async () => { await originalClose.call(writable); writes.push(name); };
+    return writable;
+  };
+  try {
+    await installMuiZip({archive, rootDirectory:root, metadata});
+  } finally {
+    MemoryFileHandle.prototype.createWritable = originalCreateWritable;
+  }
+  const manifestIndex = writes.indexOf('manifest.pmp');
+  assert.notEqual(manifestIndex, -1, 'manifest must be written');
+  const tileNames = writes.filter(name => name.endsWith('.png'));
+  assert.equal(tileNames.length, 2);
+  for (const name of tileNames) {
+    assert.ok(
+      writes.indexOf(name) < manifestIndex,
+      `tile ${name} must be written before the manifest: ${JSON.stringify(writes)}`,
+    );
+  }
+  // The published manifest must decode from the on-disk bytes (read-back).
+  const stored = await fileAt(root, 'pyxis-map/packs/overview/manifest.pmp');
+  assert.equal(parseSparseManifest(stored).tileCount, 2);
+});
+
+test('policy mismatch after a detected style refuses before any SD write', async () => {
+  const archive = storedZip([['maps/osm-bright/2/1/1.png', PNG]]);
+  const root = new MemoryDirectoryHandle();
+  await assert.rejects(
+    installMuiZip({archive, rootDirectory:root,
+      metadata:{...metadata, license:'CC-BY-3.0'}}),
+    /attribution|provenance/i,
   );
   assert.equal(root.children.has('pyxis-map'), false);
 });
