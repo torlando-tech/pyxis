@@ -116,13 +116,16 @@ function storedZip(entries) {
 }
 
 class MemoryFileHandle {
-  constructor(name, log) { this.name = name; this.kind = 'file'; this.bytes = new Uint8Array(); this.log = log; }
+  constructor(name, log) { this.name = name; this.kind = 'file'; this.bytes = new Uint8Array(); this.log = log; this.failOnWrite = false; }
   async createWritable() {
     const handle = this;
     let pending = new Uint8Array();
     return {
       async write(value) { pending = new Uint8Array(value instanceof Blob ? await value.arrayBuffer() : value); },
-      async close() { handle.bytes = pending; handle.log.push(`write:${handle.name}`); },
+      async close() {
+        if (handle.failOnWrite) throw new Error(`injected write failure: ${handle.name}`);
+        handle.bytes = pending; handle.log.push(`write:${handle.name}`);
+      },
       async abort() {},
     };
   }
@@ -1290,4 +1293,149 @@ test('map-set capacity is checked before a ninth pack is published', async () =>
   await writable.close();
   await assert.rejects(installMuiZip({archive,rootDirectory:root,metadata:{...metadata,packId:'pack-nine',name:'Pack Nine'}}), /8-pack/i);
   assert.equal(pyxis.children.has('packs'), false);
+});
+
+// Seed a card with a valid inherited composition: one published pack and a
+// matching active slot, so preflight validation passes for the inherited
+// pack before the new install runs.
+async function seedInheritedCard(root, slotName, generation, inheritedPackId) {
+  const style = getMuiStyleProfile('osm-bright');
+  const seedMeta = {
+    ...metadata, packId: inheritedPackId, name: 'Seed Pack',
+    attribution: style.attribution, source: style.source, license: style.license,
+  };
+  const pyxis = await root.getDirectoryHandle('pyxis-map', {create: true});
+  const packs = await pyxis.getDirectoryHandle('packs', {create: true});
+  const seed = await packs.getDirectoryHandle(inheritedPackId, {create: true});
+  const manifest = serializeIndexlessManifest(seedMeta, 1, 1, 1);
+  const manifestHandle = await seed.getFileHandle('manifest.pmp', {create: true});
+  const manifestWritable = await manifestHandle.createWritable();
+  await manifestWritable.write(manifest);
+  await manifestWritable.close();
+  const slotHandle = await pyxis.getFileHandle(slotName, {create: true});
+  const slotWritable = await slotHandle.createWritable();
+  await slotWritable.write(encodeActiveMapSet({
+    generation, mapSetId: 'osm-bright', attribution: style.attribution,
+    packs: [{packId: inheritedPackId}],
+  }));
+  await slotWritable.close();
+  return pyxis;
+}
+
+test('activation publishes the style record before the active slot', async () => {
+  const root = new MemoryDirectoryHandle();
+  const pyxis = await seedInheritedCard(root, 'active-pack.0', 5, 'seed-pack');
+  await installMuiZip({
+    archive: storedZip([['maps/osm-bright/2/1/1.png', PNG]]),
+    rootDirectory: root,
+    metadata: {...metadata, packId: 'pack-a'},
+  });
+  const styleWrite = root.log.findIndex(name => name === 'write:osm-bright.pmas');
+  const slotWrite = root.log.findIndex(name => name === 'write:active-pack.1');
+  assert.notEqual(styleWrite, -1, 'style record must be written');
+  assert.notEqual(slotWrite, -1, 'active slot must be written');
+  assert.ok(styleWrite < slotWrite, 'style PMAS must be written before the active slot');
+});
+
+test('a failed style write leaves every active slot untouched and is retriable', async () => {
+  const style = getMuiStyleProfile('osm-bright');
+  const root = new MemoryDirectoryHandle();
+  const pyxis = await seedInheritedCard(root, 'active-pack.0', 5, 'seed-pack');
+  const slot0Before = await fileAt(root, 'pyxis-map/active-pack.0');
+  // A corrupt 3-byte style record: present (so the resume check sees a
+  // file), but undecodable (so the planner ignores it).
+  const mapSets = await pyxis.getDirectoryHandle('map-sets', {create: true});
+  const styleHandle = await mapSets.getFileHandle('osm-bright.pmas', {create: true});
+  const corruptWritable = await styleHandle.createWritable();
+  await corruptWritable.write(new Uint8Array([0xff, 0x00, 0x13]));
+  await corruptWritable.close();
+  const corruptStyle = await fileAt(root, 'pyxis-map/map-sets/osm-bright.pmas');
+  styleHandle.failOnWrite = true;
+
+  await assert.rejects(
+    installMuiZip({
+      archive: storedZip([['maps/osm-bright/2/1/1.png', PNG]]),
+      rootDirectory: root,
+      metadata: {...metadata, packId: 'pack-a'},
+    }),
+    /activation failed; retry with the same ZIP and pack ID/i,
+  );
+  styleHandle.failOnWrite = false;
+
+  // The published pack stays on the card (exact retry is possible), the
+  // existing slot is byte-identical, and no slot was created or clobbered.
+  assert.equal((await fileAt(root, 'pyxis-map/packs/pack-a/manifest.pmp')).length > 0, true);
+  assert.equal(
+    Buffer.from(await fileAt(root, 'pyxis-map/active-pack.0')).toString('hex'),
+    Buffer.from(slot0Before).toString('hex'),
+  );
+  assert.equal(pyxis.children.has('active-pack.1'), false);
+  // The failed style write left the original corrupt bytes in place.
+  assert.equal(
+    Buffer.from(await fileAt(root, 'pyxis-map/map-sets/osm-bright.pmas')).toString('hex'),
+    Buffer.from(corruptStyle).toString('hex'),
+  );
+
+  // Exact retry converges: the corrupt style file is ignored by the
+  // planner, the plan is re-derived from the untouched slot, and style +
+  // slot end up at the same generation.
+  const resumed = await installMuiZip({
+    archive: storedZip([['maps/osm-bright/2/1/1.png', PNG]]),
+    rootDirectory: root,
+    metadata: {...metadata, packId: 'pack-a'},
+  });
+  assert.equal(resumed.resumed, true);
+  const styleRecord = decodeActiveSelection(await fileAt(root, 'pyxis-map/map-sets/osm-bright.pmas'));
+  const slot1 = decodeActiveSelection(await fileAt(root, 'pyxis-map/active-pack.1'));
+  assert.equal(styleRecord.generation, slot1.generation);
+  assert.deepEqual(slot1.packs.map(pack => pack.packId), ['pack-a', 'seed-pack']);
+  assert.equal(
+    Buffer.from(await fileAt(root, 'pyxis-map/active-pack.0')).toString('hex'),
+    Buffer.from(slot0Before).toString('hex'),
+  );
+});
+
+test('a failed slot write keeps the prior valid slot active and converges on retry', async () => {
+  const root = new MemoryDirectoryHandle();
+  const pyxis = await seedInheritedCard(root, 'active-pack.0', 5, 'seed-pack');
+  const slot0Before = await fileAt(root, 'pyxis-map/active-pack.0');
+  const slot1Handle = await pyxis.getFileHandle('active-pack.1', {create: true});
+  slot1Handle.failOnWrite = true;
+
+  await assert.rejects(
+    installMuiZip({
+      archive: storedZip([['maps/osm-bright/2/1/1.png', PNG]]),
+      rootDirectory: root,
+      metadata: {...metadata, packId: 'pack-a'},
+    }),
+    /activation failed; retry with the same ZIP and pack ID/i,
+  );
+  slot1Handle.failOnWrite = false;
+
+  // The style record advanced, but the failed slot write left the prior
+  // valid slot (active-pack.0) intact as the fallback the firmware can use.
+  const styleRecord = decodeActiveSelection(await fileAt(root, 'pyxis-map/map-sets/osm-bright.pmas'));
+  assert.equal(styleRecord.generation, 6);
+  assert.equal(
+    Buffer.from(await fileAt(root, 'pyxis-map/active-pack.0')).toString('hex'),
+    Buffer.from(slot0Before).toString('hex'),
+  );
+  assert.equal((await fileAt(root, 'pyxis-map/active-pack.1')).length, 0);
+
+  // Exact retry re-plans from the advanced style record and converges:
+  // both records carry the same new generation.
+  await installMuiZip({
+    archive: storedZip([['maps/osm-bright/2/1/1.png', PNG]]),
+    rootDirectory: root,
+    metadata: {...metadata, packId: 'pack-a'},
+  });
+  const retryStyle = decodeActiveSelection(await fileAt(root, 'pyxis-map/map-sets/osm-bright.pmas'));
+  const retrySlot = decodeActiveSelection(await fileAt(root, 'pyxis-map/active-pack.1'));
+  assert.equal(retryStyle.generation, retrySlot.generation);
+  assert.equal(retryStyle.generation, 7);
+  assert.deepEqual(retrySlot.packs.map(pack => pack.packId), ['pack-a', 'seed-pack']);
+  assert.equal(
+    Buffer.from(await fileAt(root, 'pyxis-map/active-pack.0')).toString('hex'),
+    Buffer.from(slot0Before).toString('hex'),
+  );
 });
