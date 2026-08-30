@@ -1498,6 +1498,12 @@ def _run_activate(arguments) -> int:
         _ensure_pack_published(arguments, output_root, style)
         try:
             publish_activation(pyxis_fd, plan, output_root)
+        except PublishedDurabilityError as exc:
+            print(f"error: the activation record was committed and is visible, "
+                  f"but its durability is uncertain: {exc}", file=sys.stderr)
+            print("verify the card (rerun the exact same command) instead of "
+                  "assuming activation failed", file=sys.stderr)
+            return 4
         except (PackError, OSError) as exc:
             print(f"error: pack publication succeeded but activation failed: {exc}",
                   file=sys.stderr)

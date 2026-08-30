@@ -457,13 +457,26 @@ def test_style_build_publishes_no_active_record(tmp_path: Path) -> None:
 
 
 def _lock_holder_script(pyxis_map: Path, hold_seconds: float) -> str:
+    lock_path = os.fspath(pyxis_map / load_tool().INSTALL_LOCK_NAME)
     return (
         "import fcntl, os, time\n"
-        f"fd = os.open(r'{pyxis_map}/{load_tool().INSTALL_LOCK_NAME}', os.O_RDWR | os.O_CREAT, 0o644)\n"
+        # repr() so paths containing quotes or backslashes stay valid Python.
+        f"fd = os.open({lock_path!r}, os.O_RDWR | os.O_CREAT, 0o644)\n"
         "fcntl.flock(fd, fcntl.LOCK_EX)\n"
         "print('held', flush=True)\n"
         f"time.sleep({hold_seconds})\n"
     )
+
+
+def test_lock_holder_script_escapes_paths_with_quotes() -> None:
+    # A pyxis-map path containing a single quote must still produce *valid*
+    # child Python; the old r'...' interpolation turned such a path into a
+    # SyntaxError so the holder never opened the lock and the contention test
+    # passed for the wrong reason.
+    pyxis_map = Path("/tmp/a'b/pyxis-map")
+    script = _lock_holder_script(pyxis_map, 0.0)
+    compile(script, "<holder>", "exec")  # raises SyntaxError if unescaped
+    assert "os.open(" in script and ".install.lock" in script
 
 
 def test_second_cli_process_is_refused_while_first_holds_lock(tmp_path: Path) -> None:
@@ -1034,6 +1047,29 @@ def test_cli_exact_resume_after_activation_failure(tool, tmp_path: Path, monkeyp
     slot = tool.decode_active_selection(
         (tmp_path / "sd/pyxis-map/map-sets/osm-bright.pmas").read_bytes())
     assert slot["pack_ids"] == ["pack-a"]
+
+
+def test_cli_durability_failure_reports_committed_record(tool, tmp_path: Path,
+                                                         monkeypatch, capsys) -> None:
+    # Greptile P2: a post-rename parent-fsync failure (PublishedDurabilityError)
+    # must not be reported as "activation failed" — the record is committed
+    # and visible, only its durability is uncertain.
+    put_tile(tmp_path / "xyz", 1, 0, 0)
+    real_publish = tool.publish_activation
+
+    def durability_publish(*args, **kwargs):
+        target = args[2] if len(args) > 2 else kwargs["output_root"]
+        raise tool.PublishedDurabilityError(target, OSError("injected fsync failure"))
+
+    monkeypatch.setattr(tool, "publish_activation", durability_publish)
+    code = _cli_run(tool, tmp_path, "xyz", _cli_metadata(tool, "pack-a") + ["--activate"])
+    assert code == 4
+    err = capsys.readouterr().err
+    # The generic "activation failed" handler must NOT fire for a committed
+    # durability failure; the committed-record message must.
+    assert "pack publication succeeded but activation failed" not in err
+    assert "committed and is visible" in err
+    assert "durability is uncertain" in err
 
 
 def test_cli_existing_pack_metadata_mismatch_refuses(tool, tmp_path: Path) -> None:
