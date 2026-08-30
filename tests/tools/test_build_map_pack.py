@@ -548,6 +548,130 @@ def test_cli_lock_file_is_persistent_and_never_unlinked(tmp_path: Path) -> None:
     assert "unlink(" not in acquire_source + release_source
 
 
+@pytest.fixture(scope="module")
+def tool():
+    return load_tool()
+
+
+def assert_plan(tool, plan, style_id, slot, generation, pack_ids) -> None:
+    policy = tool.STYLE_POLICIES[style_id]
+    assert plan.style_name == style_id
+    assert plan.target_slot == slot
+    assert plan.generation == generation
+    assert plan.pack_ids == tuple(pack_ids)
+    decoded = tool.decode_active_selection(plan.record)
+    assert decoded["format_version"] == 3
+    assert decoded["generation"] == generation
+    assert decoded["map_set_id"] == style_id
+    assert decoded["attribution"] == policy["attribution"]
+    assert decoded["pack_ids"] == pack_ids
+
+
+def _slot(tool, generation, pack_ids, style_id="osm-bright") -> bytes:
+    return tool.encode_active_map_set(generation=generation, map_set_id=style_id,
+                                      attribution=tool.STYLE_POLICIES[style_id]["attribution"],
+                                      pack_ids=list(pack_ids))
+
+
+def test_plan_empty_card_is_generation_one_slot_zero(tool) -> None:
+    plan = tool.plan_activation(slot_0=None, slot_1=None, new_pack_id="pack-a",
+                                style_id="osm-bright",
+                                attribution=tool.STYLE_POLICIES["osm-bright"]["attribution"])
+    assert_plan(tool, plan, "osm-bright", "active-pack.0", 1, ["pack-a"])
+
+
+def test_plan_one_valid_slot_targets_missing_slot(tool) -> None:
+    slot_0 = _slot(tool, 1, ["pack-a"])
+    plan = tool.plan_activation(slot_0=slot_0, slot_1=None, new_pack_id="pack-b",
+                                style_id="osm-bright",
+                                attribution=tool.STYLE_POLICIES["osm-bright"]["attribution"])
+    assert_plan(tool, plan, "osm-bright", "active-pack.1", 2, ["pack-b", "pack-a"])
+
+
+def test_plan_two_valid_slots_overwrites_lower_generation(tool) -> None:
+    slot_0 = _slot(tool, 5, ["old-a"])
+    slot_1 = _slot(tool, 3, ["old-b"])
+    plan = tool.plan_activation(slot_0=slot_0, slot_1=slot_1, new_pack_id="pack-c",
+                                style_id="osm-bright",
+                                attribution=tool.STYLE_POLICIES["osm-bright"]["attribution"])
+    # Lower-generation slot (slot 1, gen 3) is overwritten; slot 0 (gen 5) stays as fallback.
+    # Composition inherits the highest-generation same-style active set (slot 0, gen 5).
+    assert_plan(tool, plan, "osm-bright", "active-pack.1", 6, ["pack-c", "old-a"])
+
+
+def test_plan_equal_generation_unequal_records_rejected(tool) -> None:
+    slot_0 = _slot(tool, 4, ["pack-a"])
+    slot_1 = _slot(tool, 4, ["pack-b"])
+    with pytest.raises(tool.PackError, match="disagree at equal generation"):
+        tool.plan_activation(slot_0=slot_0, slot_1=slot_1, new_pack_id="pack-c",
+                             style_id="osm-bright",
+                             attribution=tool.STYLE_POLICIES["osm-bright"]["attribution"])
+
+
+def test_plan_existing_same_style_pack_moves_to_front_without_duplication(tool) -> None:
+    slot_0 = _slot(tool, 2, ["pack-a", "pack-b"])
+    plan = tool.plan_activation(slot_0=slot_0, slot_1=None, new_pack_id="pack-b",
+                                style_id="osm-bright",
+                                attribution=tool.STYLE_POLICIES["osm-bright"]["attribution"])
+    assert_plan(tool, plan, "osm-bright", "active-pack.1", 3, ["pack-b", "pack-a"])
+
+
+def test_plan_different_style_starts_new_composition(tool) -> None:
+    slot_0 = _slot(tool, 2, ["pack-a"], style_id="toner")
+    plan = tool.plan_activation(slot_0=slot_0, slot_1=None, new_pack_id="pack-b",
+                                style_id="dark-matter",
+                                attribution=tool.STYLE_POLICIES["dark-matter"]["attribution"])
+    # No dark-matter style PMAS or active set exists yet: fresh one-pack composition.
+    assert_plan(tool, plan, "dark-matter", "active-pack.1", 3, ["pack-b"])
+
+
+def test_plan_style_pmas_composition_wins_over_active_slots(tool) -> None:
+    slot_0 = _slot(tool, 2, ["slot-only"])
+    style_record = _slot(tool, 9, ["style-a", "slot-only"])
+    plan = tool.plan_activation(slot_0=slot_0, slot_1=None, new_pack_id="new-pack",
+                                style_id="osm-bright",
+                                attribution=tool.STYLE_POLICIES["osm-bright"]["attribution"],
+                                style_record=style_record)
+    assert_plan(tool, plan, "osm-bright", "active-pack.1", 10, ["new-pack", "style-a", "slot-only"])
+
+
+def test_plan_pack_limit_rejects_before_any_publication(tool) -> None:
+    slot_0 = _slot(tool, 1, [f"pack-{index}" for index in range(8)])
+    with pytest.raises(tool.PackError, match="8-pack"):
+        tool.plan_activation(slot_0=slot_0, slot_1=None, new_pack_id="pack-new",
+                             style_id="osm-bright",
+                             attribution=tool.STYLE_POLICIES["osm-bright"]["attribution"])
+    # Re-installing an existing pack within the limit is fine.
+    plan = tool.plan_activation(slot_0=slot_0, slot_1=None, new_pack_id="pack-3",
+                                style_id="osm-bright",
+                                attribution=tool.STYLE_POLICIES["osm-bright"]["attribution"])
+    assert_plan(tool, plan, "osm-bright", "active-pack.1", 2,
+                ["pack-3"] + [f"pack-{index}" for index in range(8) if index != 3])
+
+
+def test_plan_generation_exhaustion_rejects(tool) -> None:
+    slot_0 = _slot(tool, tool.MAX_GENERATION, ["pack-a"])
+    with pytest.raises(tool.PackError, match="generation is exhausted"):
+        tool.plan_activation(slot_0=slot_0, slot_1=None, new_pack_id="pack-b",
+                             style_id="osm-bright",
+                             attribution=tool.STYLE_POLICIES["osm-bright"]["attribution"])
+
+
+def test_plan_invalid_slot_is_treated_as_missing(tool) -> None:
+    slot_0 = b"\x00" * 64
+    slot_1 = _slot(tool, 1, ["pack-a"])
+    plan = tool.plan_activation(slot_0=slot_0, slot_1=slot_1, new_pack_id="pack-b",
+                                style_id="osm-bright",
+                                attribution=tool.STYLE_POLICIES["osm-bright"]["attribution"])
+    assert_plan(tool, plan, "osm-bright", "active-pack.0", 2, ["pack-b", "pack-a"])
+
+
+def test_plan_requires_exact_style_attribution(tool) -> None:
+    with pytest.raises(tool.PackError, match="attribution"):
+        tool.plan_activation(slot_0=None, slot_1=None, new_pack_id="pack-a",
+                             style_id="osm-bright", attribution="Someone else's maps")
+
+
 def test_valid_pack_is_deterministic_and_independently_validated(tmp_path: Path) -> None:
     tool = load_tool()
     source = tmp_path / "xyz"

@@ -890,6 +890,95 @@ def release_install_lock(lock_fd: int) -> None:
     os.close(lock_fd)
 
 
+@dataclass(frozen=True)
+class ActivationPlan:
+    style_name: str
+    target_slot: str
+    generation: int
+    pack_ids: tuple[str, ...]
+    record: bytes
+
+
+def _slot_state(raw: bytes | None) -> tuple[str, dict[str, object] | None]:
+    """Classify one raw active-slot record without any filesystem access."""
+    if raw is None:
+        return "missing", None
+    try:
+        values = decode_active_selection(raw)
+    except PackError:
+        return "invalid", None
+    return "present", values
+
+
+def plan_activation(*, slot_0: bytes | None, slot_1: bytes | None,
+                    style_record: bytes | None = None,
+                    new_pack_id: str, style_id: str, attribution: str) -> ActivationPlan:
+    """Derive a candidate PMAS v3 record from a raw snapshot. No filesystem I/O."""
+    if style_id not in STYLE_POLICIES:
+        raise PackError(f"unsupported map style: {style_id}")
+    policy = STYLE_POLICIES[style_id]
+    if attribution != policy["attribution"]:
+        raise PackError("--style requires attribution exactly matching the firmware style policy")
+    if not PACK_ID_RE.fullmatch(new_pack_id):
+        raise PackError("pack ID must match [a-z0-9_-]{1,31}")
+    states = ((0, _slot_state(slot_0)), (1, _slot_state(slot_1)))
+    present: list[tuple[int, dict[str, object]]] = []
+    for index, (state, values) in states:
+        if state == "present" and values is not None:
+            present.append((index, values))
+    if len(present) == 2:
+        first = present[0][1]
+        second = present[1][1]
+        if first["generation"] == second["generation"] and first != second:
+            raise PackError("active slots disagree at equal generation; restore a known-good card state first")
+    style_values: dict[str, object] | None = None
+    if style_record is not None:
+        try:
+            decoded = decode_active_selection(style_record)
+        except PackError:
+            decoded = None
+        if decoded is not None and decoded["map_set_id"] == style_id \
+                and decoded["attribution"] == policy["attribution"]:
+            style_values = decoded
+    max_generation = max(
+        (cast(int, values["generation"]) for _, values in present),
+        default=0,
+    )
+    if style_values is not None:
+        max_generation = max(max_generation, cast(int, style_values["generation"]))
+    generation = max_generation + 1
+    if generation > MAX_GENERATION:
+        raise PackError("active selection generation is exhausted")
+
+    if style_values is not None:
+        composition = list(cast(list[str], style_values["pack_ids"]))
+    else:
+        composition: list[str] = []
+        for _index, values in sorted(present, key=lambda item: cast(int, item[1]["generation"]), reverse=True):
+            if values["map_set_id"] == style_id:
+                composition = list(cast(list[str], values["pack_ids"]))
+                break
+
+    if new_pack_id in composition:
+        composition.remove(new_pack_id)
+    composition.insert(0, new_pack_id)
+    if len(composition) > MAX_ACTIVE_PACKS:
+        raise PackError("active selection exceeds the 8-pack limit")
+    if len(set(composition)) != len(composition):
+        raise PackError("duplicate pack ID in candidate map set")
+
+    missing_or_invalid = [index for index, (state, _values) in states if state != "present"]
+    if missing_or_invalid:
+        target_slot = f"active-pack.{missing_or_invalid[0]}"
+    else:
+        lower = min(present, key=lambda item: (cast(int, item[1]["generation"]), item[0]))
+        target_slot = f"active-pack.{lower[0]}"
+    record = encode_active_map_set(generation=generation, map_set_id=style_id,
+                                   attribution=attribution, pack_ids=composition)
+    return ActivationPlan(style_name=style_id, target_slot=target_slot, generation=generation,
+                          pack_ids=tuple(composition), record=record)
+
+
 def _open_verified_tile(source_fd: int, tile: Tile) -> int:
     zoom_fd, zoom_identity = _open_child_directory(source_fd, str(tile.zoom), str(tile.path.parent.parent))
     try:
