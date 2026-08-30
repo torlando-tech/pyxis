@@ -815,7 +815,10 @@ def decode_active_selection(data: bytes) -> dict[str, object]:
         if generation == 0:
             raise PackError("invalid legacy active selection generation")
         pack_id_size = data[12]
-        pack_id, = (data[13:13 + pack_id_size].decode("ascii"),)
+        try:
+            pack_id, = (data[13:13 + pack_id_size].decode("ascii"),)
+        except UnicodeDecodeError:
+            raise PackError("invalid legacy active selection pack ID") from None
         if pack_id_size == 0 or pack_id_size >= 32 or not PACK_ID_RE.fullmatch(pack_id):
             raise PackError("invalid legacy active selection pack ID")
         if any(byte != 0 for byte in data[13 + pack_id_size:44]):
@@ -1310,8 +1313,9 @@ def build_map_pack(source_directory: Path, output_root: Path, *, pack_id: str, n
     _validate_metadata(pack_id, name, attribution, source, license)
     if style is not None:
         policy = STYLE_POLICIES[style]
-        for field, expected in policy.items():
-            if locals()[field] != expected:
+        for field, value in (("attribution", attribution), ("source", source),
+                             ("license", license)):
+            if value != policy[field]:
                 raise PackError(
                     f"--style {style} requires {field} exactly matching the firmware style policy")
     antimeridian_zooms = set() if antimeridian_zooms is None else set(antimeridian_zooms)

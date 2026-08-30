@@ -135,6 +135,12 @@ map-set ID, shared attribution, and the full ordered list of pack IDs (up to
 eight), so the writer never depends on per-pack row-span bookkeeping to know
 what belongs to a set. `--activate` requires `--style`.
 
+The CLI is deliberately stricter than the firmware here: when activating a
+v3 set it refuses, before any write, any set that references a pack whose
+manifest is not itself PMPK v3. A v3 active set that still points at legacy
+v1/v2 packs may be readable by the firmware, but the CLI will not activate
+one — it reports the mismatch and leaves all records untouched.
+
 Before activation the CLI, under a persistent CLI install lock:
 
 1. reads the two redundant `active-pack.0`/`active-pack.1` slots and the style

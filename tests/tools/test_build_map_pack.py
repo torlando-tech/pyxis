@@ -159,6 +159,19 @@ def test_pmas_v1_v2_decode_unchanged() -> None:
     assert values["pack_ids"] == ["legacy-1"]
 
 
+def test_pmas_v1_non_ascii_pack_id_raises_pack_error_not_traceback() -> None:
+    tool = load_tool()
+    # A valid-CRC legacy v1 record whose pack ID carries a non-ASCII byte
+    # (0x80) must surface a clean PackError (exit-2 path), not an
+    # uncaught UnicodeDecodeError traceback.
+    body = bytearray(b"PMAS\x01\x00" + struct.pack("<H", 48) + struct.pack("<I", 5) + b"\x08")
+    body.extend(b"\x80egacy-1")  # 0x80 first byte: non-ASCII, invalid grammar
+    body.extend(b"\x00" * (44 - len(body)))
+    bad = bytes(body) + struct.pack("<I", zlib.crc32(body))
+    with pytest.raises(tool.PackError):
+        tool.decode_active_selection(bad)
+
+
 def test_encode_pmas_v3_matches_frozen_vector() -> None:
     tool = load_tool()
     for name in ("pmas_v3_one_pack", "pmas_v3_three_packs"):
