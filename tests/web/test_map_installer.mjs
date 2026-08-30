@@ -12,6 +12,7 @@ import {
   installMuiZip,
   parseSparseManifest,
   resolveMuiStyleProfile,
+  planActivation,
   serializeIndexlessManifest,
   suggestMapIdentity,
 } from '../../docs/flasher/js/map-installer.js';
@@ -579,6 +580,100 @@ test('rejects altered required style attribution before touching the SD root', a
     /attribution|provenance/i,
   );
   assert.equal(root.children.has('pyxis-map'), false);
+});
+
+test('browser activation planning mirrors the CLI plan contract', () => {
+  const attribution = getMuiStyleProfile('osm-bright').attribution;
+  const slot = (generation, packIds, styleId = 'osm-bright') => encodeActiveMapSet({
+    generation,
+    mapSetId: styleId,
+    attribution: getMuiStyleProfile(styleId).attribution,
+    packs: packIds.map(packId => ({packId})),
+  });
+  const checkPlan = (plan, styleName, targetSlot, generation, packIds) => {
+    assert.equal(plan.styleName, styleName);
+    assert.equal(plan.targetSlot, targetSlot);
+    assert.equal(plan.generation, generation);
+    assert.deepEqual(plan.packIds, packIds);
+    const decoded = decodeActiveSelection(plan.record);
+    assert.equal(decoded.version, 3);
+    assert.equal(decoded.generation, generation);
+    assert.equal(decoded.mapSetId, styleName);
+    assert.equal(decoded.attribution, getMuiStyleProfile(styleName).attribution);
+    assert.deepEqual(decoded.packs.map(pack => pack.packId), packIds);
+  };
+
+  // Empty card: generation one, slot zero.
+  checkPlan(planActivation({slot0: null, slot1: null, newPackId: 'pack-a',
+    styleId: 'osm-bright', attribution}), 'osm-bright', 'active-pack.0', 1, ['pack-a']);
+
+  // One valid slot: target the missing slot.
+  checkPlan(planActivation({slot0: slot(1, ['pack-a']), slot1: null, newPackId: 'pack-b',
+    styleId: 'osm-bright', attribution}), 'osm-bright', 'active-pack.1', 2, ['pack-b', 'pack-a']);
+
+  // Two valid slots: overwrite the lower-generation one, inherit its composition.
+  checkPlan(planActivation({slot0: slot(5, ['old-a']), slot1: slot(3, ['old-b']), newPackId: 'pack-c',
+    styleId: 'osm-bright', attribution}), 'osm-bright', 'active-pack.1', 6, ['pack-c', 'old-a']);
+
+  // Re-installing an existing pack moves it to the front without duplication.
+  checkPlan(planActivation({slot0: slot(2, ['pack-a', 'pack-b']), slot1: null, newPackId: 'pack-b',
+    styleId: 'osm-bright', attribution}), 'osm-bright', 'active-pack.1', 3, ['pack-b', 'pack-a']);
+
+  // A different style starts a fresh composition but still advances the
+  // generation past the existing slots.
+  checkPlan(planActivation({slot0: slot(2, ['pack-a'], 'toner'), slot1: null, newPackId: 'pack-b',
+    styleId: 'dark-matter', attribution: getMuiStyleProfile('dark-matter').attribution}),
+    'dark-matter', 'active-pack.1', 3, ['pack-b']);
+
+  // The style PMAS composition wins over the active slots and drives the
+  // generation.
+  checkPlan(planActivation({slot0: slot(2, ['slot-only']), slot1: null,
+    styleRecord: slot(9, ['style-a', 'slot-only']), newPackId: 'new-pack',
+    styleId: 'osm-bright', attribution}), 'osm-bright', 'active-pack.1', 10,
+    ['new-pack', 'style-a', 'slot-only']);
+
+  // Invalid raw slot bytes are treated like a missing slot: the target is
+  // slot zero and the generation restarts from one, exactly like the CLI.
+  const corrupted = slot(1, ['pack-a']);
+  corrupted[corrupted.length - 1] ^= 1;
+  checkPlan(planActivation({slot0: corrupted, slot1: null, newPackId: 'pack-b',
+    styleId: 'osm-bright', attribution}), 'osm-bright', 'active-pack.0', 1, ['pack-b']);
+
+  // Equal-generation disagreement is rejected before any plan exists.
+  assert.throws(() => planActivation({slot0: slot(4, ['pack-a']), slot1: slot(4, ['pack-b']),
+    newPackId: 'pack-c', styleId: 'osm-bright', attribution}), /equal generation/i);
+
+  // The 8-pack limit is enforced before publication; re-installing an
+  // existing pack within the limit is allowed.
+  assert.throws(() => planActivation({
+    slot0: slot(1, Array.from({length: 8}, (_, index) => `pack-${index}`)), slot1: null,
+    newPackId: 'pack-new', styleId: 'osm-bright', attribution,
+  }), /8-pack/i);
+  checkPlan(planActivation({
+    slot0: slot(1, Array.from({length: 8}, (_, index) => `pack-${index}`)), slot1: null,
+    newPackId: 'pack-3', styleId: 'osm-bright', attribution,
+  }), 'osm-bright', 'active-pack.1', 2,
+    ['pack-3', ...Array.from({length: 8}, (_, index) => `pack-${index}`).filter(id => id !== 'pack-3')]);
+
+  // Generation exhaustion is rejected.
+  const MAX_GENERATION = 0xffffffff;
+  assert.throws(() => planActivation({slot0: slot(MAX_GENERATION, ['pack-a']), slot1: null,
+    newPackId: 'pack-b', styleId: 'osm-bright', attribution}), /exhausted/i);
+
+  // Attribution must match the style policy exactly.
+  assert.throws(() => planActivation({slot0: null, slot1: null, newPackId: 'pack-a',
+    styleId: 'osm-bright', attribution: 'wrong'}), /attribution/i);
+  assert.throws(() => planActivation({slot0: null, slot1: null, newPackId: 'pack-a',
+    styleId: 'nope', attribution: 'x'}), /unsupported/i);
+  assert.throws(() => planActivation({slot0: null, slot1: null, newPackId: 'Bad ID',
+    styleId: 'osm-bright', attribution}), /pack id/i);
+
+  // A style PMAS for a different map set or with the wrong attribution is
+  // ignored, not trusted.
+  checkPlan(planActivation({slot0: slot(2, ['slot-only']), slot1: null,
+    styleRecord: slot(9, ['style-a'], 'toner'), newPackId: 'new-pack',
+    styleId: 'osm-bright', attribution}), 'osm-bright', 'active-pack.1', 3,
+    ['new-pack', 'slot-only']);
 });
 
 test('indexless active map-set wire format contains ordered pack IDs only', () => {

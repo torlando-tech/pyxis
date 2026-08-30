@@ -658,6 +658,95 @@ async function removeOwnedPack(packs,packId,pack,receiptName,receipt,entries){
   }catch{return false;}
 }
 
+const MAX_ACTIVE_PACKS = 8;
+
+function slotState(raw) {
+  if (raw === null || raw === undefined) return {state: 'missing', values: null};
+  try {
+    return {state: 'present', values: decodeActiveSelection(raw)};
+  } catch {
+    return {state: 'invalid', values: null};
+  }
+}
+
+// Normalize a decoded slot record to the fields planning needs. Legacy v1
+// records carry a single string that is both the map-set ID and the one pack
+// ID, matching the CLI's normalized v1 decode.
+function slotFields(values) {
+  return {
+    generation: values.generation,
+    mapSetId: values.mapSetId ?? values.packId,
+    packIds: values.packs ? values.packs.map(pack => pack.packId) : [values.packId],
+  };
+}
+
+export function planActivation({slot0, slot1, styleRecord, newPackId, styleId, attribution}) {
+  const profile = getMuiStyleProfile(styleId);
+  if (attribution !== profile.attribution) {
+    fail('attribution must exactly match the firmware style policy');
+  }
+  if (!/^[a-z0-9_-]{1,31}$/.test(newPackId)) fail('Pack ID must match [a-z0-9_-]{1,31}');
+  const states = [slotState(slot0), slotState(slot1)];
+  const present = states
+    .map((state, index) => (state.state === 'present' ? {index, ...slotFields(state.values)} : null))
+    .filter(Boolean);
+  if (present.length === 2) {
+    const [first, second] = present;
+    const sameGeneration = first.generation === second.generation;
+    const unequal = first.mapSetId !== second.mapSetId ||
+      first.generation !== second.generation ||
+      JSON.stringify(first.packIds) !== JSON.stringify(second.packIds);
+    if (sameGeneration && unequal) {
+      fail('active slots disagree at equal generation; restore a known-good card state first');
+    }
+  }
+  let styleValues = null;
+  if (styleRecord !== null && styleRecord !== undefined) {
+    try {
+      const decoded = decodeActiveSelection(styleRecord);
+      const fields = slotFields(decoded);
+      if (decoded.version !== 1 && fields.mapSetId === styleId &&
+          decoded.attribution === profile.attribution) {
+        styleValues = fields;
+      }
+    } catch {
+      // A corrupt style snapshot is ignored, exactly like the CLI.
+    }
+  }
+  let maxGeneration = present.reduce((maximum, slot) => Math.max(maximum, slot.generation), 0);
+  if (styleValues) maxGeneration = Math.max(maxGeneration, styleValues.generation);
+  const generation = maxGeneration + 1;
+  if (generation > 0xffffffff) fail('active selection generation is exhausted');
+  let composition;
+  if (styleValues) {
+    composition = [...styleValues.packIds];
+  } else {
+    composition = [];
+    for (const slot of [...present].sort((left, right) => right.generation - left.generation)) {
+      if (slot.mapSetId === styleId) { composition = [...slot.packIds]; break; }
+    }
+  }
+  if (composition.includes(newPackId)) composition.splice(composition.indexOf(newPackId), 1);
+  composition.unshift(newPackId);
+  if (composition.length > MAX_ACTIVE_PACKS) fail('active selection exceeds the 8-pack limit');
+  if (new Set(composition).size !== composition.length) fail('duplicate pack ID in candidate map set');
+  let targetSlot;
+  const missing = states.findIndex(state => state.state !== 'present');
+  if (missing !== -1) {
+    targetSlot = `active-pack.${missing}`;
+  } else {
+    const lower = [...present].sort((left, right) => left.generation - right.generation || left.index - right.index)[0];
+    targetSlot = `active-pack.${lower.index}`;
+  }
+  const record = encodeActiveMapSet({
+    generation,
+    mapSetId: styleId,
+    attribution,
+    packs: composition.map(packId => ({packId})),
+  });
+  return {styleName: styleId, targetSlot, generation, packIds: composition, record};
+}
+
 async function prepareActiveMapSet(pyxis,metadata){
   const slots=await Promise.all([readSelection(pyxis,'active-pack.0'),readSelection(pyxis,'active-pack.1')]);
   if(slots[0]&&slots[1]&&slots[0].generation===slots[1].generation&&JSON.stringify(slots[0])!==JSON.stringify(slots[1]))fail('Conflicting active map-set records');
