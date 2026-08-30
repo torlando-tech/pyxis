@@ -1531,7 +1531,9 @@ def _parser() -> argparse.ArgumentParser:
                         help="firmware map style; metadata must exactly match the style policy and PMPK v3 is emitted")
     parser.add_argument("--activate", action="store_true",
                         help="after publishing the pack, atomically activate it into the style PMAS "
-                             "and one redundant active slot (requires --style)")
+                             "and one redundant active slot (requires --style). Serializes CLI "
+                             "processes via a persistent lock; do not run the browser installer "
+                             "against the same mounted card at the same time")
     return parser
 
 

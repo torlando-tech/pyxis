@@ -109,6 +109,58 @@ The pack ID must match `[a-z0-9_-]{1,31}`. The destination is:
 
 The output root is normally the mounted SD-card root. The importer refuses to replace an existing pack.
 
+## Safe CLI installation with style and activation (PMPK/PMAS v3)
+
+For the four Coalition/MUI styles the CLI can emit the indexless **PMPK v3**
+manifest and, with `--activate`, write the complete **PMAS v3** active map set
+in the same safe order the firmware expects. Run from the repository root with
+the SD card mounted and not in use by Pyxis:
+
+```sh
+python3 tools/maps/build_map_pack.py ./my-xyz /media/$USER/SDCARD \
+  --pack-id regional-map \
+  --name "Regional Map" \
+  --style osm-bright \
+  --activate
+```
+
+With `--style`, `--attribution`, `--source`, and `--license` must exactly match
+the firmware style policy; the CLI refuses a style request whose metadata does
+not match. The supported styles are `osm-bright`, `dark-matter`, `positron`,
+and `toner`.
+
+**PMPK v3** stores only the manifest identity, metadata, minimum and maximum
+zoom, and total tile count. **PMAS v3** is a single complete record holding the
+map-set ID, shared attribution, and the full ordered list of pack IDs (up to
+eight), so the writer never depends on per-pack row-span bookkeeping to know
+what belongs to a set. `--activate` requires `--style`.
+
+Before activation the CLI, under a persistent CLI install lock:
+
+1. reads the two redundant `active-pack.0`/`active-pack.1` slots and the style
+   snapshot,
+2. derives the candidate PMAS v3 record (new pack at priority zero, existing
+   same-style packs preserved, generation advanced),
+3. validates every inherited pack's manifest,
+4. stages and independently validates the new pack and publishes it,
+5. revalidates every candidate pack including the new one, then
+6. writes and reads back the style snapshot first and exactly one redundant
+   active slot second, preserving the peer slot as the last known-valid
+   fallback.
+
+A preflight failure changes no style or active-slot bytes. A failed slot write
+leaves the previous valid active set available. A published-but-not-activated
+pack is never deleted: rerun the exact same command to retry activation. There
+are no marker, lease, or heartbeat files to delete or clean up.
+
+**Safe eject.** After the CLI reports success, safely unmount/eject the SD card
+before returning it to the T-Deck.
+
+**Concurrency.** The CLI install lock serializes *CLI processes only*. It does
+not coordinate with the browser installer. **Do not run the CLI and the browser
+installer against the same mounted card at the same time.** To install with the
+CLI, keep the browser installer closed (and vice versa).
+
 ## Legacy single-pack selection from the CLI
 
 With the SD card still mounted on the host and not in use by Pyxis, write the
