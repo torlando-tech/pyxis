@@ -11,10 +11,11 @@ import {
   inspectMuiZip,
   installMuiZip,
   parseSparseManifest,
-  resolveMuiStyleProfile,
   planActivation,
+  resolveMuiStyleProfile,
   serializeIndexlessManifest,
   suggestMapIdentity,
+  validateCandidatePacks,
 } from '../../docs/flasher/js/map-installer.js';
 
 const PNG = Buffer.from(
@@ -676,6 +677,171 @@ test('browser activation planning mirrors the CLI plan contract', () => {
     ['new-pack', 'slot-only']);
 });
 
+// Install a one-tile MUI pack, returning the root for follow-up mutation.
+async function installPack(root, archive, meta) {
+  return installMuiZip({archive, rootDirectory: root, metadata: meta});
+}
+
+async function packTreeBytes(root) {
+  const pyxis = root.children.get('pyxis-map');
+  const out = new Map();
+  const walk = async (dir, prefix) => {
+    for (const [name, child] of dir.children.entries()) {
+      const path = prefix ? `${prefix}/${name}` : name;
+      if (child.kind === 'file') {
+        out.set(path, Buffer.from(await (await child.getFile()).arrayBuffer()));
+      } else {
+        await walk(child, path);
+      }
+    }
+  };
+  if (pyxis) await walk(pyxis, 'pyxis-map');
+  return out;
+}
+
+test('browser validates every inherited pack before activation', async () => {
+  const style = getMuiStyleProfile('osm-bright');
+  const metaFor = (packId) => ({
+    ...metadata, packId, attribution: style.attribution, source: style.source, license: style.license,
+  });
+  // Activate pack-a, then pack-b + pack-a, mirroring the CLI A8 fixture.
+  const root = new MemoryDirectoryHandle();
+  await installPack(root, storedZip([['maps/osm-bright/1/0/0.png', PNG]]), metaFor('pack-a'));
+  await installPack(root, storedZip([['maps/osm-bright/1/1/0.png', PNG]]), metaFor('pack-b'));
+  const pyxis = root.children.get('pyxis-map');
+  const mapSets = pyxis.children.get('map-sets');
+  const packs = pyxis.children.get('packs');
+  const styleRecord = new Uint8Array(await (await mapSets.children.get('osm-bright.pmas').getFile()).arrayBuffer());
+  const slot0 = new Uint8Array(await (await pyxis.children.get('active-pack.0').getFile()).arrayBuffer());
+  const slot1 = pyxis.children.get('active-pack.1');
+  const slot1Bytes = slot1
+    ? new Uint8Array(await (await slot1.getFile()).arrayBuffer())
+    : null;
+  const before = await packTreeBytes(root);
+
+  // Missing inherited pack: refusal before any record mutation.
+  await packs.children.get('pack-a').removeEntry('manifest.pmp');
+  await assert.rejects(
+    installPack(root, storedZip([['maps/osm-bright/2/0/0.png', PNG]]), metaFor('pack-c')),
+    /missing inherited pack manifest/i,
+  );
+  // The card is byte-identical after the refusal: both slots and the style
+  // record unchanged, and pack-c was never published. (The only diff from
+  // the pre-refusal tree is the intentionally removed pack-a manifest.)
+  let after = await packTreeBytes(root);
+  const afterRefusal = new Map(after);
+  const beforeRefusal = new Map(before);
+  afterRefusal.delete('pyxis-map/packs/pack-a/manifest.pmp');
+  beforeRefusal.delete('pyxis-map/packs/pack-a/manifest.pmp');
+  assert.deepEqual([...afterRefusal.entries()].sort(), [...beforeRefusal.entries()].sort());
+  assert.equal(after.get('pyxis-map/map-sets/osm-bright.pmas').toString('hex'), Buffer.from(styleRecord).toString('hex'));
+  assert.equal(after.get('pyxis-map/active-pack.0').toString('hex'), Buffer.from(slot0).toString('hex'));
+  if (slot1Bytes) {
+    assert.equal(after.get('pyxis-map/active-pack.1').toString('hex'), Buffer.from(slot1Bytes).toString('hex'));
+  }
+  assert.equal(packs.children.has('pack-c'), false);
+
+  // A second refusal (now for a corrupt inherited manifest path: the
+  // missing manifest) leaves the slots and style record untouched as well.
+  await assert.rejects(
+    installPack(root, storedZip([['maps/osm-bright/2/1/1.png', PNG]]), metaFor('pack-c')),
+    /missing inherited pack manifest/i,
+  );
+  after = await packTreeBytes(root);
+  assert.equal(after.get('pyxis-map/active-pack.0').toString('hex'), Buffer.from(slot0).toString('hex'));
+  assert.equal(after.get('pyxis-map/map-sets/osm-bright.pmas').toString('hex'), Buffer.from(styleRecord).toString('hex'));
+  assert.equal(packs.children.has('pack-c'), false);
+});
+
+test('browser corrupt-inherited-pack refusal keeps the card untouched', async () => {
+  const style = getMuiStyleProfile('osm-bright');
+  const metaFor = (packId) => ({
+    ...metadata, packId, attribution: style.attribution, source: style.source, license: style.license,
+  });
+  const root = new MemoryDirectoryHandle();
+  await installPack(root, storedZip([['maps/osm-bright/1/0/0.png', PNG]]), metaFor('pack-a'));
+  const pyxis = root.children.get('pyxis-map');
+  const packs = pyxis.children.get('packs');
+  const before = await packTreeBytes(root);
+
+  // Corrupt the inherited manifest, then install pack-c.
+  const manifest = await fileAt(root, 'pyxis-map/packs/pack-a/manifest.pmp');
+  const corrupt = new Uint8Array(manifest);
+  corrupt[0] ^= 1;
+  const corruptHandle = await packs.children.get('pack-a').getFileHandle('manifest.pmp', {create: true});
+  const corruptWritable = await corruptHandle.createWritable({keepExistingData: false});
+  await corruptWritable.write(corrupt);
+  await corruptWritable.close();
+
+  await assert.rejects(
+    installPack(root, storedZip([['maps/osm-bright/2/0/0.png', PNG]]), metaFor('pack-c')),
+    /manifest header or CRC is invalid|missing inherited/i,
+  );
+
+  const after = await packTreeBytes(root);
+  // Restore the corrupted manifest's original bytes in the snapshot: every
+  // other file must be byte-identical to the pre-corruption state.
+  const afterExpected = new Map(after);
+  afterExpected.set('pyxis-map/packs/pack-a/manifest.pmp', Buffer.from(manifest));
+  assert.deepEqual([...afterExpected.entries()].sort(), [...before.entries()].sort());
+  assert.equal(packs.children.has('pack-c'), false);
+});
+
+test('browser validateCandidatePacks rejects v1/v2 and policy-mismatched manifests', async () => {
+  const style = getMuiStyleProfile('osm-bright');
+  const root = new MemoryDirectoryHandle();
+  await installPack(root, storedZip([['maps/osm-bright/1/0/0.png', PNG]]), {
+    ...metadata, attribution: style.attribution, source: style.source, license: style.license,
+  });
+  const pyxis = root.children.get('pyxis-map');
+  const packs = pyxis.children.get('packs');
+  const policyCheck = () => validateCandidatePacks(
+    pyxis, 'osm-bright', style.attribution, ['overview']);
+  await policyCheck();
+
+  // A legal legacy v2 manifest (spans present) must be rejected as not v3.
+  const parts = [];
+  const pushU16 = (value) => { parts.push(value & 0xff, value >> 8); };
+  const pushU32 = (value) => {
+    parts.push(value & 0xff, (value >> 8) & 0xff, (value >> 16) & 0xff, (value >>> 24) & 0xff);
+  };
+  const pushSized = (text) => {
+    const bytes = [...new TextEncoder().encode(text)];
+    parts.push(bytes.length, ...bytes);
+  };
+  pushU32(0x4b504d50); parts.push(2, 0); pushU16(16); pushU32(0); pushU32(0);
+  pushSized('overview'); pushSized('Overview');
+  pushSized(style.attribution); pushSized(style.source); pushSized(style.license);
+  parts.push(1, 1); pushU16(1); pushU32(1);
+  parts.push(1); pushU32(0); pushU32(0); pushU32(1);
+  const inner = new Uint8Array(parts);
+  const totalLength = inner.length + 4;
+  inner[8] = totalLength & 0xff;
+  inner[9] = (totalLength >> 8) & 0xff;
+  inner[10] = (totalLength >> 16) & 0xff;
+  inner[11] = (totalLength >>> 24) & 0xff;
+  const v2Record = new Uint8Array(inner.length + 4);
+  v2Record.set(inner);
+  new DataView(v2Record.buffer).setUint32(v2Record.length - 4, crc32(inner), true);
+  const replaceManifest = async (bytes) => {
+    const handle = await packs.children.get('overview').getFileHandle('manifest.pmp', {create: true});
+    const writable = await handle.createWritable({keepExistingData: false});
+    await writable.write(bytes);
+    await writable.close();
+  };
+  await replaceManifest(v2Record);
+  await assert.rejects(policyCheck(), /not PMPK v3/i);
+
+  // A v3 manifest declaring a different pack ID is rejected. Rebuild a legal
+  // v3 manifest with a 6-byte ID so every later string offset stays exact.
+  const renamedManifest = serializeIndexlessManifest({
+    packId: 'otherm', name: 'Overview', attribution: style.attribution,
+    source: style.source, license: style.license,
+  }, 1, 1, 1);
+  await replaceManifest(renamedManifest);
+  await assert.rejects(policyCheck(), /different pack ID/i);
+});
+
 test('indexless active map-set wire format contains ordered pack IDs only', () => {
   const record = encodeActiveMapSet({generation:1,mapSetId:'osm-bright',attribution:'Map data attribution',packs:[
     {packId:'detail'},
@@ -1122,6 +1288,6 @@ test('map-set capacity is checked before a ninth pack is published', async () =>
   await writable.write(encodeActiveMapSet({generation:8,mapSetId:'osm-bright',attribution:metadata.attribution,packs:
     Array.from({length:8}, (_,index) => ({packId:`pack-${index}`}))}));
   await writable.close();
-  await assert.rejects(installMuiZip({archive,rootDirectory:root,metadata:{...metadata,packId:'pack-nine',name:'Pack Nine'}}), /active map set/i);
+  await assert.rejects(installMuiZip({archive,rootDirectory:root,metadata:{...metadata,packId:'pack-nine',name:'Pack Nine'}}), /8-pack/i);
   assert.equal(pyxis.children.has('packs'), false);
 });
