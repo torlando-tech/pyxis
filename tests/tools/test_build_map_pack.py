@@ -953,6 +953,152 @@ def test_read_back_mismatch_is_a_failure(tool, tmp_path: Path, monkeypatch) -> N
         os.close(pyxis_fd)
 
 
+def test_activate_requires_style(tool, tmp_path: Path) -> None:
+    put_tile(tmp_path / "xyz", 1, 0, 0)
+    code = tool.main([str(tmp_path / "xyz"), str(tmp_path / "sd"),
+                      "--pack-id", "p", "--name", "n", "--attribution", "a",
+                      "--source", "s", "--license", "l", "--activate"])
+    assert code == 2
+
+
+def _cli_metadata(tool, pack_id: str, style: str = "osm-bright") -> list[str]:
+    policy = tool.STYLE_POLICIES[style]
+    return ["--pack-id", pack_id, "--name", f"{pack_id} pack",
+            "--attribution", policy["attribution"], "--source", policy["source"],
+            "--license", policy["license"], "--style", style]
+
+
+def _cli_run(tool, tmp_path, source_name, args):
+    return tool.main([str(tmp_path / source_name), str(tmp_path / "sd"), *args])
+
+
+def test_cli_fresh_install_and_activate(tool, tmp_path: Path) -> None:
+    put_tile(tmp_path / "xyz", 1, 0, 0)
+    code = _cli_run(tool, tmp_path, "xyz",
+                    _cli_metadata(tool, "pack-a") + ["--activate"])
+    assert code == 0
+    pyxis_map = tmp_path / "sd/pyxis-map"
+    style_path = pyxis_map / "map-sets/osm-bright.pmas"
+    assert style_path.is_file()
+    slot = tool.decode_active_selection(style_path.read_bytes())
+    assert slot["map_set_id"] == "osm-bright"
+    assert slot["pack_ids"] == ["pack-a"]
+    assert (pyxis_map / "active-pack.0").read_bytes() == style_path.read_bytes()
+
+
+def test_cli_install_without_activate_writes_no_records(tool, tmp_path: Path) -> None:
+    put_tile(tmp_path / "xyz", 1, 0, 0)
+    code = _cli_run(tool, tmp_path, "xyz", _cli_metadata(tool, "pack-a"))
+    assert code == 0
+    pyxis_map = tmp_path / "sd/pyxis-map"
+    assert (pyxis_map / "packs/pack-a/manifest.pmp").is_file()
+    assert not (pyxis_map / "active-pack.0").exists()
+    assert not (pyxis_map / "active-pack.1").exists()
+    assert not (pyxis_map / "map-sets/osm-bright.pmas").exists()
+
+
+def test_cli_exact_resume_after_activation_failure(tool, tmp_path: Path, monkeypatch) -> None:
+    put_tile(tmp_path / "xyz", 1, 0, 0)
+    real_publish = tool.publish_activation
+    calls = {"n": 0}
+
+    def flaky_publish(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("injected activation failure")
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(tool, "publish_activation", flaky_publish)
+    code = _cli_run(tool, tmp_path, "xyz", _cli_metadata(tool, "pack-a") + ["--activate"])
+    assert code == 4
+    assert calls["n"] == 1
+    # The published immutable pack survives the failed activation and the exact
+    # retry reuses it (no republish) and converges.
+    assert (tmp_path / "sd/pyxis-map/packs/pack-a/manifest.pmp").is_file()
+    code = _cli_run(tool, tmp_path, "xyz", _cli_metadata(tool, "pack-a") + ["--activate"])
+    assert code == 0
+    assert calls["n"] == 2
+    slot = tool.decode_active_selection(
+        (tmp_path / "sd/pyxis-map/map-sets/osm-bright.pmas").read_bytes())
+    assert slot["pack_ids"] == ["pack-a"]
+
+
+def test_cli_existing_pack_metadata_mismatch_refuses(tool, tmp_path: Path) -> None:
+    put_tile(tmp_path / "xyz", 1, 0, 0)
+    assert _cli_run(tool, tmp_path, "xyz", _cli_metadata(tool, "pack-a")) == 0
+    pyxis_map = tmp_path / "sd/pyxis-map"
+    before = (pyxis_map / "packs/pack-a/manifest.pmp").read_bytes()
+    # Resume with a different --name must refuse; the existing pack is untouched.
+    code = tool.main([str(tmp_path / "xyz"), str(tmp_path / "sd"),
+                      "--pack-id", "pack-a", "--name", "different name",
+                      "--attribution", tool.STYLE_POLICIES["osm-bright"]["attribution"],
+                      "--source", tool.STYLE_POLICIES["osm-bright"]["source"],
+                      "--license", tool.STYLE_POLICIES["osm-bright"]["license"],
+                      "--style", "osm-bright", "--activate"])
+    assert code == 2
+    assert (pyxis_map / "packs/pack-a/manifest.pmp").read_bytes() == before
+    assert not (pyxis_map / "map-sets/osm-bright.pmas").exists()
+
+
+def test_cli_missing_inherited_pack_refuses_before_record_mutation(tool, tmp_path: Path) -> None:
+    pyxis_map, gen_1, gen_2 = _build_two_pack_card(tool, tmp_path)
+    (pyxis_map / "packs/pack-a/manifest.pmp").unlink()
+    put_tile(tmp_path / "src-c", 1, 0, 0)
+    args = [str(tmp_path / "src-c"), str(tmp_path / "sd"),
+            "--pack-id", "pack-c", "--name", "pack-c pack",
+            "--attribution", tool.STYLE_POLICIES["osm-bright"]["attribution"],
+            "--source", tool.STYLE_POLICIES["osm-bright"]["source"],
+            "--license", tool.STYLE_POLICIES["osm-bright"]["license"],
+            "--style", "osm-bright", "--activate"]
+    code = tool.main(args)
+    assert code == 2
+    # Both active slots and the (absent) style record are unchanged after refusal.
+    assert (pyxis_map / "active-pack.0").read_bytes() == gen_1
+    assert (pyxis_map / "active-pack.1").read_bytes() == gen_2
+    assert not (pyxis_map / "map-sets/osm-bright.pmas").exists()
+    # The new pack was not published because preflight failed first.
+    assert not (pyxis_map / "packs/pack-c").exists()
+
+
+def test_cli_eight_pack_limit_refuses_before_publication(tool, tmp_path: Path) -> None:
+    for index in range(8):
+        src = tmp_path / f"src-{index}"
+        put_tile(src, 1, 0, 0)
+        assert _cli_run(tool, tmp_path, f"src-{index}",
+                        _cli_metadata(tool, f"pack-{index}")) == 0
+    pyxis_map = tmp_path / "sd/pyxis-map"
+    attribution = tool.STYLE_POLICIES["osm-bright"]["attribution"]
+    for index in range(1, 8):
+        record = tool.encode_active_map_set(
+            generation=index, map_set_id="osm-bright", attribution=attribution,
+            pack_ids=[f"pack-{j}" for j in range(index, -1, -1)])
+        (pyxis_map / "active-pack.0").write_bytes(record)
+    put_tile(tmp_path / "src-new", 1, 0, 0)
+    code = tool.main([str(tmp_path / "src-new"), str(tmp_path / "sd"),
+                      "--pack-id", "pack-new", "--name", "pack-new pack",
+                      "--attribution", attribution,
+                      "--source", tool.STYLE_POLICIES["osm-bright"]["source"],
+                      "--license", tool.STYLE_POLICIES["osm-bright"]["license"],
+                      "--style", "osm-bright", "--activate"])
+    assert code == 2
+    assert not (pyxis_map / "packs/pack-new").exists()
+    assert not (pyxis_map / "map-sets/osm-bright.pmas").exists()
+
+
+def test_cli_activate_lock_contention(tool, tmp_path: Path) -> None:
+    put_tile(tmp_path / "xyz", 1, 0, 0)
+    pyxis_map = tmp_path / "sd/pyxis-map"
+    pyxis_map.mkdir(parents=True)
+    lock_fd = os.open(pyxis_map / tool.INSTALL_LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        code = _cli_run(tool, tmp_path, "xyz", _cli_metadata(tool, "pack-a") + ["--activate"])
+        assert code == 2
+        assert not (pyxis_map / "map-sets/osm-bright.pmas").exists()
+    finally:
+        os.close(lock_fd)
+
+
 def test_valid_pack_is_deterministic_and_independently_validated(tmp_path: Path) -> None:
     tool = load_tool()
     source = tmp_path / "xyz"

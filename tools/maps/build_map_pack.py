@@ -1407,6 +1407,112 @@ def build_map_pack(source_directory: Path, output_root: Path, *, pack_id: str, n
             raise PublishedDurabilityError(target, close_error)
 
 
+def _read_optional_file_at(parent_fd: int, name: str, maximum: int) -> bytes | None:
+    """Read a small record, treating missing or malformed files as absent."""
+    try:
+        return _read_file_at(parent_fd, name, maximum)
+    except (FileNotFoundError, PackError):
+        return None
+
+
+def _read_optional_style_record(pyxis_fd: int, style: str) -> bytes | None:
+    try:
+        map_sets_fd, _ = _open_child_directory(pyxis_fd, "map-sets", "pyxis-map/map-sets")
+    except PackError:
+        return None
+    try:
+        return _read_optional_file_at(map_sets_fd, f"{style}.pmas", MAX_ACTIVE_SELECTION_BYTES)
+    finally:
+        os.close(map_sets_fd)
+
+
+def _preflight_existing_packs(pyxis_fd: int, plan: "ActivationPlan", new_pack_id: str) -> None:
+    """Validate inherited packs before the new pack is published (A10 step 4).
+
+    The 8-pack limit is already enforced by plan_activation; this refuses a
+    missing/corrupt/policy-incompatible inherited pack before any publication.
+    """
+    inherited = tuple(p for p in plan.pack_ids if p != new_pack_id)
+    if not inherited:
+        return
+    validate_active_pack_manifests_at(
+        pyxis_fd, map_set_id=plan.style_name,
+        attribution=STYLE_POLICIES[plan.style_name]["attribution"], pack_ids=inherited)
+
+
+def _ensure_pack_published(arguments, output_root: Path, style: str) -> Path:
+    """Stage and publish the new pack, or resume an exact-match existing pack."""
+    pack_dir = output_root / "pyxis-map" / "packs" / arguments.pack_id
+    if pack_dir.exists():
+        parsed = validate_pack(pack_dir, arguments.max_bytes)
+        for field, expected in (("pack_id", arguments.pack_id),
+                                ("name", arguments.name),
+                                ("attribution", arguments.attribution),
+                                ("source", arguments.source),
+                                ("license", arguments.license)):
+            if parsed[field] != expected:
+                raise PackError(
+                    f"existing pack {arguments.pack_id} {field} does not match the request; "
+                    "refusing to overwrite")
+        return pack_dir
+    return build_map_pack(
+        arguments.xyz_directory, output_root,
+        pack_id=arguments.pack_id, name=arguments.name,
+        attribution=arguments.attribution, source=arguments.source,
+        license=arguments.license, max_tiles=arguments.max_tiles,
+        max_bytes=arguments.max_bytes,
+        antimeridian_zooms=set(arguments.antimeridian_zoom),
+        sparse=arguments.sparse, style=style)
+
+
+def _run_activate(arguments) -> int:
+    """A10 order: lock, plan, preflight, publish, revalidate, write, read-back."""
+    style = arguments.style
+    if style is None:
+        raise PackError("--activate requires --style")
+    output_root = Path(arguments.output_root)
+    root_fd = _open_path(output_root, create=True)
+    try:
+        pyxis_fd, _ = _mkdir_open(root_fd, "pyxis-map")
+    finally:
+        os.close(root_fd)
+    lock_fd = -1
+    try:
+        try:
+            lock_fd = acquire_install_lock(pyxis_fd)
+        except PackError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        slot_0 = _read_optional_file_at(pyxis_fd, "active-pack.0", MAX_ACTIVE_SELECTION_BYTES)
+        slot_1 = _read_optional_file_at(pyxis_fd, "active-pack.1", MAX_ACTIVE_SELECTION_BYTES)
+        style_record = _read_optional_style_record(pyxis_fd, style)
+        plan = plan_activation(
+            slot_0=slot_0, slot_1=slot_1, style_record=style_record,
+            new_pack_id=arguments.pack_id, style_id=style,
+            attribution=arguments.attribution)
+        _preflight_existing_packs(pyxis_fd, plan, arguments.pack_id)
+        _ensure_pack_published(arguments, output_root, style)
+        try:
+            publish_activation(pyxis_fd, plan, output_root)
+        except (PackError, OSError) as exc:
+            print(f"error: pack publication succeeded but activation failed: {exc}",
+                  file=sys.stderr)
+            print("the published pack was left in place; rerun the exact same command to retry",
+                  file=sys.stderr)
+            return 4
+        return 0
+    except PublishedDurabilityError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 3
+    except (PackError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        if lock_fd >= 0:
+            release_install_lock(lock_fd)
+        os.close(pyxis_fd)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("xyz_directory", type=Path)
@@ -1423,11 +1529,19 @@ def _parser() -> argparse.ArgumentParser:
                         help="explicitly admit sparse state/polygon coverage and emit PMPK v2")
     parser.add_argument("--style", choices=sorted(STYLE_POLICIES),
                         help="firmware map style; metadata must exactly match the style policy and PMPK v3 is emitted")
+    parser.add_argument("--activate", action="store_true",
+                        help="after publishing the pack, atomically activate it into the style PMAS "
+                             "and one redundant active slot (requires --style)")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
+    if arguments.activate and arguments.style is None:
+        print("error: --activate requires --style", file=sys.stderr)
+        return 2
+    if arguments.activate:
+        return _run_activate(arguments)
     try:
         target = build_map_pack(arguments.xyz_directory, arguments.output_root,
                                 pack_id=arguments.pack_id, name=arguments.name,
