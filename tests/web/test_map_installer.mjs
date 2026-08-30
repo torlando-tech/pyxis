@@ -12,6 +12,7 @@ import {
   installMuiZip,
   parseSparseManifest,
   resolveMuiStyleProfile,
+  serializeIndexlessManifest,
   suggestMapIdentity,
 } from '../../docs/flasher/js/map-installer.js';
 
@@ -228,6 +229,182 @@ test('filesystem mock matches browser File System Access API semantics', async (
     root.getDirectoryHandle('missing-dir', {create: false}),
     error => error.name === 'NotFoundError',
   );
+});
+
+const v3Vectors = JSON.parse(
+  (await readFile(new URL('../fixtures/map_pack_v3_vectors.json', import.meta.url))).toString('utf8'),
+);
+
+function hexToBytes(hex) {
+  return Uint8Array.from(hex.match(/../g).map(part => Number.parseInt(part, 16)));
+}
+
+function rewriteCrc32(bytes) {
+  const output = new Uint8Array(bytes.length);
+  output.set(bytes);
+  const view = new DataView(output.buffer);
+  view.setUint32(output.length - 4, crc32(output.subarray(0, output.length - 4)), true);
+  return output;
+}
+
+test('browser consumes the frozen PMPK v3 vectors', () => {
+  for (const name of ['pmpk_v3_one_tile', 'pmpk_v3_multi_zoom']) {
+    const entry = v3Vectors[name];
+    const parsed = parseSparseManifest(hexToBytes(entry.hex));
+    assert.equal(parsed.packId, entry.pack_id);
+    assert.equal(parsed.name, entry.name);
+    assert.equal(parsed.attribution, entry.attribution);
+    assert.equal(parsed.source, entry.source);
+    assert.equal(parsed.license, entry.license);
+    assert.equal(parsed.minZoom, entry.min_zoom);
+    assert.equal(parsed.maxZoom, entry.max_zoom);
+    assert.equal(parsed.tileCount, entry.tile_count);
+    assert.deepEqual(parsed.rowSpans, []);
+  }
+});
+
+test('browser serializes the frozen PMPK v3 vectors exactly', () => {
+  for (const name of ['pmpk_v3_one_tile', 'pmpk_v3_multi_zoom']) {
+    const entry = v3Vectors[name];
+    const actual = serializeIndexlessManifest({
+      packId: entry.pack_id, name: entry.name, attribution: entry.attribution,
+      source: entry.source, license: entry.license,
+    }, entry.min_zoom, entry.max_zoom, entry.tile_count);
+    assert.deepEqual([...actual], [...hexToBytes(entry.hex)]);
+  }
+});
+
+test('browser decodes the frozen PMAS v3 vectors', () => {
+  for (const name of ['pmas_v3_one_pack', 'pmas_v3_three_packs']) {
+    const entry = v3Vectors[name];
+    const decoded = decodeActiveSelection(hexToBytes(entry.hex));
+    assert.equal(decoded.version, 3);
+    assert.equal(decoded.generation, entry.generation);
+    assert.equal(decoded.mapSetId, entry.map_set_id);
+    assert.equal(decoded.attribution, entry.attribution);
+    assert.deepEqual(
+      decoded.packs.map(pack => pack.packId),
+      entry.pack_ids,
+    );
+    for (const pack of decoded.packs) assert.deepEqual(pack.rowSpans, undefined);
+  }
+});
+
+test('browser encodes the frozen PMAS v3 vectors exactly', () => {
+  for (const name of ['pmas_v3_one_pack', 'pmas_v3_three_packs']) {
+    const entry = v3Vectors[name];
+    const actual = encodeActiveMapSet({
+      generation: entry.generation,
+      mapSetId: entry.map_set_id,
+      attribution: entry.attribution,
+      packs: entry.pack_ids.map(packId => ({packId})),
+    });
+    assert.deepEqual([...actual], [...hexToBytes(entry.hex)]);
+  }
+});
+
+test('browser rejects the same invalid PMPK v3 mutations as the CLI', () => {
+  const mutate = (apply) => {
+    const data = hexToBytes(v3Vectors.pmpk_v3_one_tile.hex);
+    apply(data);
+    return rewriteCrc32(data);
+  };
+  assert.throws(() => parseSparseManifest(mutate(data => { data[5] = 1; })));
+  // Splice four zero bytes before the CRC: the total-length field then
+  // disagrees with the actual record size.
+  const withTrailing = rewriteCrc32(hexToBytes(v3Vectors.pmpk_v3_one_tile.hex));
+  assert.throws(() => parseSparseManifest(
+    new Uint8Array([
+      ...withTrailing.subarray(0, withTrailing.length - 4),
+      0, 0, 0, 0,
+      ...withTrailing.subarray(withTrailing.length - 4),
+    ]),
+  ));
+  const corrupted = hexToBytes(v3Vectors.pmpk_v3_one_tile.hex);
+  corrupted[corrupted.length - 1] ^= 1;
+  assert.throws(() => parseSparseManifest(corrupted));
+  assert.throws(() => parseSparseManifest(mutate(data => {
+    new DataView(data.buffer).setUint32(data.length - 8, 0, true);
+  })));
+  assert.throws(() => parseSparseManifest(mutate(data => { data[data.length - 9] = 1; })));
+});
+
+test('browser rejects the same invalid PMAS v3 mutations as the CLI', () => {
+  const hex = v3Vectors.pmas_v3_one_pack.hex;
+  const corrupted = hexToBytes(hex);
+  corrupted[corrupted.length - 1] ^= 1;
+  assert.throws(() => decodeActiveSelection(corrupted));
+  const generationZero = hexToBytes(hex);
+  new DataView(generationZero.buffer).setUint32(8, 0, true);
+  assert.throws(() => decodeActiveSelection(rewriteCrc32(generationZero)));
+  const trailing = rewriteCrc32(hexToBytes(hex));
+  const extended = new Uint8Array(trailing.length + 1);
+  extended.set(trailing);
+  extended[trailing.length - 1] = trailing[trailing.length - 1];
+  assert.throws(() => decodeActiveSelection(extended));
+  assert.throws(() => encodeActiveMapSet({
+    generation: 0, mapSetId: 'osm-bright', attribution: 'Example', packs: [{packId: 'detail'}],
+  }));
+  assert.throws(() => encodeActiveMapSet({
+    generation: 1, mapSetId: 'osm-bright', attribution: 'Example',
+    packs: Array.from({length: 9}, (_, index) => ({packId: `pack-${index}`})),
+  }));
+  assert.throws(() => encodeActiveMapSet({
+    generation: 1, mapSetId: 'osm-bright', attribution: 'Example', packs: [],
+  }));
+  assert.throws(() => encodeActiveMapSet({
+    generation: 1, mapSetId: 'osm-bright', attribution: 'Example',
+    packs: [{packId: 'detail'}, {packId: 'detail'}],
+  }));
+});
+
+test('browser preserves legacy PMAS v1 decoding and v2 span validation', () => {
+  const body = new Uint8Array(44);
+  const view = new DataView(body.buffer);
+  view.setUint32(0, 0x53414d50, true);
+  body[4] = 1;
+  view.setUint16(6, 48, true);
+  view.setUint32(8, 5, true);
+  body[12] = 8;
+  body.set(new TextEncoder().encode('legacy-1'), 13);
+  const record = new Uint8Array(body.length + 4);
+  record.set(body);
+  new DataView(record.buffer).setUint32(44, crc32(body), true);
+  const decoded = decodeActiveSelection(record);
+  assert.equal(decoded.version, 1);
+  assert.equal(decoded.generation, 5);
+  assert.equal(decoded.packId, 'legacy-1');
+
+  // Hand-built v2: header, map-set id, attribution, one pack carrying one
+  // row span; total length and CRC patched after the body is assembled.
+  const parts = [];
+  const push = (bytes) => parts.push(...bytes);
+  const pushU16 = (value) => { parts.push(value & 0xff, value >> 8); };
+  const pushU32 = (value) => {
+    parts.push(value & 0xff, (value >> 8) & 0xff, (value >> 16) & 0xff, (value >>> 24) & 0xff);
+  };
+  const pushSized = (text) => { push([...new TextEncoder().encode(text)]); };
+  pushU32(0x53414d50); parts.push(2, 0); pushU16(0); pushU32(9);
+  parts.push(8); pushSized('legacy-1');
+  parts.push(7); pushSized('Example');
+  parts.push(1);
+  parts.push(8); pushSized('legacy-1');
+  pushU16(1);
+  parts.push(1); pushU32(1); pushU32(0); pushU32(1);
+  const inner = new Uint8Array(parts);
+  const totalLength = inner.length + 4;
+  inner[6] = totalLength & 0xff;
+  inner[7] = totalLength >> 8;
+  const v2Record = new Uint8Array(inner.length + 4);
+  v2Record.set(inner);
+  new DataView(v2Record.buffer).setUint32(v2Record.length - 4, crc32(inner), true);
+  const v2Decoded = decodeActiveSelection(v2Record);
+  assert.equal(v2Decoded.version, 2);
+  assert.equal(v2Decoded.generation, 9);
+  assert.equal(v2Decoded.mapSetId, 'legacy-1');
+  assert.deepEqual(v2Decoded.packs, [
+    {packId: 'legacy-1', rowSpans: [{zoom: 1, y: 1, xMinimum: 0, xMaximum: 1}]},
+  ]);
 });
 
 const metadata = {
