@@ -1,0 +1,48 @@
+{
+  "pmpk_v3_one_tile": {
+    "pack_id": "one-tile",
+    "name": "One Tile",
+    "attribution": "(c) OpenMapTiles (c) OpenStreetMap contributors",
+    "source": "local-example",
+    "license": "CC-BY-4.0",
+    "min_zoom": 2,
+    "max_zoom": 2,
+    "tile_count": 1,
+    "format_version": 3,
+    "hex": "504d504b030010007400000000000000086f6e652d74696c65084f6e652054696c652f286329204f70656e4d617054696c657320286329204f70656e5374726565744d617020636f6e7472696275746f72730d6c6f63616c2d6578616d706c650943432d42592d342e30020201000000372a0b6b"
+  },
+  "pmpk_v3_multi_zoom": {
+    "pack_id": "multi-zoom",
+    "name": "Multi Zoom",
+    "attribution": "(c) OpenMapTiles (c) OpenStreetMap contributors",
+    "source": "local-example",
+    "license": "CC-BY-4.0",
+    "min_zoom": 0,
+    "max_zoom": 1,
+    "tile_count": 5,
+    "format_version": 3,
+    "hex": "504d504b0300100078000000000000000a6d756c74692d7a6f6f6d0a4d756c7469205a6f6f6d2f286329204f70656e4d617054696c657320286329204f70656e5374726565744d617020636f6e7472696275746f72730d6c6f63616c2d6578616d706c650943432d42592d342e3000010500000009478901"
+  },
+  "pmas_v3_one_pack": {
+    "format_version": 3,
+    "generation": 1,
+    "map_set_id": "osm-bright",
+    "attribution": "(c) OpenMapTiles (c) OpenStreetMap contributors",
+    "pack_ids": [
+      "detail"
+    ],
+    "hex": "504d415303005300010000000a6f736d2d6272696768742f286329204f70656e4d617054696c657320286329204f70656e5374726565744d617020636f6e7472696275746f7273010664657461696ca333e002"
+  },
+  "pmas_v3_three_packs": {
+    "format_version": 3,
+    "generation": 7,
+    "map_set_id": "osm-bright",
+    "attribution": "(c) OpenMapTiles (c) OpenStreetMap contributors",
+    "pack_ids": [
+      "overview",
+      "detail",
+      "basemap"
+    ],
+    "hex": "504d415303006400070000000a6f736d2d6272696768742f286329204f70656e4d617054696c657320286329204f70656e5374726565744d617020636f6e7472696275746f727303086f766572766965770664657461696c07626173656d61708fc8a823"
+  }
+}

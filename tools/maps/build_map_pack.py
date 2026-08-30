@@ -13,6 +13,7 @@ import argparse
 import ctypes
 from dataclasses import dataclass
 import errno
+import fcntl
 import os
 from pathlib import Path
 import re
@@ -23,8 +24,10 @@ from typing import Any, cast, Iterable
 import zlib
 
 MAGIC = b"PMPK"
+ACTIVE_MAGIC = b"PMAS"
 FORMAT_VERSION = 1
 SPARSE_FORMAT_VERSION = 2
+INDEXLESS_FORMAT_VERSION = 3
 HEADER_SIZE = 16
 EXTENT_SIZE = 26
 ROW_SPAN_SIZE = 13
@@ -37,6 +40,32 @@ PACK_ID_RE = re.compile(r"[a-z0-9_-]{1,31}\Z")
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _STRING_LIMITS = {"pack_id": 31, "name": 63, "attribution": 127, "source": 127, "license": 63}
 MAX_MANIFEST_BYTES = 7100
+MAX_ACTIVE_SELECTION_BYTES = 7105
+MAX_ACTIVE_PACKS = 8
+MAX_GENERATION = 0xFFFFFFFF
+INSTALL_LOCK_NAME = ".install.lock"
+STYLE_POLICIES: dict[str, dict[str, str]] = {
+    "osm-bright": {
+        "attribution": "(c) OpenMapTiles (c) OpenStreetMap contributors",
+        "source": "Oxed's Map Tile Downloader (OSM Bright)",
+        "license": "OSM ODbL; style CC-BY-4.0/BSD-3-Clause",
+    },
+    "dark-matter": {
+        "attribution": "(c) OpenMapTiles (c) OpenStreetMap contributors; style (c) CARTO",
+        "source": "Oxed's Map Tile Downloader (Dark Matter)",
+        "license": "OSM ODbL; style CC-BY-4.0/BSD-3-Clause (CARTO CC-BY-3.0)",
+    },
+    "positron": {
+        "attribution": "(c) OpenMapTiles (c) OpenStreetMap contributors; style (c) CARTO",
+        "source": "Oxed's Map Tile Downloader (Positron)",
+        "license": "OSM ODbL; style CC-BY-4.0/BSD-3-Clause (CARTO CC-BY-3.0)",
+    },
+    "toner": {
+        "attribution": "(c) MapTiler (c) OpenStreetMap contributors",
+        "source": "Oxed's Map Tile Downloader (Toner)",
+        "license": "OSM ODbL; style CC-BY-4.0/BSD-3-Clause (Stamen ISC)",
+    },
+}
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
@@ -603,11 +632,34 @@ def serialize_manifest(*, pack_id: str, name: str, attribution: str, source: str
     return bytes(result)
 
 
+def serialize_indexless_manifest(*, pack_id: str, name: str, attribution: str, source: str,
+                                 license: str, minimum_zoom: int, maximum_zoom: int,
+                                 tile_count: int) -> bytes:
+    _validate_metadata(pack_id, name, attribution, source, license)
+    if not 0 <= minimum_zoom <= maximum_zoom <= MAX_ZOOM:
+        raise PackError("invalid indexless zoom range")
+    if tile_count <= 0 or tile_count > 0xFFFFFFFF:
+        raise PackError("invalid indexless tile count")
+    payload = bytearray()
+    for field, value in (("pack_id", pack_id), ("name", name), ("attribution", attribution),
+                         ("source", source), ("license", license)):
+        encoded = _checked_text(field, value)
+        payload.append(len(encoded))
+        payload.extend(encoded)
+    payload.extend((minimum_zoom, maximum_zoom))
+    payload.extend(struct.pack("<I", tile_count))
+    length = HEADER_SIZE + len(payload) + 4
+    result = bytearray(struct.pack("<4sBBHII", MAGIC, INDEXLESS_FORMAT_VERSION, 0, HEADER_SIZE, length, 0))
+    result.extend(payload)
+    result.extend(struct.pack("<I", zlib.crc32(result)))
+    return bytes(result)
+
+
 def parse_manifest(data: bytes) -> dict[str, object]:
     if len(data) < 20 or len(data) > MAX_MANIFEST_BYTES:
         raise PackError("manifest is truncated or oversized")
     magic, version, reserved, header_size, length, reserved_word = struct.unpack("<4sBBHII", data[:16])
-    if magic != MAGIC or version not in (FORMAT_VERSION, SPARSE_FORMAT_VERSION) or \
+    if magic != MAGIC or version not in (FORMAT_VERSION, SPARSE_FORMAT_VERSION, INDEXLESS_FORMAT_VERSION) or \
             (reserved, header_size, length, reserved_word) != (0, 16, len(data), 0):
         raise PackError("invalid manifest header")
     if zlib.crc32(data[:-4]) != struct.unpack("<I", data[-4:])[0]:
@@ -652,7 +704,22 @@ def parse_manifest(data: bytes) -> dict[str, object]:
             raise PackError("invalid manifest length or zoom range")
         _validate_manifest_values(extents, tile_count)
         values.update(format_version=version, min_zoom=minimum, max_zoom=maximum,
-                      tile_count=tile_count, extents=extents, row_spans=[])
+                      tile_count=tile_count, extents=extents, row_spans=[], indexless=False)
+    elif version == INDEXLESS_FORMAT_VERSION:
+        if position + 6 > len(data) - 4:
+            raise PackError("manifest indexless fields are truncated")
+        minimum, maximum = data[position:position + 2]
+        position += 2
+        tile_count = struct.unpack("<I", data[position:position + 4])[0]
+        position += 4
+        if position != len(data) - 4:
+            raise PackError("manifest indexless record has trailing bytes")
+        if minimum > maximum or maximum > MAX_ZOOM:
+            raise PackError("invalid manifest zoom range")
+        if tile_count == 0:
+            raise PackError("invalid manifest tile count")
+        values.update(format_version=version, min_zoom=minimum, max_zoom=maximum,
+                      tile_count=tile_count, extents=[], row_spans=[], indexless=True)
     else:
         if position + 8 > len(data) - 4:
             raise PackError("manifest sparse fields are truncated")
@@ -671,8 +738,395 @@ def parse_manifest(data: bytes) -> dict[str, object]:
             raise PackError("invalid manifest length or zoom range")
         _validate_row_spans(row_spans, tile_count)
         values.update(format_version=version, min_zoom=minimum, max_zoom=maximum,
-                      tile_count=tile_count, extents=[], row_spans=row_spans)
+                      tile_count=tile_count, extents=[], row_spans=row_spans, indexless=False)
     return values
+
+
+def _validate_indexless_selection(generation: int, map_set_id: str, attribution: str,
+                                  pack_ids: list[str]) -> None:
+    if not 1 <= generation <= MAX_GENERATION:
+        raise PackError("active selection generation must be 1..0xFFFFFFFF")
+    if not PACK_ID_RE.fullmatch(map_set_id):
+        raise PackError("map set ID must match [a-z0-9_-]{1,31}")
+    _checked_text("attribution", attribution)
+    if not 1 <= len(pack_ids) <= MAX_ACTIVE_PACKS:
+        raise PackError("active selection must reference 1..8 packs")
+    seen: set[str] = set()
+    for pack_id in pack_ids:
+        if not PACK_ID_RE.fullmatch(pack_id):
+            raise PackError("pack ID must match [a-z0-9_-]{1,31}")
+        if pack_id in seen:
+            raise PackError("duplicate pack ID in active selection")
+        seen.add(pack_id)
+
+
+def encode_active_map_set(*, generation: int, map_set_id: str, attribution: str,
+                          pack_ids: list[str]) -> bytes:
+    _validate_indexless_selection(generation, map_set_id, attribution, pack_ids)
+    body = bytearray(struct.pack("<4sBBHI", ACTIVE_MAGIC, INDEXLESS_FORMAT_VERSION, 0, 0, generation))
+    for field, value in (("pack_id", map_set_id), ("attribution", attribution)):
+        encoded = _checked_text(field, value)
+        body.append(len(encoded))
+        body.extend(encoded)
+    body.append(len(pack_ids))
+    for pack_id in pack_ids:
+        encoded = pack_id.encode("ascii")
+        body.append(len(encoded))
+        body.extend(encoded)
+    total_length = len(body) + 4
+    header = bytes(body[:6]) + struct.pack("<H", total_length) + bytes(body[8:])
+    return header + struct.pack("<I", zlib.crc32(header))
+
+
+def _decode_pmas_string(data: bytes, position: int, end: int, *, capacity: int, identifier: bool) -> tuple[str, int]:
+    if position >= end:
+        raise PackError("active selection string is truncated")
+    size = data[position]
+    position += 1
+    if size == 0 or size >= capacity or size > end - position:
+        raise PackError("invalid active selection string")
+    try:
+        value = data[position:position + size].decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise PackError("invalid active selection string") from exc
+    if not all(0x20 <= byte <= 0x7E for byte in data[position:position + size]):
+        raise PackError("invalid active selection string")
+    if identifier and not PACK_ID_RE.fullmatch(value):
+        raise PackError("invalid active selection identifier")
+    return value, position + size
+
+
+def decode_active_selection(data: bytes) -> dict[str, object]:
+    if len(data) < 16 or len(data) > MAX_ACTIVE_SELECTION_BYTES:
+        raise PackError("active selection is truncated or oversized")
+    if data[:4] != ACTIVE_MAGIC or data[5] != 0:
+        raise PackError("invalid active selection header")
+    version = data[4]
+    if version not in (1, SPARSE_FORMAT_VERSION, INDEXLESS_FORMAT_VERSION):
+        raise PackError("unsupported active selection version")
+    if zlib.crc32(data[:-4]) != struct.unpack("<I", data[-4:])[0]:
+        raise PackError("invalid active selection CRC")
+    if version == 1:
+        if len(data) != 48:
+            raise PackError("legacy active selection must be 48 bytes")
+        if struct.unpack("<H", data[6:8])[0] != 48:
+            raise PackError("invalid legacy active selection header")
+        generation = struct.unpack("<I", data[8:12])[0]
+        if generation == 0:
+            raise PackError("invalid legacy active selection generation")
+        pack_id_size = data[12]
+        try:
+            pack_id, = (data[13:13 + pack_id_size].decode("ascii"),)
+        except UnicodeDecodeError:
+            raise PackError("invalid legacy active selection pack ID") from None
+        if pack_id_size == 0 or pack_id_size >= 32 or not PACK_ID_RE.fullmatch(pack_id):
+            raise PackError("invalid legacy active selection pack ID")
+        if any(byte != 0 for byte in data[13 + pack_id_size:44]):
+            raise PackError("legacy active selection must be zero padded")
+        return {"format_version": 1, "generation": generation, "map_set_id": pack_id,
+                "attribution": "", "pack_ids": [pack_id], "row_spans": {}}
+    generation = struct.unpack("<I", data[8:12])[0]
+    if generation == 0:
+        raise PackError("invalid active selection generation")
+    if struct.unpack("<H", data[6:8])[0] != len(data):
+        raise PackError("invalid active selection length")
+    end = len(data) - 4
+    position = 12
+    map_set_id, position = _decode_pmas_string(data, position, end, capacity=32, identifier=True)
+    attribution, position = _decode_pmas_string(data, position, end, capacity=128, identifier=False)
+    if position >= end:
+        raise PackError("active selection pack count is truncated")
+    pack_count = data[position]
+    position += 1
+    if not 1 <= pack_count <= MAX_ACTIVE_PACKS:
+        raise PackError("invalid active selection pack count")
+    pack_ids: list[str] = []
+    row_spans: dict[str, list[tuple[int, int, int, int]]] = {}
+    for _ in range(pack_count):
+        pack_id, position = _decode_pmas_string(data, position, end, capacity=32, identifier=True)
+        if pack_id in pack_ids:
+            raise PackError("duplicate pack ID in active selection")
+        pack_ids.append(pack_id)
+        if version == SPARSE_FORMAT_VERSION:
+            if position + 2 > end:
+                raise PackError("active selection span count is truncated")
+            span_count = struct.unpack("<H", data[position:position + 2])[0]
+            position += 2
+            if span_count == 0 or span_count > MAX_ROW_SPANS:
+                raise PackError("invalid active selection span count")
+            if span_count * ROW_SPAN_SIZE > end - position:
+                raise PackError("active selection spans are truncated")
+            spans: list[tuple[int, int, int, int]] = []
+            for _span in range(span_count):
+                zoom, y, x_minimum, x_maximum = struct.unpack(
+                    "<BIII", data[position:position + ROW_SPAN_SIZE])
+                position += ROW_SPAN_SIZE
+                spans.append((zoom, y, x_minimum, x_maximum))
+            row_spans[pack_id] = spans
+    if position != end:
+        raise PackError("active selection has trailing bytes")
+    return {"format_version": version, "generation": generation, "map_set_id": map_set_id,
+            "attribution": attribution, "pack_ids": pack_ids, "row_spans": row_spans}
+
+
+def acquire_install_lock(pyxis_fd: int) -> int:
+    """Acquire the persistent CLI-to-CLI install lock.
+
+    The lock file lives inside the mounted pyxis-map directory and is never
+    unlinked: it exists only to carry an fcntl.flock that serializes CLI
+    processes. Returns the lock descriptor; closing it releases the lock.
+    """
+    flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+    try:
+        lock_fd = os.open(INSTALL_LOCK_NAME, flags, 0o644, dir_fd=pyxis_fd)
+    except OSError as exc:
+        raise PackError(f"cannot open CLI install lock: {exc}") from exc
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(lock_fd)
+        raise PackError("another CLI map install is running; retry after it finishes") from exc
+    return lock_fd
+
+
+def release_install_lock(lock_fd: int) -> None:
+    os.close(lock_fd)
+
+
+@dataclass(frozen=True)
+class ActivationPlan:
+    style_name: str
+    target_slot: str
+    generation: int
+    pack_ids: tuple[str, ...]
+    record: bytes
+
+
+def _slot_state(raw: bytes | None) -> tuple[str, dict[str, object] | None]:
+    """Classify one raw active-slot record without any filesystem access."""
+    if raw is None:
+        return "missing", None
+    try:
+        values = decode_active_selection(raw)
+    except PackError:
+        return "invalid", None
+    return "present", values
+
+
+def _rename_at(parent_fd: int, source: str, destination: str, target: Path) -> None:
+    if _renameat2 is None:
+        raise PackError("atomic rename unsupported on this host")
+    result = _renameat2(parent_fd, os.fsencode(source), parent_fd, os.fsencode(destination), 0)
+    if result == 0:
+        return
+    error = ctypes.get_errno()
+    if error in (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP):
+        raise PackError("atomic rename unsupported on this filesystem")
+    raise OSError(error, os.strerror(error), target)
+
+
+def _atomic_replace_file_at(parent_fd: int, name: str, data: bytes, target: Path) -> None:
+    """Publish data to name via private temp + fsync + atomic overwrite rename + parent fsync."""
+    temp_name = ""
+    temp_fd = -1
+    for attempt in range(256):
+        temp_name = f".{name}.tmp-{os.getpid():x}-{attempt:02x}"
+        try:
+            temp_fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                              0o644, dir_fd=parent_fd)
+            break
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise PackError(f"cannot stage {name}: {exc}") from exc
+    else:
+        raise PackError("cannot allocate temporary output file")
+    try:
+        try:
+            _write_all(temp_fd, data, name)
+            os.fsync(temp_fd)
+        finally:
+            os.close(temp_fd)
+        temp_fd = -1
+        _rename_at(parent_fd, temp_name, name, target)
+        temp_name = ""
+    finally:
+        if temp_fd >= 0:
+            try:
+                os.close(temp_fd)
+            except OSError:
+                pass
+        if temp_name:
+            try:
+                os.unlink(temp_name, dir_fd=parent_fd)
+            except OSError:
+                pass
+    try:
+        _fsync_directory_fd(parent_fd)
+    except OSError as exc:
+        raise PublishedDurabilityError(target, exc) from exc
+
+
+def _read_back_file_at(parent_fd: int, name: str, expected: bytes, target: Path,
+                       label: str) -> bytes:
+    data = _read_file_at(parent_fd, name, max(len(expected), MAX_ACTIVE_SELECTION_BYTES))
+    if data != expected:
+        raise PackError(f"{label} read-back mismatch for {target}")
+    return data
+
+
+def validate_active_pack_manifests_at(pyxis_fd: int, *, map_set_id: str, attribution: str,
+                                      pack_ids: tuple[str, ...]) -> None:
+    """Hard preflight: every referenced pack manifest must decode and match policy.
+
+    Mirrors firmware MapTilePack::validateMapSet() for indexless PMAS v3 sets:
+    missing, corrupt, or policy-incompatible inherited packs are preflight
+    failures and never silently dropped.
+    """
+    if not pack_ids:
+        raise PackError("map set composition is empty")
+    policy = STYLE_POLICIES.get(map_set_id)
+    if policy is None:
+        raise PackError(f"unsupported map style: {map_set_id}")
+    if attribution != policy["attribution"]:
+        raise PackError("active set attribution does not match the firmware style policy")
+    try:
+        packs_fd, _ = _open_child_directory(pyxis_fd, "packs", "pyxis-map/packs")
+    except FileNotFoundError as exc:
+        raise PackError(f"missing inherited pack manifest: packs/{pack_ids[0]}/manifest.pmp") from exc
+    try:
+        for pack_id in pack_ids:
+            try:
+                pack_fd = os.open(pack_id, _DIRECTORY_FLAGS, dir_fd=packs_fd)
+            except FileNotFoundError as exc:
+                raise PackError(
+                    f"missing inherited pack manifest: packs/{pack_id}/manifest.pmp") from exc
+            except OSError as exc:
+                raise PackError(f"invalid inherited pack directory: packs/{pack_id}: {exc}") from exc
+            try:
+                manifest_bytes = _read_file_at(pack_fd, "manifest.pmp", MAX_MANIFEST_BYTES)
+            except FileNotFoundError as exc:
+                raise PackError(
+                    f"missing inherited pack manifest: packs/{pack_id}/manifest.pmp") from exc
+            finally:
+                os.close(pack_fd)
+            parsed = parse_manifest(manifest_bytes)
+            if parsed["format_version"] != INDEXLESS_FORMAT_VERSION:
+                raise PackError(
+                    f"pack {pack_id} manifest is not PMPK v3; indexless activation requires v3")
+            if parsed["pack_id"] != pack_id:
+                raise PackError(f"pack {pack_id} manifest declares a different pack ID")
+            if parsed["attribution"] != attribution:
+                raise PackError(f"pack {pack_id} attribution does not match the active set")
+            if parsed["source"] != policy["source"] or parsed["license"] != policy["license"]:
+                raise PackError(
+                    f"pack {pack_id} source/license does not match the {map_set_id} style policy")
+    finally:
+        os.close(packs_fd)
+
+
+def publish_activation(pyxis_fd: int, plan: "ActivationPlan", output_root: Path) -> None:
+    """Validate every candidate pack, then publish style PMAS and target slot with read-back.
+
+    Order: full preflight, style record first, slot record second. The peer
+    active slot is never touched. A failed preflight changes no bytes.
+    """
+    validate_active_pack_manifests_at(
+        pyxis_fd, map_set_id=plan.style_name,
+        attribution=STYLE_POLICIES[plan.style_name]["attribution"], pack_ids=plan.pack_ids)
+    map_sets_fd, _ = _mkdir_open(pyxis_fd, "map-sets")
+    try:
+        style_target = output_root / "pyxis-map" / "map-sets" / f"{plan.style_name}.pmas"
+        _atomic_replace_file_at(map_sets_fd, f"{plan.style_name}.pmas", plan.record, style_target)
+        style_read_back = _read_back_file_at(
+            map_sets_fd, f"{plan.style_name}.pmas", plan.record, style_target, "style record")
+        decoded = decode_active_selection(style_read_back)
+        if (decoded["format_version"] != INDEXLESS_FORMAT_VERSION
+                or decoded["generation"] != plan.generation
+                or decoded["map_set_id"] != plan.style_name
+                or decoded["pack_ids"] != list(plan.pack_ids)):
+            raise PackError(f"style record read-back is not semantically identical: {style_target}")
+        slot_target = output_root / "pyxis-map" / plan.target_slot
+        _atomic_replace_file_at(pyxis_fd, plan.target_slot, plan.record, slot_target)
+        slot_read_back = _read_back_file_at(
+            pyxis_fd, plan.target_slot, plan.record, slot_target, "active slot record")
+        decoded = decode_active_selection(slot_read_back)
+        if (decoded["format_version"] != INDEXLESS_FORMAT_VERSION
+                or decoded["generation"] != plan.generation
+                or decoded["map_set_id"] != plan.style_name
+                or decoded["pack_ids"] != list(plan.pack_ids)):
+            raise PackError(f"active slot read-back is not semantically identical: {slot_target}")
+    finally:
+        os.close(map_sets_fd)
+
+
+def plan_activation(*, slot_0: bytes | None, slot_1: bytes | None,
+                    style_record: bytes | None = None,
+                    new_pack_id: str, style_id: str, attribution: str) -> ActivationPlan:
+    """Derive a candidate PMAS v3 record from a raw snapshot. No filesystem I/O."""
+    if style_id not in STYLE_POLICIES:
+        raise PackError(f"unsupported map style: {style_id}")
+    policy = STYLE_POLICIES[style_id]
+    if attribution != policy["attribution"]:
+        raise PackError("--style requires attribution exactly matching the firmware style policy")
+    if not PACK_ID_RE.fullmatch(new_pack_id):
+        raise PackError("pack ID must match [a-z0-9_-]{1,31}")
+    states = ((0, _slot_state(slot_0)), (1, _slot_state(slot_1)))
+    present: list[tuple[int, dict[str, object]]] = []
+    for index, (state, values) in states:
+        if state == "present" and values is not None:
+            present.append((index, values))
+    if len(present) == 2:
+        first = present[0][1]
+        second = present[1][1]
+        if first["generation"] == second["generation"] and first != second:
+            raise PackError("active slots disagree at equal generation; restore a known-good card state first")
+    style_values: dict[str, object] | None = None
+    if style_record is not None:
+        try:
+            decoded = decode_active_selection(style_record)
+        except PackError:
+            decoded = None
+        if decoded is not None and decoded["map_set_id"] == style_id \
+                and decoded["attribution"] == policy["attribution"]:
+            style_values = decoded
+    max_generation = max(
+        (cast(int, values["generation"]) for _, values in present),
+        default=0,
+    )
+    if style_values is not None:
+        max_generation = max(max_generation, cast(int, style_values["generation"]))
+    generation = max_generation + 1
+    if generation > MAX_GENERATION:
+        raise PackError("active selection generation is exhausted")
+
+    if style_values is not None:
+        composition = list(cast(list[str], style_values["pack_ids"]))
+    else:
+        composition: list[str] = []
+        for _index, values in sorted(present, key=lambda item: cast(int, item[1]["generation"]), reverse=True):
+            if values["map_set_id"] == style_id:
+                composition = list(cast(list[str], values["pack_ids"]))
+                break
+
+    if new_pack_id in composition:
+        composition.remove(new_pack_id)
+    composition.insert(0, new_pack_id)
+    if len(composition) > MAX_ACTIVE_PACKS:
+        raise PackError("active selection exceeds the 8-pack limit")
+    if len(set(composition)) != len(composition):
+        raise PackError("duplicate pack ID in candidate map set")
+
+    missing_or_invalid = [index for index, (state, _values) in states if state != "present"]
+    if missing_or_invalid:
+        target_slot = f"active-pack.{missing_or_invalid[0]}"
+    else:
+        lower = min(present, key=lambda item: (cast(int, item[1]["generation"]), item[0]))
+        target_slot = f"active-pack.{lower[0]}"
+    record = encode_active_map_set(generation=generation, map_set_id=style_id,
+                                   attribution=attribution, pack_ids=composition)
+    return ActivationPlan(style_name=style_id, target_slot=target_slot, generation=generation,
+                          pack_ids=tuple(composition), record=record)
 
 
 def _open_verified_tile(source_fd: int, tile: Tile) -> int:
@@ -762,11 +1216,15 @@ def _validate_pack_fd(pack_fd: int, label: Path, max_bytes: int) -> dict[str, ob
         os.close(tiles_fd)
     if len(tiles) != tile_count:
         raise PackError("emitted tile tree does not match manifest")
-    if parsed["format_version"] == FORMAT_VERSION:
+    format_version = parsed["format_version"]
+    if format_version == FORMAT_VERSION:
         expected_extents = cast(list[ZoomExtent], parsed["extents"])
         extents = calculate_extents(tiles, {item.zoom for item in expected_extents if len(item.intervals) == 2})
         if extents != expected_extents:
             raise PackError("emitted tile tree does not match manifest")
+    elif format_version == INDEXLESS_FORMAT_VERSION:
+        if tiles[0].zoom != parsed["min_zoom"] or tiles[-1].zoom != parsed["max_zoom"]:
+            raise PackError("emitted tile tree does not match indexless manifest")
     else:
         expected_spans = cast(list[RowSpan], parsed["row_spans"])
         if calculate_row_spans(tiles) != expected_spans:
@@ -846,10 +1304,20 @@ def build_map_pack(source_directory: Path, output_root: Path, *, pack_id: str, n
                    attribution: str, source: str, license: str,
                    max_tiles: int = DEFAULT_MAX_TILES, max_bytes: int = DEFAULT_MAX_BYTES,
                    antimeridian_zooms: set[int] | None = None,
-                   sparse: bool = False) -> Path:
+                   sparse: bool = False,
+                   style: str | None = None) -> Path:
     if not sys.platform.startswith("linux"):
         raise PackError("secure importer supports Linux hosts only")
+    if style is not None and style not in STYLE_POLICIES:
+        raise PackError(f"unsupported map style: {style}")
     _validate_metadata(pack_id, name, attribution, source, license)
+    if style is not None:
+        policy = STYLE_POLICIES[style]
+        for field, value in (("attribution", attribution), ("source", source),
+                             ("license", license)):
+            if value != policy[field]:
+                raise PackError(
+                    f"--style {style} requires {field} exactly matching the firmware style policy")
     antimeridian_zooms = set() if antimeridian_zooms is None else set(antimeridian_zooms)
     if any(zoom < 0 or zoom > MAX_ZOOM for zoom in antimeridian_zooms):
         raise PackError("antimeridian zoom is out of range")
@@ -862,18 +1330,24 @@ def build_map_pack(source_directory: Path, output_root: Path, *, pack_id: str, n
     committed = False
     try:
         tiles = _discover_tiles_fd(source_fd, source_directory, max_tiles, max_bytes)
-        try:
-            extents = calculate_extents(tiles, antimeridian_zooms)
-        except PackError as exc:
-            if not sparse or antimeridian_zooms or not str(exc).startswith("incomplete rectangle"):
-                raise
-            row_spans = calculate_row_spans(tiles)
-            manifest = serialize_sparse_manifest(pack_id=pack_id, name=name, attribution=attribution,
-                                                 source=source, license=license,
-                                                 row_spans=row_spans, tile_count=len(tiles))
+        if style is not None:
+            manifest = serialize_indexless_manifest(
+                pack_id=pack_id, name=name, attribution=attribution, source=source,
+                license=license, minimum_zoom=tiles[0].zoom, maximum_zoom=tiles[-1].zoom,
+                tile_count=len(tiles))
         else:
-            manifest = serialize_manifest(pack_id=pack_id, name=name, attribution=attribution, source=source,
-                                          license=license, extents=extents, tile_count=len(tiles))
+            try:
+                extents = calculate_extents(tiles, antimeridian_zooms)
+            except PackError as exc:
+                if not sparse or antimeridian_zooms or not str(exc).startswith("incomplete rectangle"):
+                    raise
+                row_spans = calculate_row_spans(tiles)
+                manifest = serialize_sparse_manifest(pack_id=pack_id, name=name, attribution=attribution,
+                                                     source=source, license=license,
+                                                     row_spans=row_spans, tile_count=len(tiles))
+            else:
+                manifest = serialize_manifest(pack_id=pack_id, name=name, attribution=attribution, source=source,
+                                              license=license, extents=extents, tile_count=len(tiles))
         output_fd = _open_path(output_root, create=True)
         pyxis_fd, pyxis_identity = _mkdir_open(output_fd, "pyxis-map")
         packs_fd, packs_identity = _mkdir_open(pyxis_fd, "packs")
@@ -937,6 +1411,118 @@ def build_map_pack(source_directory: Path, output_root: Path, *, pack_id: str, n
             raise PublishedDurabilityError(target, close_error)
 
 
+def _read_optional_file_at(parent_fd: int, name: str, maximum: int) -> bytes | None:
+    """Read a small record, treating missing or malformed files as absent."""
+    try:
+        return _read_file_at(parent_fd, name, maximum)
+    except (FileNotFoundError, PackError):
+        return None
+
+
+def _read_optional_style_record(pyxis_fd: int, style: str) -> bytes | None:
+    try:
+        map_sets_fd, _ = _open_child_directory(pyxis_fd, "map-sets", "pyxis-map/map-sets")
+    except PackError:
+        return None
+    try:
+        return _read_optional_file_at(map_sets_fd, f"{style}.pmas", MAX_ACTIVE_SELECTION_BYTES)
+    finally:
+        os.close(map_sets_fd)
+
+
+def _preflight_existing_packs(pyxis_fd: int, plan: "ActivationPlan", new_pack_id: str) -> None:
+    """Validate inherited packs before the new pack is published (A10 step 4).
+
+    The 8-pack limit is already enforced by plan_activation; this refuses a
+    missing/corrupt/policy-incompatible inherited pack before any publication.
+    """
+    inherited = tuple(p for p in plan.pack_ids if p != new_pack_id)
+    if not inherited:
+        return
+    validate_active_pack_manifests_at(
+        pyxis_fd, map_set_id=plan.style_name,
+        attribution=STYLE_POLICIES[plan.style_name]["attribution"], pack_ids=inherited)
+
+
+def _ensure_pack_published(arguments, output_root: Path, style: str) -> Path:
+    """Stage and publish the new pack, or resume an exact-match existing pack."""
+    pack_dir = output_root / "pyxis-map" / "packs" / arguments.pack_id
+    if pack_dir.exists():
+        parsed = validate_pack(pack_dir, arguments.max_bytes)
+        for field, expected in (("pack_id", arguments.pack_id),
+                                ("name", arguments.name),
+                                ("attribution", arguments.attribution),
+                                ("source", arguments.source),
+                                ("license", arguments.license)):
+            if parsed[field] != expected:
+                raise PackError(
+                    f"existing pack {arguments.pack_id} {field} does not match the request; "
+                    "refusing to overwrite")
+        return pack_dir
+    return build_map_pack(
+        arguments.xyz_directory, output_root,
+        pack_id=arguments.pack_id, name=arguments.name,
+        attribution=arguments.attribution, source=arguments.source,
+        license=arguments.license, max_tiles=arguments.max_tiles,
+        max_bytes=arguments.max_bytes,
+        antimeridian_zooms=set(arguments.antimeridian_zoom),
+        sparse=arguments.sparse, style=style)
+
+
+def _run_activate(arguments) -> int:
+    """A10 order: lock, plan, preflight, publish, revalidate, write, read-back."""
+    style = arguments.style
+    if style is None:
+        raise PackError("--activate requires --style")
+    output_root = Path(arguments.output_root)
+    root_fd = _open_path(output_root, create=True)
+    try:
+        pyxis_fd, _ = _mkdir_open(root_fd, "pyxis-map")
+    finally:
+        os.close(root_fd)
+    lock_fd = -1
+    try:
+        try:
+            lock_fd = acquire_install_lock(pyxis_fd)
+        except PackError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        slot_0 = _read_optional_file_at(pyxis_fd, "active-pack.0", MAX_ACTIVE_SELECTION_BYTES)
+        slot_1 = _read_optional_file_at(pyxis_fd, "active-pack.1", MAX_ACTIVE_SELECTION_BYTES)
+        style_record = _read_optional_style_record(pyxis_fd, style)
+        plan = plan_activation(
+            slot_0=slot_0, slot_1=slot_1, style_record=style_record,
+            new_pack_id=arguments.pack_id, style_id=style,
+            attribution=arguments.attribution)
+        _preflight_existing_packs(pyxis_fd, plan, arguments.pack_id)
+        _ensure_pack_published(arguments, output_root, style)
+        try:
+            publish_activation(pyxis_fd, plan, output_root)
+        except PublishedDurabilityError as exc:
+            print(f"error: the activation record was committed and is visible, "
+                  f"but its durability is uncertain: {exc}", file=sys.stderr)
+            print("verify the card (rerun the exact same command) instead of "
+                  "assuming activation failed", file=sys.stderr)
+            return 4
+        except (PackError, OSError) as exc:
+            print(f"error: pack publication succeeded but activation failed: {exc}",
+                  file=sys.stderr)
+            print("the published pack was left in place; rerun the exact same command to retry",
+                  file=sys.stderr)
+            return 4
+        return 0
+    except PublishedDurabilityError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 3
+    except (PackError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        if lock_fd >= 0:
+            release_install_lock(lock_fd)
+        os.close(pyxis_fd)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("xyz_directory", type=Path)
@@ -951,11 +1537,23 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--antimeridian-zoom", action="append", type=int, default=[])
     parser.add_argument("--sparse", action="store_true",
                         help="explicitly admit sparse state/polygon coverage and emit PMPK v2")
+    parser.add_argument("--style", choices=sorted(STYLE_POLICIES),
+                        help="firmware map style; metadata must exactly match the style policy and PMPK v3 is emitted")
+    parser.add_argument("--activate", action="store_true",
+                        help="after publishing the pack, atomically activate it into the style PMAS "
+                             "and one redundant active slot (requires --style). Serializes CLI "
+                             "processes via a persistent lock; do not run the browser installer "
+                             "against the same mounted card at the same time")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
+    if arguments.activate and arguments.style is None:
+        print("error: --activate requires --style", file=sys.stderr)
+        return 2
+    if arguments.activate:
+        return _run_activate(arguments)
     try:
         target = build_map_pack(arguments.xyz_directory, arguments.output_root,
                                 pack_id=arguments.pack_id, name=arguments.name,
@@ -963,7 +1561,7 @@ def main(argv: list[str] | None = None) -> int:
                                 license=arguments.license, max_tiles=arguments.max_tiles,
                                 max_bytes=arguments.max_bytes,
                                 antimeridian_zooms=set(arguments.antimeridian_zoom),
-                                sparse=arguments.sparse)
+                                sparse=arguments.sparse, style=arguments.style)
     except PublishedDurabilityError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 3
