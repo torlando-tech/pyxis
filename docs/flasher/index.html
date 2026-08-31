@@ -577,8 +577,20 @@
                         license: style.license,
                     },
                     onProgress(progress) {
-                        if (progress.phase === 'write' && (progress.completed % 25 === 0 || progress.completed === progress.total)) {
-                            setMapStatus(`Writing tiles: ${progress.completed}/${progress.total}`);
+                        if (progress.phase === 'validate') {
+                            if (progress.completed === 1 || progress.completed % 200 === 0 || progress.completed === progress.total) {
+                                setMapStatus(`Validating ZIP: ${progress.completed}/${progress.total} entries`);
+                            }
+                        } else if (progress.phase === 'checking') {
+                            setMapStatus('Checking existing map packs on the card…');
+                        } else if (progress.phase === 'write') {
+                            if (progress.completed === 1 || progress.completed % 25 === 0 || progress.completed === progress.total) {
+                                setMapStatus(`Writing tiles: ${progress.completed}/${progress.total}`);
+                            }
+                        } else if (progress.phase === 'manifest') {
+                            setMapStatus('Publishing pack manifest…');
+                        } else if (progress.phase === 'activating') {
+                            setMapStatus('Enabling map set (writing and verifying active slots)…');
                         }
                     },
                 });

@@ -1455,6 +1455,36 @@ test('activation publishes the style record before the active slot', async () =>
   assert.ok(styleWrite < slotWrite, 'style PMAS must be written before the active slot');
 });
 
+test('installation reports progress for every user-visible phase in order', async () => {
+  // The flasher renders status from onProgress events; a phase that never
+  // reports (e.g. the full-ZIP validate sweep before the first write) leaves
+  // the UI looking frozen during long installs.
+  const root = new MemoryDirectoryHandle();
+  const events = [];
+  await installMuiZip({
+    archive: storedZip([['maps/osm-bright/2/1/1.png', PNG]]),
+    rootDirectory: root,
+    metadata: {...metadata, packId: 'pack-progress'},
+    onProgress(progress) { events.push(progress); },
+  });
+  const phases = events.map(event => event.phase);
+  for (const phase of ['validate', 'checking', 'write', 'manifest', 'activating']) {
+    assert.ok(phases.includes(phase), `missing progress phase: ${phase}`);
+  }
+  const lastValidate = phases.lastIndexOf('validate');
+  const firstWrite = phases.indexOf('write');
+  assert.ok(lastValidate < firstWrite, 'validate events must precede tile writes');
+  assert.ok(phases.indexOf('checking') < firstWrite, 'inherited-pack check must precede tile writes');
+  assert.ok(firstWrite < phases.indexOf('manifest'), 'manifest publish must follow tile writes');
+  assert.ok(phases.indexOf('manifest') < phases.indexOf('activating'), 'activation must follow the manifest publish');
+  const writeEvents = events.filter(event => event.phase === 'write');
+  assert.deepEqual(
+    writeEvents.map(event => [event.completed, event.total]),
+    [[1, 1]],
+    'write progress must report completed/total per tile',
+  );
+});
+
 test('a failed style write leaves every active slot untouched and is retriable', async () => {
   const style = getMuiStyleProfile('osm-bright');
   const root = new MemoryDirectoryHandle();

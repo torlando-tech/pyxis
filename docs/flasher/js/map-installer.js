@@ -805,7 +805,8 @@ export function planActivation({slot0, slot1, styleRecord, newPackId, styleId, a
 // pack itself is not (yet) on the card, so it is excluded here and validated
 // again after publication. Mirrors the CLI's A10 preflight step. Reads only:
 // no directory is created on the card by this path.
-async function preflightInheritedPacks(pyxis,metadata){
+async function preflightInheritedPacks(pyxis,metadata,onProgress){
+  onProgress({phase:'checking'});
   const styleName=`${metadata.mapSetId}.pmas`;
   const [slot0,slot1,styleRecord]=await Promise.all([
     readRawSelection(pyxis,'active-pack.0'),
@@ -823,7 +824,8 @@ async function preflightInheritedPacks(pyxis,metadata){
   return plan;
 }
 
-async function activateMapSet(pyxis,metadata){
+async function activateMapSet(pyxis,metadata,onProgress){
+  onProgress({phase:'activating'});
   // Capture the raw slots and style record exactly once, then derive the
   // plan from that same snapshot. No read/decode followed by a separate
   // snapshot of the same record.
@@ -885,21 +887,21 @@ async function installMuiZipLocked({archive,rootDirectory,metadata,onProgress=()
   // Refuse a broken inherited composition before any pack publication:
   // a failed preflight creates no pack directory and changes no style or
   // active-slot bytes.
-  await preflightInheritedPacks(pyxis,metadata);
+  await preflightInheritedPacks(pyxis,metadata,onProgress);
   const packs=await getDirectory(pyxis,'packs');
   let existing=null;try{existing=await packs.getDirectoryHandle(metadata.packId);}catch(error){if(error?.name!=='NotFoundError')throw error;}
   if(existing){
     let empty=true;for await(const _entry of existing.entries()){empty=false;break;}
-    if(!empty){await verifyExistingPack(existing,archive,report,manifest);try{const active=await activateMapSet(pyxis,metadata);return{...report,manifestBytes:manifest.length,resumed:true,...active};}catch(error){throw new Error(`Map pack is installed and verified, but activation failed: ${error.message}`);}}
+    if(!empty){await verifyExistingPack(existing,archive,report,manifest);try{const active=await activateMapSet(pyxis,metadata,onProgress);return{...report,manifestBytes:manifest.length,resumed:true,...active};}catch(error){throw new Error(`Map pack is installed and verified, but activation failed: ${error.message}`);}}
   }
   const pack=existing||await getDirectory(packs,metadata.packId);await verifyNamedDirectory(packs,metadata.packId,pack,[]);let published=false;const receipt=new Uint8Array(16);crypto.getRandomValues(receipt);const receiptName=`.pyxis-install-owner-${[...receipt].map(byte=>byte.toString(16).padStart(2,'0')).join('')}`;
   try{
     await writeVerified(pack,receiptName,receipt);await verifyNamedDirectory(packs,metadata.packId,pack,[receiptName]);
     const tiles=await getDirectory(pack,'tiles');
     for(let index=0;index<report.entries.length;index++){const entry=report.entries[index];const zoom=await getDirectory(tiles,String(entry.zoom));const x=await getDirectory(zoom,String(entry.x));const bytes=await blobBytes(archive,entry.dataOffset,entry.dataOffset+entry.size);if(crc32(bytes)!==entry.checksum)fail(`ZIP changed during installation: ${entry.name}`);await validatePng(bytes,entry.name);await writeVerified(x,`${entry.y}.png`,bytes);onProgress({phase:'write',completed:index+1,total:report.tileCount});}
-    await writeVerified(pack,'manifest.pmp',manifest);parseSparseManifest(await fileBytes(pack,'manifest.pmp'));published=true;
+    await writeVerified(pack,'manifest.pmp',manifest);onProgress({phase:'manifest'});parseSparseManifest(await fileBytes(pack,'manifest.pmp'));published=true;
     try{await pack.removeEntry(receiptName);}catch(error){throw new Error(`Map pack is installed and verified, but its ownership receipt could not be removed: ${error.message}`);}
-    try{const active=await activateMapSet(pyxis,metadata);return{...report,manifestBytes:manifest.length,resumed:false,...active};}
+    try{const active=await activateMapSet(pyxis,metadata,onProgress);return{...report,manifestBytes:manifest.length,resumed:false,...active};}
     catch(error){throw new Error(`Map pack is installed and verified, but activation failed; retry with the same ZIP and pack ID: ${error.message}`);}
   }catch(error){
     if(!published&&!(await removeOwnedPack(packs,metadata.packId,pack,receiptName,receipt,report.entries))){
