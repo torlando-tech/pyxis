@@ -39,7 +39,9 @@ async function withInstallLock(rootDirectory, operation) {
     if (typeof rootDirectory?.name !== 'string' || rootDirectory.name.length === 0) {
       fail('Selected SD root has no stable directory name');
     }
-    // Web Locks are shared by every same-origin installer tab. Distinct
+    // Web Locks serialize only tabs that share this flasher origin. They do
+    // not coordinate with the CLI, another origin, or another browser
+    // profile; do not extend this comment to claim otherwise. Distinct
     // FileSystemDirectoryHandle objects for the same root have the same name;
     // equal names on unrelated roots merely serialize harmlessly.
     return lockManager.request(

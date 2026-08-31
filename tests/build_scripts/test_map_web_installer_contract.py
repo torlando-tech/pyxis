@@ -91,3 +91,17 @@ def test_map_installer_uses_no_invented_filesystem_api_options() -> None:
     # request options object; the test source may only pass it as an ignored
     # unknown option (B1 harness test), never as an exception trigger.
     assert 'exclusive' not in installer.replace("{mode:'exclusive'}", "")
+    # Web Locks only serialize same-origin tabs. The deterministic lock name,
+    # the fail-closed message for browsers without the primitives, and the
+    # scope-limiting comment must all survive refactors, and no comment or
+    # error text may claim coordination with the CLI, other origins, or
+    # other browser profiles.
+    assert "pyxis-map-installer:" in installer
+    assert "cross-tab locking required for safe map installation" in installer
+    lower = " ".join(installer.lower().replace("//", " ").split())
+    assert "not coordinate with the cli" in lower
+    assert "another origin" in lower
+    assert "another browser profile" in lower
+    for overclaim in ("cross-origin", "other profile", "all producers",
+                      "both producers", "coordinated by the cli"):
+        assert overclaim not in lower

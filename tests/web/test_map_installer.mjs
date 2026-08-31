@@ -1222,6 +1222,106 @@ test('distinct handles for one selected root are serialized across tabs', async 
   assert.deepEqual(new Set(newest.packs.map(pack => pack.packId)), new Set(['tab-one', 'tab-two']));
 });
 
+function installSequence(root) {
+  const archive = storedZip([['2/1/1.png', PNG]]);
+  const events = [];
+  const install = (label) => installMuiZip({
+    archive,
+    rootDirectory: new DirectoryHandleAlias(root),
+    metadata: {...metadata, packId: label, name: label},
+    onProgress(progress) {
+      if (progress.phase === 'write') events.push(`${label}:started`);
+    },
+  }).then(() => { events.push(`${label}:finished`); });
+  return {events, install};
+}
+
+test('two same-origin installs run strictly one at a time under Web Locks', async () => {
+  const root = new MemoryDirectoryHandle('sd-card');
+  const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: {locks: new MemoryLockManager()},
+  });
+  const {events, install} = installSequence(root);
+  try {
+    await Promise.all([
+      install('alpha'),
+      install('beta'),
+    ]);
+  } finally {
+    if (previousNavigator) Object.defineProperty(globalThis, 'navigator', previousNavigator);
+    else delete globalThis.navigator;
+  }
+  const startPositions = ['alpha:started', 'beta:started'].map(label => events.indexOf(label));
+  assert.ok(startPositions.every(index => index !== -1));
+  const firstToStart = startPositions[0] < startPositions[1] ? 'alpha' : 'beta';
+  const secondToStart = firstToStart === 'alpha' ? 'beta' : 'alpha';
+  assert.ok(
+    events.indexOf(`${firstToStart}:finished`) < startPositions[1],
+    `the first install must finish before the second starts: ${events.join(' ')}`,
+  );
+  assert.ok(startPositions[1] < events.indexOf(`${secondToStart}:finished`));
+});
+
+test('a Web Locks rejection propagates without touching the selected root', async () => {
+  const root = new MemoryDirectoryHandle('sd-card');
+  const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: {
+      locks: {
+        request(name, options, operation) {
+          assert.equal(name, 'pyxis-map-installer:sd-card');
+          assert.deepEqual(options, {mode: 'exclusive'});
+          throw new Error('lock refused by another tab');
+        },
+      },
+    },
+  });
+  try {
+    await assert.rejects(
+      installMuiZip({
+        archive: storedZip([['2/1/1.png', PNG]]),
+        rootDirectory: root,
+        metadata: {...metadata, packId: 'lock-rejected', name: 'Lock Rejected'},
+      }),
+      /lock refused by another tab/i,
+    );
+  } finally {
+    if (previousNavigator) Object.defineProperty(globalThis, 'navigator', previousNavigator);
+    else delete globalThis.navigator;
+  }
+  assert.equal(root.children.has('pyxis-map'), false, 'no SD mutation may precede lock acquisition');
+});
+
+test('a supported browser without Web Locks fails closed before any mutation', async () => {
+  const root = new MemoryDirectoryHandle('sd-card');
+  const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  Object.defineProperty(globalThis, 'navigator', {configurable: true, value: {}});
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: {showDirectoryPicker: () => {}},
+  });
+  try {
+    await assert.rejects(
+      installMuiZip({
+        archive: storedZip([['2/1/1.png', PNG]]),
+        rootDirectory: root,
+        metadata,
+      }),
+      /cross-tab locking required for safe map installation/i,
+    );
+  } finally {
+    if (previousNavigator) Object.defineProperty(globalThis, 'navigator', previousNavigator);
+    else delete globalThis.navigator;
+    if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow);
+    else delete globalThis.window;
+  }
+  assert.equal(root.children.has('pyxis-map'), false, 'an unlocked browser must not install maps');
+});
+
 test('an empty directory created during destination creation is never removed', async () => {
   const archive = storedZip([['2/1/1.png', PNG]]);
   const root = new MemoryDirectoryHandle();
