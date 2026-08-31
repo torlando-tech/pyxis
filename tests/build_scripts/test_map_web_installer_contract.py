@@ -27,7 +27,7 @@ def test_map_installer_ui_is_local_file_to_sd_and_offline_only() -> None:
     assert "showDirectoryPicker" in source
     assert "navigator.locks?.request" in source
     assert "cross-tab locking required for safe map installation" in source
-    assert "./js/map-installer.js?v=map-style-picker-2" in source
+    assert "./js/map-installer.js?v=map-pack-v3" in source
     assert "Oxed's Map Tile Downloader" in source
     assert "OpenStreetMap contributors" in source
     assert "suggestMapIdentity" in source

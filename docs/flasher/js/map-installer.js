@@ -685,6 +685,7 @@ async function readManifestAt(parent, packId) {
 }
 
 export async function validateCandidatePacks(pyxis, mapSetId, attribution, packIds) {
+  // Exported for the contract suite; also the runtime API for the install flow.
   if (!Array.isArray(packIds) || packIds.length === 0) fail('map set composition is empty');
   const profile = getMuiStyleProfile(mapSetId);
   if (attribution !== profile.attribution) fail('active set attribution does not match the firmware style policy');
@@ -731,6 +732,7 @@ function slotFields(values) {
 }
 
 export function planActivation({slot0, slot1, styleRecord, newPackId, styleId, attribution}) {
+  // Exported for the contract suite; pure planning core of the install flow.
   const profile = getMuiStyleProfile(styleId);
   if (attribution !== profile.attribution) {
     fail('attribution must exactly match the firmware style policy');
@@ -738,14 +740,15 @@ export function planActivation({slot0, slot1, styleRecord, newPackId, styleId, a
   if (!/^[a-z0-9_-]{1,31}$/.test(newPackId)) fail('Pack ID must match [a-z0-9_-]{1,31}');
   const states = [slotState(slot0), slotState(slot1)];
   const present = states
-    .map((state, index) => (state.state === 'present' ? {index, ...slotFields(state.values)} : null))
+    .map((state, index) => (state.state === 'present' ? {index, values: state.values, ...slotFields(state.values)} : null))
     .filter(Boolean);
   if (present.length === 2) {
     const [first, second] = present;
     const sameGeneration = first.generation === second.generation;
-    const unequal = first.mapSetId !== second.mapSetId ||
-      first.generation !== second.generation ||
-      JSON.stringify(first.packIds) !== JSON.stringify(second.packIds);
+    // Mirror the CLI exactly: compare the FULL decoded records (version,
+    // attribution, pack list, spans) so a same-generation v1/v3 pair with
+    // colliding pack IDs is flagged, not just the normalized fields.
+    const unequal = JSON.stringify(first.values) !== JSON.stringify(second.values);
     if (sameGeneration && unequal) {
       fail('active slots disagree at equal generation; restore a known-good card state first');
     }

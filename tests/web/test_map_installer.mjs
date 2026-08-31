@@ -647,6 +647,24 @@ test('browser activation planning mirrors the CLI plan contract', () => {
   assert.throws(() => planActivation({slot0: slot(4, ['pack-a']), slot1: slot(4, ['pack-b']),
     newPackId: 'pack-c', styleId: 'osm-bright', attribution}), /equal generation/i);
 
+  // A v1 slot and a v3 slot at the same generation with a colliding pack ID
+  // are also unequal records and must be rejected: the CLI compares the full
+  // decoded record, and the browser must mirror that, not just normalized
+  // fields (which a v1/v3 pair would share after normalization).
+  const legacyBody = new Uint8Array(44);
+  const legacyView = new DataView(legacyBody.buffer);
+  legacyView.setUint32(0, 0x53414d50, true);
+  legacyBody[4] = 1;
+  legacyView.setUint16(6, 48, true);
+  legacyView.setUint32(8, 4, true);
+  legacyBody[12] = 6;
+  legacyBody.set(new TextEncoder().encode('pack-x'), 13);
+  const legacyRecord = new Uint8Array(legacyBody.length + 4);
+  legacyRecord.set(legacyBody);
+  new DataView(legacyRecord.buffer).setUint32(44, crc32(legacyBody), true);
+  assert.throws(() => planActivation({slot0: legacyRecord, slot1: slot(4, ['pack-x']),
+    newPackId: 'pack-c', styleId: 'osm-bright', attribution}), /equal generation/i);
+
   // The 8-pack limit is enforced before publication; re-installing an
   // existing pack within the limit is allowed.
   assert.throws(() => planActivation({

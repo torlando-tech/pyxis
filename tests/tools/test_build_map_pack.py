@@ -634,6 +634,26 @@ def test_plan_equal_generation_unequal_records_rejected(tool) -> None:
                              attribution=tool.STYLE_POLICIES["osm-bright"]["attribution"])
 
 
+def test_plan_v1_v3_equal_generation_colliding_pack_rejected(tool) -> None:
+    # A legacy v1 slot and a v3 slot at the same generation with a colliding
+    # pack ID are unequal full records and must be rejected. The v1 record
+    # decodes to map_set_id == pack_id, so the normalized fields would agree;
+    # only a full-record comparison (version/attribution/row_spans) catches it.
+    body = bytearray(44)
+    body[0:4] = b"PMAS"
+    body[4] = 1
+    body[6:8] = struct.pack("<H", 48)
+    body[8:12] = struct.pack("<I", 4)
+    body[12] = len("pack-x")
+    body[13:13 + len("pack-x")] = b"pack-x"
+    record = bytes(body) + struct.pack("<I", zlib.crc32(bytes(body)))
+    slot_1 = _slot(tool, 4, ["pack-x"])
+    with pytest.raises(tool.PackError, match="disagree at equal generation"):
+        tool.plan_activation(slot_0=record, slot_1=slot_1, new_pack_id="pack-c",
+                             style_id="osm-bright",
+                             attribution=tool.STYLE_POLICIES["osm-bright"]["attribution"])
+
+
 def test_plan_existing_same_style_pack_moves_to_front_without_duplication(tool) -> None:
     slot_0 = _slot(tool, 2, ["pack-a", "pack-b"])
     plan = tool.plan_activation(slot_0=slot_0, slot_1=None, new_pack_id="pack-b",

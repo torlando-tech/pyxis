@@ -185,7 +185,14 @@ def main() -> None:
         "reload": True,
         "exclusive_option_ignored": True,
     }
-    record = {key: bool(result_reload.get(key)) for key in expected}
+    record = {
+        # install/readback/exclusive come from the install phase (observed
+        # there); only reload/tokenOk/composition come from the reload phase.
+        "install": bool(result_install.get("install")),
+        "readback": bool(result_install.get("readback")),
+        "reload": bool(result_reload.get("reload")),
+        "exclusive_option_ignored": bool(result_install.get("exclusive_option_ignored")),
+    }
     if record != expected or result_reload.get("tokenOk") is not True \
             or not result_reload.get("composition", {}).get("ok"):
         json.dump({"ok": False, "result": result_reload}, sys.stdout)

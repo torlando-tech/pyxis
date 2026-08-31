@@ -25,7 +25,10 @@
     } from '../../docs/flasher/js/map-installer.js';
 
     const statusEl = document.getElementById('status');
-    function setStage(name) { statusEl.textContent = `stage: ${name}`; }
+    function setStage(name) {
+      window.__smokeStage = name;
+      statusEl.textContent = `stage: ${name}`;
+    }
 
     const PNG_BASE64 =
       'iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAIAAADTED8xAAAA1UlEQVR4nO3BMQEAAADCoPVP7WULoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAGwEtAAHMpTgHAAAAAElFTkSuQmCC';
@@ -135,7 +138,7 @@
       // travel in the query string (with a nonce defeating the bfcache) so
       // each phase is an independent real load.
       const params = new URLSearchParams(location.search);
-      const runId = params.get('run') || window.__smokeRunId;
+      const runId = params.get('run');
       const metadata = await (await fetch('./smoke-metadata.json')).json();
       const isReload = params.get('phase') === 'reload';
       const root = await navigator.storage.getDirectory();
@@ -185,10 +188,10 @@
         const composition = await verifyComposition(
           await smoke.getDirectoryHandle('pyxis-map'), metadata, 1);
         window.__smokeResult = {
-          install: true,
-          readback: true,
+          // The install/readback/exclusive booleans come from the install
+          // phase (driver merges them in); this phase only reports what it
+          // re-observed after the page reload.
           reload: tokenOk && composition.ok,
-          exclusive_option_ignored: true,
           tokenOk,
           composition,
         };
