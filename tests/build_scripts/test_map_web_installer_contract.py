@@ -61,6 +61,44 @@ def test_map_installer_explains_the_complete_sd_card_workflow() -> None:
     assert positions == sorted(positions)
 
 
+def test_map_installer_documents_the_single_writer_contract() -> None:
+    """B9: both the flasher UI and the docs must state the supported
+    concurrency model — no CLI+browser at once, close other flasher tabs,
+    wait for verified completion, safe eject, exact retry — and must never
+    tell users to clean up marker files."""
+    flasher = FLASHER.read_text(encoding="utf-8")
+    docs = (ROOT / "docs/offline-map-packs.md").read_text(encoding="utf-8")
+    assert 'class="warning map-safety-contract"' in flasher
+    # Normalize whitespace so phrase checks survive HTML line-wrapping.
+    flasher_norm = " ".join(flasher.split())
+    contract_phrases = (
+        "close all other Pyxis flasher tabs",
+        "command-line installer",
+        "mounted card at the same time",
+        "completion message",
+        "safely eject",
+        "retry with the exact same ZIP",
+    )
+    for phrase in contract_phrases:
+        assert phrase in flasher_norm, f"flasher missing: {phrase!r}"
+    # The docs carry the same contract, plus the lock-scope limitation.
+    docs_norm = " ".join(docs.split())
+    assert "do not run the CLI and the browser installer" in docs_norm
+    assert "Close all other flasher tabs" in docs_norm
+    assert "Wait for the verified completion message" in docs_norm
+    assert "same browser profile" in docs_norm
+    # No marker-file cleanup instructions anywhere in the map installer docs.
+    lower_docs = docs_norm.lower()
+    for forbidden in (
+        "delete the marker",
+        "remove the marker",
+        "clean up the marker",
+        "delete the active-pack",
+        "remove the active-pack",
+    ):
+        assert forbidden not in lower_docs
+
+
 def test_map_installer_has_no_tile_network_fetch_path() -> None:
     source = INSTALLER.read_text(encoding="utf-8").lower()
     for forbidden in ("fetch(", "xmlhttprequest", "websocket", "http://", "https://"):

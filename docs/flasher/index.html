@@ -340,6 +340,18 @@
                 <li>Click <strong>Install and Enable</strong>, then choose the mounted SD-card root.</li>
                 <li>Safely eject the SD card, return it to the T-Deck, power it on, and open Maps.</li>
             </ol>
+            <div class="warning map-safety-contract">
+                <strong>Before installing:</strong> close all other Pyxis flasher tabs or
+                windows, and do not run the command-line installer against this same
+                mounted card at the same time. The cross-tab lock coordinates only
+                tabs of this flasher in the same browser profile; it cannot see the
+                CLI or other browsers.
+                <br><br>
+                <strong>After installing:</strong> wait for the verified completion
+                message, then safely eject the card. If activation fails after a pack
+                was published, retry with the exact same ZIP and the same name and
+                pack ID.
+            </div>
             <p class="map-note">Existing unrelated SD-card files are preserved. Map tiles are validated locally and are never uploaded.</p>
             <div class="map-installer-grid">
                 <div class="map-field">
