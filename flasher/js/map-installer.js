@@ -39,7 +39,9 @@ async function withInstallLock(rootDirectory, operation) {
     if (typeof rootDirectory?.name !== 'string' || rootDirectory.name.length === 0) {
       fail('Selected SD root has no stable directory name');
     }
-    // Web Locks are shared by every same-origin installer tab. Distinct
+    // Web Locks serialize only tabs that share this flasher origin. They do
+    // not coordinate with the CLI, another origin, or another browser
+    // profile; do not extend this comment to claim otherwise. Distinct
     // FileSystemDirectoryHandle objects for the same root have the same name;
     // equal names on unrelated roots merely serialize harmlessly.
     return lockManager.request(
@@ -638,8 +640,7 @@ async function verifyNamedDirectory(parent,name,expected,allowedEntries){
   if(entries.length!==allowed.length||entries.some((entry,index)=>entry!==allowed[index]))fail(`SD destination was created concurrently or is not empty: ${name}`);
 }
 async function writeVerified(parent,name,bytes){ const handle=await parent.getFileHandle(name,{create:true}); const writable=await handle.createWritable({keepExistingData:false}); try{await writable.write(bytes);await writable.close();}catch(error){try{await writable.abort();}catch{} throw error;} const actual=new Uint8Array(await (await handle.getFile()).arrayBuffer()); if(actual.length!==bytes.length) fail(`SD read-back mismatch: ${name}`); for(let index=0;index<bytes.length;index++) if(actual[index]!==bytes[index]) fail(`SD read-back mismatch: ${name}`); return handle; }
-async function readSelection(pyxis,name){ let handle; try{handle=await pyxis.getFileHandle(name);}catch(error){if(error?.name==='NotFoundError')return null;throw error;} const bytes=new Uint8Array(await(await handle.getFile()).arrayBuffer()); try{return decodeActiveSelection(bytes);}catch{return null;} }
-async function readStyleSelection(mapSets,name){let handle;try{handle=await mapSets.getFileHandle(name);}catch(error){if(error?.name==='NotFoundError')return null;throw error;}const bytes=new Uint8Array(await(await handle.getFile()).arrayBuffer());try{return decodeActiveSelection(bytes);}catch{fail(`Installed style record is invalid: ${name}`);}}
+async function readRawSelection(parent,name){ let handle; try{handle=await parent.getFileHandle(name);}catch(error){if(error?.name==='NotFoundError')return null;throw error;} return new Uint8Array(await(await handle.getFile()).arrayBuffer()); }
 async function fileBytes(parent,name){const handle=await parent.getFileHandle(name);return new Uint8Array(await(await handle.getFile()).arrayBuffer());}
 function equalBytes(left,right){if(left.length!==right.length)return false;for(let index=0;index<left.length;index++)if(left[index]!==right[index])return false;return true;}
 async function removeOwnedPack(packs,packId,pack,receiptName,receipt,entries){
@@ -658,33 +659,203 @@ async function removeOwnedPack(packs,packId,pack,receiptName,receipt,entries){
   }catch{return false;}
 }
 
-async function prepareActiveMapSet(pyxis,metadata){
-  const slots=await Promise.all([readSelection(pyxis,'active-pack.0'),readSelection(pyxis,'active-pack.1')]);
-  if(slots[0]&&slots[1]&&slots[0].generation===slots[1].generation&&JSON.stringify(slots[0])!==JSON.stringify(slots[1]))fail('Conflicting active map-set records');
-  const valid=slots.filter(Boolean);const highest=Math.max(0,...valid.map(slot=>slot.generation));if(highest===0xffffffff)fail('Active selection generation is exhausted');
-  const current=valid.sort((left,right)=>right.generation-left.generation)[0];
-  const mapSets=await getDirectory(pyxis,'map-sets');const styleName=`${metadata.mapSetId}.pmas`;
-  const installed=await readStyleSelection(mapSets,styleName);
-  if(installed&&(![2,3].includes(installed.version)||installed.mapSetId!==metadata.mapSetId||installed.attribution!==metadata.attribution))fail('Installed style record does not match selected map set');
-  const composition=installed||([2,3].includes(current?.version)&&current.mapSetId===metadata.mapSetId?current:null);
-  let packs=[];
-  if(composition){
-    if(composition.attribution!==metadata.attribution)fail('Installed map set attribution does not match');
-    packs=composition.packs.filter(pack=>pack.packId!==metadata.packId);
+const MAX_ACTIVE_PACKS = 8;
+
+// Bounded manifest size, matching the CLI's MAX_MANIFEST_BYTES.
+const MAX_MANIFEST_BYTES = 7100;
+
+async function readManifestAt(parent, packId) {
+  let pack;
+  try {
+    pack = await parent.getDirectoryHandle(packId);
+  } catch (error) {
+    if (error?.name === 'NotFoundError') throw new MapInstallerError(`missing inherited pack manifest: packs/${packId}/manifest.pmp`);
+    throw new MapInstallerError(`invalid inherited pack directory: packs/${packId}: ${error.message}`);
   }
-  packs.unshift({packId:metadata.packId});
-  const target=!slots[0]?'active-pack.0':!slots[1]?'active-pack.1':slots[0].generation<=slots[1].generation?'active-pack.0':'active-pack.1';
-  const record=encodeActiveMapSet({generation:highest+1,mapSetId:metadata.mapSetId,attribution:metadata.attribution,packs});
-  return {target,record,packs,mapSets,styleName};
+  let handle;
+  try {
+    handle = await pack.getFileHandle('manifest.pmp');
+  } catch (error) {
+    if (error?.name === 'NotFoundError') throw new MapInstallerError(`missing inherited pack manifest: packs/${packId}/manifest.pmp`);
+    throw error;
+  }
+  const file = await handle.getFile();
+  if (file.size > MAX_MANIFEST_BYTES) fail(`inherited pack manifest exceeds the bounded limit: ${packId}`);
+  return new Uint8Array(await file.arrayBuffer());
 }
 
-async function activateMapSet(pyxis,metadata){
-  const {target,record,mapSets,styleName}=await prepareActiveMapSet(pyxis,metadata);
-  await writeVerified(mapSets,styleName,record);const installed=decodeActiveSelection(await fileBytes(mapSets,styleName));
-  if(installed.version!==3||installed.mapSetId!==metadata.mapSetId||installed.packs[0].packId!==metadata.packId)fail('Style map-set verification failed');
-  await writeVerified(pyxis,target,record);const selected=decodeActiveSelection(await fileBytes(pyxis,target));
-  if(selected.version!==3||selected.mapSetId!==metadata.mapSetId||selected.packs[0].packId!==metadata.packId)fail('Active map-set verification failed');
-  return {selectionFile:target,styleFile:styleName,enabledPacks:selected.packs.map(pack=>pack.packId)};
+export async function validateCandidatePacks(pyxis, mapSetId, attribution, packIds) {
+  // Exported for the contract suite; also the runtime API for the install flow.
+  if (!Array.isArray(packIds) || packIds.length === 0) fail('map set composition is empty');
+  const profile = getMuiStyleProfile(mapSetId);
+  if (attribution !== profile.attribution) fail('active set attribution does not match the firmware style policy');
+  let packs;
+  try {
+    packs = await pyxis.getDirectoryHandle('packs');
+  } catch (error) {
+    if (error?.name === 'NotFoundError') throw new MapInstallerError(`missing inherited pack manifest: packs/${packIds[0]}/manifest.pmp`);
+    throw error;
+  }
+  for (const packId of packIds) {
+    const manifest = await readManifestAt(packs, packId);
+    const parsed = parseSparseManifest(manifest);
+    if (parsed.rowSpans.length !== 0 || parsed.tileCount === undefined) {
+      // v2 manifests carry row spans; v3 is indexless (rowSpans empty).
+      fail(`pack ${packId} manifest is not PMPK v3; indexless activation requires v3`);
+    }
+    if (parsed.packId !== packId) fail(`pack ${packId} manifest declares a different pack ID`);
+    if (parsed.attribution !== attribution) fail(`pack ${packId} attribution does not match the active set`);
+    if (parsed.source !== profile.source || parsed.license !== profile.license) {
+      fail(`pack ${packId} source/license does not match the ${mapSetId} style policy`);
+    }
+  }
+}
+
+function slotState(raw) {
+  if (raw === null || raw === undefined) return {state: 'missing', values: null};
+  try {
+    return {state: 'present', values: decodeActiveSelection(raw)};
+  } catch {
+    return {state: 'invalid', values: null};
+  }
+}
+
+// Normalize a decoded slot record to the fields planning needs. Legacy v1
+// records carry a single string that is both the map-set ID and the one pack
+// ID, matching the CLI's normalized v1 decode.
+function slotFields(values) {
+  return {
+    generation: values.generation,
+    mapSetId: values.mapSetId ?? values.packId,
+    packIds: values.packs ? values.packs.map(pack => pack.packId) : [values.packId],
+  };
+}
+
+export function planActivation({slot0, slot1, styleRecord, newPackId, styleId, attribution}) {
+  // Exported for the contract suite; pure planning core of the install flow.
+  const profile = getMuiStyleProfile(styleId);
+  if (attribution !== profile.attribution) {
+    fail('attribution must exactly match the firmware style policy');
+  }
+  if (!/^[a-z0-9_-]{1,31}$/.test(newPackId)) fail('Pack ID must match [a-z0-9_-]{1,31}');
+  const states = [slotState(slot0), slotState(slot1)];
+  const present = states
+    .map((state, index) => (state.state === 'present' ? {index, values: state.values, ...slotFields(state.values)} : null))
+    .filter(Boolean);
+  if (present.length === 2) {
+    const [first, second] = present;
+    const sameGeneration = first.generation === second.generation;
+    // Mirror the CLI exactly: compare the FULL decoded records (version,
+    // attribution, pack list, spans) so a same-generation v1/v3 pair with
+    // colliding pack IDs is flagged, not just the normalized fields.
+    const unequal = JSON.stringify(first.values) !== JSON.stringify(second.values);
+    if (sameGeneration && unequal) {
+      fail('active slots disagree at equal generation; restore a known-good card state first');
+    }
+  }
+  let styleValues = null;
+  if (styleRecord !== null && styleRecord !== undefined) {
+    try {
+      const decoded = decodeActiveSelection(styleRecord);
+      const fields = slotFields(decoded);
+      if (decoded.version !== 1 && fields.mapSetId === styleId &&
+          decoded.attribution === profile.attribution) {
+        styleValues = fields;
+      }
+    } catch {
+      // A corrupt style snapshot is ignored, exactly like the CLI.
+    }
+  }
+  let maxGeneration = present.reduce((maximum, slot) => Math.max(maximum, slot.generation), 0);
+  if (styleValues) maxGeneration = Math.max(maxGeneration, styleValues.generation);
+  const generation = maxGeneration + 1;
+  if (generation > 0xffffffff) fail('active selection generation is exhausted');
+  let composition;
+  if (styleValues) {
+    composition = [...styleValues.packIds];
+  } else {
+    composition = [];
+    for (const slot of [...present].sort((left, right) => right.generation - left.generation)) {
+      if (slot.mapSetId === styleId) { composition = [...slot.packIds]; break; }
+    }
+  }
+  if (composition.includes(newPackId)) composition.splice(composition.indexOf(newPackId), 1);
+  composition.unshift(newPackId);
+  if (composition.length > MAX_ACTIVE_PACKS) fail('active selection exceeds the 8-pack limit');
+  if (new Set(composition).size !== composition.length) fail('duplicate pack ID in candidate map set');
+  let targetSlot;
+  const missing = states.findIndex(state => state.state !== 'present');
+  if (missing !== -1) {
+    targetSlot = `active-pack.${missing}`;
+  } else {
+    const lower = [...present].sort((left, right) => left.generation - right.generation || left.index - right.index)[0];
+    targetSlot = `active-pack.${lower.index}`;
+  }
+  const record = encodeActiveMapSet({
+    generation,
+    mapSetId: styleId,
+    attribution,
+    packs: composition.map(packId => ({packId})),
+  });
+  return {styleName: styleId, targetSlot, generation, packIds: composition, record};
+}
+
+// Preflight before any pack publication: snapshot the raw slots and style
+// record once, derive the plan, and validate every inherited pack. The new
+// pack itself is not (yet) on the card, so it is excluded here and validated
+// again after publication. Mirrors the CLI's A10 preflight step. Reads only:
+// no directory is created on the card by this path.
+async function preflightInheritedPacks(pyxis,metadata,onProgress){
+  onProgress({phase:'checking'});
+  const styleName=`${metadata.mapSetId}.pmas`;
+  const [slot0,slot1,styleRecord]=await Promise.all([
+    readRawSelection(pyxis,'active-pack.0'),
+    readRawSelection(pyxis,'active-pack.1'),
+    (async () => {
+      let mapSets;
+      try { mapSets = await pyxis.getDirectoryHandle('map-sets'); }
+      catch (error) { if (error?.name === 'NotFoundError') return null; throw error; }
+      return readRawSelection(mapSets,styleName);
+    })(),
+  ]);
+  const plan=planActivation({slot0,slot1,styleRecord,newPackId:metadata.packId,styleId:metadata.mapSetId,attribution:metadata.attribution});
+  const inherited=plan.packIds.filter(id=>id!==metadata.packId);
+  if(inherited.length)await validateCandidatePacks(pyxis,metadata.mapSetId,metadata.attribution,inherited);
+  return plan;
+}
+
+async function activateMapSet(pyxis,metadata,onProgress){
+  onProgress({phase:'activating'});
+  // Capture the raw slots and style record exactly once, then derive the
+  // plan from that same snapshot. No read/decode followed by a separate
+  // snapshot of the same record.
+  const mapSets=await getDirectory(pyxis,'map-sets');
+  const styleName=`${metadata.mapSetId}.pmas`;
+  const [slot0,slot1,styleRecord]=await Promise.all([
+    readRawSelection(pyxis,'active-pack.0'),
+    readRawSelection(pyxis,'active-pack.1'),
+    readRawSelection(mapSets,styleName),
+  ]);
+  const plan=planActivation({slot0,slot1,styleRecord,newPackId:metadata.packId,styleId:metadata.mapSetId,attribution:metadata.attribution});
+  // Validate every candidate pack's manifest before any record mutation.
+  // The new pack's own manifest is verified by this same call; a failed
+  // preflight changes no style or active-slot bytes.
+  await validateCandidatePacks(pyxis,metadata.mapSetId,metadata.attribution,plan.packIds);
+  await writeVerified(mapSets,styleName,plan.record);
+  const styleReadBack=decodeActiveSelection(await fileBytes(mapSets,styleName));
+  if(styleReadBack.version!==3||styleReadBack.generation!==plan.generation||styleReadBack.mapSetId!==plan.styleName||
+     styleReadBack.attribution!==metadata.attribution||
+     JSON.stringify(styleReadBack.packs.map(pack=>pack.packId))!==JSON.stringify(plan.packIds)){
+    fail('Style map-set read-back is not semantically identical');
+  }
+  await writeVerified(pyxis,plan.targetSlot,plan.record);
+  const slotReadBack=decodeActiveSelection(await fileBytes(pyxis,plan.targetSlot));
+  if(slotReadBack.version!==3||slotReadBack.generation!==plan.generation||slotReadBack.mapSetId!==plan.styleName||
+     slotReadBack.attribution!==metadata.attribution||
+     JSON.stringify(slotReadBack.packs.map(pack=>pack.packId))!==JSON.stringify(plan.packIds)){
+    fail('Active map-set read-back is not semantically identical');
+  }
+  return {selectionFile:plan.targetSlot,styleFile:styleName,enabledPacks:[...plan.packIds]};
 }
 
 async function verifyExactDirectory(directory, expected, label){
@@ -713,20 +884,24 @@ async function installMuiZipLocked({archive,rootDirectory,metadata,onProgress=()
   const report=await inspectMuiZip(archive,{onProgress});
   if(report.styleId&&report.styleId!==metadata.mapSetId)fail('MUI ZIP style does not match the selected map set');
   const manifest=serializeIndexlessManifest(metadata,report.minZoom,report.maxZoom,report.tileCount);const pyxis=await getDirectory(rootDirectory,'pyxis-map');
-  await prepareActiveMapSet(pyxis,metadata);const packs=await getDirectory(pyxis,'packs');
+  // Refuse a broken inherited composition before any pack publication:
+  // a failed preflight creates no pack directory and changes no style or
+  // active-slot bytes.
+  await preflightInheritedPacks(pyxis,metadata,onProgress);
+  const packs=await getDirectory(pyxis,'packs');
   let existing=null;try{existing=await packs.getDirectoryHandle(metadata.packId);}catch(error){if(error?.name!=='NotFoundError')throw error;}
   if(existing){
     let empty=true;for await(const _entry of existing.entries()){empty=false;break;}
-    if(!empty){await verifyExistingPack(existing,archive,report,manifest);try{const active=await activateMapSet(pyxis,metadata);return{...report,manifestBytes:manifest.length,resumed:true,...active};}catch(error){throw new Error(`Map pack is installed and verified, but activation failed: ${error.message}`);}}
+    if(!empty){await verifyExistingPack(existing,archive,report,manifest);try{const active=await activateMapSet(pyxis,metadata,onProgress);return{...report,manifestBytes:manifest.length,resumed:true,...active};}catch(error){throw new Error(`Map pack is installed and verified, but activation failed: ${error.message}`);}}
   }
   const pack=existing||await getDirectory(packs,metadata.packId);await verifyNamedDirectory(packs,metadata.packId,pack,[]);let published=false;const receipt=new Uint8Array(16);crypto.getRandomValues(receipt);const receiptName=`.pyxis-install-owner-${[...receipt].map(byte=>byte.toString(16).padStart(2,'0')).join('')}`;
   try{
     await writeVerified(pack,receiptName,receipt);await verifyNamedDirectory(packs,metadata.packId,pack,[receiptName]);
     const tiles=await getDirectory(pack,'tiles');
     for(let index=0;index<report.entries.length;index++){const entry=report.entries[index];const zoom=await getDirectory(tiles,String(entry.zoom));const x=await getDirectory(zoom,String(entry.x));const bytes=await blobBytes(archive,entry.dataOffset,entry.dataOffset+entry.size);if(crc32(bytes)!==entry.checksum)fail(`ZIP changed during installation: ${entry.name}`);await validatePng(bytes,entry.name);await writeVerified(x,`${entry.y}.png`,bytes);onProgress({phase:'write',completed:index+1,total:report.tileCount});}
-    await writeVerified(pack,'manifest.pmp',manifest);parseSparseManifest(await fileBytes(pack,'manifest.pmp'));published=true;
+    await writeVerified(pack,'manifest.pmp',manifest);onProgress({phase:'manifest'});parseSparseManifest(await fileBytes(pack,'manifest.pmp'));published=true;
     try{await pack.removeEntry(receiptName);}catch(error){throw new Error(`Map pack is installed and verified, but its ownership receipt could not be removed: ${error.message}`);}
-    try{const active=await activateMapSet(pyxis,metadata);return{...report,manifestBytes:manifest.length,resumed:false,...active};}
+    try{const active=await activateMapSet(pyxis,metadata,onProgress);return{...report,manifestBytes:manifest.length,resumed:false,...active};}
     catch(error){throw new Error(`Map pack is installed and verified, but activation failed; retry with the same ZIP and pack ID: ${error.message}`);}
   }catch(error){
     if(!published&&!(await removeOwnedPack(packs,metadata.packId,pack,receiptName,receipt,report.entries))){

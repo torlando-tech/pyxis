@@ -340,6 +340,18 @@
                 <li>Click <strong>Install and Enable</strong>, then choose the mounted SD-card root.</li>
                 <li>Safely eject the SD card, return it to the T-Deck, power it on, and open Maps.</li>
             </ol>
+            <div class="warning map-safety-contract">
+                <strong>Before installing:</strong> close all other Pyxis flasher tabs or
+                windows, and do not run the command-line installer against this same
+                mounted card at the same time. The cross-tab lock coordinates only
+                tabs of this flasher in the same browser profile; it cannot see the
+                CLI or other browsers.
+                <br><br>
+                <strong>After installing:</strong> wait for the verified completion
+                message, then safely eject the card. If activation fails after a pack
+                was published, retry with the exact same ZIP and the same name and
+                pack ID.
+            </div>
             <p class="map-note">Existing unrelated SD-card files are preserved. Map tiles are validated locally and are never uploaded.</p>
             <div class="map-installer-grid">
                 <div class="map-field">
@@ -412,7 +424,7 @@
 
     <script type="module">
         import { ESPLoader, Transport } from './js/esptool.js';
-        import { inspectMuiZip, installMuiZip, resolveMuiStyleProfile, suggestMapIdentity } from './js/map-installer.js?v=map-style-picker-2';
+        import { inspectMuiZip, installMuiZip, resolveMuiStyleProfile, suggestMapIdentity } from './js/map-installer.js?v=map-pack-v3-progress';
 
         const flashBtn = document.getElementById('flash-btn');
         const eraseCheckbox = document.getElementById('erase-checkbox');
@@ -565,8 +577,20 @@
                         license: style.license,
                     },
                     onProgress(progress) {
-                        if (progress.phase === 'write' && (progress.completed % 25 === 0 || progress.completed === progress.total)) {
-                            setMapStatus(`Writing tiles: ${progress.completed}/${progress.total}`);
+                        if (progress.phase === 'validate') {
+                            if (progress.completed === 1 || progress.completed % 200 === 0 || progress.completed === progress.total) {
+                                setMapStatus(`Validating ZIP: ${progress.completed}/${progress.total} entries`);
+                            }
+                        } else if (progress.phase === 'checking') {
+                            setMapStatus('Checking existing map packs on the card…');
+                        } else if (progress.phase === 'write') {
+                            if (progress.completed === 1 || progress.completed % 25 === 0 || progress.completed === progress.total) {
+                                setMapStatus(`Writing tiles: ${progress.completed}/${progress.total}`);
+                            }
+                        } else if (progress.phase === 'manifest') {
+                            setMapStatus('Publishing pack manifest…');
+                        } else if (progress.phase === 'activating') {
+                            setMapStatus('Enabling map set (writing and verifying active slots)…');
                         }
                     },
                 });
