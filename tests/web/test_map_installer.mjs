@@ -11,8 +11,11 @@ import {
   inspectMuiZip,
   installMuiZip,
   parseSparseManifest,
+  planActivation,
   resolveMuiStyleProfile,
+  serializeIndexlessManifest,
   suggestMapIdentity,
+  validateCandidatePacks,
 } from '../../docs/flasher/js/map-installer.js';
 
 const PNG = Buffer.from(
@@ -113,13 +116,16 @@ function storedZip(entries) {
 }
 
 class MemoryFileHandle {
-  constructor(name, log) { this.name = name; this.kind = 'file'; this.bytes = new Uint8Array(); this.log = log; }
+  constructor(name, log) { this.name = name; this.kind = 'file'; this.bytes = new Uint8Array(); this.log = log; this.failOnWrite = false; }
   async createWritable() {
     const handle = this;
     let pending = new Uint8Array();
     return {
       async write(value) { pending = new Uint8Array(value instanceof Blob ? await value.arrayBuffer() : value); },
-      async close() { handle.bytes = pending; handle.log.push(`write:${handle.name}`); },
+      async close() {
+        if (handle.failOnWrite) throw new Error(`injected write failure: ${handle.name}`);
+        handle.bytes = pending; handle.log.push(`write:${handle.name}`);
+      },
       async abort() {},
     };
   }
@@ -192,6 +198,229 @@ async function child(root, path) {
   return current;
 }
 
+async function fileAt(root, path) {
+  const parts = path.split('/');
+  let current = root;
+  for (const part of parts.slice(0, -1)) current = current.children.get(part);
+  const file = current.children.get(parts.at(-1));
+  if (!file || file.kind !== 'file') throw new Error(`test helper: not a file: ${path}`);
+  return new Uint8Array(await (await file.getFile()).arrayBuffer());
+}
+
+test('filesystem mock matches browser File System Access API semantics', async () => {
+  // Repeated create:true on an existing file must return the same handle,
+  // exactly like browsers (no exclusive-create behavior).
+  const root = new MemoryDirectoryHandle();
+  const first = await root.getFileHandle('a.pmas', {create: true});
+  const second = await root.getFileHandle('a.pmas', {create: true});
+  assert.equal(first, second);
+
+  // The File System Access API has no `exclusive` option; unknown options
+  // are ignored rather than converted into exceptions.
+  const ignored = await root.getFileHandle('a.pmas', {create: true, exclusive: true});
+  assert.equal(ignored, first);
+  const directoryFirst = await root.getDirectoryHandle('tiles', {create: true});
+  const directorySecond = await root.getDirectoryHandle('tiles', {create: true, exclusive: true});
+  assert.equal(directoryFirst, directorySecond);
+
+  // A file and directory sharing a name are TypeMismatchError in both
+  // directions; missing files without create are NotFoundError.
+  await assert.rejects(
+    root.getFileHandle('tiles', {create: true}),
+    error => error.name === 'TypeMismatchError',
+  );
+  const reverse = new MemoryDirectoryHandle();
+  await reverse.getDirectoryHandle('a.pmas', {create: true});
+  await assert.rejects(
+    reverse.getFileHandle('a.pmas', {create: true}),
+    error => error.name === 'TypeMismatchError',
+  );
+  await assert.rejects(
+    root.getFileHandle('missing.pmas'),
+    error => error.name === 'NotFoundError',
+  );
+  await assert.rejects(
+    root.getDirectoryHandle('missing-dir', {create: false}),
+    error => error.name === 'NotFoundError',
+  );
+});
+
+const v3Vectors = JSON.parse(
+  (await readFile(new URL('../fixtures/map_pack_v3_vectors.json', import.meta.url))).toString('utf8'),
+);
+
+function hexToBytes(hex) {
+  return Uint8Array.from(hex.match(/../g).map(part => Number.parseInt(part, 16)));
+}
+
+function rewriteCrc32(bytes) {
+  const output = new Uint8Array(bytes.length);
+  output.set(bytes);
+  const view = new DataView(output.buffer);
+  view.setUint32(output.length - 4, crc32(output.subarray(0, output.length - 4)), true);
+  return output;
+}
+
+test('browser consumes the frozen PMPK v3 vectors', () => {
+  for (const name of ['pmpk_v3_one_tile', 'pmpk_v3_multi_zoom']) {
+    const entry = v3Vectors[name];
+    const parsed = parseSparseManifest(hexToBytes(entry.hex));
+    assert.equal(parsed.packId, entry.pack_id);
+    assert.equal(parsed.name, entry.name);
+    assert.equal(parsed.attribution, entry.attribution);
+    assert.equal(parsed.source, entry.source);
+    assert.equal(parsed.license, entry.license);
+    assert.equal(parsed.minZoom, entry.min_zoom);
+    assert.equal(parsed.maxZoom, entry.max_zoom);
+    assert.equal(parsed.tileCount, entry.tile_count);
+    assert.deepEqual(parsed.rowSpans, []);
+  }
+});
+
+test('browser serializes the frozen PMPK v3 vectors exactly', () => {
+  for (const name of ['pmpk_v3_one_tile', 'pmpk_v3_multi_zoom']) {
+    const entry = v3Vectors[name];
+    const actual = serializeIndexlessManifest({
+      packId: entry.pack_id, name: entry.name, attribution: entry.attribution,
+      source: entry.source, license: entry.license,
+    }, entry.min_zoom, entry.max_zoom, entry.tile_count);
+    assert.deepEqual([...actual], [...hexToBytes(entry.hex)]);
+  }
+});
+
+test('browser decodes the frozen PMAS v3 vectors', () => {
+  for (const name of ['pmas_v3_one_pack', 'pmas_v3_three_packs']) {
+    const entry = v3Vectors[name];
+    const decoded = decodeActiveSelection(hexToBytes(entry.hex));
+    assert.equal(decoded.version, 3);
+    assert.equal(decoded.generation, entry.generation);
+    assert.equal(decoded.mapSetId, entry.map_set_id);
+    assert.equal(decoded.attribution, entry.attribution);
+    assert.deepEqual(
+      decoded.packs.map(pack => pack.packId),
+      entry.pack_ids,
+    );
+    for (const pack of decoded.packs) assert.deepEqual(pack.rowSpans, undefined);
+  }
+});
+
+test('browser encodes the frozen PMAS v3 vectors exactly', () => {
+  for (const name of ['pmas_v3_one_pack', 'pmas_v3_three_packs']) {
+    const entry = v3Vectors[name];
+    const actual = encodeActiveMapSet({
+      generation: entry.generation,
+      mapSetId: entry.map_set_id,
+      attribution: entry.attribution,
+      packs: entry.pack_ids.map(packId => ({packId})),
+    });
+    assert.deepEqual([...actual], [...hexToBytes(entry.hex)]);
+  }
+});
+
+test('browser rejects the same invalid PMPK v3 mutations as the CLI', () => {
+  const mutate = (apply) => {
+    const data = hexToBytes(v3Vectors.pmpk_v3_one_tile.hex);
+    apply(data);
+    return rewriteCrc32(data);
+  };
+  assert.throws(() => parseSparseManifest(mutate(data => { data[5] = 1; })));
+  // Splice four zero bytes before the CRC: the total-length field then
+  // disagrees with the actual record size.
+  const withTrailing = rewriteCrc32(hexToBytes(v3Vectors.pmpk_v3_one_tile.hex));
+  assert.throws(() => parseSparseManifest(
+    new Uint8Array([
+      ...withTrailing.subarray(0, withTrailing.length - 4),
+      0, 0, 0, 0,
+      ...withTrailing.subarray(withTrailing.length - 4),
+    ]),
+  ));
+  const corrupted = hexToBytes(v3Vectors.pmpk_v3_one_tile.hex);
+  corrupted[corrupted.length - 1] ^= 1;
+  assert.throws(() => parseSparseManifest(corrupted));
+  assert.throws(() => parseSparseManifest(mutate(data => {
+    new DataView(data.buffer).setUint32(data.length - 8, 0, true);
+  })));
+  assert.throws(() => parseSparseManifest(mutate(data => { data[data.length - 9] = 1; })));
+});
+
+test('browser rejects the same invalid PMAS v3 mutations as the CLI', () => {
+  const hex = v3Vectors.pmas_v3_one_pack.hex;
+  const corrupted = hexToBytes(hex);
+  corrupted[corrupted.length - 1] ^= 1;
+  assert.throws(() => decodeActiveSelection(corrupted));
+  const generationZero = hexToBytes(hex);
+  new DataView(generationZero.buffer).setUint32(8, 0, true);
+  assert.throws(() => decodeActiveSelection(rewriteCrc32(generationZero)));
+  const trailing = rewriteCrc32(hexToBytes(hex));
+  const extended = new Uint8Array(trailing.length + 1);
+  extended.set(trailing);
+  extended[trailing.length - 1] = trailing[trailing.length - 1];
+  assert.throws(() => decodeActiveSelection(extended));
+  assert.throws(() => encodeActiveMapSet({
+    generation: 0, mapSetId: 'osm-bright', attribution: 'Example', packs: [{packId: 'detail'}],
+  }));
+  assert.throws(() => encodeActiveMapSet({
+    generation: 1, mapSetId: 'osm-bright', attribution: 'Example',
+    packs: Array.from({length: 9}, (_, index) => ({packId: `pack-${index}`})),
+  }));
+  assert.throws(() => encodeActiveMapSet({
+    generation: 1, mapSetId: 'osm-bright', attribution: 'Example', packs: [],
+  }));
+  assert.throws(() => encodeActiveMapSet({
+    generation: 1, mapSetId: 'osm-bright', attribution: 'Example',
+    packs: [{packId: 'detail'}, {packId: 'detail'}],
+  }));
+});
+
+test('browser preserves legacy PMAS v1 decoding and v2 span validation', () => {
+  const body = new Uint8Array(44);
+  const view = new DataView(body.buffer);
+  view.setUint32(0, 0x53414d50, true);
+  body[4] = 1;
+  view.setUint16(6, 48, true);
+  view.setUint32(8, 5, true);
+  body[12] = 8;
+  body.set(new TextEncoder().encode('legacy-1'), 13);
+  const record = new Uint8Array(body.length + 4);
+  record.set(body);
+  new DataView(record.buffer).setUint32(44, crc32(body), true);
+  const decoded = decodeActiveSelection(record);
+  assert.equal(decoded.version, 1);
+  assert.equal(decoded.generation, 5);
+  assert.equal(decoded.packId, 'legacy-1');
+
+  // Hand-built v2: header, map-set id, attribution, one pack carrying one
+  // row span; total length and CRC patched after the body is assembled.
+  const parts = [];
+  const push = (bytes) => parts.push(...bytes);
+  const pushU16 = (value) => { parts.push(value & 0xff, value >> 8); };
+  const pushU32 = (value) => {
+    parts.push(value & 0xff, (value >> 8) & 0xff, (value >> 16) & 0xff, (value >>> 24) & 0xff);
+  };
+  const pushSized = (text) => { push([...new TextEncoder().encode(text)]); };
+  pushU32(0x53414d50); parts.push(2, 0); pushU16(0); pushU32(9);
+  parts.push(8); pushSized('legacy-1');
+  parts.push(7); pushSized('Example');
+  parts.push(1);
+  parts.push(8); pushSized('legacy-1');
+  pushU16(1);
+  parts.push(1); pushU32(1); pushU32(0); pushU32(1);
+  const inner = new Uint8Array(parts);
+  const totalLength = inner.length + 4;
+  inner[6] = totalLength & 0xff;
+  inner[7] = totalLength >> 8;
+  const v2Record = new Uint8Array(inner.length + 4);
+  v2Record.set(inner);
+  new DataView(v2Record.buffer).setUint32(v2Record.length - 4, crc32(inner), true);
+  const v2Decoded = decodeActiveSelection(v2Record);
+  assert.equal(v2Decoded.version, 2);
+  assert.equal(v2Decoded.generation, 9);
+  assert.equal(v2Decoded.mapSetId, 'legacy-1');
+  assert.deepEqual(v2Decoded.packs, [
+    {packId: 'legacy-1', rowSpans: [{zoom: 1, y: 1, xMinimum: 0, xMaximum: 1}]},
+  ]);
+});
+
 const metadata = {
   packId: 'overview',
   mapSetId: 'osm-bright',
@@ -254,6 +483,99 @@ test('rejects installing a detected style into a different map set', async () =>
   assert.equal(root.children.has('pyxis-map'), false);
 });
 
+test('style-qualified MUI install publishes an indexless PMPK v3 manifest', async () => {
+  const archive = storedZip([
+    ['maps/osm-bright/2/1/1.png', PNG],
+    ['maps/osm-bright/2/1/0.png', PNG],
+  ]);
+  const root = new MemoryDirectoryHandle();
+  const result = await installMuiZip({archive, rootDirectory:root, metadata});
+  assert.equal(result.resumed, false);
+  const pack = await child(root, 'pyxis-map/packs/overview');
+  const stored = await fileAt(root, 'pyxis-map/packs/overview/manifest.pmp');
+  const parsed = parseSparseManifest(stored);
+  assert.equal(parsed.packId, 'overview');
+  assert.equal(parsed.name, 'Overview');
+  assert.equal(parsed.attribution, metadata.attribution);
+  assert.equal(parsed.source, metadata.source);
+  assert.equal(parsed.license, metadata.license);
+  assert.equal(parsed.minZoom, 2);
+  assert.equal(parsed.maxZoom, 2);
+  assert.equal(parsed.tileCount, 2);
+  assert.deepEqual(parsed.rowSpans, []);
+  // No ownership receipt or other stray entries may remain in the pack.
+  assert.deepEqual([...pack.children.keys()].sort(), ['manifest.pmp', 'tiles']);
+});
+
+test('rootless ZIP with a selected style publishes the matching PMPK v3 manifest', async () => {
+  const archive = storedZip([
+    ['0/0/0.png', PNG],
+    ['1/0/0.png', PNG],
+    ['1/1/0.png', PNG],
+    ['1/0/1.png', PNG],
+    ['1/1/1.png', PNG],
+  ]);
+  const root = new MemoryDirectoryHandle();
+  const style = resolveMuiStyleProfile(null, 'toner');
+  const result = await installMuiZip({archive, rootDirectory:root, metadata:{
+    ...metadata, mapSetId:style.id, attribution:style.attribution,
+    source:style.source, license:style.license,
+  }});
+  assert.equal(result.resumed, false);
+  const stored = await fileAt(root, 'pyxis-map/packs/overview/manifest.pmp');
+  const parsed = parseSparseManifest(stored);
+  assert.equal(parsed.attribution, style.attribution);
+  assert.equal(parsed.source, style.source);
+  assert.equal(parsed.license, style.license);
+  assert.equal(parsed.minZoom, 0);
+  assert.equal(parsed.maxZoom, 1);
+  assert.equal(parsed.tileCount, 5);
+  assert.deepEqual(parsed.rowSpans, []);
+});
+
+test('the PMPK v3 manifest is published after the last tile and read back', async () => {
+  const archive = storedZip([['2/1/1.png', PNG], ['2/1/0.png', PNG]]);
+  const root = new MemoryDirectoryHandle();
+  const writes = [];
+  const originalCreateWritable = MemoryFileHandle.prototype.createWritable;
+  MemoryFileHandle.prototype.createWritable = async function () {
+    const writable = await originalCreateWritable.call(this);
+    const name = this.name;
+    const originalClose = writable.close;
+    writable.close = async () => { await originalClose.call(writable); writes.push(name); };
+    return writable;
+  };
+  try {
+    await installMuiZip({archive, rootDirectory:root, metadata});
+  } finally {
+    MemoryFileHandle.prototype.createWritable = originalCreateWritable;
+  }
+  const manifestIndex = writes.indexOf('manifest.pmp');
+  assert.notEqual(manifestIndex, -1, 'manifest must be written');
+  const tileNames = writes.filter(name => name.endsWith('.png'));
+  assert.equal(tileNames.length, 2);
+  for (const name of tileNames) {
+    assert.ok(
+      writes.indexOf(name) < manifestIndex,
+      `tile ${name} must be written before the manifest: ${JSON.stringify(writes)}`,
+    );
+  }
+  // The published manifest must decode from the on-disk bytes (read-back).
+  const stored = await fileAt(root, 'pyxis-map/packs/overview/manifest.pmp');
+  assert.equal(parseSparseManifest(stored).tileCount, 2);
+});
+
+test('policy mismatch after a detected style refuses before any SD write', async () => {
+  const archive = storedZip([['maps/osm-bright/2/1/1.png', PNG]]);
+  const root = new MemoryDirectoryHandle();
+  await assert.rejects(
+    installMuiZip({archive, rootDirectory:root,
+      metadata:{...metadata, license:'CC-BY-3.0'}}),
+    /attribution|provenance/i,
+  );
+  assert.equal(root.children.has('pyxis-map'), false);
+});
+
 test('rejects altered required style attribution before touching the SD root', async () => {
   const root = new MemoryDirectoryHandle();
   await assert.rejects(
@@ -262,6 +584,283 @@ test('rejects altered required style attribution before touching the SD root', a
     /attribution|provenance/i,
   );
   assert.equal(root.children.has('pyxis-map'), false);
+});
+
+test('browser activation planning mirrors the CLI plan contract', () => {
+  const attribution = getMuiStyleProfile('osm-bright').attribution;
+  const slot = (generation, packIds, styleId = 'osm-bright') => encodeActiveMapSet({
+    generation,
+    mapSetId: styleId,
+    attribution: getMuiStyleProfile(styleId).attribution,
+    packs: packIds.map(packId => ({packId})),
+  });
+  const checkPlan = (plan, styleName, targetSlot, generation, packIds) => {
+    assert.equal(plan.styleName, styleName);
+    assert.equal(plan.targetSlot, targetSlot);
+    assert.equal(plan.generation, generation);
+    assert.deepEqual(plan.packIds, packIds);
+    const decoded = decodeActiveSelection(plan.record);
+    assert.equal(decoded.version, 3);
+    assert.equal(decoded.generation, generation);
+    assert.equal(decoded.mapSetId, styleName);
+    assert.equal(decoded.attribution, getMuiStyleProfile(styleName).attribution);
+    assert.deepEqual(decoded.packs.map(pack => pack.packId), packIds);
+  };
+
+  // Empty card: generation one, slot zero.
+  checkPlan(planActivation({slot0: null, slot1: null, newPackId: 'pack-a',
+    styleId: 'osm-bright', attribution}), 'osm-bright', 'active-pack.0', 1, ['pack-a']);
+
+  // One valid slot: target the missing slot.
+  checkPlan(planActivation({slot0: slot(1, ['pack-a']), slot1: null, newPackId: 'pack-b',
+    styleId: 'osm-bright', attribution}), 'osm-bright', 'active-pack.1', 2, ['pack-b', 'pack-a']);
+
+  // Two valid slots: overwrite the lower-generation one, inherit its composition.
+  checkPlan(planActivation({slot0: slot(5, ['old-a']), slot1: slot(3, ['old-b']), newPackId: 'pack-c',
+    styleId: 'osm-bright', attribution}), 'osm-bright', 'active-pack.1', 6, ['pack-c', 'old-a']);
+
+  // Re-installing an existing pack moves it to the front without duplication.
+  checkPlan(planActivation({slot0: slot(2, ['pack-a', 'pack-b']), slot1: null, newPackId: 'pack-b',
+    styleId: 'osm-bright', attribution}), 'osm-bright', 'active-pack.1', 3, ['pack-b', 'pack-a']);
+
+  // A different style starts a fresh composition but still advances the
+  // generation past the existing slots.
+  checkPlan(planActivation({slot0: slot(2, ['pack-a'], 'toner'), slot1: null, newPackId: 'pack-b',
+    styleId: 'dark-matter', attribution: getMuiStyleProfile('dark-matter').attribution}),
+    'dark-matter', 'active-pack.1', 3, ['pack-b']);
+
+  // The style PMAS composition wins over the active slots and drives the
+  // generation.
+  checkPlan(planActivation({slot0: slot(2, ['slot-only']), slot1: null,
+    styleRecord: slot(9, ['style-a', 'slot-only']), newPackId: 'new-pack',
+    styleId: 'osm-bright', attribution}), 'osm-bright', 'active-pack.1', 10,
+    ['new-pack', 'style-a', 'slot-only']);
+
+  // Invalid raw slot bytes are treated like a missing slot: the target is
+  // slot zero and the generation restarts from one, exactly like the CLI.
+  const corrupted = slot(1, ['pack-a']);
+  corrupted[corrupted.length - 1] ^= 1;
+  checkPlan(planActivation({slot0: corrupted, slot1: null, newPackId: 'pack-b',
+    styleId: 'osm-bright', attribution}), 'osm-bright', 'active-pack.0', 1, ['pack-b']);
+
+  // Equal-generation disagreement is rejected before any plan exists.
+  assert.throws(() => planActivation({slot0: slot(4, ['pack-a']), slot1: slot(4, ['pack-b']),
+    newPackId: 'pack-c', styleId: 'osm-bright', attribution}), /equal generation/i);
+
+  // A v1 slot and a v3 slot at the same generation with a colliding pack ID
+  // are also unequal records and must be rejected: the CLI compares the full
+  // decoded record, and the browser must mirror that, not just normalized
+  // fields (which a v1/v3 pair would share after normalization).
+  const legacyBody = new Uint8Array(44);
+  const legacyView = new DataView(legacyBody.buffer);
+  legacyView.setUint32(0, 0x53414d50, true);
+  legacyBody[4] = 1;
+  legacyView.setUint16(6, 48, true);
+  legacyView.setUint32(8, 4, true);
+  legacyBody[12] = 6;
+  legacyBody.set(new TextEncoder().encode('pack-x'), 13);
+  const legacyRecord = new Uint8Array(legacyBody.length + 4);
+  legacyRecord.set(legacyBody);
+  new DataView(legacyRecord.buffer).setUint32(44, crc32(legacyBody), true);
+  assert.throws(() => planActivation({slot0: legacyRecord, slot1: slot(4, ['pack-x']),
+    newPackId: 'pack-c', styleId: 'osm-bright', attribution}), /equal generation/i);
+
+  // The 8-pack limit is enforced before publication; re-installing an
+  // existing pack within the limit is allowed.
+  assert.throws(() => planActivation({
+    slot0: slot(1, Array.from({length: 8}, (_, index) => `pack-${index}`)), slot1: null,
+    newPackId: 'pack-new', styleId: 'osm-bright', attribution,
+  }), /8-pack/i);
+  checkPlan(planActivation({
+    slot0: slot(1, Array.from({length: 8}, (_, index) => `pack-${index}`)), slot1: null,
+    newPackId: 'pack-3', styleId: 'osm-bright', attribution,
+  }), 'osm-bright', 'active-pack.1', 2,
+    ['pack-3', ...Array.from({length: 8}, (_, index) => `pack-${index}`).filter(id => id !== 'pack-3')]);
+
+  // Generation exhaustion is rejected.
+  const MAX_GENERATION = 0xffffffff;
+  assert.throws(() => planActivation({slot0: slot(MAX_GENERATION, ['pack-a']), slot1: null,
+    newPackId: 'pack-b', styleId: 'osm-bright', attribution}), /exhausted/i);
+
+  // Attribution must match the style policy exactly.
+  assert.throws(() => planActivation({slot0: null, slot1: null, newPackId: 'pack-a',
+    styleId: 'osm-bright', attribution: 'wrong'}), /attribution/i);
+  assert.throws(() => planActivation({slot0: null, slot1: null, newPackId: 'pack-a',
+    styleId: 'nope', attribution: 'x'}), /unsupported/i);
+  assert.throws(() => planActivation({slot0: null, slot1: null, newPackId: 'Bad ID',
+    styleId: 'osm-bright', attribution}), /pack id/i);
+
+  // A style PMAS for a different map set or with the wrong attribution is
+  // ignored, not trusted.
+  checkPlan(planActivation({slot0: slot(2, ['slot-only']), slot1: null,
+    styleRecord: slot(9, ['style-a'], 'toner'), newPackId: 'new-pack',
+    styleId: 'osm-bright', attribution}), 'osm-bright', 'active-pack.1', 3,
+    ['new-pack', 'slot-only']);
+});
+
+// Install a one-tile MUI pack, returning the root for follow-up mutation.
+async function installPack(root, archive, meta) {
+  return installMuiZip({archive, rootDirectory: root, metadata: meta});
+}
+
+async function packTreeBytes(root) {
+  const pyxis = root.children.get('pyxis-map');
+  const out = new Map();
+  const walk = async (dir, prefix) => {
+    for (const [name, child] of dir.children.entries()) {
+      const path = prefix ? `${prefix}/${name}` : name;
+      if (child.kind === 'file') {
+        out.set(path, Buffer.from(await (await child.getFile()).arrayBuffer()));
+      } else {
+        await walk(child, path);
+      }
+    }
+  };
+  if (pyxis) await walk(pyxis, 'pyxis-map');
+  return out;
+}
+
+test('browser validates every inherited pack before activation', async () => {
+  const style = getMuiStyleProfile('osm-bright');
+  const metaFor = (packId) => ({
+    ...metadata, packId, attribution: style.attribution, source: style.source, license: style.license,
+  });
+  // Activate pack-a, then pack-b + pack-a, mirroring the CLI A8 fixture.
+  const root = new MemoryDirectoryHandle();
+  await installPack(root, storedZip([['maps/osm-bright/1/0/0.png', PNG]]), metaFor('pack-a'));
+  await installPack(root, storedZip([['maps/osm-bright/1/1/0.png', PNG]]), metaFor('pack-b'));
+  const pyxis = root.children.get('pyxis-map');
+  const mapSets = pyxis.children.get('map-sets');
+  const packs = pyxis.children.get('packs');
+  const styleRecord = new Uint8Array(await (await mapSets.children.get('osm-bright.pmas').getFile()).arrayBuffer());
+  const slot0 = new Uint8Array(await (await pyxis.children.get('active-pack.0').getFile()).arrayBuffer());
+  const slot1 = pyxis.children.get('active-pack.1');
+  const slot1Bytes = slot1
+    ? new Uint8Array(await (await slot1.getFile()).arrayBuffer())
+    : null;
+  const before = await packTreeBytes(root);
+
+  // Missing inherited pack: refusal before any record mutation.
+  await packs.children.get('pack-a').removeEntry('manifest.pmp');
+  await assert.rejects(
+    installPack(root, storedZip([['maps/osm-bright/2/0/0.png', PNG]]), metaFor('pack-c')),
+    /missing inherited pack manifest/i,
+  );
+  // The card is byte-identical after the refusal: both slots and the style
+  // record unchanged, and pack-c was never published. (The only diff from
+  // the pre-refusal tree is the intentionally removed pack-a manifest.)
+  let after = await packTreeBytes(root);
+  const afterRefusal = new Map(after);
+  const beforeRefusal = new Map(before);
+  afterRefusal.delete('pyxis-map/packs/pack-a/manifest.pmp');
+  beforeRefusal.delete('pyxis-map/packs/pack-a/manifest.pmp');
+  assert.deepEqual([...afterRefusal.entries()].sort(), [...beforeRefusal.entries()].sort());
+  assert.equal(after.get('pyxis-map/map-sets/osm-bright.pmas').toString('hex'), Buffer.from(styleRecord).toString('hex'));
+  assert.equal(after.get('pyxis-map/active-pack.0').toString('hex'), Buffer.from(slot0).toString('hex'));
+  if (slot1Bytes) {
+    assert.equal(after.get('pyxis-map/active-pack.1').toString('hex'), Buffer.from(slot1Bytes).toString('hex'));
+  }
+  assert.equal(packs.children.has('pack-c'), false);
+
+  // A second refusal (now for a corrupt inherited manifest path: the
+  // missing manifest) leaves the slots and style record untouched as well.
+  await assert.rejects(
+    installPack(root, storedZip([['maps/osm-bright/2/1/1.png', PNG]]), metaFor('pack-c')),
+    /missing inherited pack manifest/i,
+  );
+  after = await packTreeBytes(root);
+  assert.equal(after.get('pyxis-map/active-pack.0').toString('hex'), Buffer.from(slot0).toString('hex'));
+  assert.equal(after.get('pyxis-map/map-sets/osm-bright.pmas').toString('hex'), Buffer.from(styleRecord).toString('hex'));
+  assert.equal(packs.children.has('pack-c'), false);
+});
+
+test('browser corrupt-inherited-pack refusal keeps the card untouched', async () => {
+  const style = getMuiStyleProfile('osm-bright');
+  const metaFor = (packId) => ({
+    ...metadata, packId, attribution: style.attribution, source: style.source, license: style.license,
+  });
+  const root = new MemoryDirectoryHandle();
+  await installPack(root, storedZip([['maps/osm-bright/1/0/0.png', PNG]]), metaFor('pack-a'));
+  const pyxis = root.children.get('pyxis-map');
+  const packs = pyxis.children.get('packs');
+  const before = await packTreeBytes(root);
+
+  // Corrupt the inherited manifest, then install pack-c.
+  const manifest = await fileAt(root, 'pyxis-map/packs/pack-a/manifest.pmp');
+  const corrupt = new Uint8Array(manifest);
+  corrupt[0] ^= 1;
+  const corruptHandle = await packs.children.get('pack-a').getFileHandle('manifest.pmp', {create: true});
+  const corruptWritable = await corruptHandle.createWritable({keepExistingData: false});
+  await corruptWritable.write(corrupt);
+  await corruptWritable.close();
+
+  await assert.rejects(
+    installPack(root, storedZip([['maps/osm-bright/2/0/0.png', PNG]]), metaFor('pack-c')),
+    /manifest header or CRC is invalid|missing inherited/i,
+  );
+
+  const after = await packTreeBytes(root);
+  // Restore the corrupted manifest's original bytes in the snapshot: every
+  // other file must be byte-identical to the pre-corruption state.
+  const afterExpected = new Map(after);
+  afterExpected.set('pyxis-map/packs/pack-a/manifest.pmp', Buffer.from(manifest));
+  assert.deepEqual([...afterExpected.entries()].sort(), [...before.entries()].sort());
+  assert.equal(packs.children.has('pack-c'), false);
+});
+
+test('browser validateCandidatePacks rejects v1/v2 and policy-mismatched manifests', async () => {
+  const style = getMuiStyleProfile('osm-bright');
+  const root = new MemoryDirectoryHandle();
+  await installPack(root, storedZip([['maps/osm-bright/1/0/0.png', PNG]]), {
+    ...metadata, attribution: style.attribution, source: style.source, license: style.license,
+  });
+  const pyxis = root.children.get('pyxis-map');
+  const packs = pyxis.children.get('packs');
+  const policyCheck = () => validateCandidatePacks(
+    pyxis, 'osm-bright', style.attribution, ['overview']);
+  await policyCheck();
+
+  // A legal legacy v2 manifest (spans present) must be rejected as not v3.
+  const parts = [];
+  const pushU16 = (value) => { parts.push(value & 0xff, value >> 8); };
+  const pushU32 = (value) => {
+    parts.push(value & 0xff, (value >> 8) & 0xff, (value >> 16) & 0xff, (value >>> 24) & 0xff);
+  };
+  const pushSized = (text) => {
+    const bytes = [...new TextEncoder().encode(text)];
+    parts.push(bytes.length, ...bytes);
+  };
+  pushU32(0x4b504d50); parts.push(2, 0); pushU16(16); pushU32(0); pushU32(0);
+  pushSized('overview'); pushSized('Overview');
+  pushSized(style.attribution); pushSized(style.source); pushSized(style.license);
+  parts.push(1, 1); pushU16(1); pushU32(1);
+  parts.push(1); pushU32(0); pushU32(0); pushU32(1);
+  const inner = new Uint8Array(parts);
+  const totalLength = inner.length + 4;
+  inner[8] = totalLength & 0xff;
+  inner[9] = (totalLength >> 8) & 0xff;
+  inner[10] = (totalLength >> 16) & 0xff;
+  inner[11] = (totalLength >>> 24) & 0xff;
+  const v2Record = new Uint8Array(inner.length + 4);
+  v2Record.set(inner);
+  new DataView(v2Record.buffer).setUint32(v2Record.length - 4, crc32(inner), true);
+  const replaceManifest = async (bytes) => {
+    const handle = await packs.children.get('overview').getFileHandle('manifest.pmp', {create: true});
+    const writable = await handle.createWritable({keepExistingData: false});
+    await writable.write(bytes);
+    await writable.close();
+  };
+  await replaceManifest(v2Record);
+  await assert.rejects(policyCheck(), /not PMPK v3/i);
+
+  // A v3 manifest declaring a different pack ID is rejected. Rebuild a legal
+  // v3 manifest with a 6-byte ID so every later string offset stays exact.
+  const renamedManifest = serializeIndexlessManifest({
+    packId: 'otherm', name: 'Overview', attribution: style.attribution,
+    source: style.source, license: style.license,
+  }, 1, 1, 1);
+  await replaceManifest(renamedManifest);
+  await assert.rejects(policyCheck(), /different pack ID/i);
 });
 
 test('indexless active map-set wire format contains ordered pack IDs only', () => {
@@ -641,6 +1240,106 @@ test('distinct handles for one selected root are serialized across tabs', async 
   assert.deepEqual(new Set(newest.packs.map(pack => pack.packId)), new Set(['tab-one', 'tab-two']));
 });
 
+function installSequence(root) {
+  const archive = storedZip([['2/1/1.png', PNG]]);
+  const events = [];
+  const install = (label) => installMuiZip({
+    archive,
+    rootDirectory: new DirectoryHandleAlias(root),
+    metadata: {...metadata, packId: label, name: label},
+    onProgress(progress) {
+      if (progress.phase === 'write') events.push(`${label}:started`);
+    },
+  }).then(() => { events.push(`${label}:finished`); });
+  return {events, install};
+}
+
+test('two same-origin installs run strictly one at a time under Web Locks', async () => {
+  const root = new MemoryDirectoryHandle('sd-card');
+  const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: {locks: new MemoryLockManager()},
+  });
+  const {events, install} = installSequence(root);
+  try {
+    await Promise.all([
+      install('alpha'),
+      install('beta'),
+    ]);
+  } finally {
+    if (previousNavigator) Object.defineProperty(globalThis, 'navigator', previousNavigator);
+    else delete globalThis.navigator;
+  }
+  const startPositions = ['alpha:started', 'beta:started'].map(label => events.indexOf(label));
+  assert.ok(startPositions.every(index => index !== -1));
+  const firstToStart = startPositions[0] < startPositions[1] ? 'alpha' : 'beta';
+  const secondToStart = firstToStart === 'alpha' ? 'beta' : 'alpha';
+  assert.ok(
+    events.indexOf(`${firstToStart}:finished`) < startPositions[1],
+    `the first install must finish before the second starts: ${events.join(' ')}`,
+  );
+  assert.ok(startPositions[1] < events.indexOf(`${secondToStart}:finished`));
+});
+
+test('a Web Locks rejection propagates without touching the selected root', async () => {
+  const root = new MemoryDirectoryHandle('sd-card');
+  const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: {
+      locks: {
+        request(name, options, operation) {
+          assert.equal(name, 'pyxis-map-installer:sd-card');
+          assert.deepEqual(options, {mode: 'exclusive'});
+          throw new Error('lock refused by another tab');
+        },
+      },
+    },
+  });
+  try {
+    await assert.rejects(
+      installMuiZip({
+        archive: storedZip([['2/1/1.png', PNG]]),
+        rootDirectory: root,
+        metadata: {...metadata, packId: 'lock-rejected', name: 'Lock Rejected'},
+      }),
+      /lock refused by another tab/i,
+    );
+  } finally {
+    if (previousNavigator) Object.defineProperty(globalThis, 'navigator', previousNavigator);
+    else delete globalThis.navigator;
+  }
+  assert.equal(root.children.has('pyxis-map'), false, 'no SD mutation may precede lock acquisition');
+});
+
+test('a supported browser without Web Locks fails closed before any mutation', async () => {
+  const root = new MemoryDirectoryHandle('sd-card');
+  const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  Object.defineProperty(globalThis, 'navigator', {configurable: true, value: {}});
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: {showDirectoryPicker: () => {}},
+  });
+  try {
+    await assert.rejects(
+      installMuiZip({
+        archive: storedZip([['2/1/1.png', PNG]]),
+        rootDirectory: root,
+        metadata,
+      }),
+      /cross-tab locking required for safe map installation/i,
+    );
+  } finally {
+    if (previousNavigator) Object.defineProperty(globalThis, 'navigator', previousNavigator);
+    else delete globalThis.navigator;
+    if (previousWindow) Object.defineProperty(globalThis, 'window', previousWindow);
+    else delete globalThis.window;
+  }
+  assert.equal(root.children.has('pyxis-map'), false, 'an unlocked browser must not install maps');
+});
+
 test('an empty directory created during destination creation is never removed', async () => {
   const archive = storedZip([['2/1/1.png', PNG]]);
   const root = new MemoryDirectoryHandle();
@@ -710,6 +1409,181 @@ test('map-set capacity is checked before a ninth pack is published', async () =>
   await writable.write(encodeActiveMapSet({generation:8,mapSetId:'osm-bright',attribution:metadata.attribution,packs:
     Array.from({length:8}, (_,index) => ({packId:`pack-${index}`}))}));
   await writable.close();
-  await assert.rejects(installMuiZip({archive,rootDirectory:root,metadata:{...metadata,packId:'pack-nine',name:'Pack Nine'}}), /active map set/i);
+  await assert.rejects(installMuiZip({archive,rootDirectory:root,metadata:{...metadata,packId:'pack-nine',name:'Pack Nine'}}), /8-pack/i);
   assert.equal(pyxis.children.has('packs'), false);
+});
+
+// Seed a card with a valid inherited composition: one published pack and a
+// matching active slot, so preflight validation passes for the inherited
+// pack before the new install runs.
+async function seedInheritedCard(root, slotName, generation, inheritedPackId) {
+  const style = getMuiStyleProfile('osm-bright');
+  const seedMeta = {
+    ...metadata, packId: inheritedPackId, name: 'Seed Pack',
+    attribution: style.attribution, source: style.source, license: style.license,
+  };
+  const pyxis = await root.getDirectoryHandle('pyxis-map', {create: true});
+  const packs = await pyxis.getDirectoryHandle('packs', {create: true});
+  const seed = await packs.getDirectoryHandle(inheritedPackId, {create: true});
+  const manifest = serializeIndexlessManifest(seedMeta, 1, 1, 1);
+  const manifestHandle = await seed.getFileHandle('manifest.pmp', {create: true});
+  const manifestWritable = await manifestHandle.createWritable();
+  await manifestWritable.write(manifest);
+  await manifestWritable.close();
+  const slotHandle = await pyxis.getFileHandle(slotName, {create: true});
+  const slotWritable = await slotHandle.createWritable();
+  await slotWritable.write(encodeActiveMapSet({
+    generation, mapSetId: 'osm-bright', attribution: style.attribution,
+    packs: [{packId: inheritedPackId}],
+  }));
+  await slotWritable.close();
+  return pyxis;
+}
+
+test('activation publishes the style record before the active slot', async () => {
+  const root = new MemoryDirectoryHandle();
+  const pyxis = await seedInheritedCard(root, 'active-pack.0', 5, 'seed-pack');
+  await installMuiZip({
+    archive: storedZip([['maps/osm-bright/2/1/1.png', PNG]]),
+    rootDirectory: root,
+    metadata: {...metadata, packId: 'pack-a'},
+  });
+  const styleWrite = root.log.findIndex(name => name === 'write:osm-bright.pmas');
+  const slotWrite = root.log.findIndex(name => name === 'write:active-pack.1');
+  assert.notEqual(styleWrite, -1, 'style record must be written');
+  assert.notEqual(slotWrite, -1, 'active slot must be written');
+  assert.ok(styleWrite < slotWrite, 'style PMAS must be written before the active slot');
+});
+
+test('installation reports progress for every user-visible phase in order', async () => {
+  // The flasher renders status from onProgress events; a phase that never
+  // reports (e.g. the full-ZIP validate sweep before the first write) leaves
+  // the UI looking frozen during long installs.
+  const root = new MemoryDirectoryHandle();
+  const events = [];
+  await installMuiZip({
+    archive: storedZip([['maps/osm-bright/2/1/1.png', PNG]]),
+    rootDirectory: root,
+    metadata: {...metadata, packId: 'pack-progress'},
+    onProgress(progress) { events.push(progress); },
+  });
+  const phases = events.map(event => event.phase);
+  for (const phase of ['validate', 'checking', 'write', 'manifest', 'activating']) {
+    assert.ok(phases.includes(phase), `missing progress phase: ${phase}`);
+  }
+  const lastValidate = phases.lastIndexOf('validate');
+  const firstWrite = phases.indexOf('write');
+  assert.ok(lastValidate < firstWrite, 'validate events must precede tile writes');
+  assert.ok(phases.indexOf('checking') < firstWrite, 'inherited-pack check must precede tile writes');
+  assert.ok(firstWrite < phases.indexOf('manifest'), 'manifest publish must follow tile writes');
+  assert.ok(phases.indexOf('manifest') < phases.indexOf('activating'), 'activation must follow the manifest publish');
+  const writeEvents = events.filter(event => event.phase === 'write');
+  assert.deepEqual(
+    writeEvents.map(event => [event.completed, event.total]),
+    [[1, 1]],
+    'write progress must report completed/total per tile',
+  );
+});
+
+test('a failed style write leaves every active slot untouched and is retriable', async () => {
+  const style = getMuiStyleProfile('osm-bright');
+  const root = new MemoryDirectoryHandle();
+  const pyxis = await seedInheritedCard(root, 'active-pack.0', 5, 'seed-pack');
+  const slot0Before = await fileAt(root, 'pyxis-map/active-pack.0');
+  // A corrupt 3-byte style record: present (so the resume check sees a
+  // file), but undecodable (so the planner ignores it).
+  const mapSets = await pyxis.getDirectoryHandle('map-sets', {create: true});
+  const styleHandle = await mapSets.getFileHandle('osm-bright.pmas', {create: true});
+  const corruptWritable = await styleHandle.createWritable();
+  await corruptWritable.write(new Uint8Array([0xff, 0x00, 0x13]));
+  await corruptWritable.close();
+  const corruptStyle = await fileAt(root, 'pyxis-map/map-sets/osm-bright.pmas');
+  styleHandle.failOnWrite = true;
+
+  await assert.rejects(
+    installMuiZip({
+      archive: storedZip([['maps/osm-bright/2/1/1.png', PNG]]),
+      rootDirectory: root,
+      metadata: {...metadata, packId: 'pack-a'},
+    }),
+    /activation failed; retry with the same ZIP and pack ID/i,
+  );
+  styleHandle.failOnWrite = false;
+
+  // The published pack stays on the card (exact retry is possible), the
+  // existing slot is byte-identical, and no slot was created or clobbered.
+  assert.equal((await fileAt(root, 'pyxis-map/packs/pack-a/manifest.pmp')).length > 0, true);
+  assert.equal(
+    Buffer.from(await fileAt(root, 'pyxis-map/active-pack.0')).toString('hex'),
+    Buffer.from(slot0Before).toString('hex'),
+  );
+  assert.equal(pyxis.children.has('active-pack.1'), false);
+  // The failed style write left the original corrupt bytes in place.
+  assert.equal(
+    Buffer.from(await fileAt(root, 'pyxis-map/map-sets/osm-bright.pmas')).toString('hex'),
+    Buffer.from(corruptStyle).toString('hex'),
+  );
+
+  // Exact retry converges: the corrupt style file is ignored by the
+  // planner, the plan is re-derived from the untouched slot, and style +
+  // slot end up at the same generation.
+  const resumed = await installMuiZip({
+    archive: storedZip([['maps/osm-bright/2/1/1.png', PNG]]),
+    rootDirectory: root,
+    metadata: {...metadata, packId: 'pack-a'},
+  });
+  assert.equal(resumed.resumed, true);
+  const styleRecord = decodeActiveSelection(await fileAt(root, 'pyxis-map/map-sets/osm-bright.pmas'));
+  const slot1 = decodeActiveSelection(await fileAt(root, 'pyxis-map/active-pack.1'));
+  assert.equal(styleRecord.generation, slot1.generation);
+  assert.deepEqual(slot1.packs.map(pack => pack.packId), ['pack-a', 'seed-pack']);
+  assert.equal(
+    Buffer.from(await fileAt(root, 'pyxis-map/active-pack.0')).toString('hex'),
+    Buffer.from(slot0Before).toString('hex'),
+  );
+});
+
+test('a failed slot write keeps the prior valid slot active and converges on retry', async () => {
+  const root = new MemoryDirectoryHandle();
+  const pyxis = await seedInheritedCard(root, 'active-pack.0', 5, 'seed-pack');
+  const slot0Before = await fileAt(root, 'pyxis-map/active-pack.0');
+  const slot1Handle = await pyxis.getFileHandle('active-pack.1', {create: true});
+  slot1Handle.failOnWrite = true;
+
+  await assert.rejects(
+    installMuiZip({
+      archive: storedZip([['maps/osm-bright/2/1/1.png', PNG]]),
+      rootDirectory: root,
+      metadata: {...metadata, packId: 'pack-a'},
+    }),
+    /activation failed; retry with the same ZIP and pack ID/i,
+  );
+  slot1Handle.failOnWrite = false;
+
+  // The style record advanced, but the failed slot write left the prior
+  // valid slot (active-pack.0) intact as the fallback the firmware can use.
+  const styleRecord = decodeActiveSelection(await fileAt(root, 'pyxis-map/map-sets/osm-bright.pmas'));
+  assert.equal(styleRecord.generation, 6);
+  assert.equal(
+    Buffer.from(await fileAt(root, 'pyxis-map/active-pack.0')).toString('hex'),
+    Buffer.from(slot0Before).toString('hex'),
+  );
+  assert.equal((await fileAt(root, 'pyxis-map/active-pack.1')).length, 0);
+
+  // Exact retry re-plans from the advanced style record and converges:
+  // both records carry the same new generation.
+  await installMuiZip({
+    archive: storedZip([['maps/osm-bright/2/1/1.png', PNG]]),
+    rootDirectory: root,
+    metadata: {...metadata, packId: 'pack-a'},
+  });
+  const retryStyle = decodeActiveSelection(await fileAt(root, 'pyxis-map/map-sets/osm-bright.pmas'));
+  const retrySlot = decodeActiveSelection(await fileAt(root, 'pyxis-map/active-pack.1'));
+  assert.equal(retryStyle.generation, retrySlot.generation);
+  assert.equal(retryStyle.generation, 7);
+  assert.deepEqual(retrySlot.packs.map(pack => pack.packId), ['pack-a', 'seed-pack']);
+  assert.equal(
+    Buffer.from(await fileAt(root, 'pyxis-map/active-pack.0')).toString('hex'),
+    Buffer.from(slot0Before).toString('hex'),
+  );
 });

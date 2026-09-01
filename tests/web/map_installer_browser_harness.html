@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<!--
+  B8 smoke harness: exercises the real browser File System Access API
+  (Origin Private File System) instead of the in-memory mock. Served from
+  tests/web/ over a localhost secure context by
+  run_map_installer_browser_smoke.py, which also serves smoke-metadata.json
+  in memory. The phase and run id travel in the query string; the driver
+  then collects window.__smokeResult.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Pyxis map installer browser smoke</title>
+  <style>body { font-family: system-ui, sans-serif; padding: 2rem; }</style>
+</head>
+<body>
+  <h1>Map installer browser smoke</h1>
+  <pre id="status">pending</pre>
+  <script type="module">
+    import {
+      decodeActiveSelection,
+      installMuiZip,
+      parseSparseManifest,
+      validatePng,
+    } from '../../docs/flasher/js/map-installer.js';
+
+    const statusEl = document.getElementById('status');
+    function setStage(name) {
+      window.__smokeStage = name;
+      statusEl.textContent = `stage: ${name}`;
+    }
+
+    const PNG_BASE64 =
+      'iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAIAAADTED8xAAAA1UlEQVR4nO3BMQEAAADCoPVP7WULoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAGwEtAAHMpTgHAAAAAElFTkSuQmCC';
+    const PNG = Uint8Array.from(atob(PNG_BASE64), ch => ch.charCodeAt(0));
+
+    function crc32(bytes) {
+      let crc = 0xffffffff;
+      for (const byte of bytes) {
+        crc ^= byte;
+        for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+      }
+      return (crc ^ 0xffffffff) >>> 0;
+    }
+
+    // Minimal stored (uncompressed) ZIP for one tile entry, mirroring the
+    // node test's storedZip but with the metadata a real browser zip tool
+    // produces: UTF-8 flag bit and a regular-file external attribute.
+    function storedZip(name, payload) {
+      const filename = new TextEncoder().encode(name);
+      const data = new Uint8Array(payload);
+      const checksum = crc32(data);
+      const localHeader = new Uint8Array(30);
+      const lv = new DataView(localHeader.buffer);
+      lv.setUint32(0, 0x04034b50, true);
+      lv.setUint16(4, 20, true);
+      lv.setUint16(6, 0x0800, true); // UTF-8 file name flag
+      lv.setUint32(14, checksum, true);
+      lv.setUint32(18, data.length, true);
+      lv.setUint32(22, data.length, true);
+      lv.setUint16(26, filename.length, true);
+      const centralHeader = new Uint8Array(46);
+      const cv = new DataView(centralHeader.buffer);
+      cv.setUint32(0, 0x02014b50, true);
+      cv.setUint16(4, 20, true);
+      cv.setUint16(6, 20, true);
+      cv.setUint16(8, 0x0800, true); // UTF-8 file name flag
+      cv.setUint32(16, checksum, true);
+      cv.setUint32(20, data.length, true);
+      cv.setUint32(24, data.length, true);
+      cv.setUint16(28, filename.length, true);
+      cv.setUint32(38, 0x81a40000, true); // unix mode 0644 regular file
+      cv.setUint32(42, 0, true);
+      const end = new Uint8Array(22);
+      const ev = new DataView(end.buffer);
+      ev.setUint32(0, 0x06054b50, true);
+      ev.setUint16(8, 1, true);
+      ev.setUint16(10, 1, true);
+      ev.setUint32(12, centralHeader.length + filename.length, true);
+      ev.setUint32(16, 30 + filename.length + data.length, true);
+      return new Blob([localHeader, filename, data, centralHeader, filename, end],
+        {type: 'application/zip'});
+    }
+
+    async function readAll(fileHandle) {
+      const file = await fileHandle.getFile();
+      return new Uint8Array(await file.arrayBuffer());
+    }
+
+    async function readIfExists(directory, name) {
+      try {
+        return await readAll(await directory.getFileHandle(name));
+      } catch (error) {
+        if (error && error.name === 'NotFoundError') return null;
+        throw error;
+      }
+    }
+
+    async function verifyComposition(pyxis, metadata, expectedGeneration) {
+      const pack = await (await pyxis.getDirectoryHandle('packs')).getDirectoryHandle(metadata.packId);
+      const manifest = await readAll(await pack.getFileHandle('manifest.pmp'));
+      const parsed = parseSparseManifest(manifest);
+      // parseSparseManifest omits version: v3 is indexless (empty rowSpans).
+      if (parsed.rowSpans.length !== 0 || parsed.tileCount === undefined) {
+        return {ok: false, reason: `manifest not v3: ${JSON.stringify(parsed)}`};
+      }
+      if (parsed.packId !== metadata.packId) return {ok: false, reason: 'manifest packId mismatch'};
+      const tile = await readAll(await (await (await (await pack.getDirectoryHandle('tiles'))
+        .getDirectoryHandle('2')).getDirectoryHandle('1')).getFileHandle('1.png'));
+      await validatePng(tile, 'smoke tile');
+      if (tile.length !== PNG.length) return {ok: false, reason: 'tile size mismatch'};
+      for (let i = 0; i < PNG.length; i++) {
+        if (tile[i] !== PNG[i]) return {ok: false, reason: `tile byte ${i} differs`};
+      }
+      // v3 PMAS pack records carry only packId (indexless; spans live in the
+      // manifest and are not repeated in the activation record).
+      const expectedPacks = {packId: metadata.packId};
+      const styleRecord = decodeActiveSelection(
+        await readAll(await (await pyxis.getDirectoryHandle('map-sets'))
+          .getFileHandle(`${metadata.mapSetId}.pmas`)));
+      const slotRecord = decodeActiveSelection(
+        await readAll(await pyxis.getFileHandle('active-pack.0')));
+      for (const [label, record] of [['style', styleRecord], ['slot', slotRecord]]) {
+        if (record.version !== 3) return {ok: false, reason: `${label} version ${record.version}`};
+        if (record.generation !== expectedGeneration) return {ok: false, reason: `${label} generation ${record.generation}`};
+        if (record.mapSetId !== metadata.mapSetId) return {ok: false, reason: `${label} mapSetId ${record.mapSetId}`};
+        if (record.attribution !== metadata.attribution) return {ok: false, reason: `${label} attribution`};
+        if (JSON.stringify(record.packs) !== JSON.stringify([expectedPacks])) {
+          return {ok: false, reason: `${label} packs ${JSON.stringify(record.packs)}`};
+        }
+      }
+      return {ok: true};
+    }
+
+    async function main() {
+      // The Python driver serves this page over localhost and writes the run
+      // metadata to smoke-metadata.json before launch; the phase and run id
+      // travel in the query string (with a nonce defeating the bfcache) so
+      // each phase is an independent real load.
+      const params = new URLSearchParams(location.search);
+      const runId = params.get('run');
+      const metadata = await (await fetch('./smoke-metadata.json')).json();
+      const isReload = params.get('phase') === 'reload';
+      const root = await navigator.storage.getDirectory();
+      const smoke = await root.getDirectoryHandle(`pyxis-map-smoke-${runId}`, {create: true});
+      try {
+        const result = {
+          install: false,
+          readback: false,
+          reload: false,
+          exclusive_option_ignored: false,
+        };
+        if (!isReload) {
+          // Reload-persistence token: written through a real handle now and
+          // re-read after a full page reload in the second phase.
+          const token = await smoke.getFileHandle('smoke-token', {create: true});
+          const writable = await token.createWritable();
+          await writable.write(`smoke:${runId}`);
+          await writable.close();
+          // The File System Access API has no exclusive create option: the
+          // second call must return the existing handle, not throw.
+          const probe = await smoke.getFileHandle('smoke-probe', {create: true, exclusive: true});
+          const probeWritable = await probe.createWritable();
+          await probeWritable.write('first');
+          await probeWritable.close();
+          const probeAgain = await smoke.getFileHandle('smoke-probe', {create: true, exclusive: true});
+          const probeFile = await probeAgain.getFile();
+          const probeText = new TextDecoder().decode(await probeFile.arrayBuffer());
+          if (probeText !== 'first') throw new Error(`exclusive probe changed content: ${probeText}`);
+          result.exclusive_option_ignored = true;
+          setStage('install');
+          await installMuiZip({
+            archive: storedZip('2/1/1.png', PNG),
+            rootDirectory: smoke,
+            metadata,
+          });
+          const composition = await verifyComposition(
+            await smoke.getDirectoryHandle('pyxis-map'), metadata, 1);
+          if (composition.ok) { result.install = true; result.readback = true; }
+          window.__smokeResult = {...result, composition};
+          statusEl.textContent = `install done: ${JSON.stringify(window.__smokeResult)}`;
+          return;
+        }
+        // Reload phase: OPFS must have survived a full page reload.
+        setStage('reload');
+        const token = await readIfExists(smoke, 'smoke-token');
+        const tokenOk = token !== null && new TextDecoder().decode(token) === `smoke:${runId}`;
+        const composition = await verifyComposition(
+          await smoke.getDirectoryHandle('pyxis-map'), metadata, 1);
+        window.__smokeResult = {
+          // The install/readback/exclusive booleans come from the install
+          // phase (driver merges them in); this phase only reports what it
+          // re-observed after the page reload.
+          reload: tokenOk && composition.ok,
+          tokenOk,
+          composition,
+        };
+        statusEl.textContent = `reload done: ${JSON.stringify(window.__smokeResult)}`;
+      } finally {
+        // Clean only this run's OPFS test directory, and only after the
+        // reload phase has captured its results.
+        if (isReload) {
+          await root.removeEntry(`pyxis-map-smoke-${runId}`, {recursive: true});
+        }
+      }
+    }
+
+    main().catch(error => {
+      window.__smokeResult = {
+        error: `${error && error.name || 'Error'}: ${error && error.message || error}`,
+        stack: (error && error.stack) || '',
+        stage: window.__smokeStage || 'unknown',
+      };
+      statusEl.textContent = `failed: ${JSON.stringify(window.__smokeResult)}`;
+    });
+  </script>
+</body>
+</html>

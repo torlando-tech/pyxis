@@ -27,7 +27,7 @@ def test_map_installer_ui_is_local_file_to_sd_and_offline_only() -> None:
     assert "showDirectoryPicker" in source
     assert "navigator.locks?.request" in source
     assert "cross-tab locking required for safe map installation" in source
-    assert "./js/map-installer.js?v=map-style-picker-2" in source
+    assert "./js/map-installer.js?v=map-pack-v3-progress" in source
     assert "Oxed's Map Tile Downloader" in source
     assert "OpenStreetMap contributors" in source
     assert "suggestMapIdentity" in source
@@ -61,6 +61,44 @@ def test_map_installer_explains_the_complete_sd_card_workflow() -> None:
     assert positions == sorted(positions)
 
 
+def test_map_installer_documents_the_single_writer_contract() -> None:
+    """B9: both the flasher UI and the docs must state the supported
+    concurrency model — no CLI+browser at once, close other flasher tabs,
+    wait for verified completion, safe eject, exact retry — and must never
+    tell users to clean up marker files."""
+    flasher = FLASHER.read_text(encoding="utf-8")
+    docs = (ROOT / "docs/offline-map-packs.md").read_text(encoding="utf-8")
+    assert 'class="warning map-safety-contract"' in flasher
+    # Normalize whitespace so phrase checks survive HTML line-wrapping.
+    flasher_norm = " ".join(flasher.split())
+    contract_phrases = (
+        "close all other Pyxis flasher tabs",
+        "command-line installer",
+        "mounted card at the same time",
+        "completion message",
+        "safely eject",
+        "retry with the exact same ZIP",
+    )
+    for phrase in contract_phrases:
+        assert phrase in flasher_norm, f"flasher missing: {phrase!r}"
+    # The docs carry the same contract, plus the lock-scope limitation.
+    docs_norm = " ".join(docs.split())
+    assert "do not run the CLI and the browser installer" in docs_norm
+    assert "Close all other flasher tabs" in docs_norm
+    assert "Wait for the verified completion message" in docs_norm
+    assert "same browser profile" in docs_norm
+    # No marker-file cleanup instructions anywhere in the map installer docs.
+    lower_docs = docs_norm.lower()
+    for forbidden in (
+        "delete the marker",
+        "remove the marker",
+        "clean up the marker",
+        "delete the active-pack",
+        "remove the active-pack",
+    ):
+        assert forbidden not in lower_docs
+
+
 def test_map_installer_has_no_tile_network_fetch_path() -> None:
     source = INSTALLER.read_text(encoding="utf-8").lower()
     for forbidden in ("fetch(", "xmlhttprequest", "websocket", "http://", "https://"):
@@ -76,3 +114,32 @@ def test_map_installer_javascript_behavior() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_map_installer_uses_no_invented_filesystem_api_options() -> None:
+    # The browser File System Access API has no `exclusive` getFileHandle
+    # option and no FileExistsError; the only legitimate `exclusive` is the
+    # Web Locks request mode. Production JS and the test mock must stay
+    # within that real contract.
+    installer = INSTALLER.read_text(encoding="utf-8")
+    test_source = NODE_TEST.read_text(encoding="utf-8")
+    for source in (installer, test_source):
+        assert "FileExistsError" not in source
+    # In the installer the only `exclusive` occurrence may be the Web Locks
+    # request options object; the test source may only pass it as an ignored
+    # unknown option (B1 harness test), never as an exception trigger.
+    assert 'exclusive' not in installer.replace("{mode:'exclusive'}", "")
+    # Web Locks only serialize same-origin tabs. The deterministic lock name,
+    # the fail-closed message for browsers without the primitives, and the
+    # scope-limiting comment must all survive refactors, and no comment or
+    # error text may claim coordination with the CLI, other origins, or
+    # other browser profiles.
+    assert "pyxis-map-installer:" in installer
+    assert "cross-tab locking required for safe map installation" in installer
+    lower = " ".join(installer.lower().replace("//", " ").split())
+    assert "not coordinate with the cli" in lower
+    assert "another origin" in lower
+    assert "another browser profile" in lower
+    for overclaim in ("cross-origin", "other profile", "all producers",
+                      "both producers", "coordinated by the cli"):
+        assert overclaim not in lower

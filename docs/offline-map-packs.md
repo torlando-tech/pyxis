@@ -10,7 +10,8 @@ Open the Pyxis web flasher in current Chrome or Edge and use **Install Offline M
 2. Turn the T-Deck off, remove its SD card, and mount the card on the computer.
 3. Choose the ZIP, enter a map name and pack ID, and wait for local validation.
 4. Click **Install and Enable**, then choose the SD-card root.
-5. After the verified completion message, safely eject the card and return it to the T-Deck.
+5. Wait for the verified completion message, then safely eject the card and
+   return it to the T-Deck.
 
 The browser accepts stored ZIP entries rooted at either `<z>/<x>/<y>.png` or
 `maps/<style>/<z>/<x>/<y>.png`. It rejects mixed styles, traversal, duplicate
@@ -18,6 +19,14 @@ paths or tile keys, symlinks, encrypted or unsupported compression, malformed
 ZIP records, unsafe PNGs, quota violations, and noncanonical XYZ paths. Tiles
 are validated and read back one at a time; the complete archive is not loaded
 into JavaScript memory.
+
+**Single writer.** The browser's cross-tab lock serializes only tabs of the
+same flasher origin in the same browser profile. Close all other flasher tabs
+and windows before installing, and do not run the CLI and the browser
+installer against the same mounted card at the same time. Wait for the
+verified completion message, then safely eject the card. A
+published-but-not-activated pack is never deleted: retry activation with the
+exact same ZIP, map set, name, and pack ID.
 
 Installation refuses to overwrite an existing pack. A verified pack from an
 earlier activation failure can be reselected with the exact same ZIP and
