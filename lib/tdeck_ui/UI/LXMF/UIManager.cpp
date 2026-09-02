@@ -26,6 +26,7 @@
 #include <microReticulum/Utilities/OS.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
+#include "UnknownSourceKeyRequest.h"
 #include <cstring>
 #include <new>
 #include <utility>
@@ -167,6 +168,52 @@ private:
 uint64_t monotonicMillis() {
     return static_cast<uint64_t>(esp_timer_get_time() / 1000LL);
 }
+
+// ---------------------------------------------------------------------------
+// On-demand identity acquisition for unknown LXMF sources (mirrors
+// Sideband's "Query Network For Keys" button).
+//
+// When an LXMF message arrives from a source whose RNS identity has not been
+// learned, the router accepts the message but UIManager::on_message_received
+// skips location ingest for unauthenticated senders. Nothing in the firmware
+// ever triggered the identity learning that microLXMF's comment at
+// LXMRouter.cpp:1267 expects ("signature will be validated later if the
+// source identity is learned via announce"). This fires a bounded
+// RNS path request — the exact mechanism of Sideband's
+// RNS.Transport.request_path — so any peer that already knows the source's
+// key (the hub, a phone, or another node) can answer with the cached
+// announce. The next message from that peer then validates and plots.
+//
+// Rate limiting (UnknownSourceKeyRequest.h, host-tested): one automatic
+// path request per 30 minutes per unknown identity, with at most
+// kMaxTrackedSources open request windows in total. While the table is
+// saturated with unexpired windows, new identities are deferred (at most
+// one window) instead of evicting someone else's open window, so neither
+// an honest user's repeat traffic nor a flood of bogus identities can
+// force the network to answer unbounded path requests.
+namespace {
+UnknownSourceKeyRequestPolicy s_key_request_policy;
+
+void request_key_for_unknown_source(const ::LXMF::LXMessage& message) {
+    if (message.unverified_reason() !=
+        ::LXMF::Type::Message::SOURCE_UNKNOWN) {
+        return;  // Bad signature is not recoverable by asking the network.
+    }
+    const RNS::Bytes& source_hash = message.source_hash();
+    if (source_hash.size() != Telemetry::PEER_ID_SIZE) {
+        return;
+    }
+    const std::string source_hex = source_hash.toHex();
+    const uint64_t now = monotonicMillis();
+    if (!s_key_request_policy.should_request(source_hex, now)) {
+        return;  // Recently requested — wait for the answer to land.
+    }
+    s_key_request_policy.record_request(source_hex, now);
+    INFO(("Requesting network keys for unknown LXMF source " +
+          source_hex.substr(0, 8) + "...").c_str());
+    Transport::request_path(source_hash);
+}
+}  // namespace
 
 bool peerIdFromHash(const Bytes& hash, Telemetry::PeerId& output) {
     if (hash.size() != Telemetry::PEER_ID_SIZE) return false;
@@ -821,6 +868,31 @@ void UIManager::update() {
         const std::size_t peer_count = _peer_locations.snapshot(
             wall_now_millis, MAP_PEER_MAX_AGE_MS, peers,
             Telemetry::MAX_PEER_LOCATIONS);
+        // App-only diagnostic: edge-triggered so it stays quiet while the
+        // map sits idle. Temporary until the missing-map-pin investigation
+        // is closed; remove with the fix.
+        {
+            const std::size_t total = _peer_locations.size();
+            const int blocked =
+                location_state != Telemetry::LocationControllerState::READY
+                    ? 1 : 0;
+            static std::size_t last_total = static_cast<std::size_t>(-1);
+            static std::size_t last_visible = static_cast<std::size_t>(-1);
+            static int last_blocked = -1;
+            static bool have_last = false;
+            if (!have_last || last_total != total ||
+                last_visible != peer_count || last_blocked != blocked) {
+                have_last = true;
+                last_total = total;
+                last_visible = peer_count;
+                last_blocked = blocked;
+                INFOF(
+                    "  Map snapshot: store=%s total=%llu visible=%llu",
+                    blocked ? "BLOCKED" : "READY",
+                    (unsigned long long)total,
+                    (unsigned long long)peer_count);
+            }
+        }
         Pyxis::MapView::Request map_request{};
         map_request.center = {0.0, 0.0};
         map_request.zoom = 2U;
@@ -1584,6 +1656,14 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
 #ifdef PYXIS_TEST_HOOKS
     pyxis_test_hook_record_rx(message);
 #endif
+
+    // Diagnostic: unauthenticated messages are accepted by the router but
+    // skipped below for location ingest. Ask the network for the source's
+    // key (Sideband "request keys" equivalent) so the NEXT message from
+    // this peer can validate and be plotted.
+    if (!message.signature_validated()) {
+        request_key_for_unknown_source(message);
+    }
 
     // Classify authenticated location fields before any conversation write.
     // Raw field keys and values are MessagePack spans retained by LXMessage.
