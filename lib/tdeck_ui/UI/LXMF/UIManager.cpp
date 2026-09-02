@@ -1649,6 +1649,28 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
     // Arduino loop's `UIManager::update()` would assert at the 5s
     // LVGL_LOCK timeout (LVGLLock.h:45), tipping pyxis into a panic
     // reset. Scope the lock to ONLY the UI mutations below.
+    // Drop messages whose source identity is KNOWN but whose signature
+    // fails to validate (spoofed or malicious — an attacker forging a
+    // legitimate peer's hash). The opportunistic (on_packet) and direct
+    // (on_resource_concluded) router paths already reject these, but the
+    // propagated (store-and-forward) path — process_propagated_lxmf —
+    // queues them without a signature check, so this handler is the only
+    // choke point that covers all three. Drop before anything else: no
+    // key request, no location ingest, no persistence, no render, no
+    // notification.
+    //
+    // SOURCE_UNKNOWN is NOT dropped here: a first-contact peer's message
+    // may be legitimate and the key is still being learned (key request
+    // below), so those render as today.
+    if (!message.signature_validated() &&
+        message.unverified_reason() ==
+            ::LXMF::Type::Message::SIGNATURE_INVALID) {
+        WARNING(("Dropping message with invalid signature from " +
+                 message.source_hash().toHex().substr(0, 8) +
+                 "...").c_str());
+        return;
+    }
+
     std::string source_hex = message.source_hash().toHex().substr(0, 8);
     std::string msg = "Message received from " + source_hex + "...";
     INFO(msg.c_str());
@@ -1657,10 +1679,12 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
     pyxis_test_hook_record_rx(message);
 #endif
 
-    // Diagnostic: unauthenticated messages are accepted by the router but
-    // skipped below for location ingest. Ask the network for the source's
-    // key (Sideband "request keys" equivalent) so the NEXT message from
-    // this peer can validate and be plotted.
+    // First-contact key learning: unauthenticated messages from a source
+    // whose identity has not been learned yet (SOURCE_UNKNOWN) are accepted
+    // by the router but skipped below for location ingest. Ask the network
+    // for the source's key (Sideband "request keys" equivalent) so the NEXT
+    // message from this peer can validate and be plotted. Signature-invalid
+    // messages were already dropped above.
     if (!message.signature_validated()) {
         request_key_for_unknown_source(message);
     }
