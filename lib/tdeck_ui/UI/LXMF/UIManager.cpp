@@ -170,8 +170,8 @@ uint64_t monotonicMillis() {
 }
 
 // ---------------------------------------------------------------------------
-// App-only diagnostic: on-demand identity acquisition for unknown LXMF
-// sources (mirrors Sideband's "Query Network For Keys" button).
+// On-demand identity acquisition for unknown LXMF sources (mirrors
+// Sideband's "Query Network For Keys" button).
 //
 // When an LXMF message arrives from a source whose RNS identity has not been
 // learned, the router accepts the message but UIManager::on_message_received
@@ -184,10 +184,13 @@ uint64_t monotonicMillis() {
 // key (the hub, a phone, or another node) can answer with the cached
 // announce. The next message from that peer then validates and plots.
 //
-// The rate-limit policy lives in UnknownSourceKeyRequest.h (host-tested);
-// only the Transport::request_path side effect stays here. Diagnostic for
-// the missing-map-pin investigation; remove with the other ingest
-// diagnostics once the root cause closes.
+// Rate limiting (UnknownSourceKeyRequest.h, host-tested): one automatic
+// path request per 30 minutes per unknown identity, with at most
+// kMaxTrackedSources open request windows in total. While the table is
+// saturated with unexpired windows, new identities are deferred (at most
+// one window) instead of evicting someone else's open window, so neither
+// an honest user's repeat traffic nor a flood of bogus identities can
+// force the network to answer unbounded path requests.
 namespace {
 UnknownSourceKeyRequestPolicy s_key_request_policy;
 
@@ -1704,9 +1707,6 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
         if (location_decision.log_malformed) {
             WARNING("Malformed inbound location field ignored");
         }
-        // App-only diagnostic: tracks the store outcome for the ingest line.
-        // Temporary until the missing-map-pin investigation is closed.
-        int ingest_diag_result = -1;
         if (location_decision.apply_location) {
             const uint64_t location_wall_now =
                 static_cast<uint64_t>(RNS::Utilities::OS::ltime());
@@ -1723,7 +1723,6 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
                         location_decision.location,
                         location_decision.meta,
                         location_decision.received_at_millis);
-                ingest_diag_result = static_cast<int>(location_result);
                 if (location_result != Telemetry::PeerLocationResult::STALE &&
                     location_result != Telemetry::PeerLocationResult::NOT_FOUND &&
                     location_result != Telemetry::PeerLocationResult::INVALID_ARGUMENT) {
@@ -1733,27 +1732,6 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
             } else {
                 WARNING("Location state not restored; inbound update ignored");
             }
-        }
-        // App-only diagnostic: one bounded line per inbound location frame.
-        // Reports peer, policy branch, decoded fix, source-clock skew, and
-        // store result (0=INSERTED 1=UPDATED 4=STALE 5=EXPIRED 6=INVALID).
-        // Temporary until the missing-map-pin investigation is closed;
-        // remove with the fix.
-        {
-            const int64_t source_ts = static_cast<int64_t>(
-                location_decision.location.timestamp_seconds) * 1000LL;
-            const int64_t skew_millis = static_cast<int64_t>(
-                location_decision.received_at_millis) - source_ts;
-            INFOF(
-                "  Location ingest: peer %02x%02x kind=%d result=%d lat=%.4f "
-                "lon=%.4f src_age=%lldms",
-                (int)location_decision.authenticated_sender.bytes[14],
-                (int)location_decision.authenticated_sender.bytes[15],
-                (int)location_decision.kind,
-                ingest_diag_result,
-                (double)location_decision.location.latitude_e6 / 1000000.0,
-                (double)location_decision.location.longitude_e6 / 1000000.0,
-                (long long)skew_millis);
         }
         if (!location_decision.persist) {
             INFO("  Location telemetry processed without chat persistence");
