@@ -100,6 +100,13 @@ const char* styleLabel(const char* style_id) {
     return "Style";
 }
 
+// The allowlist is otherwise light basemaps (osm-bright, positron, toner).
+// Marker labels sit directly on those tiles with no backing plate, so black
+// reads on light backgrounds and white only on the one dark basemap.
+bool isDarkBasemap(const char* style_id) {
+    return style_id != nullptr && std::strcmp(style_id, "dark-matter") == 0;
+}
+
 }  // namespace
 
 static_assert(sizeof(lv_color_t) == 2U,
@@ -728,6 +735,13 @@ void MapScreen::applyFrame() {
             setPlaceholder(index);
         }
     }
+    // Marker labels float directly over the basemap tiles (no backing plate),
+    // so their ink must contrast the active style: black on light basemaps,
+    // white on the one dark basemap. Re-evaluated every frame so a style
+    // switch re-colors any visible labels on the next applied frame.
+    const lv_color_t marker_label_color =
+        isDarkBasemap(style_selector_.activeId())
+            ? lv_color_white() : lv_color_black();
     for (std::size_t index = 0; index < MARKER_COUNT; ++index) {
         if (index >= frame.marker_count) {
             lv_obj_add_flag(approximation_halos_[index], LV_OBJ_FLAG_HIDDEN);
@@ -764,6 +778,7 @@ void MapScreen::applyFrame() {
                           marker.peer.bytes[Telemetry::PEER_ID_SIZE - 1U]);
         }
         lv_label_set_text(marker_labels_[index], label);
+        lv_obj_set_style_text_color(marker_labels_[index], marker_label_color, 0);
         lv_obj_set_pos(marker_labels_[index], x + 6, y - 7);
         lv_obj_clear_flag(marker_labels_[index], LV_OBJ_FLAG_HIDDEN);
     }
