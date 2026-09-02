@@ -59,7 +59,8 @@ struct UnknownSourceKeyRequestPolicy {
 
     struct Entry {
         std::string source_hex;
-        unsigned long long last_requested_millis = 0;
+        unsigned long long last_requested_millis;
+        Entry() : last_requested_millis(0) {}
     };
 
     // One entry per fired request whose window is still open.
@@ -110,7 +111,10 @@ struct UnknownSourceKeyRequestPolicy {
             // unauthorized request).
             return;
         }
-        last_requested.push_back(Entry{source_hex, now_millis});
+        Entry entry;
+        entry.source_hex = source_hex;
+        entry.last_requested_millis = now_millis;
+        last_requested.push_back(entry);
     }
 };
 
