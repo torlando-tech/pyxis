@@ -26,6 +26,7 @@
 #include <microReticulum/Utilities/OS.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
+#include "UnknownSourceKeyRequest.h"
 #include <cstring>
 #include <new>
 #include <utility>
@@ -183,15 +184,12 @@ uint64_t monotonicMillis() {
 // key (the hub, a phone, or another node) can answer with the cached
 // announce. The next message from that peer then validates and plots.
 //
-// Rate-limited per source hash (5 min) and globally (64 entries) to keep
-// opportunistic-flood cost to zero in the steady state. Diagnostic for the
-// missing-map-pin investigation; remove with the other ingest diagnostics
-// once the root cause is closed.
+// The rate-limit policy lives in UnknownSourceKeyRequest.h (host-tested);
+// only the Transport::request_path side effect stays here. Diagnostic for
+// the missing-map-pin investigation; remove with the other ingest
+// diagnostics once the root cause closes.
 namespace {
-struct KeyRequestState {
-    std::vector<std::pair<std::string, uint64_t>> last_requested;
-};
-KeyRequestState s_key_request_state;
+UnknownSourceKeyRequestPolicy s_key_request_policy;
 
 void request_key_for_unknown_source(const ::LXMF::LXMessage& message) {
     if (message.unverified_reason() !=
@@ -204,20 +202,10 @@ void request_key_for_unknown_source(const ::LXMF::LXMessage& message) {
     }
     const std::string source_hex = source_hash.toHex();
     const uint64_t now = monotonicMillis();
-    const static constexpr uint64_t kKeyRequestIntervalMillis = 5 * 60 * 1000;
-    for (auto& e : s_key_request_state.last_requested) {
-        if (e.first == source_hex) {
-            if (now < e.second + kKeyRequestIntervalMillis) {
-                return;  // Recently requested — wait for the answer to land.
-            }
-            e.second = now;  // Expired — re-request below.
-            break;
-        }
+    if (!s_key_request_policy.should_request(source_hex, now)) {
+        return;  // Recently requested — wait for the answer to land.
     }
-    if (s_key_request_state.last_requested.size() >= 64U) {
-        s_key_request_state.last_requested.erase(s_key_request_state.last_requested.begin());
-    }
-    s_key_request_state.last_requested.emplace_back(source_hex, now);
+    s_key_request_policy.record_request(source_hex, now);
     INFO(("Requesting network keys for unknown LXMF source " +
           source_hex.substr(0, 8) + "...").c_str());
     Transport::request_path(source_hash);
@@ -877,6 +865,31 @@ void UIManager::update() {
         const std::size_t peer_count = _peer_locations.snapshot(
             wall_now_millis, MAP_PEER_MAX_AGE_MS, peers,
             Telemetry::MAX_PEER_LOCATIONS);
+        // App-only diagnostic: edge-triggered so it stays quiet while the
+        // map sits idle. Temporary until the missing-map-pin investigation
+        // is closed; remove with the fix.
+        {
+            const std::size_t total = _peer_locations.size();
+            const int blocked =
+                location_state != Telemetry::LocationControllerState::READY
+                    ? 1 : 0;
+            static std::size_t last_total = static_cast<std::size_t>(-1);
+            static std::size_t last_visible = static_cast<std::size_t>(-1);
+            static int last_blocked = -1;
+            static bool have_last = false;
+            if (!have_last || last_total != total ||
+                last_visible != peer_count || last_blocked != blocked) {
+                have_last = true;
+                last_total = total;
+                last_visible = peer_count;
+                last_blocked = blocked;
+                INFOF(
+                    "  Map snapshot: store=%s total=%llu visible=%llu",
+                    blocked ? "BLOCKED" : "READY",
+                    (unsigned long long)total,
+                    (unsigned long long)peer_count);
+            }
+        }
         Pyxis::MapView::Request map_request{};
         map_request.center = {0.0, 0.0};
         map_request.zoom = 2U;
@@ -1691,6 +1704,9 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
         if (location_decision.log_malformed) {
             WARNING("Malformed inbound location field ignored");
         }
+        // App-only diagnostic: tracks the store outcome for the ingest line.
+        // Temporary until the missing-map-pin investigation is closed.
+        int ingest_diag_result = -1;
         if (location_decision.apply_location) {
             const uint64_t location_wall_now =
                 static_cast<uint64_t>(RNS::Utilities::OS::ltime());
@@ -1707,6 +1723,7 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
                         location_decision.location,
                         location_decision.meta,
                         location_decision.received_at_millis);
+                ingest_diag_result = static_cast<int>(location_result);
                 if (location_result != Telemetry::PeerLocationResult::STALE &&
                     location_result != Telemetry::PeerLocationResult::NOT_FOUND &&
                     location_result != Telemetry::PeerLocationResult::INVALID_ARGUMENT) {
@@ -1716,6 +1733,27 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
             } else {
                 WARNING("Location state not restored; inbound update ignored");
             }
+        }
+        // App-only diagnostic: one bounded line per inbound location frame.
+        // Reports peer, policy branch, decoded fix, source-clock skew, and
+        // store result (0=INSERTED 1=UPDATED 4=STALE 5=EXPIRED 6=INVALID).
+        // Temporary until the missing-map-pin investigation is closed;
+        // remove with the fix.
+        {
+            const int64_t source_ts = static_cast<int64_t>(
+                location_decision.location.timestamp_seconds) * 1000LL;
+            const int64_t skew_millis = static_cast<int64_t>(
+                location_decision.received_at_millis) - source_ts;
+            INFOF(
+                "  Location ingest: peer %02x%02x kind=%d result=%d lat=%.4f "
+                "lon=%.4f src_age=%lldms",
+                (int)location_decision.authenticated_sender.bytes[14],
+                (int)location_decision.authenticated_sender.bytes[15],
+                (int)location_decision.kind,
+                ingest_diag_result,
+                (double)location_decision.location.latitude_e6 / 1000000.0,
+                (double)location_decision.location.longitude_e6 / 1000000.0,
+                (long long)skew_millis);
         }
         if (!location_decision.persist) {
             INFO("  Location telemetry processed without chat persistence");
