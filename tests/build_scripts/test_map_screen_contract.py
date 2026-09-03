@@ -262,6 +262,31 @@ def test_style_switch_is_bounded_and_worker_owned():
     assert "style_selector_.clearError()" in hide
 
 
+def test_marker_labels_contrast_active_basemap_style():
+    source = text(UI / "MapScreen.cpp")
+    # The allowlist is light basemaps except one dark style, so pin labels are
+    # black by default and white only over the dark basemap.
+    assert "bool isDarkBasemap(const char* style_id)" in source
+    dark = function_body(source, "bool isDarkBasemap(const char* style_id)")
+    assert "std::strcmp(style_id, \"dark-matter\") == 0" in dark
+
+    frame = function_body(source, "void MapScreen::applyFrame()")
+    assert "isDarkBasemap(style_selector_.activeId())" in frame
+    # The ternary text encodes the contract: dark basemap -> white,
+    # otherwise -> black (so black is the default for light basemaps).
+    assert "lv_color_white() : lv_color_black()" in frame
+    # Exactly one label-color call, and it sits in the marker loop's main
+    # branch: after the loop's hidden-marker continue, not in the hide path.
+    apply_marker = "lv_obj_set_style_text_color(marker_labels_[index], marker_label_color"
+    assert frame.count(apply_marker) == 1
+    loop = frame.index("for (std::size_t index = 0; index < MARKER_COUNT; ++index)")
+    loop_branch_continue = frame.index("continue;", loop)
+    apply = frame.index(apply_marker)
+    assert loop < loop_branch_continue < apply
+    # The color itself is derived once, before the loop applies it.
+    assert frame.index("marker_label_color") < apply
+
+
 def test_ui_manager_services_before_lock_and_hides_map_everywhere():
     source = text(UI / "UIManager.cpp")
     update = function_body(source, "void UIManager::update()")
