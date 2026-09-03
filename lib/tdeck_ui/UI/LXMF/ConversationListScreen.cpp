@@ -307,14 +307,19 @@ void ConversationListScreen::refresh() {
         // Re-pop the preview cache from the metadata we just read (the
         // next refresh becomes O(1) with no I/O). Only meaningful on the
         // fallback path — when the cache was already serving us there is
-        // nothing new to write. Skipped when drops were queued: the
-        // drained deletes update last_message_hash, so a preview written
-        // for the old tail would be stale for one refresh — let the next
-        // fallback re-read the converged tail instead.
-        if (need_metadata && last_meta.valid && !last_meta.content.empty()
-            && !queued_drops) {
+        // nothing new to write. An EMPTY content re-pops as a valid
+        // cached empty preview (the store marks it populated), so
+        // empty-content tails — location shares, blank pings — also stop
+        // falling back. The one-shot index commit below persists the
+        // repop so a reboot does not re-pay every fallback. Skipped
+        // when drops were queued: the drained deletes update
+        // last_message_hash, so a preview written for the old tail would
+        // be stale for one refresh — let the next fallback re-read the
+        // converged tail instead.
+        if (need_metadata && last_meta.valid && !queued_drops) {
             _message_store->set_last_message_preview(peer_hash,
                 last_meta.content.substr(0, 47));
+            _index_commit_pending = true;
         }
 
         // Create conversation item
@@ -409,7 +414,7 @@ void ConversationListScreen::refresh() {
         snprintf(perf_buf, sizeof(perf_buf),
             "[PERF] convlist skip rows=%u fallbacks=%u gather=%ums diff=%ums total=%ums",
             (unsigned)gathered.size(), (unsigned)p_fallbacks,
-            (unsigned)p_t_gather, (unsigned)p_t_diff, (unsigned)(p_t_diff - p_t0));
+            (unsigned)p_t_gather, (unsigned)p_t_diff, (unsigned)p_t_diff);
         INFO(perf_buf);
         return;  // rows on screen are current
     }
@@ -595,6 +600,24 @@ void ConversationListScreen::flush_pending_drops() {
         }
     }
     _pending_drops.swap(remaining);
+}
+
+void ConversationListScreen::flush_pending_index_commit() {
+    // Called from UIManager::update() BEFORE it takes the LVGL lock,
+    // right after draining drops. Commits the persisted conversation
+    // index once per boot when refresh() had to fall back to
+    // load_message_metadata() (unpopulated preview cache): the in-memory
+    // repop would otherwise be lost on reboot and the next cold boot
+    // would re-read every newest message file again. save_index()
+    // rewrites the whole index, so it also persists any preview cache
+    // writes made by save_message() since the last store-originated
+    // commit — one-shot by design; the flag clears even if the commit
+    // fails and a later fallback re-arms it.
+    if (!_message_store || !_index_commit_pending) {
+        return;
+    }
+    _message_store->commit_index();
+    _index_commit_pending = false;
 }
 
 void ConversationListScreen::clear_unread_badge(lv_obj_t* container) {

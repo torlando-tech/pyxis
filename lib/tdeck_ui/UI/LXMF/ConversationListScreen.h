@@ -135,6 +135,19 @@ public:
     void flush_pending_drops();
 
     /**
+     * Commit the persisted conversation index once when this boot has
+     * fallen back to message-file reads (the one-shot preview-cache
+     * warm-up: cold boot after a firmware/index upgrade, or a tail
+     * cleared by a delete). The in-memory repop alone is lost on
+     * reboot, so without this commit the first list refresh after
+     * EVERY boot re-reads every newest message file. MUST be called
+     * OUTSIDE the LVGL lock (UIManager::update() calls it after
+     * draining drops, before mark-read, so all three land in one
+     * sensible order — each save_index() rewrites the whole index).
+     */
+    void flush_pending_index_commit();
+
+    /**
      * Set callback for conversation selection
      * @param callback Function to call when conversation is selected
      */
@@ -257,6 +270,12 @@ private:
     // before taking the lock so the index converges to the newest
     // readable message.
     std::vector<RNS::Bytes> _pending_drops;
+    // Set by refresh() when at least one conversation fell back to
+    // load_message_metadata() this boot (unpopulated preview cache:
+    // cold boot on a pre-c8d3156-generation index, or a tail cleared by
+    // delete). flush_pending_index_commit() persists the repop once so
+    // the next boot serves previews straight from the index.
+    bool _index_commit_pending = false;
 
     ConversationSelectedCallback _conversation_selected_callback;
     ComposeCallback _compose_callback;

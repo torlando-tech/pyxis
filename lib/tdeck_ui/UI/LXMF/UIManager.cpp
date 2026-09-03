@@ -724,6 +724,10 @@ void UIManager::update() {
         // sensible order — each save_index() rewrites the whole index,
         // and mark-read's final write carries the cleared unread count.
         _conversation_list_screen->flush_pending_drops();
+        // One-shot preview-cache warm-up commit (index carries
+        // last_preview now; see the method). Lands before mark-read so
+        // that final index write also carries the warmed previews.
+        _conversation_list_screen->flush_pending_index_commit();
         // Commit queued mark-read index writes the same way — the LVGL
         // click handler only recorded the peer hash.
         _conversation_list_screen->flush_pending_mark_reads();
