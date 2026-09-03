@@ -1114,12 +1114,19 @@ void UIManager::render_route(Route route) {
         case Route::HOME:
             _home_screen->show();
             break;
-        case Route::MESSAGES:
+        case Route::MESSAGES: {
+            // [PERF] temporary instrumentation — removable.
+            const uint32_t p_route_start = millis();
             _conversation_list_screen->refresh();
             _pending_conversation_refresh = false;
             _last_conversation_refresh_ms = millis();
             _conversation_list_screen->show();
+            char perf_buf[64];
+            snprintf(perf_buf, sizeof(perf_buf), "[PERF] convlist route=%ums",
+                (unsigned)(millis() - p_route_start));
+            INFO(perf_buf);
             break;
+        }
         case Route::MAP:
             _map_screen->show();
             break;

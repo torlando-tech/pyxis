@@ -198,6 +198,13 @@ void ConversationListScreen::refresh() {
         return;
     }
 
+    // [PERF] temporary instrumentation — removable. Stage timings for the
+    // Messages tap path. Kept as INFO so it survives a DEBUG-off build and
+    // lands in the serial capture.
+    const uint32_t p_t0 = millis();
+    uint32_t p_t_gather = 0, p_t_diff = 0, p_t_rebuild = 0;
+    size_t p_fallbacks = 0;
+
     // Revalidate-then-render: gather the row data first (now O(1) per
     // conversation — index preview + hash + unread, no message-file I/O)
     // and compare it against what is already on screen. The old path
@@ -249,6 +256,7 @@ void ConversationListScreen::refresh() {
             _message_store->get_last_message_preview(peer_hash, preview, preview_ts);
         bool need_metadata = !have_preview;
         bool queued_drops = false;
+        if (need_metadata) p_fallbacks++;
 
         ::LXMF::MessageStore::MessageMetadata last_meta;
         last_meta.valid = false;
@@ -378,6 +386,7 @@ void ConversationListScreen::refresh() {
     // BEFORE any later refresh takes the lock, so a refresh in that
     // window sees the data unchanged (badge stays off) and the first
     // refresh after the flush sees unread==0 and rebuilds correctly.)
+    p_t_gather = millis() - p_t0;
     bool changed = (gathered.size() != _conversations.size());
     if (!changed) {
         for (size_t i = 0; i < gathered.size(); ++i) {
@@ -393,7 +402,15 @@ void ConversationListScreen::refresh() {
             }
         }
     }
+    p_t_diff = millis() - p_t0;
     if (!changed) {
+        // [PERF] temporary instrumentation — removable.
+        char perf_buf[128];
+        snprintf(perf_buf, sizeof(perf_buf),
+            "[PERF] convlist skip rows=%u fallbacks=%u gather=%ums diff=%ums total=%ums",
+            (unsigned)gathered.size(), (unsigned)p_fallbacks,
+            (unsigned)p_t_gather, (unsigned)p_t_diff, (unsigned)(p_t_diff - p_t0));
+        INFO(perf_buf);
         return;  // rows on screen are current
     }
 
@@ -413,6 +430,7 @@ void ConversationListScreen::refresh() {
         _conversations.push_back(item);
         create_conversation_item(item);
     }
+    p_t_rebuild = millis() - p_t0;
 
     // refresh() may run while Messages remains active. Newly created rows are
     // not automatically restored to the encoder group after lv_obj_clean().
@@ -423,6 +441,16 @@ void ConversationListScreen::refresh() {
                 lv_group_add_obj(group, container);
             }
         }
+    }
+
+    // [PERF] temporary instrumentation — removable.
+    {
+        char perf_buf[128];
+        snprintf(perf_buf, sizeof(perf_buf),
+            "[PERF] convlist build rows=%u fallbacks=%u gather=%ums rebuild=%ums total=%ums",
+            (unsigned)gathered.size(), (unsigned)p_fallbacks,
+            (unsigned)p_t_gather, (unsigned)p_t_rebuild, (unsigned)(millis() - p_t0));
+        INFO(perf_buf);
     }
 }
 
@@ -604,6 +632,8 @@ void ConversationListScreen::set_home_callback(HomeCallback callback) {
 
 void ConversationListScreen::show() {
     LVGL_LOCK();
+    // [PERF] temporary instrumentation — removable.
+    const uint32_t p_show_start = millis();
     _visible = true;
     lv_obj_clear_flag(_screen, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(_screen);  // Bring to front for touch events
@@ -630,6 +660,14 @@ void ConversationListScreen::show() {
         } else if (_btn_new) {
             lv_group_focus_obj(_btn_new);
         }
+    }
+
+    // [PERF] temporary instrumentation — removable.
+    {
+        char perf_buf[64];
+        snprintf(perf_buf, sizeof(perf_buf), "[PERF] convlist show=%ums",
+            (unsigned)(millis() - p_show_start));
+        INFO(perf_buf);
     }
 }
 
