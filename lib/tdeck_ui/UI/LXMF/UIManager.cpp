@@ -719,6 +719,11 @@ void UIManager::update() {
     // never runs under the render lock (same reason as on_message_received).
     if (_conversation_list_screen) {
         _conversation_list_screen->flush_pending_name_writes();
+        // Drop queued corrupt messages (index commit + payload removal).
+        // Drained before mark-read so both index commits land in a
+        // sensible order — each save_index() rewrites the whole index,
+        // and mark-read's final write carries the cleared unread count.
+        _conversation_list_screen->flush_pending_drops();
         // Commit queued mark-read index writes the same way — the LVGL
         // click handler only recorded the peer hash.
         _conversation_list_screen->flush_pending_mark_reads();

@@ -122,6 +122,19 @@ public:
     void clear_unread_badge(lv_obj_t* container);
 
     /**
+     * Queue a corrupt/unreadable message for deletion. The actual
+     * store mutation (index commit + payload removal) is drained by
+     * flush_pending_drops() OUTSIDE the LVGL lock, like mark-read.
+     */
+    void request_drop_message(const RNS::Bytes& message_hash);
+
+    /**
+     * Drop queued unreadable messages from the store. MUST be called
+     * OUTSIDE the LVGL lock.
+     */
+    void flush_pending_drops();
+
+    /**
      * Set callback for conversation selection
      * @param callback Function to call when conversation is selected
      */
@@ -239,6 +252,11 @@ private:
     // only queues the hash; UIManager::update() commits it (LittleFS
     // index write) before taking the lock.
     std::vector<RNS::Bytes> _pending_mark_reads;
+    // Corrupt/unreadable messages queued for deletion (one per unreadable
+    // tail walk, bounded per refresh); UIManager::update() drops them
+    // before taking the lock so the index converges to the newest
+    // readable message.
+    std::vector<RNS::Bytes> _pending_drops;
 
     ConversationSelectedCallback _conversation_selected_callback;
     ComposeCallback _compose_callback;

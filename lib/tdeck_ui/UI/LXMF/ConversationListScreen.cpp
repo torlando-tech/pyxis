@@ -242,9 +242,41 @@ void ConversationListScreen::refresh() {
             _message_store->load_message_metadata(last_msg_hash);
 
         if (!last_meta.valid) {
-            // Corrupt/unreadable last message — skip the row rather than
-            // rendering an empty preview with a bogus timestamp.
-            continue;
+            // The newest message is corrupt/unreadable. Don't hide the
+            // conversation over one bad message: drop the unreadable
+            // message(s) and preview the newest readable one instead.
+            //
+            // This only costs the get_messages_for_conversation() array
+            // copy and the extra metadata reads on the corrupt path — the
+            // common (all-readable) path above stays O(1) + one read.
+            //
+            // delete_message() commits the index and removes files, so it
+            // must not run under this LVGL lock: we only queue the hashes
+            // here, and UIManager::update() drains them (before taking the
+            // lock) — same deferred pattern as mark-read / name writes.
+            // The store's index updates last_message_hash on delete, so
+            // the next refresh converges to the same preview.
+            std::vector<Bytes> hashes =
+                _message_store->get_messages_for_conversation(peer_hash);
+            request_drop_message(last_msg_hash);  // tail is the known-bad one
+            // Walk newest→oldest over all but the tail (array is
+            // chronological; hashes.back() is the tail we just queued) to
+            // find the newest readable preview, queuing any unreadable
+            // messages along the way.
+            for (int i = (int)hashes.size() - 2; i >= 0; --i) {
+                ::LXMF::MessageStore::MessageMetadata m =
+                    _message_store->load_message_metadata(hashes[i]);
+                if (m.valid) {
+                    last_meta = m;  // newest readable preview
+                    break;
+                }
+                request_drop_message(hashes[i]);
+            }
+            if (!last_meta.valid) {
+                // Every message was unreadable; all queued for drop. Skip
+                // the row this refresh — the store converges to none.
+                continue;
+            }
         }
 
         // Create conversation item
@@ -427,6 +459,37 @@ void ConversationListScreen::flush_pending_mark_reads() {
         _message_store->mark_conversation_read(h);
     }
     _pending_mark_reads.clear();
+}
+
+void ConversationListScreen::request_drop_message(const Bytes& message_hash) {
+    // Queues a corrupt/unreadable message for deletion. The actual
+    // delete_message() (index commit + payload file removal, and the
+    // last_message_hash update) runs from flush_pending_drops() OUTSIDE
+    // the LVGL lock. A bounded number of unreadable messages can be
+    // queued per refresh (one per conversation, walking the tail), so the
+    // queue cannot grow without bound.
+    for (const auto& h : _pending_drops) {
+        if (h == message_hash) return;
+    }
+    _pending_drops.push_back(message_hash);
+}
+
+void ConversationListScreen::flush_pending_drops() {
+    // Called from UIManager::update() BEFORE it takes the LVGL lock.
+    // Drop the queued unreadable messages so the conversation index
+    // converges (deletion updates last_message_hash to the new tail); the
+    // next list refresh then previews the newest readable message. A
+    // delete that fails (store not ready) is left for a later drain.
+    if (!_message_store || _pending_drops.empty()) {
+        return;
+    }
+    std::vector<Bytes> remaining;
+    for (const auto& h : _pending_drops) {
+        if (!_message_store->delete_message(h)) {
+            remaining.push_back(h);
+        }
+    }
+    _pending_drops.swap(remaining);
 }
 
 void ConversationListScreen::clear_unread_badge(lv_obj_t* container) {
