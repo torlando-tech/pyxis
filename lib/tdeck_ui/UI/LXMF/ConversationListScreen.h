@@ -102,11 +102,24 @@ public:
     void flush_pending_name_writes();
 
     /**
-     * Update unread count for a specific conversation
-     * @param peer_hash Peer hash
-     * @param unread_count New unread count
+     * Request that a conversation be marked read. Defers the store
+     * mutation (LittleFS index commit) out of the LVGL event callback;
+     * MUST be drained by flush_pending_mark_reads() OUTSIDE the LVGL
+     * lock (UIManager::update() calls it before taking the lock), the
+     * same pattern as the deferred display-name write-throughs.
      */
-    void update_unread_count(const RNS::Bytes& peer_hash, uint16_t unread_count);
+    void request_mark_read(const RNS::Bytes& peer_hash);
+
+    /**
+     * Commit pending mark-read requests to the store. MUST be called
+     * OUTSIDE the LVGL lock.
+     */
+    void flush_pending_mark_reads();
+
+    /**
+     * Remove the unread badge from a rendered conversation row.
+     */
+    void clear_unread_badge(lv_obj_t* container);
 
     /**
      * Set callback for conversation selection
@@ -213,6 +226,7 @@ private:
     ::LXMF::MessageStore* _message_store;
     std::vector<ConversationItem> _conversations;
     std::vector<lv_obj_t*> _conversation_containers;  // For focus group management
+    std::vector<lv_obj_t*> _badge_pool;  // Unread badge per row (nullptr when none); index-aligned with _conversation_containers
     std::vector<RNS::Bytes> _peer_hash_pool;  // Object pool to avoid per-item allocations
     RNS::Bytes _pending_delete_hash;  // Hash of conversation pending deletion
     bool _has_unresolved_names = false;  // True if any conversation shows hash instead of name
@@ -221,6 +235,10 @@ private:
     // under the lock stalls the render task on a cold-boot announce burst.
     // Drained by UIManager::update() before it takes the lock.
     std::vector<std::pair<RNS::Bytes, std::string>> _pending_name_writes;
+    // Mark-read requests deferred the same way: the LVGL click handler
+    // only queues the hash; UIManager::update() commits it (LittleFS
+    // index write) before taking the lock.
+    std::vector<RNS::Bytes> _pending_mark_reads;
 
     ConversationSelectedCallback _conversation_selected_callback;
     ComposeCallback _compose_callback;

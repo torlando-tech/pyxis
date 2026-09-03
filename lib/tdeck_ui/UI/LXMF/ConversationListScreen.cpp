@@ -204,6 +204,7 @@ void ConversationListScreen::refresh() {
     lv_obj_clean(_list);
     _conversations.clear();
     _conversation_containers.clear();
+    _badge_pool.clear();
     _peer_hash_pool.clear();
     _has_unresolved_names = false;
 
@@ -214,6 +215,7 @@ void ConversationListScreen::refresh() {
     _peer_hash_pool.reserve(peer_hashes.size());
     _conversations.reserve(peer_hashes.size());
     _conversation_containers.reserve(peer_hashes.size());
+    _badge_pool.reserve(peer_hashes.size());
 
     {
         char log_buf[48];
@@ -222,15 +224,28 @@ void ConversationListScreen::refresh() {
     }
 
     for (const auto& peer_hash : peer_hashes) {
-        std::vector<Bytes> messages = _message_store->get_messages_for_conversation(peer_hash);
-
-        if (messages.empty()) {
+        // Last-message hash comes from the conversation index cache
+        // (O(1) in-memory lookup, no 8KB hash-array copy and no I/O).
+        Bytes last_msg_hash = _message_store->get_last_message_hash(peer_hash);
+        if (!last_msg_hash) {
             continue;
         }
 
-        // Load last message for preview
-        Bytes last_msg_hash = messages.back();
-        ::LXMF::LXMessage last_msg = _message_store->load_message(last_msg_hash);
+        // Load last message metadata for the preview. load_message() would
+        // also read the payload file twice (recovery validation + load),
+        // parse the full JSON twice (including the large "packed" hex
+        // blob), hex-decode it, and msgpack-unpack the whole message —
+        // all for a 30-char preview and a timestamp. The metadata path
+        // does one open + one filtered parse per conversation, which is
+        // what ChatScreen already uses for the same fields.
+        ::LXMF::MessageStore::MessageMetadata last_meta =
+            _message_store->load_message_metadata(last_msg_hash);
+
+        if (!last_meta.valid) {
+            // Corrupt/unreadable last message — skip the row rather than
+            // rendering an empty preview with a bogus timestamp.
+            continue;
+        }
 
         // Create conversation item
         ConversationItem item;
@@ -270,16 +285,21 @@ void ConversationListScreen::refresh() {
             _has_unresolved_names = true;
         }
 
-        // Get message content for preview
-        String content((const char*)last_msg.content().data(), last_msg.content().size());
+        // Get message content for preview (metadata path returns the
+        // pre-extracted UTF-8 content — no msgpack unpacking)
+        String content(last_meta.content.c_str());
         item.last_message = content.substring(0, 30);  // Truncate to 30 chars
         if (content.length() > 30) {
             item.last_message += "...";
         }
 
-        item.timestamp = (uint32_t)last_msg.timestamp();
+        item.timestamp = (uint32_t)last_meta.timestamp;
         item.timestamp_str = format_timestamp(item.timestamp);
-        item.unread_count = 0;  // TODO: Track unread count
+        // Unread count straight from the conversation index (persisted,
+        // incremented on incoming save, cleared when the user opens the
+        // chat via request_mark_read()).
+        item.unread_count =
+            (uint16_t)_message_store->get_conversation_unread_count(peer_hash);
 
         _conversations.push_back(item);
         create_conversation_item(item);
@@ -356,12 +376,17 @@ void ConversationListScreen::create_conversation_item(const ConversationItem& it
 
     lv_obj_t* label_time = lv_label_create(container);
     lv_label_set_text(label_time, item.timestamp_str.c_str());
-    lv_obj_align(label_time, LV_ALIGN_BOTTOM_RIGHT, -6, -4);
+    // Leave room for the unread badge (20px + 6px pad) when one is
+    // present; the badge occupies the bottom-right corner.
+    lv_obj_align(label_time, LV_ALIGN_BOTTOM_RIGHT,
+                 item.unread_count > 0 ? -30 : -6, -4);
     lv_obj_set_style_text_color(label_time, Theme::textMuted(), 0);
 
-    // Unread count badge
+    // Unread count badge. Always append to _badge_pool (nullptr when no
+    // badge) so the pool stays index-aligned with _conversation_containers.
+    lv_obj_t* badge = nullptr;
     if (item.unread_count > 0) {
-        lv_obj_t* badge = lv_obj_create(container);
+        badge = lv_obj_create(container);
         lv_obj_set_size(badge, 20, 20);
         lv_obj_align(badge, LV_ALIGN_BOTTOM_RIGHT, -6, -4);
         lv_obj_set_style_bg_color(badge, Theme::error(), 0);
@@ -370,20 +395,53 @@ void ConversationListScreen::create_conversation_item(const ConversationItem& it
         lv_obj_set_style_pad_all(badge, 0, 0);
 
         lv_obj_t* label_count = lv_label_create(badge);
-        lv_label_set_text_fmt(label_count, "%d", item.unread_count);
+        // Badge is a 20px circle; cap the digit count so it always fits.
+        int shown = item.unread_count;
+        if (shown > 9) shown = 9;
+        lv_label_set_text_fmt(label_count, "%d", shown);
         lv_obj_center(label_count);
         lv_obj_set_style_text_color(label_count, lv_color_white(), 0);
     }
+    _badge_pool.push_back(badge);
 }
 
-void ConversationListScreen::update_unread_count(const Bytes& peer_hash, uint16_t unread_count) {
-    LVGL_LOCK();
-    // Find conversation and update
-    for (auto& conv : _conversations) {
-        if (conv.peer_hash == peer_hash) {
-            conv.unread_count = unread_count;
-            refresh();  // Redraw list
-            break;
+void ConversationListScreen::request_mark_read(const Bytes& peer_hash) {
+    // Defers the actual store mutation. mark_conversation_read() commits
+    // the index to LittleFS, so it runs from UIManager::update() BEFORE
+    // the LVGL lock (same pattern as flush_pending_name_writes) — not
+    // from this LVGL event callback.
+    for (const auto& h : _pending_mark_reads) {
+        if (h == peer_hash) return;
+    }
+    _pending_mark_reads.push_back(peer_hash);
+}
+
+void ConversationListScreen::flush_pending_mark_reads() {
+    // Called from UIManager::update() BEFORE it takes the LVGL lock.
+    // mark_conversation_read() hits microStore/LittleFS; the LVGL event
+    // that requested the mark-read only set the flag.
+    if (!_message_store || _pending_mark_reads.empty()) {
+        return;
+    }
+    for (const auto& h : _pending_mark_reads) {
+        _message_store->mark_conversation_read(h);
+    }
+    _pending_mark_reads.clear();
+}
+
+void ConversationListScreen::clear_unread_badge(lv_obj_t* container) {
+    // Remove the unread badge from a rendered conversation row. The badge
+    // is tracked in _badge_pool in lockstep with _conversation_containers,
+    // so locate the row by container and delete its stored badge object.
+    // (LVGL 8.4's lv_obj_t is opaque — no public child iteration — so a
+    // side table is the portable way to reach the badge on click.)
+    for (size_t i = 0; i < _conversation_containers.size(); ++i) {
+        if (_conversation_containers[i] == container) {
+            if (i < _badge_pool.size() && _badge_pool[i]) {
+                lv_obj_del(_badge_pool[i]);
+                _badge_pool[i] = nullptr;
+            }
+            return;
         }
     }
 }
@@ -655,6 +713,11 @@ void ConversationListScreen::on_conversation_clicked(lv_event_t* event) {
     Bytes* peer_hash = (Bytes*)lv_obj_get_user_data(target);
 
     if (peer_hash && screen->_conversation_selected_callback) {
+        // Clear the badge in the UI now; the store commit is deferred to
+        // UIManager::update() (mark_conversation_read() writes the
+        // LittleFS index and must not run under the LVGL lock).
+        screen->clear_unread_badge(target);
+        screen->request_mark_read(*peer_hash);
         screen->_conversation_selected_callback(*peer_hash);
     }
 }

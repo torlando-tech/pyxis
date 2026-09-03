@@ -719,6 +719,9 @@ void UIManager::update() {
     // never runs under the render lock (same reason as on_message_received).
     if (_conversation_list_screen) {
         _conversation_list_screen->flush_pending_name_writes();
+        // Commit queued mark-read index writes the same way — the LVGL
+        // click handler only recorded the peer hash.
+        _conversation_list_screen->flush_pending_mark_reads();
     }
 
     // SERVICE ORDER CONTRACT: consume peer consent commands and complete the
@@ -1783,6 +1786,12 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
     bool viewing_this_chat = (_navigation.current() == Route::CHAT && _current_peer_hash == message.source_hash());
     if (viewing_this_chat) {
         _chat_screen->add_message(message, false);
+        // The user is watching this conversation land, so it's read.
+        // Defers the index commit to UIManager::update() like the
+        // click-path badge clear.
+        if (_conversation_list_screen) {
+            _conversation_list_screen->request_mark_read(message.source_hash());
+        }
     }
 
     // Play notification sound if enabled and not viewing this conversation
