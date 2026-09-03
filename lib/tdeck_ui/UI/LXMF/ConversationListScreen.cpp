@@ -231,24 +231,39 @@ void ConversationListScreen::refresh() {
             continue;
         }
 
-        // Load last message metadata for the preview. load_message() would
-        // also read the payload file twice (recovery validation + load),
-        // parse the full JSON twice (including the large "packed" hex
-        // blob), hex-decode it, and msgpack-unpack the whole message —
-        // all for a 30-char preview and a timestamp. The metadata path
-        // does one open + one filtered parse per conversation, which is
-        // what ChatScreen already uses for the same fields.
-        ::LXMF::MessageStore::MessageMetadata last_meta =
-            _message_store->load_message_metadata(last_msg_hash);
+        // Preview + timestamp come from the conversation index cache when
+        // available: O(1), zero I/O. Only fall back to load_message_metadata()
+        // when the cache is empty — the first refresh after a firmware
+        // upgrade (index generation predates the field) or after a
+        // corrupt-message drop. The write-through below re-pops the cache,
+        // so the fallback happens at most once per conversation per
+        // firmware generation.
+        //
+        // The metadata path does one open + one filtered parse per
+        // conversation (the old unconditional path opened + parsed the
+        // newest message file on EVERY refresh, which dominated list-load
+        // time on SPI LittleFS).
+        std::string preview;
+        double preview_ts = 0.0;
+        bool have_preview =
+            _message_store->get_last_message_preview(peer_hash, preview, preview_ts);
+        bool need_metadata = !have_preview;
+        bool queued_drops = false;
 
-        if (!last_meta.valid) {
+        ::LXMF::MessageStore::MessageMetadata last_meta;
+        last_meta.valid = false;
+        if (need_metadata) {
+            last_meta = _message_store->load_message_metadata(last_msg_hash);
+        }
+
+        if (need_metadata && !last_meta.valid) {
             // The newest message is corrupt/unreadable. Don't hide the
             // conversation over one bad message: drop the unreadable
             // message(s) and preview the newest readable one instead.
             //
             // This only costs the get_messages_for_conversation() array
             // copy and the extra metadata reads on the corrupt path — the
-            // common (all-readable) path above stays O(1) + one read.
+            // common (cached) path above stays O(1) + no I/O.
             //
             // delete_message() commits the index and removes files, so it
             // must not run under this LVGL lock: we only queue the hashes
@@ -259,6 +274,7 @@ void ConversationListScreen::refresh() {
             std::vector<Bytes> hashes =
                 _message_store->get_messages_for_conversation(peer_hash);
             request_drop_message(last_msg_hash);  // tail is the known-bad one
+            queued_drops = true;
             // Walk newest→oldest over all but the tail (array is
             // chronological; hashes.back() is the tail we just queued) to
             // find the newest readable preview, queuing any unreadable
@@ -271,12 +287,26 @@ void ConversationListScreen::refresh() {
                     break;
                 }
                 request_drop_message(hashes[i]);
+                queued_drops = true;
             }
             if (!last_meta.valid) {
                 // Every message was unreadable; all queued for drop. Skip
                 // the row this refresh — the store converges to none.
                 continue;
             }
+        }
+
+        // Re-pop the preview cache from the metadata we just read (the
+        // next refresh becomes O(1) with no I/O). Only meaningful on the
+        // fallback path — when the cache was already serving us there is
+        // nothing new to write. Skipped when drops were queued: the
+        // drained deletes update last_message_hash, so a preview written
+        // for the old tail would be stale for one refresh — let the next
+        // fallback re-read the converged tail instead.
+        if (need_metadata && last_meta.valid && !last_meta.content.empty()
+            && !queued_drops) {
+            _message_store->set_last_message_preview(peer_hash,
+                last_meta.content.substr(0, 47));
         }
 
         // Create conversation item
@@ -317,15 +347,15 @@ void ConversationListScreen::refresh() {
             _has_unresolved_names = true;
         }
 
-        // Get message content for preview (metadata path returns the
-        // pre-extracted UTF-8 content — no msgpack unpacking)
-        String content(last_meta.content.c_str());
+        // Get message content for preview (index cache, or pre-extracted
+        // metadata on the fallback path — no msgpack unpacking)
+        String content(have_preview ? preview.c_str() : last_meta.content.c_str());
         item.last_message = content.substring(0, 30);  // Truncate to 30 chars
         if (content.length() > 30) {
             item.last_message += "...";
         }
 
-        item.timestamp = (uint32_t)last_meta.timestamp;
+        item.timestamp = (uint32_t)(have_preview ? preview_ts : last_meta.timestamp);
         item.timestamp_str = format_timestamp(item.timestamp);
         // Unread count straight from the conversation index (persisted,
         // incremented on incoming save, cleared when the user opens the
