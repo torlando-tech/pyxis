@@ -198,29 +198,29 @@ void ConversationListScreen::refresh() {
         return;
     }
 
-    INFO("Refreshing conversation list");
+    // Revalidate-then-render: gather the row data first (now O(1) per
+    // conversation — index preview + hash + unread, no message-file I/O)
+    // and compare it against what is already on screen. The old path
+    // unconditionally ran lv_obj_clean(_list) + recreated 5-7 LVGL objects
+    // per row on EVERY refresh (navigation back to Messages, every
+    // 750ms coalesced inbound batch, name-resolution sweep) — that
+    // widget churn was what still made Messages feel slow vs NomadNet /
+    // Network / Maps, which build once and just unhide.
+    std::vector<ConversationItem> gathered;
 
-    // Clear existing items (also removes from focus group when deleted)
-    lv_obj_clean(_list);
-    _conversations.clear();
-    _conversation_containers.clear();
-    _badge_pool.clear();
-    _peer_hash_pool.clear();
     _has_unresolved_names = false;
 
     // Load conversations from store
     std::vector<Bytes> peer_hashes = _message_store->get_conversations();
-
-    // Reserve capacity to avoid reallocations during population
-    _peer_hash_pool.reserve(peer_hashes.size());
-    _conversations.reserve(peer_hashes.size());
-    _conversation_containers.reserve(peer_hashes.size());
-    _badge_pool.reserve(peer_hashes.size());
+    gathered.reserve(peer_hashes.size());
 
     {
         char log_buf[48];
         snprintf(log_buf, sizeof(log_buf), "  Found %zu conversations", peer_hashes.size());
-        INFO(log_buf);
+        // DEBUG, not INFO: refresh() now runs on every navigation and
+        // periodic sweep, and serial output happens under the LVGL lock
+        // (the render task waits on the same lock the serial flush holds).
+        DEBUG(log_buf);
     }
 
     for (const auto& peer_hash : peer_hashes) {
@@ -363,6 +363,53 @@ void ConversationListScreen::refresh() {
         item.unread_count =
             (uint16_t)_message_store->get_conversation_unread_count(peer_hash);
 
+        gathered.push_back(item);
+    }
+
+    // Revalidate: skip the LVGL rebuild entirely when nothing changed.
+    // Rows keep their focus-group membership and the screen keeps its
+    // scroll position, and the render task costs only the O(1) gather
+    // above. This is the common case: navigation back to Messages with
+    // no new traffic, 750ms coalesced refreshes on an idle link, and
+    // the update_status() name-resolution sweep.
+    //
+    // (Badge edge case: a clicked row has its badge widget deleted and a
+    // mark-read queued; the mark-read flush runs in UIManager::update()
+    // BEFORE any later refresh takes the lock, so a refresh in that
+    // window sees the data unchanged (badge stays off) and the first
+    // refresh after the flush sees unread==0 and rebuilds correctly.)
+    bool changed = (gathered.size() != _conversations.size());
+    if (!changed) {
+        for (size_t i = 0; i < gathered.size(); ++i) {
+            const ConversationItem& g = gathered[i];
+            const ConversationItem& c = _conversations[i];
+            if (g.peer_hash != c.peer_hash ||
+                g.peer_name != c.peer_name ||
+                g.last_message != c.last_message ||
+                g.timestamp != c.timestamp ||
+                g.unread_count != c.unread_count) {
+                changed = true;
+                break;
+            }
+        }
+    }
+    if (!changed) {
+        return;  // rows on screen are current
+    }
+
+    // Data changed: rebuild the list (full rebuild — a partial per-row
+    // diff is not worth the extra bookkeeping for a list this size).
+    lv_obj_clean(_list);
+    _conversations.clear();
+    _conversation_containers.clear();
+    _badge_pool.clear();
+    _peer_hash_pool.clear();
+    _peer_hash_pool.reserve(gathered.size());
+    _conversations.reserve(gathered.size());
+    _conversation_containers.reserve(gathered.size());
+    _badge_pool.reserve(gathered.size());
+
+    for (const ConversationItem& item : gathered) {
         _conversations.push_back(item);
         create_conversation_item(item);
     }
