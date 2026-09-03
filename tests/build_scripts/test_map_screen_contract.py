@@ -275,11 +275,16 @@ def test_marker_labels_contrast_active_basemap_style():
     # The ternary text encodes the contract: dark basemap -> white,
     # otherwise -> black (so black is the default for light basemaps).
     assert "lv_color_white() : lv_color_black()" in frame
-    assert "lv_obj_set_style_text_color(marker_labels_[index], marker_label_color, 0)" in frame
-    # The color is derived once per frame and applied inside the marker loop.
-    derive = frame.index("marker_label_color")
-    apply = frame.index("lv_obj_set_style_text_color(marker_labels_[index], marker_label_color")
-    assert derive < apply
+    # Exactly one label-color call, and it sits in the marker loop's main
+    # branch: after the loop's hidden-marker continue, not in the hide path.
+    apply_marker = "lv_obj_set_style_text_color(marker_labels_[index], marker_label_color"
+    assert frame.count(apply_marker) == 1
+    loop = frame.index("for (std::size_t index = 0; index < MARKER_COUNT; ++index)")
+    loop_branch_continue = frame.index("continue;", loop)
+    apply = frame.index(apply_marker)
+    assert loop < loop_branch_continue < apply
+    # The color itself is derived once, before the loop applies it.
+    assert frame.index("marker_label_color") < apply
 
 
 def test_ui_manager_services_before_lock_and_hides_map_everywhere():
