@@ -276,6 +276,15 @@ private:
     // delete). flush_pending_index_commit() persists the repop once so
     // the next boot serves previews straight from the index.
     bool _index_commit_pending = false;
+    // Guards _pending_name_writes / _pending_mark_reads / _pending_drops
+    // / _index_commit_pending: producers run under the LVGL lock (LVGL
+    // task: click handlers, refresh() during navigation) while the
+    // flush_*() consumers run on the main loop WITHOUT the LVGL lock
+    // (their store I/O must not run under it). Critical sections hold
+    // no LVGL lock, no store I/O, and never block — a brief vector
+    // swap/push — so portMAX_DELAY acquisition cannot deadlock or stall
+    // a task.
+    SemaphoreHandle_t _queue_mutex = nullptr;
 
     ConversationSelectedCallback _conversation_selected_callback;
     ComposeCallback _compose_callback;

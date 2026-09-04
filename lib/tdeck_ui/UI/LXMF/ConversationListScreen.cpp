@@ -35,6 +35,10 @@ ConversationListScreen::ConversationListScreen(lv_obj_t* parent)
       _label_battery_icon(nullptr), _label_battery_pct(nullptr),
       _lora_interface(nullptr), _ble_interface(nullptr), _gps(nullptr),
       _message_store(nullptr) {
+    // Queue mutex guards the deferred queues shared between the LVGL
+    // task (producers) and the main loop (flush_* consumers) — create
+    // before any task can touch them.
+    _queue_mutex = xSemaphoreCreateMutex();
     LVGL_LOCK();
 
     // Create screen object
@@ -66,7 +70,36 @@ ConversationListScreen::~ConversationListScreen() {
     if (_screen) {
         lv_obj_del(_screen);
     }
+    // No task outlives the screen: safe to delete outside the lock.
+    if (_queue_mutex) {
+        vSemaphoreDelete(_queue_mutex);
+        _queue_mutex = nullptr;
+    }
 }
+
+namespace {
+// RAII guard for _queue_mutex. The guarded sections are bounded vector
+// operations (no store I/O, no LVGL lock), so a missed acquisition is a
+// logic error — treat it like an assert by failing closed.
+class QueueGuard {
+public:
+    explicit QueueGuard(SemaphoreHandle_t m) : _m(m) {
+        if (_m) {
+            xSemaphoreTake(_m, portMAX_DELAY);
+        }
+    }
+    ~QueueGuard() {
+        if (_m) {
+            xSemaphoreGive(_m);
+        }
+    }
+    QueueGuard(const QueueGuard&) = delete;
+    QueueGuard& operator=(const QueueGuard&) = delete;
+
+private:
+    SemaphoreHandle_t _m;
+};
+}  // namespace
 
 void ConversationListScreen::create_header() {
     _header = lv_obj_create(_screen);
@@ -311,6 +344,9 @@ void ConversationListScreen::refresh() {
         if (need_metadata && last_meta.valid && !queued_drops) {
             _message_store->set_last_message_preview(peer_hash,
                 last_meta.content.substr(0, 47));
+            // refresh() runs on the LVGL task; the main-loop drain reads
+            // the flag — set under _queue_mutex (brief, no I/O inside).
+            QueueGuard guard(_queue_mutex);
             _index_commit_pending = true;
         }
 
@@ -336,6 +372,9 @@ void ConversationListScreen::refresh() {
                 // (held by UIManager::update()). UIManager::update() flushes
                 // these before it takes the lock so the I/O never stalls the
                 // render task. (Same rationale as on_message_received.)
+                // Appended from the LVGL task; the main-loop drain swaps
+                // the queue — take _queue_mutex (brief, no I/O inside).
+                QueueGuard guard(_queue_mutex);
                 _pending_name_writes.emplace_back(
                     peer_hash, std::string(display_name.c_str()));
             }
@@ -435,14 +474,23 @@ void ConversationListScreen::flush_pending_name_writes() {
     // Called from UIManager::update() BEFORE it takes the LVGL lock.
     // set_display_name() hits microStore/LittleFS; running it inside refresh()
     // (under the lock) serially stalls the LVGL render task on a cold-boot
-    // announce burst. Same fix as UIManager::on_message_received.
-    if (!_message_store || _pending_name_writes.empty()) {
+    // announce burst. Same fix as UIManager::on_message_received. Swap the
+    // queue under _queue_mutex (refresh() appends from the LVGL task), then
+    // do the I/O outside it.
+    std::vector<std::pair<Bytes, std::string>> batch;
+    {
+        QueueGuard guard(_queue_mutex);
+        if (_pending_name_writes.empty()) {
+            return;
+        }
+        batch.swap(_pending_name_writes);
+    }
+    if (!_message_store) {
         return;
     }
-    for (const auto& w : _pending_name_writes) {
+    for (const auto& w : batch) {
         _message_store->set_display_name(w.first, w.second);
     }
-    _pending_name_writes.clear();
 }
 
 void ConversationListScreen::create_conversation_item(const ConversationItem& item) {
@@ -523,24 +571,37 @@ void ConversationListScreen::request_mark_read(const Bytes& peer_hash) {
     // Defers the actual store mutation. mark_conversation_read() commits
     // the index to LittleFS, so it runs from UIManager::update() BEFORE
     // the LVGL lock (same pattern as flush_pending_name_writes) — not
-    // from this LVGL event callback.
-    for (const auto& h : _pending_mark_reads) {
-        if (h == peer_hash) return;
+    // from this LVGL event callback. The queue itself is shared with the
+    // main-loop drain, so take _queue_mutex (brief, no I/O inside).
+    {
+        QueueGuard guard(_queue_mutex);
+        for (const auto& h : _pending_mark_reads) {
+            if (h == peer_hash) return;
+        }
+        _pending_mark_reads.push_back(peer_hash);
     }
-    _pending_mark_reads.push_back(peer_hash);
 }
 
 void ConversationListScreen::flush_pending_mark_reads() {
     // Called from UIManager::update() BEFORE it takes the LVGL lock.
     // mark_conversation_read() hits microStore/LittleFS; the LVGL event
-    // that requested the mark-read only set the flag.
-    if (!_message_store || _pending_mark_reads.empty()) {
+    // that requested the mark-read only set the flag. Swap the queue
+    // under _queue_mutex, then do the I/O outside it (a new request
+    // arriving during the I/O waits its one drain tick).
+    std::vector<Bytes> batch;
+    {
+        QueueGuard guard(_queue_mutex);
+        if (_pending_mark_reads.empty()) {
+            return;
+        }
+        batch.swap(_pending_mark_reads);
+    }
+    if (!_message_store) {
         return;
     }
-    for (const auto& h : _pending_mark_reads) {
+    for (const auto& h : batch) {
         _message_store->mark_conversation_read(h);
     }
-    _pending_mark_reads.clear();
 }
 
 void ConversationListScreen::request_drop_message(const Bytes& message_hash) {
@@ -549,7 +610,9 @@ void ConversationListScreen::request_drop_message(const Bytes& message_hash) {
     // last_message_hash update) runs from flush_pending_drops() OUTSIDE
     // the LVGL lock. A bounded number of unreadable messages can be
     // queued per refresh (one per conversation, walking the tail), so the
-    // queue cannot grow without bound.
+    // queue cannot grow without bound. Shared with the main-loop drain,
+    // so take _queue_mutex (brief, no I/O inside).
+    QueueGuard guard(_queue_mutex);
     for (const auto& h : _pending_drops) {
         if (h == message_hash) return;
     }
@@ -561,17 +624,55 @@ void ConversationListScreen::flush_pending_drops() {
     // Drop the queued unreadable messages so the conversation index
     // converges (deletion updates last_message_hash to the new tail); the
     // next list refresh then previews the newest readable message. A
-    // delete that fails (store not ready) is left for a later drain.
-    if (!_message_store || _pending_drops.empty()) {
+    // delete that fails (store not ready) is requeued for a later drain,
+    // deduped against any request that arrived during the I/O.
+    std::vector<Bytes> batch;
+    {
+        QueueGuard guard(_queue_mutex);
+        if (_pending_drops.empty()) {
+            return;
+        }
+        batch.swap(_pending_drops);
+    }
+    if (!_message_store) {
+        // Store not ready: hand the batch back (merged, deduped) so
+        // nothing is lost while the store comes up.
+        QueueGuard guard(_queue_mutex);
+        for (const auto& h : batch) {
+            bool present = false;
+            for (const auto& q : _pending_drops) {
+                if (q == h) {
+                    present = true;
+                    break;
+                }
+            }
+            if (!present) {
+                _pending_drops.push_back(h);
+            }
+        }
         return;
     }
     std::vector<Bytes> remaining;
-    for (const auto& h : _pending_drops) {
+    for (const auto& h : batch) {
         if (!_message_store->delete_message(h)) {
             remaining.push_back(h);
         }
     }
-    _pending_drops.swap(remaining);
+    if (!remaining.empty()) {
+        QueueGuard guard(_queue_mutex);
+        for (const auto& h : remaining) {
+            bool present = false;
+            for (const auto& q : _pending_drops) {
+                if (q == h) {
+                    present = true;
+                    break;
+                }
+            }
+            if (!present) {
+                _pending_drops.push_back(h);
+            }
+        }
+    }
 }
 
 void ConversationListScreen::flush_pending_index_commit() {
@@ -585,11 +686,19 @@ void ConversationListScreen::flush_pending_index_commit() {
     // writes made by save_message() since the last store-originated
     // commit — one-shot by design; the flag clears even if the commit
     // fails and a later fallback re-arms it.
-    if (!_message_store || !_index_commit_pending) {
+    // refresh() (LVGL task) sets it; the main-loop drain consumes it —
+    // test-and-clear under _queue_mutex (a lost set would skip the
+    // one-shot index commit and cost every boot the full fallback pass).
+    bool pending;
+    {
+        QueueGuard guard(_queue_mutex);
+        pending = _index_commit_pending;
+        _index_commit_pending = false;
+    }
+    if (!_message_store || !pending) {
         return;
     }
     _message_store->commit_index();
-    _index_commit_pending = false;
 }
 
 void ConversationListScreen::clear_unread_badge(lv_obj_t* container) {
