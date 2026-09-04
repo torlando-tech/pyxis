@@ -291,65 +291,10 @@ void SettingsScreen::create_identity_view(lv_obj_t* parent) {
 }
 
 void SettingsScreen::create_network_view(lv_obj_t* parent) {
-    create_label_row(parent, "WiFi SSID:");
-    _ta_wifi_ssid = create_text_input(parent, "Enter SSID", false, 32);
-
-    create_label_row(parent, "WiFi Password:");
-    _ta_wifi_password = create_text_input(parent, "Enter password", true, 64);
-
-    create_label_row(parent, "TCP Host:");
-    _ta_tcp_host = create_text_input(parent, "IP or hostname", false, 64);
-
-    // Port and reconnect row
-    lv_obj_t* port_row = lv_obj_create(parent);
-    lv_obj_set_width(port_row, LV_PCT(100));
-    lv_obj_set_height(port_row, 32);
-    lv_obj_set_style_bg_opa(port_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(port_row, 0, 0);
-    lv_obj_set_style_pad_all(port_row, 0, 0);
-    lv_obj_clear_flag(port_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t* port_label = lv_label_create(port_row);
-    lv_label_set_text(port_label, "Port:");
-    lv_obj_align(port_label, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_set_style_text_color(port_label, Theme::textTertiary(), 0);
-    lv_obj_set_style_text_font(port_label, &lv_font_montserrat_14, 0);
-
-    _ta_tcp_port = lv_textarea_create(port_row);
-    lv_obj_set_size(_ta_tcp_port, 60, 26);
-    lv_obj_align(_ta_tcp_port, LV_ALIGN_LEFT_MID, 35, 0);
-    lv_textarea_set_one_line(_ta_tcp_port, true);
-    lv_textarea_set_max_length(_ta_tcp_port, 5);
-    lv_textarea_set_accepted_chars(_ta_tcp_port, "0123456789");
-    lv_obj_set_style_bg_color(_ta_tcp_port, Theme::surfaceInput(), 0);
-    lv_obj_set_style_text_color(_ta_tcp_port, Theme::textPrimary(), 0);
-    lv_obj_set_style_border_color(_ta_tcp_port, Theme::border(), 0);
-    lv_obj_set_style_border_width(_ta_tcp_port, 1, 0);
-    lv_obj_set_style_radius(_ta_tcp_port, 4, 0);
-    lv_obj_set_style_pad_all(_ta_tcp_port, 4, 0);
-    lv_obj_set_style_text_font(_ta_tcp_port, &lv_font_montserrat_14, 0);
-    lv_group_t* group = LVGL::LVGLInit::get_default_group();
-    if (group) {
-        lv_group_add_obj(group, _ta_tcp_port);
-    }
-    TextAreaHelper::enable_paste(_ta_tcp_port);
-
-    _btn_reconnect = lv_btn_create(port_row);
-    lv_obj_set_size(_btn_reconnect, 80, 26);
-    lv_obj_align(_btn_reconnect, LV_ALIGN_RIGHT_MID, 0, 0);
-    lv_obj_set_style_bg_color(_btn_reconnect, Theme::primary(), 0);
-    lv_obj_set_style_bg_color(_btn_reconnect, Theme::primaryPressed(), LV_STATE_PRESSED);
-    lv_obj_add_event_cb(_btn_reconnect, on_reconnect_clicked, LV_EVENT_CLICKED, this);
-
-    lv_obj_t* label_reconnect = lv_label_create(_btn_reconnect);
-    lv_label_set_text(label_reconnect, "Reconnect");
-    lv_obj_center(label_reconnect);
-    lv_obj_set_style_text_color(label_reconnect, Theme::textPrimary(), 0);
-    lv_obj_set_style_text_font(label_reconnect, &lv_font_montserrat_14, 0);
-
-    // Interface row: how this device reaches peers. LoRa lives here next to
-    // TCP/Auto/BLE (it is one interface); the Radio page tunes the RF.
-    create_label_row(parent, "Interfaces:");
+    // Row 1: Reticulum interface toggles — how this device reaches peers.
+    // LoRa lives here next to TCP/Auto/BLE (it is one interface); the
+    // Radio page tunes the RF.
+    create_label_row(parent, "Reticulum Interfaces:");
 
     lv_obj_t* iface_row = lv_obj_create(parent);
     lv_obj_set_width(iface_row, LV_PCT(100));
@@ -406,6 +351,64 @@ void SettingsScreen::create_network_view(lv_obj_t* parent) {
     lv_obj_set_style_bg_color(_switch_ble_enabled, Theme::border(), LV_PART_MAIN);
     lv_obj_set_style_bg_color(_switch_ble_enabled, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
     lv_obj_add_event_cb(_switch_ble_enabled, on_interface_switch_changed, LV_EVENT_VALUE_CHANGED, this);
+
+    create_label_row(parent, "WiFi SSID:");
+    _ta_wifi_ssid = create_text_input(parent, "Enter SSID", false, 32);
+
+    create_label_row(parent, "WiFi Password:");
+    _ta_wifi_password = create_text_input(parent, "Enter password", true, 64);
+
+    create_label_row(parent, "TCP Host:");
+    _ta_tcp_host = create_text_input(parent, "IP or hostname", false, 64);
+
+    // Port and reconnect row
+    lv_obj_t* port_row = lv_obj_create(parent);
+    lv_obj_set_width(port_row, LV_PCT(100));
+    lv_obj_set_height(port_row, 32);
+    lv_obj_set_style_bg_opa(port_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(port_row, 0, 0);
+    lv_obj_set_style_pad_all(port_row, 0, 0);
+    lv_obj_clear_flag(port_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* port_label = lv_label_create(port_row);
+    lv_label_set_text(port_label, "Port:");
+    lv_obj_align(port_label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_text_color(port_label, Theme::textTertiary(), 0);
+    lv_obj_set_style_text_font(port_label, &lv_font_montserrat_14, 0);
+
+    _ta_tcp_port = lv_textarea_create(port_row);
+    lv_obj_set_size(_ta_tcp_port, 60, 26);
+    lv_obj_align(_ta_tcp_port, LV_ALIGN_LEFT_MID, 35, 0);
+    lv_textarea_set_one_line(_ta_tcp_port, true);
+    lv_textarea_set_max_length(_ta_tcp_port, 5);
+    lv_textarea_set_accepted_chars(_ta_tcp_port, "0123456789");
+    lv_obj_set_style_bg_color(_ta_tcp_port, Theme::surfaceInput(), 0);
+    lv_obj_set_style_text_color(_ta_tcp_port, Theme::textPrimary(), 0);
+    lv_obj_set_style_border_color(_ta_tcp_port, Theme::border(), 0);
+    lv_obj_set_style_border_width(_ta_tcp_port, 1, 0);
+    lv_obj_set_style_radius(_ta_tcp_port, 4, 0);
+    lv_obj_set_style_pad_all(_ta_tcp_port, 4, 0);
+    lv_obj_set_style_text_font(_ta_tcp_port, &lv_font_montserrat_14, 0);
+    lv_group_t* group = LVGL::LVGLInit::get_default_group();
+    if (group) {
+        lv_group_add_obj(group, _ta_tcp_port);
+    }
+    TextAreaHelper::enable_paste(_ta_tcp_port);
+
+    _btn_reconnect = lv_btn_create(port_row);
+    lv_obj_set_size(_btn_reconnect, 110, 26);
+    lv_obj_align(_btn_reconnect, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_set_style_bg_color(_btn_reconnect, Theme::primary(), 0);
+    lv_obj_set_style_bg_color(_btn_reconnect, Theme::primaryPressed(), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(_btn_reconnect, on_reconnect_clicked, LV_EVENT_CLICKED, this);
+
+    lv_obj_t* label_reconnect = lv_label_create(_btn_reconnect);
+    // This button re-applies the WiFi SSID/password fields to the running
+    // stack (no reboot). It is not related to the TCP host.
+    lv_label_set_text(label_reconnect, "WiFi Reconnect");
+    lv_obj_center(label_reconnect);
+    lv_obj_set_style_text_color(label_reconnect, Theme::textPrimary(), 0);
+    lv_obj_set_style_text_font(label_reconnect, &lv_font_montserrat_12, 0);
 }
 
 void SettingsScreen::create_radio_view(lv_obj_t* parent) {
