@@ -22,8 +22,6 @@ namespace LXMF {
 // focusable object — the transport switch), which lands the user at the
 // bottom of the list. A short delay after show() puts the view back at the
 // top; later scrolling is left to the user.
-static SettingsScreen* g_settings_entry_reset = nullptr;
-lv_timer_t* SettingsScreen::_entry_scroll_reset_timer = nullptr;
 
 // NVS keys
 static const char* NVS_NAMESPACE = "settings";
@@ -1409,18 +1407,16 @@ void SettingsScreen::set_status_callback(StatusScreenCallback callback) {
     _status_callback = callback;
 }
 
-void SettingsScreen::entry_scroll_reset_cb(lv_timer_t* timer) {
-    // One-shot: null the owning pointer BEFORE deleting so the next show()
-    // recreates the timer. (Skipping the null-out leaves a dangling pointer
-    // and lv_timer_reset() on freed memory — no reset on the 2nd+ entry.)
-    _entry_scroll_reset_timer = nullptr;
-    lv_timer_del(timer);
-    SettingsScreen* screen = g_settings_entry_reset;
-    g_settings_entry_reset = nullptr;
-    if (!screen || !screen->_content) return;
-    LVGL_LOCK();
-    if (lv_obj_is_visible(screen->_screen)) {
-        lv_obj_scroll_to_y(screen->_content, 0, LV_ANIM_OFF);
+// [SCROLLDIAG] temporary instrumentation — remove before PR.
+void SettingsScreen::diag_scroll_watch_cb(lv_timer_t* timer) {
+    SettingsScreen* s = static_cast<SettingsScreen*>(timer->user_data);
+    if (!s || !s->_diag_entry || !s->_content) return;
+    int16_t y = lv_obj_get_scroll_y(s->_content);
+    if (y != 0) {
+        Serial.printf("[SCROLLDIAG] DEVIATION content scroll_y=%d\n", (int)y);
+        s->_diag_entry = false;
+        s->_diag_timer = nullptr;
+        lv_timer_del(timer);
     }
 }
 
@@ -1441,13 +1437,21 @@ void SettingsScreen::show() {
         }
     }
 
-    // Counter the group re-focus auto-scroll (see entry_scroll_reset_cb).
-    // show() already holds the LVGL lock, so timer creation here is safe.
-    g_settings_entry_reset = this;
-    if (!_entry_scroll_reset_timer) {
-        _entry_scroll_reset_timer = lv_timer_create(entry_scroll_reset_cb, 50, nullptr);
-    } else {
-        lv_timer_reset(_entry_scroll_reset_timer);
+    // Hidden LVGL objects keep their scroll position, so without this the
+    // screen reopens wherever the user last left it (typically the bottom
+    // after scrolling to Transport Mode). Settings always opens at the top.
+    if (_content) {
+        Serial.printf("[SCROLLDIAG] show: scroll_y before reset = %d\n",
+                      (int)lv_obj_get_scroll_y(_content));
+        lv_obj_scroll_to_y(_content, 0, LV_ANIM_OFF);
+        Serial.printf("[SCROLLDIAG] show: scroll_y after reset = %d\n",
+                      (int)lv_obj_get_scroll_y(_content));
+    }
+    // [SCROLLDIAG] temporary: watch for anything that moves the scroll after
+    // entry and log the first deviation from 0.
+    _diag_entry = true;
+    if (!_diag_timer) {
+        _diag_timer = lv_timer_create(diag_scroll_watch_cb, 30, this);
     }
 }
 
