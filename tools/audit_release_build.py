@@ -46,7 +46,7 @@ EXCLUDED_SYMBOLS = (
 )
 PINNED_DEPENDENCIES = {
     "microReticulum": "cd0338e7fc07d3a7785a450656ba766491cbf6e8",
-    "microLXMF": "58a6eb088a428453cf0bce63c893e53f0a2ec551",
+    "microLXMF": "d7e05fdc10fe11bca0c4e3d8c0214b0be7d9a911",
     "microStore": "2762f7606800ffb23f4a593947d4f58e259cda7a",
 }
 
