@@ -171,6 +171,15 @@ void ChatScreen::load_conversation(const Bytes& peer_hash, ::LXMF::MessageStore&
     _peer_hash = peer_hash;
     _message_store = &store;
 
+    // A peer change cancels any in-flight background fill from the
+    // previous conversation (it would otherwise prepend the previous
+    // conversation's older rows into the new one). refresh() re-arms the
+    // fill for the new peer.
+    if (_bg_fill_active.exchange(false)) {
+        _keep_bottom_during_background_fill.store(false);
+        _bg_fill_target = _display_start_idx;  // fill is a no-op now
+    }
+
     {
         char log_buf[64];
         snprintf(log_buf, sizeof(log_buf), "Loading conversation with peer %.8s...",
@@ -251,9 +260,9 @@ void ChatScreen::refresh() {
     for (size_t i = _display_start_idx; i < _all_message_hashes.size(); i++) {
         const auto& msg_hash = _all_message_hashes[i];
 
-        // Use fast metadata loader (no msgpack unpacking)
+        // Use fast metadata loader (cache hit: O(1) in-memory; miss: one
+        // LittleFS read that warms the cache for every later touch).
         ::LXMF::MessageStore::MessageMetadata meta = _message_store->load_message_metadata(msg_hash);
-
         if (!meta.valid) {
             continue;
         }
@@ -335,6 +344,8 @@ void ChatScreen::load_more_messages(size_t batch) {
         --i;  // Decrement first since we're iterating backwards
         const auto& msg_hash = _all_message_hashes[i];
 
+        // Use fast metadata loader (cache hit: O(1) in-memory; miss: one
+        // LittleFS read that warms the cache for every later touch).
         ::LXMF::MessageStore::MessageMetadata meta = _message_store->load_message_metadata(msg_hash);
         if (!meta.valid) {
             continue;
@@ -735,34 +746,66 @@ void ChatScreen::on_message_long_pressed(lv_event_t* event) {
     lv_obj_t* bubble = lv_event_get_target(event);
     lv_obj_t* row = lv_obj_get_parent(bubble);
 
-    // Bubbles render a truncated copy of long messages, so recover the FULL
-    // content for this row (reverse-lookup row -> hash -> stored item) for both
-    // the detail view and Copy.
-    String full;
+    // Bubbles render a display-capped copy (metadata cache / MAX_DISPLAY_
+    // CHARS), so the full text must be recovered from the store. This
+    // handler runs on the LVGL task and the store is main-loop-only, so
+    // record the request and let tick_pending_full_message() (main loop)
+    // do the disk read + modal build.
+    RNS::Bytes hash;
     for (const auto& kv : screen->_message_rows) {
         if (kv.second == row) {
-            for (const auto& m : screen->_messages) {
-                if (m.message_hash == kv.first) {
-                    full = m.content;
-                    break;
-                }
-            }
+            hash = kv.first;
             break;
         }
     }
-    if (full.length() == 0) {  // fallback to the (possibly truncated) label text
-        lv_obj_t* label = lv_obj_get_child(bubble, 0);
-        if (label) {
-            const char* t = lv_label_get_text(label);
-            if (t) full = t;
-        }
+    if (hash.size() == 0) {
+        return;
     }
+    if (screen->_pending_full_message.load()) {
+        // A request is already queued; the next modal supersedes this one.
+        return;
+    }
+    // Runs while the LVGL task holds the mutex (lvgl_task wraps
+    // lv_task_handler in it), so these writes serialize with the main
+    // loop's copy of _pending_full_message_hash under LVGL_LOCK.
+    screen->_pending_full_message_hash = hash;
+    screen->_pending_copy_text = "";
+    screen->_pending_full_message.store(true);
+}
+
+// Complete a pending long-press full-message request (see
+// on_message_long_pressed). Runs on the main loop: the disk-bound
+// load_message_content() happens OUTSIDE the LVGL lock (same task that
+// does all other store I/O), then the modal is built under LVGL_LOCK().
+// This path is user-triggered (once per long press), not per frame.
+void ChatScreen::tick_pending_full_message() {
+    if (!_pending_full_message.load()) {
+        return;
+    }
+    // Copy the hash under the LVGL lock: the LVGL task writes it while
+    // holding that same lock (see on_message_long_pressed), so this is a
+    // safe handoff. Then the disk read happens OUTSIDE the lock.
+    RNS::Bytes hash;
+    {
+        LVGL_LOCK();
+        if (!_pending_full_message.load()) {
+            return;
+        }
+        hash = _pending_full_message_hash;
+        // Clear before the read: a superseding long-press can re-arm while
+        // we are here and must not be lost.
+        _pending_full_message.store(false);
+    }
+    if (!_message_store) {
+        return;
+    }
+    String full = String(_message_store->load_message_content(hash).c_str());
     if (full.length() == 0) {
         return;
     }
-
-    screen->_pending_copy_text = full;
-    screen->show_full_message(full);
+    LVGL_LOCK();
+    _pending_copy_text = full;
+    show_full_message(full);
 }
 
 // Full-screen scrollable view of a single message's complete text, with Copy.

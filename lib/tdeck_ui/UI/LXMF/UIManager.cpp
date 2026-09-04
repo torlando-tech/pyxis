@@ -719,6 +719,18 @@ void UIManager::update() {
     // never runs under the render lock (same reason as on_message_received).
     if (_conversation_list_screen) {
         _conversation_list_screen->flush_pending_name_writes();
+        // Drop queued corrupt messages (index commit + payload removal).
+        // Drained before mark-read so both index commits land in a
+        // sensible order — each save_index() rewrites the whole index,
+        // and mark-read's final write carries the cleared unread count.
+        _conversation_list_screen->flush_pending_drops();
+        // One-shot preview-cache warm-up commit (index carries
+        // last_preview now; see the method). Lands before mark-read so
+        // that final index write also carries the warmed previews.
+        _conversation_list_screen->flush_pending_index_commit();
+        // Commit queued mark-read index writes the same way — the LVGL
+        // click handler only recorded the peer hash.
+        _conversation_list_screen->flush_pending_mark_reads();
     }
 
     // SERVICE ORDER CONTRACT: consume peer consent commands and complete the
@@ -790,6 +802,9 @@ void UIManager::update() {
     // whole page blocking it past LVGLLock's 5s timeout.
     if (_navigation.current() == Route::CHAT && _chat_screen) {
         _chat_screen->tick_background_fill();
+        // Long-press full-message view: the LVGL event handler only records
+        // the hash; the disk read + modal build run here on the main loop.
+        _chat_screen->tick_pending_full_message();
     }
     // Gather + render the announce list off the LVGL lock on the main loop (its
     // refresh() just arms a flag). Iterating the path table on the LVGL task raced
@@ -1783,6 +1798,12 @@ void UIManager::on_message_received(::LXMF::LXMessage& message) {
     bool viewing_this_chat = (_navigation.current() == Route::CHAT && _current_peer_hash == message.source_hash());
     if (viewing_this_chat) {
         _chat_screen->add_message(message, false);
+        // The user is watching this conversation land, so it's read.
+        // Defers the index commit to UIManager::update() like the
+        // click-path badge clear.
+        if (_conversation_list_screen) {
+            _conversation_list_screen->request_mark_read(message.source_hash());
+        }
     }
 
     // Play notification sound if enabled and not viewing this conversation

@@ -35,6 +35,17 @@ ConversationListScreen::ConversationListScreen(lv_obj_t* parent)
       _label_battery_icon(nullptr), _label_battery_pct(nullptr),
       _lora_interface(nullptr), _ble_interface(nullptr), _gps(nullptr),
       _message_store(nullptr) {
+    // Queue mutex guards the deferred queues shared between the LVGL
+    // task (producers) and the main loop (flush_* consumers) — create
+    // before any task can touch them. Fail closed: if allocation
+    // fails, every guarded site below refuses queue mutation and the
+    // screen degrades (no mark-read/drop/deferred name writes) rather
+    // than running the queues unsynchronized.
+    _queue_mutex = xSemaphoreCreateMutex();
+    if (!_queue_mutex) {
+        ERROR("ConversationListScreen: queue mutex allocation failed; "
+              "deferred mark-read/drop/name-write queues disabled (fail closed)");
+    }
     LVGL_LOCK();
 
     // Create screen object
@@ -66,7 +77,36 @@ ConversationListScreen::~ConversationListScreen() {
     if (_screen) {
         lv_obj_del(_screen);
     }
+    // No task outlives the screen: safe to delete outside the lock.
+    if (_queue_mutex) {
+        vSemaphoreDelete(_queue_mutex);
+        _queue_mutex = nullptr;
+    }
 }
+
+namespace {
+// RAII guard for _queue_mutex. The guarded sections are bounded vector
+// operations (no store I/O, no LVGL lock), so a missed acquisition is a
+// logic error — treat it like an assert by failing closed.
+class QueueGuard {
+public:
+    explicit QueueGuard(SemaphoreHandle_t m) : _m(m) {
+        if (_m) {
+            xSemaphoreTake(_m, portMAX_DELAY);
+        }
+    }
+    ~QueueGuard() {
+        if (_m) {
+            xSemaphoreGive(_m);
+        }
+    }
+    QueueGuard(const QueueGuard&) = delete;
+    QueueGuard& operator=(const QueueGuard&) = delete;
+
+private:
+    SemaphoreHandle_t _m;
+};
+}  // namespace
 
 void ConversationListScreen::create_header() {
     _header = lv_obj_create(_screen);
@@ -198,39 +238,128 @@ void ConversationListScreen::refresh() {
         return;
     }
 
-    INFO("Refreshing conversation list");
+    // Revalidate-then-render: gather the row data first (now O(1) per
+    // conversation — index preview + hash + unread, no message-file I/O)
+    // and compare it against what is already on screen. The old path
+    // unconditionally ran lv_obj_clean(_list) + recreated 5-7 LVGL objects
+    // per row on EVERY refresh (navigation back to Messages, every
+    // 750ms coalesced inbound batch, name-resolution sweep) — that
+    // widget churn was what still made Messages feel slow vs NomadNet /
+    // Network / Maps, which build once and just unhide.
+    std::vector<ConversationItem> gathered;
 
-    // Clear existing items (also removes from focus group when deleted)
-    lv_obj_clean(_list);
-    _conversations.clear();
-    _conversation_containers.clear();
-    _peer_hash_pool.clear();
     _has_unresolved_names = false;
 
     // Load conversations from store
     std::vector<Bytes> peer_hashes = _message_store->get_conversations();
-
-    // Reserve capacity to avoid reallocations during population
-    _peer_hash_pool.reserve(peer_hashes.size());
-    _conversations.reserve(peer_hashes.size());
-    _conversation_containers.reserve(peer_hashes.size());
+    gathered.reserve(peer_hashes.size());
 
     {
         char log_buf[48];
         snprintf(log_buf, sizeof(log_buf), "  Found %zu conversations", peer_hashes.size());
-        INFO(log_buf);
+        // DEBUG, not INFO: refresh() now runs on every navigation and
+        // periodic sweep, and serial output happens under the LVGL lock
+        // (the render task waits on the same lock the serial flush holds).
+        DEBUG(log_buf);
     }
 
     for (const auto& peer_hash : peer_hashes) {
-        std::vector<Bytes> messages = _message_store->get_messages_for_conversation(peer_hash);
-
-        if (messages.empty()) {
+        // Last-message hash comes from the conversation index cache
+        // (O(1) in-memory lookup, no 8KB hash-array copy and no I/O).
+        Bytes last_msg_hash = _message_store->get_last_message_hash(peer_hash);
+        if (!last_msg_hash) {
             continue;
         }
 
-        // Load last message for preview
-        Bytes last_msg_hash = messages.back();
-        ::LXMF::LXMessage last_msg = _message_store->load_message(last_msg_hash);
+        // Preview + timestamp come from the conversation index cache when
+        // available: O(1), zero I/O. Only fall back to load_message_metadata()
+        // when the cache is empty — the first refresh after a firmware
+        // upgrade (index generation predates the field) or after a
+        // corrupt-message drop. The write-through below re-pops the cache,
+        // so the fallback happens at most once per conversation per
+        // firmware generation.
+        //
+        // The metadata path does one open + one filtered parse per
+        // conversation (the old unconditional path opened + parsed the
+        // newest message file on EVERY refresh, which dominated list-load
+        // time on SPI LittleFS).
+        std::string preview;
+        double preview_ts = 0.0;
+        bool have_preview =
+            _message_store->get_last_message_preview(peer_hash, preview, preview_ts);
+        bool need_metadata = !have_preview;
+        bool queued_drops = false;
+
+        ::LXMF::MessageStore::MessageMetadata last_meta;
+        last_meta.valid = false;
+        if (need_metadata) {
+            last_meta = _message_store->load_message_metadata(last_msg_hash);
+        }
+
+        if (need_metadata && !last_meta.valid) {
+            // The newest message is corrupt/unreadable. Don't hide the
+            // conversation over one bad message: drop the unreadable
+            // message(s) and preview the newest readable one instead.
+            //
+            // This only costs the get_messages_for_conversation() array
+            // copy and the extra metadata reads on the corrupt path — the
+            // common (cached) path above stays O(1) + no I/O.
+            //
+            // delete_message() commits the index and removes files, so it
+            // must not run under this LVGL lock: we only queue the hashes
+            // here, and UIManager::update() drains them (before taking the
+            // lock) — same deferred pattern as mark-read / name writes.
+            // The store's index updates last_message_hash on delete, so
+            // the next refresh converges to the same preview.
+            std::vector<Bytes> hashes =
+                _message_store->get_messages_for_conversation(peer_hash);
+            request_drop_message(last_msg_hash);  // tail is the known-bad one
+            queued_drops = true;
+            // Walk newest→oldest over all but the tail (array is
+            // chronological; hashes.back() is the tail we just queued) to
+            // find the newest readable preview, queuing any unreadable
+            // messages along the way.
+            for (int i = (int)hashes.size() - 2; i >= 0; --i) {
+                ::LXMF::MessageStore::MessageMetadata m =
+                    _message_store->load_message_metadata(hashes[i]);
+                if (m.valid) {
+                    last_meta = m;  // newest readable preview
+                    break;
+                }
+                request_drop_message(hashes[i]);
+                queued_drops = true;
+            }
+            if (!last_meta.valid) {
+                // Every message was unreadable; all queued for drop. Skip
+                // the row this refresh — the store converges to none.
+                continue;
+            }
+        }
+
+        // Re-pop the preview cache from the metadata we just read (the
+        // next refresh becomes O(1) with no I/O). Only meaningful on the
+        // fallback path — when the cache was already serving us there is
+        // nothing new to write. An EMPTY content re-pops as a valid
+        // cached empty preview (the store marks it populated), so
+        // empty-content tails — location shares, blank pings — also stop
+        // falling back. The one-shot index commit below persists the
+        // repop so a reboot does not re-pay every fallback. Skipped
+        // when drops were queued: the drained deletes update
+        // last_message_hash, so a preview written for the old tail would
+        // be stale for one refresh — let the next fallback re-read the
+        // converged tail instead.
+        if (need_metadata && last_meta.valid && !queued_drops) {
+            _message_store->set_last_message_preview(peer_hash,
+                last_meta.content.substr(0, 47));
+            // refresh() runs on the LVGL task; the main-loop drain reads
+            // the flag — set under _queue_mutex (brief, no I/O inside).
+            // Fail closed: without the mutex the deferred commit cannot
+            // run safely and would leave the preview uncommitted anyway.
+            if (_queue_mutex) {
+                QueueGuard guard(_queue_mutex);
+                _index_commit_pending = true;
+            }
+        }
 
         // Create conversation item
         ConversationItem item;
@@ -254,8 +383,14 @@ void ConversationListScreen::refresh() {
                 // (held by UIManager::update()). UIManager::update() flushes
                 // these before it takes the lock so the I/O never stalls the
                 // render task. (Same rationale as on_message_received.)
-                _pending_name_writes.emplace_back(
-                    peer_hash, std::string(display_name.c_str()));
+                // Appended from the LVGL task; the main-loop drain swaps
+                // the queue — take _queue_mutex (brief, no I/O inside).
+                // Fail closed (see constructor) if the mutex is unavailable.
+                if (_queue_mutex) {
+                    QueueGuard guard(_queue_mutex);
+                    _pending_name_writes.emplace_back(
+                        peer_hash, std::string(display_name.c_str()));
+                }
             }
         }
         if (!resolved && _message_store) {
@@ -270,17 +405,69 @@ void ConversationListScreen::refresh() {
             _has_unresolved_names = true;
         }
 
-        // Get message content for preview
-        String content((const char*)last_msg.content().data(), last_msg.content().size());
+        // Get message content for preview (index cache, or pre-extracted
+        // metadata on the fallback path — no msgpack unpacking)
+        String content(have_preview ? preview.c_str() : last_meta.content.c_str());
         item.last_message = content.substring(0, 30);  // Truncate to 30 chars
         if (content.length() > 30) {
             item.last_message += "...";
         }
 
-        item.timestamp = (uint32_t)last_msg.timestamp();
+        item.timestamp = (uint32_t)(have_preview ? preview_ts : last_meta.timestamp);
         item.timestamp_str = format_timestamp(item.timestamp);
-        item.unread_count = 0;  // TODO: Track unread count
+        // Unread count straight from the conversation index (persisted,
+        // incremented on incoming save, cleared when the user opens the
+        // chat via request_mark_read()).
+        item.unread_count =
+            (uint16_t)_message_store->get_conversation_unread_count(peer_hash);
 
+        gathered.push_back(item);
+    }
+
+    // Revalidate: skip the LVGL rebuild entirely when nothing changed.
+    // Rows keep their focus-group membership and the screen keeps its
+    // scroll position, and the render task costs only the O(1) gather
+    // above. This is the common case: navigation back to Messages with
+    // no new traffic, 750ms coalesced refreshes on an idle link, and
+    // the update_status() name-resolution sweep.
+    //
+    // (Badge edge case: a clicked row has its badge widget deleted and a
+    // mark-read queued; the mark-read flush runs in UIManager::update()
+    // BEFORE any later refresh takes the lock, so a refresh in that
+    // window sees the data unchanged (badge stays off) and the first
+    // refresh after the flush sees unread==0 and rebuilds correctly.)
+    bool changed = (gathered.size() != _conversations.size());
+    if (!changed) {
+        for (size_t i = 0; i < gathered.size(); ++i) {
+            const ConversationItem& g = gathered[i];
+            const ConversationItem& c = _conversations[i];
+            if (g.peer_hash != c.peer_hash ||
+                g.peer_name != c.peer_name ||
+                g.last_message != c.last_message ||
+                g.timestamp != c.timestamp ||
+                g.unread_count != c.unread_count) {
+                changed = true;
+                break;
+            }
+        }
+    }
+    if (!changed) {
+        return;  // rows on screen are current
+    }
+
+    // Data changed: rebuild the list (full rebuild — a partial per-row
+    // diff is not worth the extra bookkeeping for a list this size).
+    lv_obj_clean(_list);
+    _conversations.clear();
+    _conversation_containers.clear();
+    _badge_pool.clear();
+    _peer_hash_pool.clear();
+    _peer_hash_pool.reserve(gathered.size());
+    _conversations.reserve(gathered.size());
+    _conversation_containers.reserve(gathered.size());
+    _badge_pool.reserve(gathered.size());
+
+    for (const ConversationItem& item : gathered) {
         _conversations.push_back(item);
         create_conversation_item(item);
     }
@@ -301,14 +488,27 @@ void ConversationListScreen::flush_pending_name_writes() {
     // Called from UIManager::update() BEFORE it takes the LVGL lock.
     // set_display_name() hits microStore/LittleFS; running it inside refresh()
     // (under the lock) serially stalls the LVGL render task on a cold-boot
-    // announce burst. Same fix as UIManager::on_message_received.
-    if (!_message_store || _pending_name_writes.empty()) {
+    // announce burst. Same fix as UIManager::on_message_received. Swap the
+    // queue under _queue_mutex (refresh() appends from the LVGL task), then
+    // do the I/O outside it. Fail closed (no draining) if the mutex is
+    // unavailable.
+    std::vector<std::pair<Bytes, std::string>> batch;
+    {
+        if (!_queue_mutex) {
+            return;
+        }
+        QueueGuard guard(_queue_mutex);
+        if (_pending_name_writes.empty()) {
+            return;
+        }
+        batch.swap(_pending_name_writes);
+    }
+    if (!_message_store) {
         return;
     }
-    for (const auto& w : _pending_name_writes) {
+    for (const auto& w : batch) {
         _message_store->set_display_name(w.first, w.second);
     }
-    _pending_name_writes.clear();
 }
 
 void ConversationListScreen::create_conversation_item(const ConversationItem& item) {
@@ -356,12 +556,17 @@ void ConversationListScreen::create_conversation_item(const ConversationItem& it
 
     lv_obj_t* label_time = lv_label_create(container);
     lv_label_set_text(label_time, item.timestamp_str.c_str());
-    lv_obj_align(label_time, LV_ALIGN_BOTTOM_RIGHT, -6, -4);
+    // Leave room for the unread badge (20px + 6px pad) when one is
+    // present; the badge occupies the bottom-right corner.
+    lv_obj_align(label_time, LV_ALIGN_BOTTOM_RIGHT,
+                 item.unread_count > 0 ? -30 : -6, -4);
     lv_obj_set_style_text_color(label_time, Theme::textMuted(), 0);
 
-    // Unread count badge
+    // Unread count badge. Always append to _badge_pool (nullptr when no
+    // badge) so the pool stays index-aligned with _conversation_containers.
+    lv_obj_t* badge = nullptr;
     if (item.unread_count > 0) {
-        lv_obj_t* badge = lv_obj_create(container);
+        badge = lv_obj_create(container);
         lv_obj_set_size(badge, 20, 20);
         lv_obj_align(badge, LV_ALIGN_BOTTOM_RIGHT, -6, -4);
         lv_obj_set_style_bg_color(badge, Theme::error(), 0);
@@ -370,20 +575,183 @@ void ConversationListScreen::create_conversation_item(const ConversationItem& it
         lv_obj_set_style_pad_all(badge, 0, 0);
 
         lv_obj_t* label_count = lv_label_create(badge);
-        lv_label_set_text_fmt(label_count, "%d", item.unread_count);
+        // Badge is a 20px circle; cap the digit count so it always fits.
+        int shown = item.unread_count;
+        if (shown > 9) shown = 9;
+        lv_label_set_text_fmt(label_count, "%d", shown);
         lv_obj_center(label_count);
         lv_obj_set_style_text_color(label_count, lv_color_white(), 0);
     }
+    _badge_pool.push_back(badge);
 }
 
-void ConversationListScreen::update_unread_count(const Bytes& peer_hash, uint16_t unread_count) {
-    LVGL_LOCK();
-    // Find conversation and update
-    for (auto& conv : _conversations) {
-        if (conv.peer_hash == peer_hash) {
-            conv.unread_count = unread_count;
-            refresh();  // Redraw list
-            break;
+void ConversationListScreen::request_mark_read(const Bytes& peer_hash) {
+    // Defers the actual store mutation. mark_conversation_read() commits
+    // the index to LittleFS, so it runs from UIManager::update() BEFORE
+    // the LVGL lock (same pattern as flush_pending_name_writes) — not
+    // from this LVGL event callback. The queue itself is shared with the
+    // main-loop drain, so take _queue_mutex (brief, no I/O inside). Fail
+    // closed (no enqueue) if the mutex is unavailable.
+    if (!_queue_mutex) {
+        return;
+    }
+    {
+        QueueGuard guard(_queue_mutex);
+        for (const auto& h : _pending_mark_reads) {
+            if (h == peer_hash) return;
+        }
+        _pending_mark_reads.push_back(peer_hash);
+    }
+}
+
+void ConversationListScreen::flush_pending_mark_reads() {
+    // Called from UIManager::update() BEFORE it takes the LVGL lock.
+    // mark_conversation_read() hits microStore/LittleFS; the LVGL event
+    // that requested the mark-read only set the flag. Swap the queue
+    // under _queue_mutex, then do the I/O outside it (a new request
+    // arriving during the I/O waits its one drain tick). Fail closed
+    // (no draining) if the mutex is unavailable.
+    std::vector<Bytes> batch;
+    {
+        if (!_queue_mutex) {
+            return;
+        }
+        QueueGuard guard(_queue_mutex);
+        if (_pending_mark_reads.empty()) {
+            return;
+        }
+        batch.swap(_pending_mark_reads);
+    }
+    if (!_message_store) {
+        return;
+    }
+    for (const auto& h : batch) {
+        _message_store->mark_conversation_read(h);
+    }
+}
+
+void ConversationListScreen::request_drop_message(const Bytes& message_hash) {
+    // Queues a corrupt/unreadable message for deletion. The actual
+    // delete_message() (index commit + payload file removal, and the
+    // last_message_hash update) runs from flush_pending_drops() OUTSIDE
+    // the LVGL lock. A bounded number of unreadable messages can be
+    // queued per refresh (one per conversation, walking the tail), so the
+    // queue cannot grow without bound. Shared with the main-loop drain,
+    // so take _queue_mutex (brief, no I/O inside). Fail closed (no
+    // enqueue) if the mutex is unavailable.
+    if (!_queue_mutex) {
+        return;
+    }
+    QueueGuard guard(_queue_mutex);
+    for (const auto& h : _pending_drops) {
+        if (h == message_hash) return;
+    }
+    _pending_drops.push_back(message_hash);
+}
+
+void ConversationListScreen::flush_pending_drops() {
+    // Called from UIManager::update() BEFORE it takes the LVGL lock.
+    // Drop the queued unreadable messages so the conversation index
+    // converges (deletion updates last_message_hash to the new tail); the
+    // next list refresh then previews the newest readable message. A
+    // delete that fails (store not ready) is requeued for a later drain,
+    // deduped against any request that arrived during the I/O. Fail
+    // closed (no draining) if the mutex is unavailable.
+    if (!_queue_mutex) {
+        return;
+    }
+    std::vector<Bytes> batch;
+    {
+        QueueGuard guard(_queue_mutex);
+        if (_pending_drops.empty()) {
+            return;
+        }
+        batch.swap(_pending_drops);
+    }
+    if (!_message_store) {
+        // Store not ready: hand the batch back (merged, deduped) so
+        // nothing is lost while the store comes up.
+        QueueGuard guard(_queue_mutex);
+        for (const auto& h : batch) {
+            bool present = false;
+            for (const auto& q : _pending_drops) {
+                if (q == h) {
+                    present = true;
+                    break;
+                }
+            }
+            if (!present) {
+                _pending_drops.push_back(h);
+            }
+        }
+        return;
+    }
+    std::vector<Bytes> remaining;
+    for (const auto& h : batch) {
+        if (!_message_store->delete_message(h)) {
+            remaining.push_back(h);
+        }
+    }
+    if (!remaining.empty()) {
+        QueueGuard guard(_queue_mutex);
+        for (const auto& h : remaining) {
+            bool present = false;
+            for (const auto& q : _pending_drops) {
+                if (q == h) {
+                    present = true;
+                    break;
+                }
+            }
+            if (!present) {
+                _pending_drops.push_back(h);
+            }
+        }
+    }
+}
+
+void ConversationListScreen::flush_pending_index_commit() {
+    // Called from UIManager::update() BEFORE it takes the LVGL lock,
+    // right after draining drops. Commits the persisted conversation
+    // index once per boot when refresh() had to fall back to
+    // load_message_metadata() (unpopulated preview cache): the in-memory
+    // repop would otherwise be lost on reboot and the next cold boot
+    // would re-read every newest message file again. save_index()
+    // rewrites the whole index, so it also persists any preview cache
+    // writes made by save_message() since the last store-originated
+    // commit — one-shot by design; the flag clears even if the commit
+    // fails and a later fallback re-arms it.
+    // refresh() (LVGL task) sets it; the main-loop drain consumes it —
+    // test-and-clear under _queue_mutex (a lost set would skip the
+    // one-shot index commit and cost every boot the full fallback pass).
+    // Fail closed (no commit drain) if the mutex is unavailable.
+    if (!_queue_mutex) {
+        return;
+    }
+    bool pending;
+    {
+        QueueGuard guard(_queue_mutex);
+        pending = _index_commit_pending;
+        _index_commit_pending = false;
+    }
+    if (!_message_store || !pending) {
+        return;
+    }
+    _message_store->commit_index();
+}
+
+void ConversationListScreen::clear_unread_badge(lv_obj_t* container) {
+    // Remove the unread badge from a rendered conversation row. The badge
+    // is tracked in _badge_pool in lockstep with _conversation_containers,
+    // so locate the row by container and delete its stored badge object.
+    // (LVGL 8.4's lv_obj_t is opaque — no public child iteration — so a
+    // side table is the portable way to reach the badge on click.)
+    for (size_t i = 0; i < _conversation_containers.size(); ++i) {
+        if (_conversation_containers[i] == container) {
+            if (i < _badge_pool.size() && _badge_pool[i]) {
+                lv_obj_del(_badge_pool[i]);
+                _badge_pool[i] = nullptr;
+            }
+            return;
         }
     }
 }
@@ -655,6 +1023,11 @@ void ConversationListScreen::on_conversation_clicked(lv_event_t* event) {
     Bytes* peer_hash = (Bytes*)lv_obj_get_user_data(target);
 
     if (peer_hash && screen->_conversation_selected_callback) {
+        // Clear the badge in the UI now; the store commit is deferred to
+        // UIManager::update() (mark_conversation_read() writes the
+        // LittleFS index and must not run under the LVGL lock).
+        screen->clear_unread_badge(target);
+        screen->request_mark_read(*peer_hash);
         screen->_conversation_selected_callback(*peer_hash);
     }
 }

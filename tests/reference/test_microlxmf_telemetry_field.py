@@ -22,7 +22,7 @@ def test_pinned_microlxmf_telemetry_field_roundtrip(tmp_path):
     if not (source / "LXMF" / "LXMessage.cpp").is_file():
         pytest.fail(f"pinned microLXMF source is unavailable at {microlxmf}")
 
-    expected = "5a44862b85e902f351b756ee00482f3258b244f5"
+    expected = "d7e05fdc10fe11bca0c4e3d8c0214b0be7d9a911"
     actual = subprocess.run(
         ["git", "-C", str(microlxmf), "rev-parse", "HEAD"],
         capture_output=True,

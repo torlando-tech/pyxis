@@ -12,3 +12,6 @@ docs/flasher/firmware/
 # is newer (see should_regenerate), so contributors with the deps
 # installed get fresh rebuilds while contributors without them still
 # get a working binary from the committed copy.
+
+# IDE-generated build database
+compile_commands.json

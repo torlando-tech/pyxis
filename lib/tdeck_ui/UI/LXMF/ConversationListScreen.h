@@ -102,11 +102,50 @@ public:
     void flush_pending_name_writes();
 
     /**
-     * Update unread count for a specific conversation
-     * @param peer_hash Peer hash
-     * @param unread_count New unread count
+     * Request that a conversation be marked read. Defers the store
+     * mutation (LittleFS index commit) out of the LVGL event callback;
+     * MUST be drained by flush_pending_mark_reads() OUTSIDE the LVGL
+     * lock (UIManager::update() calls it before taking the lock), the
+     * same pattern as the deferred display-name write-throughs.
      */
-    void update_unread_count(const RNS::Bytes& peer_hash, uint16_t unread_count);
+    void request_mark_read(const RNS::Bytes& peer_hash);
+
+    /**
+     * Commit pending mark-read requests to the store. MUST be called
+     * OUTSIDE the LVGL lock.
+     */
+    void flush_pending_mark_reads();
+
+    /**
+     * Remove the unread badge from a rendered conversation row.
+     */
+    void clear_unread_badge(lv_obj_t* container);
+
+    /**
+     * Queue a corrupt/unreadable message for deletion. The actual
+     * store mutation (index commit + payload removal) is drained by
+     * flush_pending_drops() OUTSIDE the LVGL lock, like mark-read.
+     */
+    void request_drop_message(const RNS::Bytes& message_hash);
+
+    /**
+     * Drop queued unreadable messages from the store. MUST be called
+     * OUTSIDE the LVGL lock.
+     */
+    void flush_pending_drops();
+
+    /**
+     * Commit the persisted conversation index once when this boot has
+     * fallen back to message-file reads (the one-shot preview-cache
+     * warm-up: cold boot after a firmware/index upgrade, or a tail
+     * cleared by a delete). The in-memory repop alone is lost on
+     * reboot, so without this commit the first list refresh after
+     * EVERY boot re-reads every newest message file. MUST be called
+     * OUTSIDE the LVGL lock (UIManager::update() calls it after
+     * draining drops, before mark-read, so all three land in one
+     * sensible order — each save_index() rewrites the whole index).
+     */
+    void flush_pending_index_commit();
 
     /**
      * Set callback for conversation selection
@@ -213,6 +252,7 @@ private:
     ::LXMF::MessageStore* _message_store;
     std::vector<ConversationItem> _conversations;
     std::vector<lv_obj_t*> _conversation_containers;  // For focus group management
+    std::vector<lv_obj_t*> _badge_pool;  // Unread badge per row (nullptr when none); index-aligned with _conversation_containers
     std::vector<RNS::Bytes> _peer_hash_pool;  // Object pool to avoid per-item allocations
     RNS::Bytes _pending_delete_hash;  // Hash of conversation pending deletion
     bool _has_unresolved_names = false;  // True if any conversation shows hash instead of name
@@ -221,6 +261,32 @@ private:
     // under the lock stalls the render task on a cold-boot announce burst.
     // Drained by UIManager::update() before it takes the lock.
     std::vector<std::pair<RNS::Bytes, std::string>> _pending_name_writes;
+    // Mark-read requests deferred the same way: the LVGL click handler
+    // only queues the hash; UIManager::update() commits it (LittleFS
+    // index write) before taking the lock.
+    std::vector<RNS::Bytes> _pending_mark_reads;
+    // Corrupt/unreadable messages queued for deletion (one per unreadable
+    // tail walk, bounded per refresh); UIManager::update() drops them
+    // before taking the lock so the index converges to the newest
+    // readable message.
+    std::vector<RNS::Bytes> _pending_drops;
+    // Set by refresh() when at least one conversation fell back to
+    // load_message_metadata() this boot (unpopulated preview cache:
+    // cold boot on a pre-c8d3156-generation index, or a tail cleared by
+    // delete). flush_pending_index_commit() persists the repop once so
+    // the next boot serves previews straight from the index.
+    bool _index_commit_pending = false;
+    // Guards _pending_name_writes / _pending_mark_reads / _pending_drops
+    // / _index_commit_pending: producers run under the LVGL lock (LVGL
+    // task: click handlers, refresh() during navigation) while the
+    // flush_*() consumers run on the main loop WITHOUT the LVGL lock
+    // (their store I/O must not run under it). Critical sections hold
+    // no LVGL lock, no store I/O, and never block — a brief vector
+    // swap/push — so portMAX_DELAY acquisition cannot deadlock or stall
+    // a task. NULL (allocation failure) means every guarded site fails
+    // closed: queue mutation is refused and the affected features
+    // degrade rather than run unsynchronized.
+    SemaphoreHandle_t _queue_mutex = nullptr;
 
     ConversationSelectedCallback _conversation_selected_callback;
     ComposeCallback _compose_callback;

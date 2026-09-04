@@ -41,3 +41,29 @@ target_compile_options(test_pyxis_telemetry_field PRIVATE
 target_link_options(test_pyxis_telemetry_field PRIVATE
     -fsanitize=address,undefined
 )
+
+# Host-side benchmark of the conversation-list store load path (the per-
+# conversation work ConversationListScreen::refresh() performs). Builds
+# against the exact pinned microLXMF source, so before/after numbers are
+# comparable across pin bumps. BENCH_INDEX_ACCESSORS is added by the
+# harness only when the pinned store supports in-memory preview accessors.
+add_executable(bench_conversation_list_load
+    bench_conversation_list_load.cpp
+)
+find_package(Threads REQUIRED)
+target_link_libraries(bench_conversation_list_load PRIVATE MicroLXMFLib Threads::Threads)
+target_compile_options(bench_conversation_list_load PRIVATE
+    -fexceptions
+    -Wall -Wno-unused-parameter -Wno-missing-field-initializers
+)
+target_compile_definitions(bench_conversation_list_load PRIVATE
+    MICROLXMF_NATIVE=1
+    NATIVE=1
+)
+# BENCH_INDEX_ACCESSORS=1 only when the pinned store exposes the in-memory
+# preview accessors (get_last_message_preview); otherwise the binary reports
+# that it is baseline-only.
+option(BENCH_INDEX_ACCESSORS "pin supports in-memory preview accessors" OFF)
+if(BENCH_INDEX_ACCESSORS)
+    target_compile_definitions(bench_conversation_list_load PRIVATE BENCH_INDEX_ACCESSORS=1)
+endif()
