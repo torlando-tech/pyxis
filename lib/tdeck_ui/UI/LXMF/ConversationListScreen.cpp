@@ -37,8 +37,15 @@ ConversationListScreen::ConversationListScreen(lv_obj_t* parent)
       _message_store(nullptr) {
     // Queue mutex guards the deferred queues shared between the LVGL
     // task (producers) and the main loop (flush_* consumers) — create
-    // before any task can touch them.
+    // before any task can touch them. Fail closed: if allocation
+    // fails, every guarded site below refuses queue mutation and the
+    // screen degrades (no mark-read/drop/deferred name writes) rather
+    // than running the queues unsynchronized.
     _queue_mutex = xSemaphoreCreateMutex();
+    if (!_queue_mutex) {
+        ERROR("ConversationListScreen: queue mutex allocation failed; "
+              "deferred mark-read/drop/name-write queues disabled (fail closed)");
+    }
     LVGL_LOCK();
 
     // Create screen object
@@ -346,8 +353,12 @@ void ConversationListScreen::refresh() {
                 last_meta.content.substr(0, 47));
             // refresh() runs on the LVGL task; the main-loop drain reads
             // the flag — set under _queue_mutex (brief, no I/O inside).
-            QueueGuard guard(_queue_mutex);
-            _index_commit_pending = true;
+            // Fail closed: without the mutex the deferred commit cannot
+            // run safely and would leave the preview uncommitted anyway.
+            if (_queue_mutex) {
+                QueueGuard guard(_queue_mutex);
+                _index_commit_pending = true;
+            }
         }
 
         // Create conversation item
@@ -374,9 +385,12 @@ void ConversationListScreen::refresh() {
                 // render task. (Same rationale as on_message_received.)
                 // Appended from the LVGL task; the main-loop drain swaps
                 // the queue — take _queue_mutex (brief, no I/O inside).
-                QueueGuard guard(_queue_mutex);
-                _pending_name_writes.emplace_back(
-                    peer_hash, std::string(display_name.c_str()));
+                // Fail closed (see constructor) if the mutex is unavailable.
+                if (_queue_mutex) {
+                    QueueGuard guard(_queue_mutex);
+                    _pending_name_writes.emplace_back(
+                        peer_hash, std::string(display_name.c_str()));
+                }
             }
         }
         if (!resolved && _message_store) {
@@ -476,9 +490,13 @@ void ConversationListScreen::flush_pending_name_writes() {
     // (under the lock) serially stalls the LVGL render task on a cold-boot
     // announce burst. Same fix as UIManager::on_message_received. Swap the
     // queue under _queue_mutex (refresh() appends from the LVGL task), then
-    // do the I/O outside it.
+    // do the I/O outside it. Fail closed (no draining) if the mutex is
+    // unavailable.
     std::vector<std::pair<Bytes, std::string>> batch;
     {
+        if (!_queue_mutex) {
+            return;
+        }
         QueueGuard guard(_queue_mutex);
         if (_pending_name_writes.empty()) {
             return;
@@ -572,7 +590,11 @@ void ConversationListScreen::request_mark_read(const Bytes& peer_hash) {
     // the index to LittleFS, so it runs from UIManager::update() BEFORE
     // the LVGL lock (same pattern as flush_pending_name_writes) — not
     // from this LVGL event callback. The queue itself is shared with the
-    // main-loop drain, so take _queue_mutex (brief, no I/O inside).
+    // main-loop drain, so take _queue_mutex (brief, no I/O inside). Fail
+    // closed (no enqueue) if the mutex is unavailable.
+    if (!_queue_mutex) {
+        return;
+    }
     {
         QueueGuard guard(_queue_mutex);
         for (const auto& h : _pending_mark_reads) {
@@ -587,9 +609,13 @@ void ConversationListScreen::flush_pending_mark_reads() {
     // mark_conversation_read() hits microStore/LittleFS; the LVGL event
     // that requested the mark-read only set the flag. Swap the queue
     // under _queue_mutex, then do the I/O outside it (a new request
-    // arriving during the I/O waits its one drain tick).
+    // arriving during the I/O waits its one drain tick). Fail closed
+    // (no draining) if the mutex is unavailable.
     std::vector<Bytes> batch;
     {
+        if (!_queue_mutex) {
+            return;
+        }
         QueueGuard guard(_queue_mutex);
         if (_pending_mark_reads.empty()) {
             return;
@@ -611,7 +637,11 @@ void ConversationListScreen::request_drop_message(const Bytes& message_hash) {
     // the LVGL lock. A bounded number of unreadable messages can be
     // queued per refresh (one per conversation, walking the tail), so the
     // queue cannot grow without bound. Shared with the main-loop drain,
-    // so take _queue_mutex (brief, no I/O inside).
+    // so take _queue_mutex (brief, no I/O inside). Fail closed (no
+    // enqueue) if the mutex is unavailable.
+    if (!_queue_mutex) {
+        return;
+    }
     QueueGuard guard(_queue_mutex);
     for (const auto& h : _pending_drops) {
         if (h == message_hash) return;
@@ -625,7 +655,11 @@ void ConversationListScreen::flush_pending_drops() {
     // converges (deletion updates last_message_hash to the new tail); the
     // next list refresh then previews the newest readable message. A
     // delete that fails (store not ready) is requeued for a later drain,
-    // deduped against any request that arrived during the I/O.
+    // deduped against any request that arrived during the I/O. Fail
+    // closed (no draining) if the mutex is unavailable.
+    if (!_queue_mutex) {
+        return;
+    }
     std::vector<Bytes> batch;
     {
         QueueGuard guard(_queue_mutex);
@@ -689,6 +723,10 @@ void ConversationListScreen::flush_pending_index_commit() {
     // refresh() (LVGL task) sets it; the main-loop drain consumes it —
     // test-and-clear under _queue_mutex (a lost set would skip the
     // one-shot index commit and cost every boot the full fallback pass).
+    // Fail closed (no commit drain) if the mutex is unavailable.
+    if (!_queue_mutex) {
+        return;
+    }
     bool pending;
     {
         QueueGuard guard(_queue_mutex);

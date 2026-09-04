@@ -283,7 +283,9 @@ private:
     // (their store I/O must not run under it). Critical sections hold
     // no LVGL lock, no store I/O, and never block — a brief vector
     // swap/push — so portMAX_DELAY acquisition cannot deadlock or stall
-    // a task.
+    // a task. NULL (allocation failure) means every guarded site fails
+    // closed: queue mutation is refused and the affected features
+    // degrade rather than run unsynchronized.
     SemaphoreHandle_t _queue_mutex = nullptr;
 
     ConversationSelectedCallback _conversation_selected_callback;
