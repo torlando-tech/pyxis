@@ -91,51 +91,18 @@ struct AppSettings {
 /**
  * Settings Screen
  *
- * Allows configuration of WiFi, TCP server, display, and other settings.
- * Live GPS/system readouts live on the Status screen (Route::STATUS);
- * Settings links there and holds only actionable controls.
+ * Hub-and-spoke layout (Columba-inspired): the top level is a list of
+ * navigation cards; tapping a card opens a dedicated sub-view holding
+ * that area's controls. Live status readouts live on the Status screen
+ * (Route::STATUS); the Status card links there.
  *
- * Layout:
- * +---------------------------------------+
- * | [<]  Settings                 [Save] | 36px
- * +---------------------------------------+
- * | Status >                        (link)
- * | == General ==                      |
- * |   Display Name: [_______________]  |
- * |   Brightness: [=======o------] 180 |
- * |   Keyboard Light: [OFF]            |
- * |   Screen Timeout: [1 min v]        |
- * |                                      |
- * | == Notifications ==                 |
- * |   Message Sound: [ON]               |
- * |   Volume: [=====o--------] 10       |
- * |                                      |
- * | == Network ==                       |
- * |   WiFi SSID: [__________________]   |
- * |   Password:  [******************]   |
- * |   TCP Server: [_________________]   |
- * |   Port: [____]    [Reconnect]       |
- * |   TCP Interface: [ON]               |
- * |   Auto Discovery: [OFF]             |
- * |   BLE P2P: [OFF]                    |
- * |                                      |
- * | == Radio ==                         |
- * |   LoRa Interface: [OFF]             |
- * |   (params shown when enabled)       |
- * |                                      |
- * | == Delivery ==                      |
- * |   Propagation Nodes: [View]         |
- * |   Fallback to Prop: [ON]            |
- * |   Propagation Only: [OFF]           |
- * |                                      |
- * | == Advanced ==                      |
- * |   Announce Interval (min): [240]    |
- * |   Prop Sync Interval (hrs): [4]     |
- * |   GPS Time Sync: [ON]               |
- * |                                      |
- * | == DANGER: Transport Mode ==        |
- * |   (warning + confirm switch)        |
- * +---------------------------------------+
+ * Cards (order mirrors Columba; Transport Mode must stay last):
+ *   Status, Network, Identity, Radio, Delivery, Appearance, Advanced,
+ *   Transport
+ *
+ * Save model: simple controls apply immediately; a Save button appears
+ * only on the form sub-views (Network, Radio, Identity) where a
+ * multi-field value must commit as one unit.
  */
 class SettingsScreen {
 public:
@@ -147,6 +114,7 @@ public:
     using BrightnessChangeCallback = std::function<void(uint8_t)>;
     using PropagationNodesCallback = std::function<void()>;
     using StatusScreenCallback = std::function<void()>;
+    using IdentityScreenCallback = std::function<void()>;
 
     /**
      * Create settings screen
@@ -179,7 +147,8 @@ public:
     void set_firmware_version(const String& version);
 
     /**
-     * Set callback for back button
+     * Set callback for back button (leaves Settings entirely; when a
+     * sub-view is open, the back button first returns to the hub)
      */
     void set_back_callback(BackCallback callback);
 
@@ -204,12 +173,17 @@ public:
     void set_propagation_nodes_callback(PropagationNodesCallback callback);
 
     /**
-     * Set callback for the Status link (opens Route::STATUS)
+     * Set callback for the Status card (opens Route::STATUS)
      */
     void set_status_callback(StatusScreenCallback callback);
 
     /**
-     * Show the screen
+     * Set callback for the Identity "View Identity" row (opens Route::QR)
+     */
+    void set_identity_callback(IdentityScreenCallback callback);
+
+    /**
+     * Show the screen (always on the hub)
      */
     void show();
 
@@ -230,39 +204,55 @@ private:
         SAVE_PROCESSING = 2U,
         SAVE_APPLY_RETRY = 3U
     };
-    // Main UI components
+
+    // Sub-views; HUB is the card list, the rest are dedicated pages.
+    enum View : std::uint8_t {
+        VIEW_HUB = 0,
+        VIEW_NETWORK,
+        VIEW_IDENTITY,
+        VIEW_RADIO,
+        VIEW_DELIVERY,
+        VIEW_APPEARANCE,
+        VIEW_ADVANCED,
+        VIEW_TRANSPORT,
+        VIEW_COUNT
+    };
+
+    // Header (shared across hub + sub-views)
     lv_obj_t* _screen;
     lv_obj_t* _header;
-    lv_obj_t* _content;
+    lv_obj_t* _title;
     lv_obj_t* _btn_back;
     lv_obj_t* _btn_save;
 
-    // Network section inputs
+    // Hub: navigation cards
+    lv_obj_t* _hub;
+    lv_obj_t* _cards[VIEW_COUNT - 1];
+
+    // Sub-view content containers (one per non-hub view)
+    lv_obj_t* _pages[VIEW_COUNT];
+
+    // Network sub-view inputs
     lv_obj_t* _ta_wifi_ssid;
     lv_obj_t* _ta_wifi_password;
     lv_obj_t* _ta_tcp_host;
     lv_obj_t* _ta_tcp_port;
     lv_obj_t* _btn_reconnect;
 
-    // Identity section
+    // Identity sub-view
     lv_obj_t* _ta_display_name;
+    lv_obj_t* _btn_view_identity;
 
-    // Display section
+    // Appearance sub-view (display + notifications)
     lv_obj_t* _slider_brightness;
     lv_obj_t* _label_brightness_value;
     lv_obj_t* _switch_kb_light;
     lv_obj_t* _dropdown_timeout;
-
-    // Notifications section
     lv_obj_t* _switch_notification_sound;
     lv_obj_t* _slider_notification_volume;
     lv_obj_t* _label_notification_volume_value;
 
-    // Status link row (opens the Status screen with the live readouts)
-    lv_obj_t* _btn_status;
-
-    // Interfaces section
-    lv_obj_t* _switch_tcp_enabled;
+    // Radio sub-view (LoRa)
     lv_obj_t* _switch_lora_enabled;
     lv_obj_t* _ta_lora_frequency;
     lv_obj_t* _dropdown_lora_bandwidth;
@@ -271,21 +261,25 @@ private:
     lv_obj_t* _slider_lora_power;
     lv_obj_t* _label_lora_power_value;
     lv_obj_t* _lora_params_container;  // Container for LoRa params (shown/hidden based on enabled)
+
+    // Interface row on the Network sub-view (TCP / Auto / BLE / LoRa)
+    lv_obj_t* _switch_tcp_enabled;
     lv_obj_t* _switch_auto_enabled;
     lv_obj_t* _switch_ble_enabled;
+    lv_obj_t* _switch_lora_interface;
 
-    // Advanced section
+    // Advanced sub-view
     lv_obj_t* _ta_announce_interval;
     lv_obj_t* _ta_sync_interval;
     lv_obj_t* _switch_gps_sync;
 
-    // Dangerous transport-mode section (must remain last in Settings)
+    // Dangerous transport-mode sub-view (Transport must remain the last card)
     lv_obj_t* _switch_transport_enabled;
     lv_obj_t* _transport_warning_modal;
     lv_group_t* _transport_modal_group;
     bool _transport_enable_confirmed;
 
-    // Delivery/Propagation section
+    // Delivery/Propagation sub-view
     lv_obj_t* _btn_propagation_nodes;
     lv_obj_t* _switch_prop_fallback;
     lv_obj_t* _switch_prop_only;
@@ -295,6 +289,7 @@ private:
     AppSettings _pending_save_settings;
     std::atomic<std::uint8_t> _save_state; // 0 idle, 1 pending, 2 processing
     std::uint32_t _apply_retry_at_ms;
+    View _view;
 
     // Callbacks
     BackCallback _back_callback;
@@ -303,20 +298,28 @@ private:
     BrightnessChangeCallback _brightness_change_callback;
     PropagationNodesCallback _propagation_nodes_callback;
     StatusScreenCallback _status_callback;
+    IdentityScreenCallback _identity_callback;
 
     // UI construction
     void create_header();
     void create_content();
-    void create_general_section(lv_obj_t* parent);
-    void create_notifications_section(lv_obj_t* parent);
-    void create_network_section(lv_obj_t* parent);
-    void create_radio_section(lv_obj_t* parent);
-    void create_delivery_section(lv_obj_t* parent);
-    void create_advanced_section(lv_obj_t* parent);
-    void create_transport_mode_section(lv_obj_t* parent);
+    lv_obj_t* create_page(View view);
+    lv_obj_t* create_card(lv_obj_t* parent, const char* symbol, const char* title,
+                          const char* detail, View target);
+    void create_identity_view(lv_obj_t* parent);
+    void create_network_view(lv_obj_t* parent);
+    void create_radio_view(lv_obj_t* parent);
+    void create_delivery_view(lv_obj_t* parent);
+    void create_appearance_view(lv_obj_t* parent);
+    void create_advanced_view(lv_obj_t* parent);
+    void create_transport_mode_view(lv_obj_t* parent);
+
+    // View switching
+    void switch_view(View view);
+    void focus_group_for(View view);
+    static const char* view_title(View view);
 
     // Helpers
-    lv_obj_t* create_section_header(lv_obj_t* parent, const char* title);
     lv_obj_t* create_label_row(lv_obj_t* parent, const char* label);
     lv_obj_t* create_text_input(lv_obj_t* parent, const char* placeholder,
                                  bool password = false, int max_len = 64);
@@ -328,13 +331,20 @@ private:
     // Event handlers
     static void on_back_clicked(lv_event_t* event);
     static void on_save_clicked(lv_event_t* event);
-    static void on_status_clicked(lv_event_t* event);
+    static void on_card_clicked(lv_event_t* event);
+    static void on_view_identity_clicked(lv_event_t* event);
     static void on_reconnect_clicked(lv_event_t* event);
     static void on_brightness_changed(lv_event_t* event);
     static void on_lora_enabled_changed(lv_event_t* event);
     static void on_lora_power_changed(lv_event_t* event);
     static void on_propagation_nodes_clicked(lv_event_t* event);
+    static void on_kb_light_changed(lv_event_t* event);
+    static void on_notif_sound_changed(lv_event_t* event);
     static void on_notification_volume_changed(lv_event_t* event);
+    static void on_interface_switch_changed(lv_event_t* event);
+    static void on_prop_switch_changed(lv_event_t* event);
+    static void on_timeout_changed(lv_event_t* event);
+    static void on_gps_sync_changed(lv_event_t* event);
     static void on_transport_enabled_changed(lv_event_t* event);
     static void on_transport_confirm_enable(lv_event_t* event);
     static void on_transport_cancel_enable(lv_event_t* event);

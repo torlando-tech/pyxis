@@ -600,6 +600,16 @@ bool UIManager::init() {
         [this]() { show_status(); }
     );
 
+    // Identity "View Identity" row opens the lxma:// QR screen.
+    _settings_screen->set_identity_callback(
+        [this]() { on_share_from_status(); }
+    );
+
+    // Delivery "Propagation Nodes" row opens the propagation screen.
+    _settings_screen->set_propagation_nodes_callback(
+        [this]() { show_propagation_nodes(); }
+    );
+
 
     // Set up callbacks for propagation nodes screen
     _propagation_nodes_screen->set_back_callback(

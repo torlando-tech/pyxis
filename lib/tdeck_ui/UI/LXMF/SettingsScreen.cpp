@@ -17,12 +17,6 @@ using namespace RNS;
 namespace UI {
 namespace LXMF {
 
-// One-shot scroll reset: when LVGL re-focuses the default input group on
-// screen entry it scrolls the view to the focused member (the last
-// focusable object — the transport switch), which lands the user at the
-// bottom of the list. A short delay after show() puts the view back at the
-// top; later scrolling is left to the user.
-
 // NVS keys
 static const char* NVS_NAMESPACE = "settings";
 static const char* KEY_WIFI_SSID = "wifi_ssid";
@@ -57,23 +51,30 @@ static const char* KEY_PROP_FALLBACK = "prop_fall";
 static const char* KEY_PROP_ONLY = "prop_only";
 
 SettingsScreen::SettingsScreen(lv_obj_t* parent)
-    : _screen(nullptr), _header(nullptr), _content(nullptr),
+    : _screen(nullptr), _header(nullptr), _title(nullptr),
       _btn_back(nullptr), _btn_save(nullptr),
+      _hub(nullptr),
       _ta_wifi_ssid(nullptr), _ta_wifi_password(nullptr),
       _ta_tcp_host(nullptr), _ta_tcp_port(nullptr), _btn_reconnect(nullptr),
-      _ta_display_name(nullptr),
-      _slider_brightness(nullptr), _label_brightness_value(nullptr), _switch_kb_light(nullptr), _dropdown_timeout(nullptr),
-      _btn_status(nullptr),
-      _switch_tcp_enabled(nullptr), _switch_lora_enabled(nullptr),
+      _ta_display_name(nullptr), _btn_view_identity(nullptr),
+      _slider_brightness(nullptr), _label_brightness_value(nullptr),
+      _switch_kb_light(nullptr), _dropdown_timeout(nullptr),
+      _switch_notification_sound(nullptr), _slider_notification_volume(nullptr),
+      _label_notification_volume_value(nullptr),
+      _switch_lora_enabled(nullptr),
       _ta_lora_frequency(nullptr), _dropdown_lora_bandwidth(nullptr),
       _dropdown_lora_sf(nullptr), _dropdown_lora_cr(nullptr),
       _slider_lora_power(nullptr), _label_lora_power_value(nullptr),
-      _lora_params_container(nullptr), _switch_auto_enabled(nullptr), _switch_ble_enabled(nullptr),
+      _lora_params_container(nullptr),
+      _switch_tcp_enabled(nullptr), _switch_auto_enabled(nullptr),
+      _switch_ble_enabled(nullptr), _switch_lora_interface(nullptr),
       _ta_announce_interval(nullptr), _ta_sync_interval(nullptr), _switch_gps_sync(nullptr),
       _switch_transport_enabled(nullptr), _transport_warning_modal(nullptr),
       _transport_modal_group(nullptr), _transport_enable_confirmed(false),
       _btn_propagation_nodes(nullptr), _switch_prop_fallback(nullptr), _switch_prop_only(nullptr),
-      _save_state(0U), _apply_retry_at_ms(0U) {
+      _save_state(0U), _apply_retry_at_ms(0U), _view(VIEW_HUB) {
+    for (int i = 0; i < VIEW_COUNT; ++i) _pages[i] = nullptr;
+    for (int i = 0; i < VIEW_COUNT - 1; ++i) _cards[i] = nullptr;
     LVGL_LOCK();
 
     // Create screen object
@@ -123,7 +124,7 @@ void SettingsScreen::create_header() {
     lv_obj_set_style_radius(_header, 0, 0);
     lv_obj_set_style_pad_all(_header, 0, 0);
 
-    // Back button
+    // Back button (leaves a sub-view first; leaves Settings on the hub)
     _btn_back = lv_btn_create(_header);
     lv_obj_set_size(_btn_back, 50, 28);
     lv_obj_align(_btn_back, LV_ALIGN_LEFT_MID, 2, 0);
@@ -137,13 +138,13 @@ void SettingsScreen::create_header() {
     lv_obj_set_style_text_color(label_back, Theme::textSecondary(), 0);
 
     // Title
-    lv_obj_t* title = lv_label_create(_header);
-    lv_label_set_text(title, "Settings");
-    lv_obj_align(title, LV_ALIGN_LEFT_MID, 60, 0);
-    lv_obj_set_style_text_color(title, Theme::textPrimary(), 0);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    _title = lv_label_create(_header);
+    lv_label_set_text(_title, "Settings");
+    lv_obj_align(_title, LV_ALIGN_LEFT_MID, 60, 0);
+    lv_obj_set_style_text_color(_title, Theme::textPrimary(), 0);
+    lv_obj_set_style_text_font(_title, &lv_font_montserrat_16, 0);
 
-    // Save button
+    // Save button (visible only on the form sub-views)
     _btn_save = lv_btn_create(_header);
     lv_obj_set_size(_btn_save, 55, 28);
     lv_obj_align(_btn_save, LV_ALIGN_RIGHT_MID, -4, 0);
@@ -157,56 +158,74 @@ void SettingsScreen::create_header() {
     lv_obj_set_style_text_color(label_save, Theme::textPrimary(), 0);
 }
 
-void SettingsScreen::create_content() {
-    _content = lv_obj_create(_screen);
-    lv_obj_set_size(_content, LV_PCT(100), 204);  // 240 - 36 header
-    lv_obj_align(_content, LV_ALIGN_TOP_MID, 0, 36);
-    lv_obj_set_style_pad_all(_content, 4, 0);
-    lv_obj_set_style_pad_gap(_content, 2, 0);
-    lv_obj_set_style_bg_color(_content, Theme::surface(), 0);
-    lv_obj_set_style_border_width(_content, 0, 0);
-    lv_obj_set_style_radius(_content, 0, 0);
+lv_obj_t* SettingsScreen::create_page(View view) {
+    lv_obj_t* page = lv_obj_create(_screen);
+    lv_obj_set_size(page, LV_PCT(100), 204);  // 240 - 36 header
+    lv_obj_align(page, LV_ALIGN_TOP_MID, 0, 36);
+    lv_obj_set_style_pad_all(page, 4, 0);
+    lv_obj_set_style_pad_gap(page, 2, 0);
+    lv_obj_set_style_bg_color(page, Theme::surface(), 0);
+    lv_obj_set_style_border_width(page, 0, 0);
+    lv_obj_set_style_radius(page, 0, 0);
 
-    // Enable vertical scrolling with flex layout
-    lv_obj_set_flex_flow(_content, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_scroll_dir(_content, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(_content, LV_SCROLLBAR_MODE_AUTO);
-
-    // Create sections. Order is by frequency of use: the everyday controls
-    // come first, the rare/advanced ones last. Live status readouts no longer
-    // live here — the Status link at the top opens the Status screen (Route::STATUS).
-    create_general_section(_content);
-    create_notifications_section(_content);
-    create_network_section(_content);
-    create_radio_section(_content);
-    create_delivery_section(_content);
-    create_advanced_section(_content);
-    // This dangerous opt-in must remain the final Settings section.
-    create_transport_mode_section(_content);
+    // Vertical scrolling
+    lv_obj_set_flex_flow(page, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_scroll_dir(page, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(page, LV_SCROLLBAR_MODE_AUTO);
+    _pages[view] = page;
+    return page;
 }
 
-lv_obj_t* SettingsScreen::create_section_header(lv_obj_t* parent, const char* title) {
-    lv_obj_t* header = lv_label_create(parent);
-    lv_label_set_text(header, title);
-    lv_obj_set_width(header, LV_PCT(100));
-    lv_obj_set_style_text_color(header, Theme::info(), 0);
-    lv_obj_set_style_text_font(header, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_pad_top(header, 6, 0);
-    lv_obj_set_style_pad_bottom(header, 2, 0);
-    return header;
+lv_obj_t* SettingsScreen::create_card(lv_obj_t* parent, const char* symbol,
+                                      const char* title, const char* detail,
+                                      View target) {
+    // Same card widget as the Network screen: 58px, icon + title + detail.
+    lv_obj_t* card = lv_btn_create(parent);
+    lv_obj_set_size(card, LV_PCT(100), 58);
+    lv_obj_set_style_bg_color(card, Theme::surfaceContainer(), 0);
+    lv_obj_set_style_bg_color(card, Theme::primaryPressed(), LV_STATE_FOCUSED);
+    lv_obj_set_style_border_width(card, 0, 0);
+    lv_obj_set_style_outline_color(card, Theme::primaryLight(), LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_width(card, 1, LV_STATE_FOCUSED);
+    lv_obj_set_style_outline_pad(card, 1, LV_STATE_FOCUSED);
+    lv_obj_set_style_radius(card, 8, 0);
+    lv_obj_set_style_pad_all(card, 4, 0);
+    lv_obj_add_event_cb(card, on_card_clicked, LV_EVENT_CLICKED, this);
+
+    lv_obj_t* icon = lv_label_create(card);
+    lv_label_set_text(icon, symbol);
+    lv_obj_set_style_text_font(icon, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(icon, Theme::primaryLight(), 0);
+    lv_obj_align(icon, LV_ALIGN_LEFT_MID, 4, 0);
+
+    lv_obj_t* title_label = lv_label_create(card);
+    lv_label_set_text(title_label, title);
+    lv_obj_set_style_text_font(title_label, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_color(title_label, Theme::textPrimary(), 0);
+    lv_obj_align(title_label, LV_ALIGN_LEFT_MID, 32, -7);
+
+    lv_obj_t* detail_label = lv_label_create(card);
+    lv_label_set_text(detail_label, detail);
+    lv_obj_set_style_text_font(detail_label, &lv_font_montserrat_8, 0);
+    lv_obj_set_style_text_color(detail_label, Theme::textTertiary(), 0);
+    lv_obj_align(detail_label, LV_ALIGN_LEFT_MID, 32, 10);
+
+    lv_obj_set_user_data(card, (void*)(intptr_t)target);
+    return card;
 }
 
-lv_obj_t* SettingsScreen::create_label_row(lv_obj_t* parent, const char* text) {
-    lv_obj_t* label = lv_label_create(parent);
-    lv_label_set_text(label, text);
-    lv_obj_set_width(label, LV_PCT(100));
-    lv_obj_set_style_text_color(label, Theme::textTertiary(), 0);
-    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
-    return label;
+lv_obj_t* SettingsScreen::create_label_row(lv_obj_t* parent, const char* label) {
+    // Section label above a control: Montserrat 14, tertiary color.
+    lv_obj_t* label_obj = lv_label_create(parent);
+    lv_label_set_text(label_obj, label);
+    lv_obj_set_width(label_obj, LV_PCT(100));
+    lv_obj_set_style_text_color(label_obj, Theme::textTertiary(), 0);
+    lv_obj_set_style_text_font(label_obj, &lv_font_montserrat_14, 0);
+    return label_obj;
 }
 
 lv_obj_t* SettingsScreen::create_text_input(lv_obj_t* parent, const char* placeholder,
-                                             bool password, int max_len) {
+                                            bool password, int max_len) {
     lv_obj_t* ta = lv_textarea_create(parent);
     lv_obj_set_width(ta, LV_PCT(100));
     lv_obj_set_height(ta, 28);
@@ -223,26 +242,65 @@ lv_obj_t* SettingsScreen::create_text_input(lv_obj_t* parent, const char* placeh
     lv_obj_set_style_radius(ta, 4, 0);
     lv_obj_set_style_pad_all(ta, 4, 0);
     lv_obj_set_style_text_font(ta, &lv_font_montserrat_14, 0);
-    // Add to input group for keyboard navigation
-    lv_group_t* group = LVGL::LVGLInit::get_default_group();
-    if (group) {
-        lv_group_add_obj(group, ta);
-    }
-    // Enable paste on long-press
     TextAreaHelper::enable_paste(ta);
     return ta;
 }
 
-void SettingsScreen::create_network_section(lv_obj_t* parent) {
-    create_section_header(parent, "== Network ==");
+void SettingsScreen::create_content() {
+    // Hub: the navigation card list. Order mirrors Columba; the Transport
+    // card must remain the final entry.
+    _hub = create_page(VIEW_HUB);
+    lv_obj_set_style_pad_gap(_hub, 8, 0);
+    _cards[0] = create_card(_hub, LV_SYMBOL_BATTERY_FULL, "Status", "System, GPS & storage", VIEW_HUB);
+    _cards[1] = create_card(_hub, LV_SYMBOL_WIFI, "Network", "WiFi, TCP & interfaces", VIEW_NETWORK);
+    _cards[2] = create_card(_hub, LV_SYMBOL_EDIT, "Identity", "Display name & QR code", VIEW_IDENTITY);
+    _cards[3] = create_card(_hub, LV_SYMBOL_UPLOAD, "Radio", "LoRa configuration", VIEW_RADIO);
+    _cards[4] = create_card(_hub, LV_SYMBOL_LIST, "Delivery", "Propagation & delivery", VIEW_DELIVERY);
+    _cards[5] = create_card(_hub, LV_SYMBOL_EYE_OPEN, "Appearance", "Display & keyboard light", VIEW_APPEARANCE);
+    _cards[6] = create_card(_hub, LV_SYMBOL_SETTINGS, "Advanced", "Intervals & time sync", VIEW_ADVANCED);
+    _cards[7] = create_card(_hub, LV_SYMBOL_WARNING, "Transport", "Transport mode", VIEW_TRANSPORT);
 
+    create_identity_view(create_page(VIEW_IDENTITY));
+    create_network_view(create_page(VIEW_NETWORK));
+    create_radio_view(create_page(VIEW_RADIO));
+    create_delivery_view(create_page(VIEW_DELIVERY));
+    create_appearance_view(create_page(VIEW_APPEARANCE));
+    create_advanced_view(create_page(VIEW_ADVANCED));
+    // This dangerous opt-in must remain the final settings destination.
+    create_transport_mode_view(create_page(VIEW_TRANSPORT));
+
+    // Start on the hub.
+    switch_view(VIEW_HUB);
+}
+
+void SettingsScreen::create_identity_view(lv_obj_t* parent) {
+    create_label_row(parent, "Display Name:");
+    _ta_display_name = create_text_input(parent, "Your name", false, 32);
+
+    // View Identity: opens the QR screen (lxma:// share code)
+    _btn_view_identity = lv_btn_create(parent);
+    lv_obj_set_size(_btn_view_identity, LV_PCT(100), 30);
+    lv_obj_set_style_bg_color(_btn_view_identity, Theme::surfaceInput(), 0);
+    lv_obj_set_style_bg_color(_btn_view_identity, Theme::surfaceElevated(), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(_btn_view_identity, on_view_identity_clicked, LV_EVENT_CLICKED, this);
+    lv_obj_t* identity_label = lv_label_create(_btn_view_identity);
+    lv_label_set_text(identity_label, LV_SYMBOL_IMAGE "  View Identity  " LV_SYMBOL_RIGHT);
+    lv_obj_align(identity_label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_text_color(identity_label, Theme::textPrimary(), 0);
+    {
+        lv_group_t* g = LVGL::LVGLInit::get_default_group();
+        if (g) lv_group_add_obj(g, _btn_view_identity);
+    }
+}
+
+void SettingsScreen::create_network_view(lv_obj_t* parent) {
     create_label_row(parent, "WiFi SSID:");
     _ta_wifi_ssid = create_text_input(parent, "Enter SSID", false, 32);
 
     create_label_row(parent, "WiFi Password:");
     _ta_wifi_password = create_text_input(parent, "Enter password", true, 64);
 
-    create_label_row(parent, "TCP Server:");
+    create_label_row(parent, "TCP Host:");
     _ta_tcp_host = create_text_input(parent, "IP or hostname", false, 64);
 
     // Port and reconnect row
@@ -273,12 +331,10 @@ void SettingsScreen::create_network_section(lv_obj_t* parent) {
     lv_obj_set_style_radius(_ta_tcp_port, 4, 0);
     lv_obj_set_style_pad_all(_ta_tcp_port, 4, 0);
     lv_obj_set_style_text_font(_ta_tcp_port, &lv_font_montserrat_14, 0);
-    // Add to input group for keyboard navigation
     lv_group_t* group = LVGL::LVGLInit::get_default_group();
     if (group) {
         lv_group_add_obj(group, _ta_tcp_port);
     }
-    // Enable paste on long-press
     TextAreaHelper::enable_paste(_ta_tcp_port);
 
     _btn_reconnect = lv_btn_create(port_row);
@@ -293,231 +349,72 @@ void SettingsScreen::create_network_section(lv_obj_t* parent) {
     lv_obj_center(label_reconnect);
     lv_obj_set_style_text_color(label_reconnect, Theme::textPrimary(), 0);
     lv_obj_set_style_text_font(label_reconnect, &lv_font_montserrat_14, 0);
-    // Auto Discovery row
-    lv_obj_t* auto_row = lv_obj_create(parent);
-    lv_obj_set_width(auto_row, LV_PCT(100));
-    lv_obj_set_height(auto_row, 28);
-    lv_obj_set_style_bg_opa(auto_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(auto_row, 0, 0);
-    lv_obj_set_style_pad_all(auto_row, 0, 0);
-    lv_obj_clear_flag(auto_row, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t* auto_label = lv_label_create(auto_row);
-    lv_label_set_text(auto_label, "Auto Discovery:");
-    lv_obj_align(auto_label, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_set_style_text_color(auto_label, Theme::textTertiary(), 0);
-    lv_obj_set_style_text_font(auto_label, &lv_font_montserrat_14, 0);
+    // Interface row: how this device reaches peers. LoRa lives here next to
+    // TCP/Auto/BLE (it is one interface); the Radio page tunes the RF.
+    create_label_row(parent, "Interfaces:");
 
-    _switch_auto_enabled = lv_switch_create(auto_row);
-    lv_obj_set_size(_switch_auto_enabled, 40, 20);
-    lv_obj_align(_switch_auto_enabled, LV_ALIGN_RIGHT_MID, 0, 0);
-    lv_obj_set_style_bg_color(_switch_auto_enabled, Theme::border(), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(_switch_auto_enabled, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_t* iface_row = lv_obj_create(parent);
+    lv_obj_set_width(iface_row, LV_PCT(100));
+    lv_obj_set_height(iface_row, 28);
+    lv_obj_set_style_bg_opa(iface_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(iface_row, 0, 0);
+    lv_obj_set_style_pad_all(iface_row, 0, 0);
+    lv_obj_clear_flag(iface_row, LV_OBJ_FLAG_SCROLLABLE);
 
-    // BLE P2P row
-    lv_obj_t* ble_row = lv_obj_create(parent);
-    lv_obj_set_width(ble_row, LV_PCT(100));
-    lv_obj_set_height(ble_row, 28);
-    lv_obj_set_style_bg_opa(ble_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(ble_row, 0, 0);
-    lv_obj_set_style_pad_all(ble_row, 0, 0);
-    lv_obj_clear_flag(ble_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t* ble_label = lv_label_create(ble_row);
-    lv_label_set_text(ble_label, "BLE P2P:");
-    lv_obj_align(ble_label, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_set_style_text_color(ble_label, Theme::textTertiary(), 0);
-    lv_obj_set_style_text_font(ble_label, &lv_font_montserrat_14, 0);
-
-    _switch_ble_enabled = lv_switch_create(ble_row);
-    lv_obj_set_size(_switch_ble_enabled, 40, 20);
-    lv_obj_align(_switch_ble_enabled, LV_ALIGN_RIGHT_MID, 0, 0);
-    lv_obj_set_style_bg_color(_switch_ble_enabled, Theme::border(), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(_switch_ble_enabled, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
-
-    // TCP Enable row
-    lv_obj_t* tcp_row = lv_obj_create(parent);
-    lv_obj_set_width(tcp_row, LV_PCT(100));
-    lv_obj_set_height(tcp_row, 28);
-    lv_obj_set_style_bg_opa(tcp_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(tcp_row, 0, 0);
-    lv_obj_set_style_pad_all(tcp_row, 0, 0);
-    lv_obj_clear_flag(tcp_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t* tcp_label = lv_label_create(tcp_row);
-    lv_label_set_text(tcp_label, "TCP Interface:");
+    lv_obj_t* tcp_label = lv_label_create(iface_row);
+    lv_label_set_text(tcp_label, "TCP");
     lv_obj_align(tcp_label, LV_ALIGN_LEFT_MID, 0, 0);
     lv_obj_set_style_text_color(tcp_label, Theme::textTertiary(), 0);
-    lv_obj_set_style_text_font(tcp_label, &lv_font_montserrat_14, 0);
-
-    _switch_tcp_enabled = lv_switch_create(tcp_row);
+    lv_obj_set_style_text_font(tcp_label, &lv_font_montserrat_12, 0);
+    _switch_tcp_enabled = lv_switch_create(iface_row);
     lv_obj_set_size(_switch_tcp_enabled, 40, 20);
-    lv_obj_align(_switch_tcp_enabled, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_align(_switch_tcp_enabled, LV_ALIGN_LEFT_MID, 30, 0);
     lv_obj_set_style_bg_color(_switch_tcp_enabled, Theme::border(), LV_PART_MAIN);
     lv_obj_set_style_bg_color(_switch_tcp_enabled, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_add_event_cb(_switch_tcp_enabled, on_interface_switch_changed, LV_EVENT_VALUE_CHANGED, this);
 
+    lv_obj_t* auto_label = lv_label_create(iface_row);
+    lv_label_set_text(auto_label, "AUTO");
+    lv_obj_align(auto_label, LV_ALIGN_LEFT_MID, 78, 0);
+    lv_obj_set_style_text_color(auto_label, Theme::textTertiary(), 0);
+    lv_obj_set_style_text_font(auto_label, &lv_font_montserrat_12, 0);
+    _switch_auto_enabled = lv_switch_create(iface_row);
+    lv_obj_set_size(_switch_auto_enabled, 40, 20);
+    lv_obj_align(_switch_auto_enabled, LV_ALIGN_LEFT_MID, 112, 0);
+    lv_obj_set_style_bg_color(_switch_auto_enabled, Theme::border(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(_switch_auto_enabled, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_add_event_cb(_switch_auto_enabled, on_interface_switch_changed, LV_EVENT_VALUE_CHANGED, this);
 
+    lv_obj_t* lora_label = lv_label_create(iface_row);
+    lv_label_set_text(lora_label, "LoRa");
+    lv_obj_align(lora_label, LV_ALIGN_LEFT_MID, 160, 0);
+    lv_obj_set_style_text_color(lora_label, Theme::textTertiary(), 0);
+    lv_obj_set_style_text_font(lora_label, &lv_font_montserrat_12, 0);
+    _switch_lora_interface = lv_switch_create(iface_row);
+    lv_obj_set_size(_switch_lora_interface, 40, 20);
+    lv_obj_align(_switch_lora_interface, LV_ALIGN_LEFT_MID, 196, 0);
+    lv_obj_set_style_bg_color(_switch_lora_interface, Theme::border(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(_switch_lora_interface, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_add_event_cb(_switch_lora_interface, on_interface_switch_changed, LV_EVENT_VALUE_CHANGED, this);
+
+    lv_obj_t* ble_label = lv_label_create(iface_row);
+    lv_label_set_text(ble_label, "BLE");
+    lv_obj_align(ble_label, LV_ALIGN_LEFT_MID, 244, 0);
+    lv_obj_set_style_text_color(ble_label, Theme::textTertiary(), 0);
+    lv_obj_set_style_text_font(ble_label, &lv_font_montserrat_12, 0);
+    _switch_ble_enabled = lv_switch_create(iface_row);
+    lv_obj_set_size(_switch_ble_enabled, 40, 20);
+    lv_obj_align(_switch_ble_enabled, LV_ALIGN_LEFT_MID, 272, 0);
+    lv_obj_set_style_bg_color(_switch_ble_enabled, Theme::border(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(_switch_ble_enabled, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_add_event_cb(_switch_ble_enabled, on_interface_switch_changed, LV_EVENT_VALUE_CHANGED, this);
 }
 
-void SettingsScreen::create_general_section(lv_obj_t* parent) {
-    // Status link: live readouts (GPS fix, system storage/RAM, network state)
-    // moved to the Status screen (Route::STATUS). Settings stays actionable-only,
-    // which also removes the per-second refresh work from this scroll view.
-    _btn_status = lv_btn_create(parent);
-    lv_obj_set_width(_btn_status, LV_PCT(100));
-    lv_obj_set_height(_btn_status, 30);
-    lv_obj_set_style_bg_color(_btn_status, Theme::surfaceInput(), 0);
-    lv_obj_set_style_bg_color(_btn_status, Theme::surfaceElevated(), LV_STATE_PRESSED);
-    lv_obj_add_event_cb(_btn_status, on_status_clicked, LV_EVENT_CLICKED, this);
-    lv_obj_t* status_label = lv_label_create(_btn_status);
-    lv_label_set_text(status_label, "Status  " LV_SYMBOL_RIGHT);
-    lv_obj_align(status_label, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_set_style_text_color(status_label, Theme::textPrimary(), 0);
-    {
-        lv_group_t* g = LVGL::LVGLInit::get_default_group();
-        if (g) lv_group_add_obj(g, _btn_status);
-    }
-
-    create_section_header(parent, "== General ==");
-
-    create_label_row(parent, "Display Name:");
-    _ta_display_name = create_text_input(parent, "Your name", false, 32);
-
-    // Brightness row
-    lv_obj_t* brightness_row = lv_obj_create(parent);
-    lv_obj_set_width(brightness_row, LV_PCT(100));
-    lv_obj_set_height(brightness_row, 28);
-    lv_obj_set_style_bg_opa(brightness_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(brightness_row, 0, 0);
-    lv_obj_set_style_pad_all(brightness_row, 0, 0);
-    lv_obj_clear_flag(brightness_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t* bright_label = lv_label_create(brightness_row);
-    lv_label_set_text(bright_label, "Brightness:");
-    lv_obj_align(bright_label, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_set_style_text_color(bright_label, Theme::textTertiary(), 0);
-    lv_obj_set_style_text_font(bright_label, &lv_font_montserrat_14, 0);
-
-    _slider_brightness = lv_slider_create(brightness_row);
-    lv_obj_set_size(_slider_brightness, 120, 10);
-    lv_obj_align(_slider_brightness, LV_ALIGN_LEFT_MID, 95, 0);
-    lv_slider_set_range(_slider_brightness, 10, 255);
-    lv_obj_set_style_bg_color(_slider_brightness, Theme::border(), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(_slider_brightness, Theme::info(), LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(_slider_brightness, Theme::textPrimary(), LV_PART_KNOB);
-    lv_obj_add_event_cb(_slider_brightness, on_brightness_changed, LV_EVENT_VALUE_CHANGED, this);
-
-    _label_brightness_value = lv_label_create(brightness_row);
-    lv_label_set_text(_label_brightness_value, "180");
-    lv_obj_align(_label_brightness_value, LV_ALIGN_RIGHT_MID, 0, 0);
-    lv_obj_set_style_text_color(_label_brightness_value, Theme::textPrimary(), 0);
-    lv_obj_set_style_text_font(_label_brightness_value, &lv_font_montserrat_14, 0);
-
-    // Keyboard light row
-    lv_obj_t* kb_light_row = lv_obj_create(parent);
-    lv_obj_set_width(kb_light_row, LV_PCT(100));
-    lv_obj_set_height(kb_light_row, 28);
-    lv_obj_set_style_bg_opa(kb_light_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(kb_light_row, 0, 0);
-    lv_obj_set_style_pad_all(kb_light_row, 0, 0);
-    lv_obj_clear_flag(kb_light_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t* kb_light_label = lv_label_create(kb_light_row);
-    lv_label_set_text(kb_light_label, "Keyboard Light:");
-    lv_obj_align(kb_light_label, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_set_style_text_color(kb_light_label, Theme::textTertiary(), 0);
-    lv_obj_set_style_text_font(kb_light_label, &lv_font_montserrat_14, 0);
-
-    _switch_kb_light = lv_switch_create(kb_light_row);
-    lv_obj_set_size(_switch_kb_light, 40, 20);
-    lv_obj_align(_switch_kb_light, LV_ALIGN_RIGHT_MID, 0, 0);
-    lv_obj_set_style_bg_color(_switch_kb_light, Theme::border(), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(_switch_kb_light, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
-
-    // Timeout row
-    lv_obj_t* timeout_row = lv_obj_create(parent);
-    lv_obj_set_width(timeout_row, LV_PCT(100));
-    lv_obj_set_height(timeout_row, 28);
-    lv_obj_set_style_bg_opa(timeout_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(timeout_row, 0, 0);
-    lv_obj_set_style_pad_all(timeout_row, 0, 0);
-    lv_obj_clear_flag(timeout_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t* timeout_label = lv_label_create(timeout_row);
-    lv_label_set_text(timeout_label, "Screen Timeout:");
-    lv_obj_align(timeout_label, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_set_style_text_color(timeout_label, Theme::textTertiary(), 0);
-    lv_obj_set_style_text_font(timeout_label, &lv_font_montserrat_14, 0);
-
-    _dropdown_timeout = lv_dropdown_create(timeout_row);
-    lv_dropdown_set_options(_dropdown_timeout, "30 sec\n1 min\n5 min\nNever");
-    lv_obj_set_size(_dropdown_timeout, 90, 28);
-    lv_obj_align(_dropdown_timeout, LV_ALIGN_RIGHT_MID, 0, 0);
-    lv_obj_set_style_bg_color(_dropdown_timeout, Theme::surfaceInput(), 0);
-    lv_obj_set_style_text_color(_dropdown_timeout, Theme::textPrimary(), 0);
-    lv_obj_set_style_border_color(_dropdown_timeout, Theme::border(), 0);
-    lv_obj_set_style_text_font(_dropdown_timeout, &lv_font_montserrat_14, 0);
-}
-
-void SettingsScreen::create_notifications_section(lv_obj_t* parent) {
-    create_section_header(parent, "== Notifications ==");
-
-    // Sound enabled row
-    lv_obj_t* sound_row = lv_obj_create(parent);
-    lv_obj_set_width(sound_row, LV_PCT(100));
-    lv_obj_set_height(sound_row, 28);
-    lv_obj_set_style_bg_opa(sound_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(sound_row, 0, 0);
-    lv_obj_set_style_pad_all(sound_row, 0, 0);
-    lv_obj_clear_flag(sound_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t* sound_label = lv_label_create(sound_row);
-    lv_label_set_text(sound_label, "Message Sound:");
-    lv_obj_align(sound_label, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_set_style_text_color(sound_label, Theme::textTertiary(), 0);
-    lv_obj_set_style_text_font(sound_label, &lv_font_montserrat_14, 0);
-
-    _switch_notification_sound = lv_switch_create(sound_row);
-    lv_obj_set_size(_switch_notification_sound, 40, 20);
-    lv_obj_align(_switch_notification_sound, LV_ALIGN_RIGHT_MID, 0, 0);
-    lv_obj_set_style_bg_color(_switch_notification_sound, Theme::border(), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(_switch_notification_sound, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
-
-    // Volume row
-    lv_obj_t* volume_row = lv_obj_create(parent);
-    lv_obj_set_width(volume_row, LV_PCT(100));
-    lv_obj_set_height(volume_row, 28);
-    lv_obj_set_style_bg_opa(volume_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(volume_row, 0, 0);
-    lv_obj_set_style_pad_all(volume_row, 0, 0);
-    lv_obj_clear_flag(volume_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t* volume_label = lv_label_create(volume_row);
-    lv_label_set_text(volume_label, "Volume:");
-    lv_obj_align(volume_label, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_set_style_text_color(volume_label, Theme::textTertiary(), 0);
-    lv_obj_set_style_text_font(volume_label, &lv_font_montserrat_14, 0);
-
-    _slider_notification_volume = lv_slider_create(volume_row);
-    lv_obj_set_size(_slider_notification_volume, 120, 10);
-    lv_obj_align(_slider_notification_volume, LV_ALIGN_LEFT_MID, 65, 0);
-    lv_slider_set_range(_slider_notification_volume, 0, 100);
-    lv_obj_set_style_bg_color(_slider_notification_volume, Theme::border(), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(_slider_notification_volume, Theme::info(), LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(_slider_notification_volume, Theme::textPrimary(), LV_PART_KNOB);
-    lv_obj_add_event_cb(_slider_notification_volume, on_notification_volume_changed, LV_EVENT_VALUE_CHANGED, this);
-
-    _label_notification_volume_value = lv_label_create(volume_row);
-    lv_label_set_text(_label_notification_volume_value, "50");
-    lv_obj_align(_label_notification_volume_value, LV_ALIGN_RIGHT_MID, 0, 0);
-    lv_obj_set_style_text_color(_label_notification_volume_value, Theme::textPrimary(), 0);
-    lv_obj_set_style_text_font(_label_notification_volume_value, &lv_font_montserrat_14, 0);
-}
-
-void SettingsScreen::create_radio_section(lv_obj_t* parent) {
-    create_section_header(parent, "== Radio ==");
-
-    // LoRa Enable row
+void SettingsScreen::create_radio_view(lv_obj_t* parent) {
+    // LoRa RF tuning. The on/off switch is the Radio-page handle for the same
+    // lora_enabled flag the Network interface row uses; both stay in sync
+    // through the settings snapshot.
     lv_obj_t* lora_row = lv_obj_create(parent);
     lv_obj_set_width(lora_row, LV_PCT(100));
     lv_obj_set_height(lora_row, 28);
@@ -527,7 +424,7 @@ void SettingsScreen::create_radio_section(lv_obj_t* parent) {
     lv_obj_clear_flag(lora_row, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t* lora_label = lv_label_create(lora_row);
-    lv_label_set_text(lora_label, "LoRa Interface:");
+    lv_label_set_text(lora_label, "LoRa Radio:");
     lv_obj_align(lora_label, LV_ALIGN_LEFT_MID, 0, 0);
     lv_obj_set_style_text_color(lora_label, Theme::textTertiary(), 0);
     lv_obj_set_style_text_font(lora_label, &lv_font_montserrat_14, 0);
@@ -578,7 +475,6 @@ void SettingsScreen::create_radio_section(lv_obj_t* parent) {
     lv_obj_set_style_radius(_ta_lora_frequency, 4, 0);
     lv_obj_set_style_pad_all(_ta_lora_frequency, 4, 0);
     lv_obj_set_style_text_font(_ta_lora_frequency, &lv_font_montserrat_14, 0);
-    // Enable paste on long-press
     TextAreaHelper::enable_paste(_ta_lora_frequency);
 
     lv_obj_t* mhz_label = lv_label_create(freq_row);
@@ -684,9 +580,7 @@ void SettingsScreen::create_radio_section(lv_obj_t* parent) {
     lv_obj_add_flag(_lora_params_container, LV_OBJ_FLAG_HIDDEN);
 }
 
-void SettingsScreen::create_delivery_section(lv_obj_t* parent) {
-    create_section_header(parent, "== Delivery ==");
-
+void SettingsScreen::create_delivery_view(lv_obj_t* parent) {
     // Propagation Nodes button row
     lv_obj_t* prop_nodes_row = lv_obj_create(parent);
     lv_obj_set_width(prop_nodes_row, LV_PCT(100));
@@ -735,6 +629,7 @@ void SettingsScreen::create_delivery_section(lv_obj_t* parent) {
     lv_obj_align(_switch_prop_fallback, LV_ALIGN_RIGHT_MID, 0, 0);
     lv_obj_set_style_bg_color(_switch_prop_fallback, Theme::border(), LV_PART_MAIN);
     lv_obj_set_style_bg_color(_switch_prop_fallback, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_add_event_cb(_switch_prop_fallback, on_prop_switch_changed, LV_EVENT_VALUE_CHANGED, this);
 
     // Propagation Only switch row
     lv_obj_t* prop_only_row = lv_obj_create(parent);
@@ -756,11 +651,141 @@ void SettingsScreen::create_delivery_section(lv_obj_t* parent) {
     lv_obj_align(_switch_prop_only, LV_ALIGN_RIGHT_MID, 0, 0);
     lv_obj_set_style_bg_color(_switch_prop_only, Theme::border(), LV_PART_MAIN);
     lv_obj_set_style_bg_color(_switch_prop_only, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_add_event_cb(_switch_prop_only, on_prop_switch_changed, LV_EVENT_VALUE_CHANGED, this);
 }
 
-void SettingsScreen::create_advanced_section(lv_obj_t* parent) {
-    create_section_header(parent, "== Advanced ==");
+void SettingsScreen::create_appearance_view(lv_obj_t* parent) {
+    // Brightness row
+    lv_obj_t* brightness_row = lv_obj_create(parent);
+    lv_obj_set_width(brightness_row, LV_PCT(100));
+    lv_obj_set_height(brightness_row, 28);
+    lv_obj_set_style_bg_opa(brightness_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(brightness_row, 0, 0);
+    lv_obj_set_style_pad_all(brightness_row, 0, 0);
+    lv_obj_clear_flag(brightness_row, LV_OBJ_FLAG_SCROLLABLE);
 
+    lv_obj_t* bright_label = lv_label_create(brightness_row);
+    lv_label_set_text(bright_label, "Brightness:");
+    lv_obj_align(bright_label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_text_color(bright_label, Theme::textTertiary(), 0);
+    lv_obj_set_style_text_font(bright_label, &lv_font_montserrat_14, 0);
+
+    _slider_brightness = lv_slider_create(brightness_row);
+    lv_obj_set_size(_slider_brightness, 120, 10);
+    lv_obj_align(_slider_brightness, LV_ALIGN_LEFT_MID, 95, 0);
+    lv_slider_set_range(_slider_brightness, 10, 255);
+    lv_obj_set_style_bg_color(_slider_brightness, Theme::border(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(_slider_brightness, Theme::info(), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(_slider_brightness, Theme::textPrimary(), LV_PART_KNOB);
+    lv_obj_add_event_cb(_slider_brightness, on_brightness_changed, LV_EVENT_VALUE_CHANGED, this);
+
+    _label_brightness_value = lv_label_create(brightness_row);
+    lv_label_set_text(_label_brightness_value, "180");
+    lv_obj_align(_label_brightness_value, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_set_style_text_color(_label_brightness_value, Theme::textPrimary(), 0);
+    lv_obj_set_style_text_font(_label_brightness_value, &lv_font_montserrat_14, 0);
+
+    // Keyboard light row (immediate)
+    lv_obj_t* kb_light_row = lv_obj_create(parent);
+    lv_obj_set_width(kb_light_row, LV_PCT(100));
+    lv_obj_set_height(kb_light_row, 28);
+    lv_obj_set_style_bg_opa(kb_light_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(kb_light_row, 0, 0);
+    lv_obj_set_style_pad_all(kb_light_row, 0, 0);
+    lv_obj_clear_flag(kb_light_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* kb_light_label = lv_label_create(kb_light_row);
+    lv_label_set_text(kb_light_label, "Keyboard Light:");
+    lv_obj_align(kb_light_label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_text_color(kb_light_label, Theme::textTertiary(), 0);
+    lv_obj_set_style_text_font(kb_light_label, &lv_font_montserrat_14, 0);
+
+    _switch_kb_light = lv_switch_create(kb_light_row);
+    lv_obj_set_size(_switch_kb_light, 40, 20);
+    lv_obj_align(_switch_kb_light, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_set_style_bg_color(_switch_kb_light, Theme::border(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(_switch_kb_light, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_add_event_cb(_switch_kb_light, on_kb_light_changed, LV_EVENT_VALUE_CHANGED, this);
+
+    // Timeout row (immediate)
+    lv_obj_t* timeout_row = lv_obj_create(parent);
+    lv_obj_set_width(timeout_row, LV_PCT(100));
+    lv_obj_set_height(timeout_row, 28);
+    lv_obj_set_style_bg_opa(timeout_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(timeout_row, 0, 0);
+    lv_obj_set_style_pad_all(timeout_row, 0, 0);
+    lv_obj_clear_flag(timeout_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* timeout_label = lv_label_create(timeout_row);
+    lv_label_set_text(timeout_label, "Screen Timeout:");
+    lv_obj_align(timeout_label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_text_color(timeout_label, Theme::textTertiary(), 0);
+    lv_obj_set_style_text_font(timeout_label, &lv_font_montserrat_14, 0);
+
+    _dropdown_timeout = lv_dropdown_create(timeout_row);
+    lv_dropdown_set_options(_dropdown_timeout, "30 sec\n1 min\n5 min\nNever");
+    lv_obj_set_size(_dropdown_timeout, 90, 28);
+    lv_obj_align(_dropdown_timeout, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_set_style_bg_color(_dropdown_timeout, Theme::surfaceInput(), 0);
+    lv_obj_set_style_text_color(_dropdown_timeout, Theme::textPrimary(), 0);
+    lv_obj_set_style_border_color(_dropdown_timeout, Theme::border(), 0);
+    lv_obj_set_style_text_font(_dropdown_timeout, &lv_font_montserrat_14, 0);
+    lv_obj_add_event_cb(_dropdown_timeout, on_timeout_changed, LV_EVENT_VALUE_CHANGED, this);
+
+    // Message sound row (immediate)
+    lv_obj_t* sound_row = lv_obj_create(parent);
+    lv_obj_set_width(sound_row, LV_PCT(100));
+    lv_obj_set_height(sound_row, 28);
+    lv_obj_set_style_bg_opa(sound_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(sound_row, 0, 0);
+    lv_obj_set_style_pad_all(sound_row, 0, 0);
+    lv_obj_clear_flag(sound_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* sound_label = lv_label_create(sound_row);
+    lv_label_set_text(sound_label, "Message Sound:");
+    lv_obj_align(sound_label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_text_color(sound_label, Theme::textTertiary(), 0);
+    lv_obj_set_style_text_font(sound_label, &lv_font_montserrat_14, 0);
+
+    _switch_notification_sound = lv_switch_create(sound_row);
+    lv_obj_set_size(_switch_notification_sound, 40, 20);
+    lv_obj_align(_switch_notification_sound, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_set_style_bg_color(_switch_notification_sound, Theme::border(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(_switch_notification_sound, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+    lv_obj_add_event_cb(_switch_notification_sound, on_notif_sound_changed, LV_EVENT_VALUE_CHANGED, this);
+
+    // Volume row (immediate)
+    lv_obj_t* volume_row = lv_obj_create(parent);
+    lv_obj_set_width(volume_row, LV_PCT(100));
+    lv_obj_set_height(volume_row, 28);
+    lv_obj_set_style_bg_opa(volume_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(volume_row, 0, 0);
+    lv_obj_set_style_pad_all(volume_row, 0, 0);
+    lv_obj_clear_flag(volume_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* volume_label = lv_label_create(volume_row);
+    lv_label_set_text(volume_label, "Volume:");
+    lv_obj_align(volume_label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_text_color(volume_label, Theme::textTertiary(), 0);
+    lv_obj_set_style_text_font(volume_label, &lv_font_montserrat_14, 0);
+
+    _slider_notification_volume = lv_slider_create(volume_row);
+    lv_obj_set_size(_slider_notification_volume, 120, 10);
+    lv_obj_align(_slider_notification_volume, LV_ALIGN_LEFT_MID, 65, 0);
+    lv_slider_set_range(_slider_notification_volume, 0, 100);
+    lv_obj_set_style_bg_color(_slider_notification_volume, Theme::border(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(_slider_notification_volume, Theme::info(), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(_slider_notification_volume, Theme::textPrimary(), LV_PART_KNOB);
+    lv_obj_add_event_cb(_slider_notification_volume, on_notification_volume_changed, LV_EVENT_VALUE_CHANGED, this);
+
+    _label_notification_volume_value = lv_label_create(volume_row);
+    lv_label_set_text(_label_notification_volume_value, "50");
+    lv_obj_align(_label_notification_volume_value, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_set_style_text_color(_label_notification_volume_value, Theme::textPrimary(), 0);
+    lv_obj_set_style_text_font(_label_notification_volume_value, &lv_font_montserrat_14, 0);
+}
+
+void SettingsScreen::create_advanced_view(lv_obj_t* parent) {
     // Announce interval row
     lv_obj_t* announce_row = lv_obj_create(parent);
     lv_obj_set_width(announce_row, LV_PCT(100));
@@ -794,10 +819,9 @@ void SettingsScreen::create_advanced_section(lv_obj_t* parent) {
     if (grp) {
         lv_group_add_obj(grp, _ta_announce_interval);
     }
-    // Enable paste on long-press
     TextAreaHelper::enable_paste(_ta_announce_interval);
 
-    lv_obj_t* sec_label = lv_label_create(announce_row);
+    lv_obj_t* sec_label = lv_obj_create(announce_row);
     lv_label_set_text(sec_label, "sec");
     lv_obj_align(sec_label, LV_ALIGN_RIGHT_MID, 0, 0);
     lv_obj_set_style_text_color(sec_label, Theme::textMuted(), 0);
@@ -842,7 +866,7 @@ void SettingsScreen::create_advanced_section(lv_obj_t* parent) {
     lv_obj_set_style_text_color(min_label, Theme::textMuted(), 0);
     lv_obj_set_style_text_font(min_label, &lv_font_montserrat_14, 0);
 
-    // GPS sync row
+    // GPS sync row (immediate)
     lv_obj_t* gps_sync_row = lv_obj_create(parent);
     lv_obj_set_width(gps_sync_row, LV_PCT(100));
     lv_obj_set_height(gps_sync_row, 28);
@@ -862,12 +886,10 @@ void SettingsScreen::create_advanced_section(lv_obj_t* parent) {
     lv_obj_align(_switch_gps_sync, LV_ALIGN_RIGHT_MID, 0, 0);
     lv_obj_set_style_bg_color(_switch_gps_sync, Theme::border(), LV_PART_MAIN);
     lv_obj_set_style_bg_color(_switch_gps_sync, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
-
+    lv_obj_add_event_cb(_switch_gps_sync, on_gps_sync_changed, LV_EVENT_VALUE_CHANGED, this);
 }
 
-void SettingsScreen::create_transport_mode_section(lv_obj_t* parent) {
-    create_section_header(parent, "== DANGER: Transport Mode ==");
-
+void SettingsScreen::create_transport_mode_view(lv_obj_t* parent) {
     lv_obj_t* warning = lv_label_create(parent);
     lv_obj_set_width(warning, LV_PCT(100));
     lv_label_set_long_mode(warning, LV_LABEL_LONG_WRAP);
@@ -1200,7 +1222,7 @@ void SettingsScreen::update_ui_from_settings() {
         _transport_enable_confirmed = false;
     }
 
-    // Interface settings
+    // Interface settings (TCP / Auto / LoRa / BLE)
     if (_switch_tcp_enabled) {
         if (_settings.tcp_enabled) {
             lv_obj_add_state(_switch_tcp_enabled, LV_STATE_CHECKED);
@@ -1219,6 +1241,14 @@ void SettingsScreen::update_ui_from_settings() {
             if (_lora_params_container) {
                 lv_obj_add_flag(_lora_params_container, LV_OBJ_FLAG_HIDDEN);
             }
+        }
+    }
+    if (_switch_lora_interface) {
+        // The Network interface row mirrors the Radio page's LoRa switch.
+        if (_settings.lora_enabled) {
+            lv_obj_add_state(_switch_lora_interface, LV_STATE_CHECKED);
+        } else {
+            lv_obj_clear_state(_switch_lora_interface, LV_STATE_CHECKED);
         }
     }
     if (_ta_lora_frequency) {
@@ -1343,7 +1373,17 @@ void SettingsScreen::update_settings_from_ui() {
         _settings.tcp_enabled = lv_obj_has_state(_switch_tcp_enabled, LV_STATE_CHECKED);
     }
     if (_switch_lora_enabled) {
+        // The Radio page's switch is the canonical lora_enabled handle.
+        // The Network interface row mirrors it (kept in sync below), so
+        // reading both would let a stale mirror clobber the last action.
         _settings.lora_enabled = lv_obj_has_state(_switch_lora_enabled, LV_STATE_CHECKED);
+    }
+    if (_switch_lora_interface) {
+        if (_settings.lora_enabled) {
+            lv_obj_add_state(_switch_lora_interface, LV_STATE_CHECKED);
+        } else {
+            lv_obj_clear_state(_switch_lora_interface, LV_STATE_CHECKED);
+        }
     }
     if (_ta_lora_frequency) {
         _settings.lora_frequency = String(lv_textarea_get_text(_ta_lora_frequency)).toFloat();
@@ -1407,29 +1447,17 @@ void SettingsScreen::set_status_callback(StatusScreenCallback callback) {
     _status_callback = callback;
 }
 
+void SettingsScreen::set_identity_callback(IdentityScreenCallback callback) {
+    _identity_callback = callback;
+}
+
 void SettingsScreen::show() {
     LVGL_LOCK();
     lv_obj_clear_flag(_screen, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(_screen);
 
-    // Add back/save buttons to focus group for trackball navigation
-    lv_group_t* group = LVGL::LVGLInit::get_default_group();
-    if (group) {
-        if (_btn_back) lv_group_add_obj(group, _btn_back);
-        if (_btn_save) lv_group_add_obj(group, _btn_save);
-
-        // Focus on back button
-        if (_btn_back) {
-            lv_group_focus_obj(_btn_back);
-        }
-    }
-
-    // Hidden LVGL objects keep their scroll position, so without this the
-    // screen reopens wherever the user last left it (typically the bottom
-    // after scrolling to Transport Mode). Settings always opens at the top.
-    if (_content) {
-        lv_obj_scroll_to_y(_content, 0, LV_ANIM_OFF);
-    }
+    // Entering Settings always lands on the hub.
+    switch_view(VIEW_HUB);
 }
 
 void SettingsScreen::hide() {
@@ -1440,6 +1468,9 @@ void SettingsScreen::hide() {
     if (group) {
         if (_btn_back) lv_group_remove_obj(_btn_back);
         if (_btn_save) lv_group_remove_obj(_btn_save);
+        for (int i = 0; i < VIEW_COUNT - 1; ++i) {
+            if (_cards[i]) lv_group_remove_obj(_cards[i]);
+        }
     }
 
     lv_obj_add_flag(_screen, LV_OBJ_FLAG_HIDDEN);
@@ -1449,8 +1480,136 @@ lv_obj_t* SettingsScreen::get_object() {
     return _screen;
 }
 
+const char* SettingsScreen::view_title(View view) {
+    switch (view) {
+        case VIEW_NETWORK: return "Network";
+        case VIEW_IDENTITY: return "Identity";
+        case VIEW_RADIO: return "Radio";
+        case VIEW_DELIVERY: return "Delivery";
+        case VIEW_APPEARANCE: return "Appearance";
+        case VIEW_ADVANCED: return "Advanced";
+        case VIEW_TRANSPORT: return "Transport Mode";
+        case VIEW_HUB:
+        default: return "Settings";
+    }
+}
+
+void SettingsScreen::switch_view(View view) {
+    close_transport_warning();
+    _view = view;
+
+    // Title + Save visibility (Save only on the form sub-views)
+    lv_label_set_text(_title, view_title(view));
+    const bool show_save = (view == VIEW_NETWORK || view == VIEW_RADIO || view == VIEW_IDENTITY);
+    if (show_save) {
+        lv_obj_clear_flag(_btn_save, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(_btn_save, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // Show the requested page, hide the rest.
+    for (int i = 0; i < VIEW_COUNT; ++i) {
+        if (!_pages[i]) continue;
+        if (i == view) {
+            lv_obj_clear_flag(_pages[i], LV_OBJ_FLAG_HIDDEN);
+            // Hidden LVGL objects keep their scroll position; each entry
+            // starts at the top.
+            lv_obj_scroll_to_y(_pages[i], 0, LV_ANIM_OFF);
+        } else {
+            lv_obj_add_flag(_pages[i], LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    focus_group_for(view);
+}
+
+void SettingsScreen::focus_group_for(View view) {
+    lv_group_t* group = LVGL::LVGLInit::get_default_group();
+    if (!group) return;
+
+    // Remove everything settings-related, then add exactly the objects the
+    // current view contains. Only-visible-object focus avoids the
+    // auto-scroll-to-the-last-object behavior on entry.
+    lv_obj_t* all[] = {
+        _btn_back, _btn_save,
+        _cards[0], _cards[1], _cards[2], _cards[3], _cards[4], _cards[5], _cards[6], _cards[7],
+        _btn_view_identity, _btn_reconnect, _btn_propagation_nodes,
+        _ta_wifi_ssid, _ta_wifi_password, _ta_tcp_host, _ta_tcp_port,
+        _ta_display_name, _ta_lora_frequency, _ta_announce_interval, _ta_sync_interval,
+        _slider_brightness, _slider_notification_volume, _slider_lora_power,
+        _switch_kb_light, _dropdown_timeout,
+        _switch_notification_sound,
+        _switch_lora_enabled,
+        _switch_tcp_enabled, _switch_auto_enabled, _switch_ble_enabled, _switch_lora_interface,
+        _switch_gps_sync,
+        _switch_prop_fallback, _switch_prop_only,
+        _switch_transport_enabled,
+    };
+    for (lv_obj_t* obj : all) {
+        if (obj) lv_group_remove_obj(obj);
+    }
+
+    lv_group_focus_freeze(group, true);
+    lv_group_add_obj(group, _btn_back);
+    if (_btn_save && !lv_obj_has_flag(_btn_save, LV_OBJ_FLAG_HIDDEN)) {
+        lv_group_add_obj(group, _btn_save);
+    }
+    if (view == VIEW_HUB) {
+        for (int i = 0; i < VIEW_COUNT - 1; ++i) {
+            if (_cards[i]) lv_group_add_obj(group, _cards[i]);
+        }
+    } else if (view == VIEW_NETWORK) {
+        lv_obj_t* objs[] = {
+            _ta_wifi_ssid, _ta_wifi_password, _ta_tcp_host, _ta_tcp_port, _btn_reconnect,
+            _switch_tcp_enabled, _switch_auto_enabled, _switch_lora_interface, _switch_ble_enabled,
+        };
+        for (lv_obj_t* obj : objs) if (obj) lv_group_add_obj(group, obj);
+    } else if (view == VIEW_IDENTITY) {
+        if (_ta_display_name) lv_group_add_obj(group, _ta_display_name);
+        if (_btn_view_identity) lv_group_add_obj(group, _btn_view_identity);
+    } else if (view == VIEW_RADIO) {
+        // LoRa params are only focusable while visible (LoRa enabled);
+        // a hidden container would trap focus on invisible controls.
+        lv_obj_t* objs[] = {
+            _switch_lora_enabled, _ta_lora_frequency, _dropdown_lora_bandwidth,
+            _dropdown_lora_sf, _dropdown_lora_cr, _slider_lora_power,
+        };
+        for (lv_obj_t* obj : objs) {
+            if (!obj) continue;
+            if (obj != _switch_lora_enabled &&
+                lv_obj_has_flag(_lora_params_container, LV_OBJ_FLAG_HIDDEN)) {
+                continue;
+            }
+            lv_group_add_obj(group, obj);
+        }
+    } else if (view == VIEW_DELIVERY) {
+        if (_btn_propagation_nodes) lv_group_add_obj(group, _btn_propagation_nodes);
+        if (_switch_prop_fallback) lv_group_add_obj(group, _switch_prop_fallback);
+        if (_switch_prop_only) lv_group_add_obj(group, _switch_prop_only);
+    } else if (view == VIEW_APPEARANCE) {
+        lv_obj_t* objs[] = {
+            _slider_brightness, _switch_kb_light, _dropdown_timeout,
+            _switch_notification_sound, _slider_notification_volume,
+        };
+        for (lv_obj_t* obj : objs) if (obj) lv_group_add_obj(group, obj);
+    } else if (view == VIEW_ADVANCED) {
+        lv_obj_t* objs[] = {_ta_announce_interval, _ta_sync_interval, _switch_gps_sync};
+        for (lv_obj_t* obj : objs) if (obj) lv_group_add_obj(group, obj);
+    } else if (view == VIEW_TRANSPORT) {
+        if (_switch_transport_enabled) lv_group_add_obj(group, _switch_transport_enabled);
+    }
+    lv_group_focus_freeze(group, false);
+
+    lv_group_focus_obj(_btn_back);
+}
+
 void SettingsScreen::on_back_clicked(lv_event_t* event) {
     SettingsScreen* screen = (SettingsScreen*)lv_event_get_user_data(event);
+    if (screen->_view != VIEW_HUB) {
+        // Leave the sub-view first; stay on the hub.
+        screen->switch_view(VIEW_HUB);
+        return;
+    }
     if (screen->_back_callback) {
         screen->_back_callback();
     }
@@ -1459,6 +1618,29 @@ void SettingsScreen::on_back_clicked(lv_event_t* event) {
 void SettingsScreen::on_save_clicked(lv_event_t* event) {
     SettingsScreen* screen = (SettingsScreen*)lv_event_get_user_data(event);
     screen->save_settings();
+}
+
+void SettingsScreen::on_card_clicked(lv_event_t* event) {
+    SettingsScreen* screen = (SettingsScreen*)lv_event_get_user_data(event);
+    lv_obj_t* card = lv_event_get_target(event);
+    View target = (View)(intptr_t)lv_obj_get_user_data(card);
+
+    // The Status card links to the Status screen (Route::STATUS); the
+    // navigation stack carries the back button there.
+    if (card == screen->_cards[0]) {
+        if (screen->_status_callback) {
+            screen->_status_callback();
+        }
+        return;
+    }
+    screen->switch_view(target);
+}
+
+void SettingsScreen::on_view_identity_clicked(lv_event_t* event) {
+    SettingsScreen* screen = (SettingsScreen*)lv_event_get_user_data(event);
+    if (screen->_identity_callback) {
+        screen->_identity_callback();
+    }
 }
 
 void SettingsScreen::on_reconnect_clicked(lv_event_t* event) {
@@ -1483,13 +1665,52 @@ void SettingsScreen::on_brightness_changed(lv_event_t* event) {
     if (screen->_brightness_change_callback) {
         screen->_brightness_change_callback(brightness);
     }
+    screen->save_settings();
+}
+
+void SettingsScreen::on_kb_light_changed(lv_event_t* event) {
+    // Immediate: the main loop reads keyboard_light every frame.
+    SettingsScreen* screen = (SettingsScreen*)lv_event_get_user_data(event);
+    screen->save_settings();
+}
+
+void SettingsScreen::on_timeout_changed(lv_event_t* event) {
+    // Immediate: the main loop reads screen_timeout for display sleep.
+    SettingsScreen* screen = (SettingsScreen*)lv_event_get_user_data(event);
+    screen->save_settings();
+}
+
+void SettingsScreen::on_notif_sound_changed(lv_event_t* event) {
+    // Immediate: sound/volume are read at delivery time.
+    SettingsScreen* screen = (SettingsScreen*)lv_event_get_user_data(event);
+    screen->save_settings();
+}
+
+void SettingsScreen::on_gps_sync_changed(lv_event_t* event) {
+    // Immediate: the GPS time-sync path reads gps_time_sync continuously.
+    SettingsScreen* screen = (SettingsScreen*)lv_event_get_user_data(event);
+    screen->save_settings();
+}
+
+void SettingsScreen::on_interface_switch_changed(lv_event_t* event) {
+    // Immediate: interface start/stop is handled under RouterLock by the
+    // save callback on the main loop.
+    SettingsScreen* screen = (SettingsScreen*)lv_event_get_user_data(event);
+    screen->save_settings();
+}
+
+void SettingsScreen::on_prop_switch_changed(lv_event_t* event) {
+    // Immediate: router->set_fallback_to_propagation / set_propagation_only
+    // are applied by the save callback on the main loop.
+    SettingsScreen* screen = (SettingsScreen*)lv_event_get_user_data(event);
+    screen->save_settings();
 }
 
 void SettingsScreen::on_lora_enabled_changed(lv_event_t* event) {
     SettingsScreen* screen = (SettingsScreen*)lv_event_get_user_data(event);
     bool enabled = lv_obj_has_state(screen->_switch_lora_enabled, LV_STATE_CHECKED);
 
-    // Show/hide LoRa parameters
+    // Show/hide LoRa parameters and mirror to the Network interface row.
     if (screen->_lora_params_container) {
         if (enabled) {
             lv_obj_clear_flag(screen->_lora_params_container, LV_OBJ_FLAG_HIDDEN);
@@ -1497,6 +1718,18 @@ void SettingsScreen::on_lora_enabled_changed(lv_event_t* event) {
             lv_obj_add_flag(screen->_lora_params_container, LV_OBJ_FLAG_HIDDEN);
         }
     }
+    if (screen->_switch_lora_interface) {
+        if (enabled) {
+            lv_obj_add_state(screen->_switch_lora_interface, LV_STATE_CHECKED);
+        } else {
+            lv_obj_clear_state(screen->_switch_lora_interface, LV_STATE_CHECKED);
+        }
+    }
+    // Refresh the focus group so params are focusable exactly while visible.
+    if (screen->_view == VIEW_RADIO) {
+        screen->focus_group_for(VIEW_RADIO);
+    }
+    screen->save_settings();
 }
 
 void SettingsScreen::on_lora_power_changed(lv_event_t* event) {
@@ -1515,6 +1748,7 @@ void SettingsScreen::on_notification_volume_changed(lv_event_t* event) {
 
     // Update label
     lv_label_set_text(screen->_label_notification_volume_value, String(volume).c_str());
+    screen->save_settings();
 }
 
 void SettingsScreen::on_transport_enabled_changed(lv_event_t* event) {
@@ -1527,36 +1761,29 @@ void SettingsScreen::on_transport_enabled_changed(lv_event_t* event) {
     }
 
     if (screen->_transport_enable_confirmed) {
+        screen->save_settings();
         return;
     }
 
-    // Never leave the switch enabled merely because it was toggled. The user
-    // must complete the explicit second confirmation in the danger dialog.
-    lv_obj_clear_state(screen->_switch_transport_enabled, LV_STATE_CHECKED);
+    // First enable attempt: require explicit confirmation before the
+    // dangerous opt-in persists or applies.
     screen->show_transport_warning();
 }
 
 void SettingsScreen::on_transport_confirm_enable(lv_event_t* event) {
     SettingsScreen* screen = (SettingsScreen*)lv_event_get_user_data(event);
     screen->_transport_enable_confirmed = true;
-    lv_obj_add_state(screen->_switch_transport_enabled, LV_STATE_CHECKED);
-    screen->_transport_enable_confirmed = false;
     screen->close_transport_warning();
-    INFO("Transport mode opt-in confirmed; save settings and reboot to activate");
+    screen->save_settings();
 }
 
 void SettingsScreen::on_transport_cancel_enable(lv_event_t* event) {
     SettingsScreen* screen = (SettingsScreen*)lv_event_get_user_data(event);
     screen->_transport_enable_confirmed = false;
-    lv_obj_clear_state(screen->_switch_transport_enabled, LV_STATE_CHECKED);
-    screen->close_transport_warning();
-}
-
-void SettingsScreen::on_status_clicked(lv_event_t* event) {
-    SettingsScreen* screen = (SettingsScreen*)lv_event_get_user_data(event);
-    if (screen->_status_callback) {
-        screen->_status_callback();
+    if (screen->_switch_transport_enabled) {
+        lv_obj_clear_state(screen->_switch_transport_enabled, LV_STATE_CHECKED);
     }
+    screen->close_transport_warning();
 }
 
 void SettingsScreen::on_propagation_nodes_clicked(lv_event_t* event) {
@@ -1569,4 +1796,4 @@ void SettingsScreen::on_propagation_nodes_clicked(lv_event_t* event) {
 } // namespace LXMF
 } // namespace UI
 
-#endif // ARDUINO
+#endif
