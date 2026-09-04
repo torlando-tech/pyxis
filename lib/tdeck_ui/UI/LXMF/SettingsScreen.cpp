@@ -1407,19 +1407,6 @@ void SettingsScreen::set_status_callback(StatusScreenCallback callback) {
     _status_callback = callback;
 }
 
-// [SCROLLDIAG] temporary instrumentation — remove before PR.
-void SettingsScreen::diag_scroll_watch_cb(lv_timer_t* timer) {
-    SettingsScreen* s = static_cast<SettingsScreen*>(timer->user_data);
-    if (!s || !s->_diag_entry || !s->_content) return;
-    int16_t y = lv_obj_get_scroll_y(s->_content);
-    if (y != 0) {
-        Serial.printf("[SCROLLDIAG] DEVIATION content scroll_y=%d\n", (int)y);
-        s->_diag_entry = false;
-        s->_diag_timer = nullptr;
-        lv_timer_del(timer);
-    }
-}
-
 void SettingsScreen::show() {
     LVGL_LOCK();
     lv_obj_clear_flag(_screen, LV_OBJ_FLAG_HIDDEN);
@@ -1441,17 +1428,7 @@ void SettingsScreen::show() {
     // screen reopens wherever the user last left it (typically the bottom
     // after scrolling to Transport Mode). Settings always opens at the top.
     if (_content) {
-        Serial.printf("[SCROLLDIAG] show: scroll_y before reset = %d\n",
-                      (int)lv_obj_get_scroll_y(_content));
         lv_obj_scroll_to_y(_content, 0, LV_ANIM_OFF);
-        Serial.printf("[SCROLLDIAG] show: scroll_y after reset = %d\n",
-                      (int)lv_obj_get_scroll_y(_content));
-    }
-    // [SCROLLDIAG] temporary: watch for anything that moves the scroll after
-    // entry and log the first deviation from 0.
-    _diag_entry = true;
-    if (!_diag_timer) {
-        _diag_timer = lv_timer_create(diag_scroll_watch_cb, 30, this);
     }
 }
 
