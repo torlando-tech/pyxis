@@ -340,6 +340,8 @@ private:
     static void on_transport_cancel_enable(lv_event_t* event);
     void show_transport_warning();
     void close_transport_warning();
+    static lv_timer_t* _entry_scroll_reset_timer;
+    static void entry_scroll_reset_cb(lv_timer_t* timer);
 };
 
 } // namespace LXMF

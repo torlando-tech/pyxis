@@ -17,6 +17,14 @@ using namespace RNS;
 namespace UI {
 namespace LXMF {
 
+// One-shot scroll reset: when LVGL re-focuses the default input group on
+// screen entry it scrolls the view to the focused member (the last
+// focusable object — the transport switch), which lands the user at the
+// bottom of the list. A short delay after show() puts the view back at the
+// top; later scrolling is left to the user.
+static SettingsScreen* g_settings_entry_reset = nullptr;
+lv_timer_t* SettingsScreen::_entry_scroll_reset_timer = nullptr;
+
 // NVS keys
 static const char* NVS_NAMESPACE = "settings";
 static const char* KEY_WIFI_SSID = "wifi_ssid";
@@ -1401,6 +1409,17 @@ void SettingsScreen::set_status_callback(StatusScreenCallback callback) {
     _status_callback = callback;
 }
 
+void SettingsScreen::entry_scroll_reset_cb(lv_timer_t* timer) {
+    lv_timer_del(timer);
+    SettingsScreen* screen = g_settings_entry_reset;
+    g_settings_entry_reset = nullptr;
+    if (!screen || !screen->_content) return;
+    LVGL_LOCK();
+    if (lv_obj_is_visible(screen->_screen)) {
+        lv_obj_scroll_to_y(screen->_content, 0, LV_ANIM_OFF);
+    }
+}
+
 void SettingsScreen::show() {
     LVGL_LOCK();
     lv_obj_clear_flag(_screen, LV_OBJ_FLAG_HIDDEN);
@@ -1416,6 +1435,15 @@ void SettingsScreen::show() {
         if (_btn_back) {
             lv_group_focus_obj(_btn_back);
         }
+    }
+
+    // Counter the group re-focus auto-scroll (see entry_scroll_reset_cb).
+    // show() already holds the LVGL lock, so timer creation here is safe.
+    g_settings_entry_reset = this;
+    if (!_entry_scroll_reset_timer) {
+        _entry_scroll_reset_timer = lv_timer_create(entry_scroll_reset_cb, 50, nullptr);
+    } else {
+        lv_timer_reset(_entry_scroll_reset_timer);
     }
 }
 
