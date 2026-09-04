@@ -560,7 +560,9 @@ void SettingsScreen::create_radio_view(lv_obj_t* parent) {
 
     _slider_lora_power = lv_slider_create(power_row);
     lv_obj_set_size(_slider_lora_power, 100, 10);
-    lv_obj_align(_slider_lora_power, LV_ALIGN_LEFT_MID, 75, 0);
+    // "  TX Power:" in Montserrat 14 is ~78px wide; start the track at 86
+    // so the colon never tucks under the slider.
+    lv_obj_align(_slider_lora_power, LV_ALIGN_LEFT_MID, 86, 0);
     lv_slider_set_range(_slider_lora_power, 2, 22);
     lv_obj_set_style_bg_color(_slider_lora_power, Theme::border(), LV_PART_MAIN);
     lv_obj_set_style_bg_color(_slider_lora_power, Theme::primary(), LV_PART_INDICATOR);
