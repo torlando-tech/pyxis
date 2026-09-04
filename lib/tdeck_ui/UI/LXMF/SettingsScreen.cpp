@@ -260,17 +260,14 @@ void SettingsScreen::create_content() {
     _cards[6] = create_card(_hub, LV_SYMBOL_SETTINGS, "Advanced", "Intervals & time sync", VIEW_ADVANCED);
     _cards[7] = create_card(_hub, LV_SYMBOL_WARNING, "Transport", "Transport mode", VIEW_TRANSPORT);
 
-    create_identity_view(create_page(VIEW_IDENTITY));
-    create_network_view(create_page(VIEW_NETWORK));
-    create_radio_view(create_page(VIEW_RADIO));
-    create_delivery_view(create_page(VIEW_DELIVERY));
-    create_appearance_view(create_page(VIEW_APPEARANCE));
-    create_advanced_view(create_page(VIEW_ADVANCED));
-    // This dangerous opt-in must remain the final settings destination.
-    create_transport_mode_view(create_page(VIEW_TRANSPORT));
-
-    // Start on the hub.
-    switch_view(VIEW_HUB);
+    // Sub-views are built lazily on first navigation (see
+    // ensure_view_built in switch_view). Pre-building all seven pages at
+    // construction time created ~100 extra LVGL objects, each <256B and
+    // therefore internal-DRAM-allocated via the hybrid allocator; that
+    // fragmented internal heap below the ~8.5KB the LVGL task needs
+    // (probe: total free 17KB, largest block 8180B, 8KB task create
+    // failed while 4KB succeeded) and the device parked on the boot
+    // splash.
 }
 
 void SettingsScreen::create_identity_view(lv_obj_t* parent) {
@@ -1494,9 +1491,48 @@ const char* SettingsScreen::view_title(View view) {
     }
 }
 
+void SettingsScreen::ensure_view_built(View view) {
+    if (view == VIEW_HUB || _pages[view]) return;
+    switch (view) {
+        case VIEW_NETWORK:
+            create_network_view(create_page(VIEW_NETWORK));
+            break;
+        case VIEW_IDENTITY:
+            create_identity_view(create_page(VIEW_IDENTITY));
+            break;
+        case VIEW_RADIO:
+            create_radio_view(create_page(VIEW_RADIO));
+            break;
+        case VIEW_DELIVERY:
+            create_delivery_view(create_page(VIEW_DELIVERY));
+            break;
+        case VIEW_APPEARANCE:
+            create_appearance_view(create_page(VIEW_APPEARANCE));
+            break;
+        case VIEW_ADVANCED:
+            create_advanced_view(create_page(VIEW_ADVANCED));
+            break;
+        case VIEW_TRANSPORT:
+            // This dangerous opt-in must remain the final settings
+            // destination.
+            create_transport_mode_view(create_page(VIEW_TRANSPORT));
+            break;
+        default:
+            return;
+    }
+    // Reflect any settings applied after construction (the boot-time
+    // update_ui_from_settings runs before sub-views exist).
+    update_ui_from_settings();
+}
+
 void SettingsScreen::switch_view(View view) {
     close_transport_warning();
     _view = view;
+
+    // Build the destination page on first use (hub is built at
+    // construction; sub-views are lazy to keep boot-time internal-DRAM
+    // use low — see create_content).
+    ensure_view_built(view);
 
     // Title + Save visibility (Save only on the form sub-views)
     lv_label_set_text(_title, view_title(view));

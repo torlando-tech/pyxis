@@ -315,6 +315,7 @@ private:
     void create_transport_mode_view(lv_obj_t* parent);
 
     // View switching
+    void ensure_view_built(View view);
     void switch_view(View view);
     void focus_group_for(View view);
     static const char* view_title(View view);
