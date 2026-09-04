@@ -10,11 +10,6 @@
 #include <Preferences.h>
 #include <functional>
 #include <atomic>
-#include <microReticulum/Bytes.h>
-#include <microReticulum/Identity.h>
-
-// Forward declaration
-class TinyGPSPlus;
 
 namespace UI {
 namespace LXMF {
@@ -97,41 +92,49 @@ struct AppSettings {
  * Settings Screen
  *
  * Allows configuration of WiFi, TCP server, display, and other settings.
- * Also shows GPS status and system info.
+ * Live GPS/system readouts live on the Status screen (Route::STATUS);
+ * Settings links there and holds only actionable controls.
  *
  * Layout:
  * +---------------------------------------+
  * | [<]  Settings                 [Save] | 36px
  * +---------------------------------------+
- * | == Network ==                        |
- * |   WiFi SSID: [__________________]    |
- * |   Password:  [******************]    |
- * |   TCP Server: [_________________]    |
- * |   TCP Port: [____]    [Reconnect]    |
+ * | Status >                        (link)
+ * | == General ==                      |
+ * |   Display Name: [_______________]  |
+ * |   Brightness: [=======o------] 180 |
+ * |   Keyboard Light: [OFF]            |
+ * |   Screen Timeout: [1 min v]        |
  * |                                      |
- * | == Identity ==                       |
- * |   Display Name: [_______________]    |
+ * | == Notifications ==                 |
+ * |   Message Sound: [ON]               |
+ * |   Volume: [=====o--------] 10       |
  * |                                      |
- * | == Display ==                        |
- * |   Brightness: [=======o------] 180   |
- * |   Timeout: [1 min        v]          |
+ * | == Network ==                       |
+ * |   WiFi SSID: [__________________]   |
+ * |   Password:  [******************]   |
+ * |   TCP Server: [_________________]   |
+ * |   Port: [____]    [Reconnect]       |
+ * |   TCP Interface: [ON]               |
+ * |   Auto Discovery: [OFF]             |
+ * |   BLE P2P: [OFF]                    |
  * |                                      |
- * | == GPS Status ==                     |
- * |   Satellites: 8                      |
- * |   Location: 40.7128, -74.0060        |
- * |   Altitude: 10.5m                    |
- * |   HDOP: 1.2 (Excellent)              |
+ * | == Radio ==                         |
+ * |   LoRa Interface: [OFF]             |
+ * |   (params shown when enabled)       |
  * |                                      |
- * | == System Info ==                    |
- * |   Identity: a1b2c3d4e5f6...          |
- * |   LXMF: f7e8d9c0b1a2...              |
- * |   Firmware: v1.0.0                   |
- * |   Storage: 1.2 MB free               |
- * |   RAM: 145 KB free                   |
+ * | == Delivery ==                      |
+ * |   Propagation Nodes: [View]         |
+ * |   Fallback to Prop: [ON]            |
+ * |   Propagation Only: [OFF]           |
  * |                                      |
- * | == Advanced ==                       |
- * |   Announce: [60] seconds             |
- * |   GPS Sync: [ON]                     |
+ * | == Advanced ==                      |
+ * |   Announce Interval (min): [240]    |
+ * |   Prop Sync Interval (hrs): [4]     |
+ * |   GPS Time Sync: [ON]               |
+ * |                                      |
+ * | == DANGER: Transport Mode ==        |
+ * |   (warning + confirm switch)        |
  * +---------------------------------------+
  */
 class SettingsScreen {
@@ -143,6 +146,7 @@ public:
     using WifiReconnectCallback = std::function<void(const String&, const String&)>;
     using BrightnessChangeCallback = std::function<void(uint8_t)>;
     using PropagationNodesCallback = std::function<void()>;
+    using StatusScreenCallback = std::function<void()>;
 
     /**
      * Create settings screen
@@ -171,29 +175,8 @@ public:
      */
     const AppSettings& get_settings() const { return _settings; }
 
-    /**
-     * Set identity hash for display
-     */
-    void set_identity_hash(const RNS::Bytes& hash);
-
-    /**
-     * Set LXMF delivery address hash
-     */
-    void set_lxmf_address(const RNS::Bytes& hash);
-
     /** Set the exact running firmware build for post-reboot verification. */
     void set_firmware_version(const String& version);
-
-    /**
-     * Set GPS pointer for status display
-     */
-    void set_gps(TinyGPSPlus* gps);
-
-    /**
-     * Refresh GPS and system info displays
-     */
-    void refresh();
-    void tick();  // periodic update while the screen is shown (ticks clock/GPS/system readouts)
 
     /**
      * Set callback for back button
@@ -219,6 +202,11 @@ public:
      * Set callback for propagation nodes button
      */
     void set_propagation_nodes_callback(PropagationNodesCallback callback);
+
+    /**
+     * Set callback for the Status link (opens Route::STATUS)
+     */
+    void set_status_callback(StatusScreenCallback callback);
 
     /**
      * Show the screen
@@ -270,20 +258,8 @@ private:
     lv_obj_t* _slider_notification_volume;
     lv_obj_t* _label_notification_volume_value;
 
-    // GPS status labels (read-only)
-    lv_obj_t* _label_gps_sats;
-    lv_obj_t* _label_gps_coords;
-    lv_obj_t* _label_gps_alt;
-    lv_obj_t* _label_gps_hdop;
-    lv_obj_t* _label_gps_time;
-    uint32_t _last_tick_ms = 0;  // throttle for tick()
-
-    // System info labels (read-only)
-    lv_obj_t* _label_identity_hash;
-    lv_obj_t* _label_lxmf_address;
-    lv_obj_t* _label_firmware;
-    lv_obj_t* _label_storage;
-    lv_obj_t* _label_ram;
+    // Status link row (opens the Status screen with the live readouts)
+    lv_obj_t* _btn_status;
 
     // Interfaces section
     lv_obj_t* _switch_tcp_enabled;
@@ -319,9 +295,6 @@ private:
     AppSettings _pending_save_settings;
     std::atomic<std::uint8_t> _save_state; // 0 idle, 1 pending, 2 processing
     std::uint32_t _apply_retry_at_ms;
-    RNS::Bytes _identity_hash;
-    RNS::Bytes _lxmf_address;
-    TinyGPSPlus* _gps;
 
     // Callbacks
     BackCallback _back_callback;
@@ -329,20 +302,18 @@ private:
     WifiReconnectCallback _wifi_reconnect_callback;
     BrightnessChangeCallback _brightness_change_callback;
     PropagationNodesCallback _propagation_nodes_callback;
+    StatusScreenCallback _status_callback;
 
     // UI construction
     void create_header();
     void create_content();
-    void create_network_section(lv_obj_t* parent);
-    void create_identity_section(lv_obj_t* parent);
-    void create_display_section(lv_obj_t* parent);
+    void create_general_section(lv_obj_t* parent);
     void create_notifications_section(lv_obj_t* parent);
-    void create_interfaces_section(lv_obj_t* parent);
-    void create_gps_section(lv_obj_t* parent);
-    void create_system_section(lv_obj_t* parent);
+    void create_network_section(lv_obj_t* parent);
+    void create_radio_section(lv_obj_t* parent);
+    void create_delivery_section(lv_obj_t* parent);
     void create_advanced_section(lv_obj_t* parent);
     void create_transport_mode_section(lv_obj_t* parent);
-    void create_delivery_section(lv_obj_t* parent);
 
     // Helpers
     lv_obj_t* create_section_header(lv_obj_t* parent, const char* title);
@@ -353,12 +324,11 @@ private:
     // Update UI from settings
     void update_ui_from_settings();
     void update_settings_from_ui();
-    void update_gps_display();
-    void update_system_info();
 
     // Event handlers
     static void on_back_clicked(lv_event_t* event);
     static void on_save_clicked(lv_event_t* event);
+    static void on_status_clicked(lv_event_t* event);
     static void on_reconnect_clicked(lv_event_t* event);
     static void on_brightness_changed(lv_event_t* event);
     static void on_lora_enabled_changed(lv_event_t* event);

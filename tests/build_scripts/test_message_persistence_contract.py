@@ -135,7 +135,9 @@ def test_successful_boot_cancels_ota_rollback_after_subsystems_initialize():
 
 
 def test_system_info_reports_littlefs_not_unmounted_spiffs():
-    source = (REPO_ROOT / "lib/tdeck_ui/UI/LXMF/SettingsScreen.cpp").read_text()
+    # The live system readouts (firmware build, storage, RAM) moved from the
+    # Settings screen to the Status screen; the contract follows them there.
+    source = (REPO_ROOT / "lib/tdeck_ui/UI/LXMF/StatusScreen.cpp").read_text()
     assert '"Firmware: " FIRMWARE_VERSION' in source
     assert "LittleFS.totalBytes()" in source
     assert "LittleFS.usedBytes()" in source

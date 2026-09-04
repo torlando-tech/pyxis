@@ -7,6 +7,8 @@
 #ifdef ARDUINO
 
 #include <WiFi.h>
+#include <LittleFS.h>
+#include <TinyGPSPlus.h>
 #include <microReticulum/Log.h>
 #include "../LVGL/LVGLInit.h"
 #include "../LVGL/LVGLLock.h"
@@ -22,6 +24,10 @@ StatusScreen::StatusScreen(lv_obj_t* parent)
       _label_identity_value(nullptr), _label_lxmf_value(nullptr),
       _label_wifi_status(nullptr), _label_wifi_ip(nullptr), _label_wifi_rssi(nullptr),
       _label_rns_status(nullptr), _label_prop_node(nullptr), _label_ble_header(nullptr),
+      _label_gps_sats(nullptr), _label_gps_coords(nullptr), _label_gps_alt(nullptr),
+      _label_gps_hdop(nullptr), _label_gps_time(nullptr),
+      _label_firmware(nullptr), _label_storage(nullptr), _label_ram(nullptr),
+      _gps(nullptr), _last_heavy_ms(0U),
       _rns_connected(false), _ble_peer_count(0) {
     // Initialize BLE peer labels array
     for (size_t i = 0; i < MAX_BLE_PEERS; i++) {
@@ -191,6 +197,46 @@ void StatusScreen::create_content() {
     lv_label_set_long_mode(_label_prop_node, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_pad_bottom(_label_prop_node, 8, 0);
 
+    // GPS section (read-only live readouts, previously on the Settings screen)
+    _label_gps_sats = lv_label_create(_content);
+    lv_label_set_text(_label_gps_sats, "Satellites: --");
+    lv_obj_set_style_text_color(_label_gps_sats, Theme::textPrimary(), 0);
+    lv_obj_set_style_pad_bottom(_label_gps_sats, 2, 0);
+
+    _label_gps_coords = lv_label_create(_content);
+    lv_label_set_text(_label_gps_coords, "Location: No fix");
+    lv_obj_set_style_text_color(_label_gps_coords, Theme::textPrimary(), 0);
+    lv_obj_set_style_pad_bottom(_label_gps_coords, 2, 0);
+
+    _label_gps_alt = lv_label_create(_content);
+    lv_label_set_text(_label_gps_alt, "Altitude: --");
+    lv_obj_set_style_text_color(_label_gps_alt, Theme::textPrimary(), 0);
+    lv_obj_set_style_pad_bottom(_label_gps_alt, 2, 0);
+
+    _label_gps_hdop = lv_label_create(_content);
+    lv_label_set_text(_label_gps_hdop, "HDOP: --");
+    lv_obj_set_style_text_color(_label_gps_hdop, Theme::textPrimary(), 0);
+    lv_obj_set_style_pad_bottom(_label_gps_hdop, 2, 0);
+
+    _label_gps_time = lv_label_create(_content);
+    lv_label_set_text(_label_gps_time, "Time: --");
+    lv_obj_set_style_text_color(_label_gps_time, Theme::textPrimary(), 0);
+    lv_obj_set_style_pad_bottom(_label_gps_time, 8, 0);
+
+    // System section (firmware build, storage, RAM)
+    _label_firmware = lv_label_create(_content);
+    lv_label_set_text(_label_firmware, "Firmware: " FIRMWARE_VERSION);
+    lv_obj_set_style_text_color(_label_firmware, Theme::textPrimary(), 0);
+
+    _label_storage = lv_label_create(_content);
+    lv_label_set_text(_label_storage, "Storage: --");
+    lv_obj_set_style_text_color(_label_storage, Theme::textPrimary(), 0);
+
+    _label_ram = lv_label_create(_content);
+    lv_label_set_text(_label_ram, "RAM: --");
+    lv_obj_set_style_text_color(_label_ram, Theme::textPrimary(), 0);
+    lv_obj_set_style_pad_bottom(_label_ram, 8, 0);
+
     // BLE section header
     _label_ble_header = lv_label_create(_content);
     lv_label_set_text(_label_ble_header, "BLE: No peers");
@@ -205,6 +251,7 @@ void StatusScreen::create_content() {
         lv_obj_set_style_pad_left(_label_ble_peers[i], 8, 0);
         lv_obj_add_flag(_label_ble_peers[i], LV_OBJ_FLAG_HIDDEN);
     }
+
 }
 
 void StatusScreen::set_identity_hash(const Bytes& hash) {
@@ -240,6 +287,16 @@ void StatusScreen::set_propagation_node(const String& display) {
     LVGL_LOCK();
     _prop_node_display = display;
     update_labels();
+}
+
+void StatusScreen::set_gps(TinyGPSPlus* gps) {
+    _gps = gps;
+}
+
+void StatusScreen::set_firmware_version(const String& version) {
+    LVGL_LOCK();
+    _firmware_version = version;
+    update_system_labels();
 }
 
 void StatusScreen::refresh() {
@@ -357,6 +414,95 @@ void StatusScreen::update_labels() {
             lv_obj_add_flag(_label_ble_peers[i], LV_OBJ_FLAG_HIDDEN);
         }
     }
+
+    update_gps_labels();
+    update_system_labels();
+}
+
+void StatusScreen::update_gps_labels() {
+    // Current system clock (independent of the GPS object): verify the time-sync at
+    // a glance. A sane local date means a good fix synced; "not set" means unsynced.
+    {
+        time_t now = time(nullptr);
+        struct tm lt;
+        localtime_r(&now, &lt);
+        if (lt.tm_year + 1900 >= 2024) {
+            char tbuf[48];
+            strftime(tbuf, sizeof(tbuf), "Time: %Y-%m-%d %H:%M:%S", &lt);
+            lv_label_set_text(_label_gps_time, tbuf);
+        } else {
+            lv_label_set_text(_label_gps_time, "Time: not set (awaiting GPS)");
+        }
+    }
+
+    if (!_gps) {
+        lv_label_set_text(_label_gps_sats, "Satellites: N/A");
+        lv_label_set_text(_label_gps_coords, "Location: GPS not available");
+        lv_label_set_text(_label_gps_alt, "Altitude: --");
+        lv_label_set_text(_label_gps_hdop, "HDOP: --");
+        return;
+    }
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), "Satellites: %d", (int)_gps->satellites.value());
+    lv_label_set_text(_label_gps_sats, buf);
+
+    if (_gps->location.isValid()) {
+        snprintf(buf, sizeof(buf), "Location: %.4f, %.4f",
+                 _gps->location.lat(), _gps->location.lng());
+        lv_label_set_text(_label_gps_coords, buf);
+        lv_obj_set_style_text_color(_label_gps_coords, Theme::success(), 0);
+    } else {
+        lv_label_set_text(_label_gps_coords, "Location: No fix");
+        lv_obj_set_style_text_color(_label_gps_coords, Theme::error(), 0);
+    }
+
+    if (_gps->altitude.isValid()) {
+        snprintf(buf, sizeof(buf), "Altitude: %.1fm", _gps->altitude.meters());
+        lv_label_set_text(_label_gps_alt, buf);
+    } else {
+        lv_label_set_text(_label_gps_alt, "Altitude: --");
+    }
+
+    if (_gps->hdop.isValid()) {
+        double hdop = _gps->hdop.hdop();
+        const char* quality;
+        if (hdop < 1.0) quality = "Ideal";
+        else if (hdop < 2.0) quality = "Excellent";
+        else if (hdop < 5.0) quality = "Good";
+        else if (hdop < 10.0) quality = "Moderate";
+        else quality = "Poor";
+        snprintf(buf, sizeof(buf), "HDOP: %.1f (%s)", hdop, quality);
+        lv_label_set_text(_label_gps_hdop, buf);
+    } else {
+        lv_label_set_text(_label_gps_hdop, "HDOP: --");
+    }
+}
+
+void StatusScreen::update_system_labels() {
+    if (_label_firmware && _firmware_version.length() > 0) {
+        char fbuf[96];
+        snprintf(fbuf, sizeof(fbuf), "Firmware: %s", _firmware_version.c_str());
+        lv_label_set_text(_label_firmware, fbuf);
+    }
+
+    // Storage/RAM stat reads hit the SPI flash and the allocator; throttle them
+    // to ~5s so the per-second refresh stays cheap.
+    uint32_t now = millis();
+    if (now - _last_heavy_ms < 5000) return;
+    _last_heavy_ms = now;
+
+    char buf[48];
+    size_t total = LittleFS.totalBytes();
+    size_t used = LittleFS.usedBytes();
+    if (total == 0 || used > total) {
+        lv_label_set_text(_label_storage, "Storage: unavailable");
+    } else {
+        snprintf(buf, sizeof(buf), "Storage: %d KB free", (int)((total - used) / 1024));
+        lv_label_set_text(_label_storage, buf);
+    }
+    snprintf(buf, sizeof(buf), "RAM: %d KB free", (int)(ESP.getFreeHeap() / 1024));
+    lv_label_set_text(_label_ram, buf);
 }
 
 void StatusScreen::set_back_callback(BackCallback callback) {
@@ -373,7 +519,7 @@ void StatusScreen::set_radio_activity_callback(RadioActivityCallback callback) {
 
 void StatusScreen::show() {
     LVGL_LOCK();
-    refresh();  // Update status when shown
+    update_labels();  // Update status when shown
     lv_obj_clear_flag(_screen, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(_screen);
 

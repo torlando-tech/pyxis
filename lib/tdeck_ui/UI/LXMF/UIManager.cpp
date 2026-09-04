@@ -594,6 +594,12 @@ bool UIManager::init() {
         [this]() { on_back_from_settings(); }
     );
 
+    // Status link on the Settings screen opens the Status screen; the
+    // navigation stack carries the back button there.
+    _settings_screen->set_status_callback(
+        [this]() { show_status(); }
+    );
+
 
     // Set up callbacks for propagation nodes screen
     _propagation_nodes_screen->set_back_callback(
@@ -645,10 +651,6 @@ bool UIManager::init() {
             INFO(("Restored propagation node from NVS: " + saved_hash.toHex().substr(0, 16) + "...").c_str());
         }
     }
-
-    // Set identity and LXMF address on settings screen
-    _settings_screen->set_identity_hash(_router.identity().hash());
-    _settings_screen->set_lxmf_address(_router.delivery_destination().hash());
 
 
     // Set identity hash and LXMF address on status screen
@@ -812,9 +814,6 @@ void UIManager::update() {
     // table was non-empty — this serializes the gather with the writes instead.
     if (_navigation.current() == Route::ANNOUNCES && _announce_list_screen) {
         _announce_list_screen->tick();
-    }
-    if (_navigation.current() == Route::SETTINGS && _settings_screen) {
-        _settings_screen->tick();  // keep the live clock / GPS / system readouts ticking
     }
     const uint32_t now = millis();
     nomad_update_library();
@@ -1149,7 +1148,6 @@ void UIManager::render_route(Route route) {
             _announce_list_screen->show();
             break;
         case Route::STATUS:
-            _status_screen->refresh();
             _status_screen->show();
             break;
         case Route::RADIO_ACTIVITY:
@@ -1165,7 +1163,6 @@ void UIManager::render_route(Route route) {
             _nomadnet_screen->show();
             break;
         case Route::SETTINGS:
-            _settings_screen->refresh();
             _settings_screen->show();
             break;
         case Route::CALL: if (_call_screen) _call_screen->show(); break;
@@ -1873,9 +1870,6 @@ void UIManager::refresh_current_screen() {
             break;
         case Route::STATUS:
             _status_screen->refresh();
-            break;
-        case Route::SETTINGS:
-            _settings_screen->refresh();
             break;
         case Route::PROPAGATION_NODES:
             _propagation_nodes_screen->refresh();

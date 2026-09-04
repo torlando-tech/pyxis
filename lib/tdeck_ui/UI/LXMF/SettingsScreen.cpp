@@ -8,10 +8,7 @@
 
 #include <WiFi.h>
 #include "../LVGL/LVGLLock.h"
-#include <LittleFS.h>
-#include <TinyGPSPlus.h>
 #include <microReticulum/Log.h>
-#include <microReticulum/Utilities/OS.h>
 #include "../LVGL/LVGLInit.h"
 #include "../TextAreaHelper.h"
 
@@ -60,9 +57,7 @@ SettingsScreen::SettingsScreen(lv_obj_t* parent)
       _ta_tcp_host(nullptr), _ta_tcp_port(nullptr), _btn_reconnect(nullptr),
       _ta_display_name(nullptr),
       _slider_brightness(nullptr), _label_brightness_value(nullptr), _switch_kb_light(nullptr), _dropdown_timeout(nullptr),
-      _label_gps_sats(nullptr), _label_gps_coords(nullptr), _label_gps_alt(nullptr), _label_gps_hdop(nullptr), _label_gps_time(nullptr),
-      _label_identity_hash(nullptr), _label_lxmf_address(nullptr), _label_firmware(nullptr),
-      _label_storage(nullptr), _label_ram(nullptr),
+      _btn_status(nullptr),
       _switch_tcp_enabled(nullptr), _switch_lora_enabled(nullptr),
       _ta_lora_frequency(nullptr), _dropdown_lora_bandwidth(nullptr),
       _dropdown_lora_sf(nullptr), _dropdown_lora_cr(nullptr),
@@ -72,7 +67,7 @@ SettingsScreen::SettingsScreen(lv_obj_t* parent)
       _switch_transport_enabled(nullptr), _transport_warning_modal(nullptr),
       _transport_modal_group(nullptr), _transport_enable_confirmed(false),
       _btn_propagation_nodes(nullptr), _switch_prop_fallback(nullptr), _switch_prop_only(nullptr),
-      _save_state(0U), _apply_retry_at_ms(0U), _gps(nullptr) {
+      _save_state(0U), _apply_retry_at_ms(0U) {
     LVGL_LOCK();
 
     // Create screen object
@@ -171,15 +166,14 @@ void SettingsScreen::create_content() {
     lv_obj_set_scroll_dir(_content, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(_content, LV_SCROLLBAR_MODE_AUTO);
 
-    // Create sections
-    create_network_section(_content);
-    create_identity_section(_content);
-    create_display_section(_content);
+    // Create sections. Order is by frequency of use: the everyday controls
+    // come first, the rare/advanced ones last. Live status readouts no longer
+    // live here — the Status link at the top opens the Status screen (Route::STATUS).
+    create_general_section(_content);
     create_notifications_section(_content);
-    create_interfaces_section(_content);
+    create_network_section(_content);
+    create_radio_section(_content);
     create_delivery_section(_content);
-    create_gps_section(_content);
-    create_system_section(_content);
     create_advanced_section(_content);
     // This dangerous opt-in must remain the final Settings section.
     create_transport_mode_section(_content);
@@ -293,17 +287,95 @@ void SettingsScreen::create_network_section(lv_obj_t* parent) {
     lv_obj_center(label_reconnect);
     lv_obj_set_style_text_color(label_reconnect, Theme::textPrimary(), 0);
     lv_obj_set_style_text_font(label_reconnect, &lv_font_montserrat_14, 0);
+    // Auto Discovery row
+    lv_obj_t* auto_row = lv_obj_create(parent);
+    lv_obj_set_width(auto_row, LV_PCT(100));
+    lv_obj_set_height(auto_row, 28);
+    lv_obj_set_style_bg_opa(auto_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(auto_row, 0, 0);
+    lv_obj_set_style_pad_all(auto_row, 0, 0);
+    lv_obj_clear_flag(auto_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* auto_label = lv_label_create(auto_row);
+    lv_label_set_text(auto_label, "Auto Discovery:");
+    lv_obj_align(auto_label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_text_color(auto_label, Theme::textTertiary(), 0);
+    lv_obj_set_style_text_font(auto_label, &lv_font_montserrat_14, 0);
+
+    _switch_auto_enabled = lv_switch_create(auto_row);
+    lv_obj_set_size(_switch_auto_enabled, 40, 20);
+    lv_obj_align(_switch_auto_enabled, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_set_style_bg_color(_switch_auto_enabled, Theme::border(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(_switch_auto_enabled, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+
+    // BLE P2P row
+    lv_obj_t* ble_row = lv_obj_create(parent);
+    lv_obj_set_width(ble_row, LV_PCT(100));
+    lv_obj_set_height(ble_row, 28);
+    lv_obj_set_style_bg_opa(ble_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(ble_row, 0, 0);
+    lv_obj_set_style_pad_all(ble_row, 0, 0);
+    lv_obj_clear_flag(ble_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* ble_label = lv_label_create(ble_row);
+    lv_label_set_text(ble_label, "BLE P2P:");
+    lv_obj_align(ble_label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_text_color(ble_label, Theme::textTertiary(), 0);
+    lv_obj_set_style_text_font(ble_label, &lv_font_montserrat_14, 0);
+
+    _switch_ble_enabled = lv_switch_create(ble_row);
+    lv_obj_set_size(_switch_ble_enabled, 40, 20);
+    lv_obj_align(_switch_ble_enabled, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_set_style_bg_color(_switch_ble_enabled, Theme::border(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(_switch_ble_enabled, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+
+    // TCP Enable row
+    lv_obj_t* tcp_row = lv_obj_create(parent);
+    lv_obj_set_width(tcp_row, LV_PCT(100));
+    lv_obj_set_height(tcp_row, 28);
+    lv_obj_set_style_bg_opa(tcp_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(tcp_row, 0, 0);
+    lv_obj_set_style_pad_all(tcp_row, 0, 0);
+    lv_obj_clear_flag(tcp_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* tcp_label = lv_label_create(tcp_row);
+    lv_label_set_text(tcp_label, "TCP Interface:");
+    lv_obj_align(tcp_label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_text_color(tcp_label, Theme::textTertiary(), 0);
+    lv_obj_set_style_text_font(tcp_label, &lv_font_montserrat_14, 0);
+
+    _switch_tcp_enabled = lv_switch_create(tcp_row);
+    lv_obj_set_size(_switch_tcp_enabled, 40, 20);
+    lv_obj_align(_switch_tcp_enabled, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_set_style_bg_color(_switch_tcp_enabled, Theme::border(), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(_switch_tcp_enabled, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+
+
 }
 
-void SettingsScreen::create_identity_section(lv_obj_t* parent) {
-    create_section_header(parent, "== Identity ==");
+void SettingsScreen::create_general_section(lv_obj_t* parent) {
+    // Status link: live readouts (GPS fix, system storage/RAM, network state)
+    // moved to the Status screen (Route::STATUS). Settings stays actionable-only,
+    // which also removes the per-second refresh work from this scroll view.
+    _btn_status = lv_btn_create(parent);
+    lv_obj_set_width(_btn_status, LV_PCT(100));
+    lv_obj_set_height(_btn_status, 30);
+    lv_obj_set_style_bg_color(_btn_status, Theme::surfaceInput(), 0);
+    lv_obj_set_style_bg_color(_btn_status, Theme::surfaceElevated(), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(_btn_status, on_status_clicked, LV_EVENT_CLICKED, this);
+    lv_obj_t* status_label = lv_label_create(_btn_status);
+    lv_label_set_text(status_label, "Status  " LV_SYMBOL_RIGHT);
+    lv_obj_align(status_label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_text_color(status_label, Theme::textPrimary(), 0);
+    {
+        lv_group_t* g = LVGL::LVGLInit::get_default_group();
+        if (g) lv_group_add_obj(g, _btn_status);
+    }
+
+    create_section_header(parent, "== General ==");
 
     create_label_row(parent, "Display Name:");
     _ta_display_name = create_text_input(parent, "Your name", false, 32);
-}
-
-void SettingsScreen::create_display_section(lv_obj_t* parent) {
-    create_section_header(parent, "== Display ==");
 
     // Brightness row
     lv_obj_t* brightness_row = lv_obj_create(parent);
@@ -436,71 +508,8 @@ void SettingsScreen::create_notifications_section(lv_obj_t* parent) {
     lv_obj_set_style_text_font(_label_notification_volume_value, &lv_font_montserrat_14, 0);
 }
 
-void SettingsScreen::create_interfaces_section(lv_obj_t* parent) {
-    create_section_header(parent, "== Interfaces ==");
-
-    // Auto Discovery row
-    lv_obj_t* auto_row = lv_obj_create(parent);
-    lv_obj_set_width(auto_row, LV_PCT(100));
-    lv_obj_set_height(auto_row, 28);
-    lv_obj_set_style_bg_opa(auto_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(auto_row, 0, 0);
-    lv_obj_set_style_pad_all(auto_row, 0, 0);
-    lv_obj_clear_flag(auto_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t* auto_label = lv_label_create(auto_row);
-    lv_label_set_text(auto_label, "Auto Discovery:");
-    lv_obj_align(auto_label, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_set_style_text_color(auto_label, Theme::textTertiary(), 0);
-    lv_obj_set_style_text_font(auto_label, &lv_font_montserrat_14, 0);
-
-    _switch_auto_enabled = lv_switch_create(auto_row);
-    lv_obj_set_size(_switch_auto_enabled, 40, 20);
-    lv_obj_align(_switch_auto_enabled, LV_ALIGN_RIGHT_MID, 0, 0);
-    lv_obj_set_style_bg_color(_switch_auto_enabled, Theme::border(), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(_switch_auto_enabled, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
-
-    // BLE P2P row
-    lv_obj_t* ble_row = lv_obj_create(parent);
-    lv_obj_set_width(ble_row, LV_PCT(100));
-    lv_obj_set_height(ble_row, 28);
-    lv_obj_set_style_bg_opa(ble_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(ble_row, 0, 0);
-    lv_obj_set_style_pad_all(ble_row, 0, 0);
-    lv_obj_clear_flag(ble_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t* ble_label = lv_label_create(ble_row);
-    lv_label_set_text(ble_label, "BLE P2P:");
-    lv_obj_align(ble_label, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_set_style_text_color(ble_label, Theme::textTertiary(), 0);
-    lv_obj_set_style_text_font(ble_label, &lv_font_montserrat_14, 0);
-
-    _switch_ble_enabled = lv_switch_create(ble_row);
-    lv_obj_set_size(_switch_ble_enabled, 40, 20);
-    lv_obj_align(_switch_ble_enabled, LV_ALIGN_RIGHT_MID, 0, 0);
-    lv_obj_set_style_bg_color(_switch_ble_enabled, Theme::border(), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(_switch_ble_enabled, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
-
-    // TCP Enable row
-    lv_obj_t* tcp_row = lv_obj_create(parent);
-    lv_obj_set_width(tcp_row, LV_PCT(100));
-    lv_obj_set_height(tcp_row, 28);
-    lv_obj_set_style_bg_opa(tcp_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(tcp_row, 0, 0);
-    lv_obj_set_style_pad_all(tcp_row, 0, 0);
-    lv_obj_clear_flag(tcp_row, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t* tcp_label = lv_label_create(tcp_row);
-    lv_label_set_text(tcp_label, "TCP Interface:");
-    lv_obj_align(tcp_label, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_set_style_text_color(tcp_label, Theme::textTertiary(), 0);
-    lv_obj_set_style_text_font(tcp_label, &lv_font_montserrat_14, 0);
-
-    _switch_tcp_enabled = lv_switch_create(tcp_row);
-    lv_obj_set_size(_switch_tcp_enabled, 40, 20);
-    lv_obj_align(_switch_tcp_enabled, LV_ALIGN_RIGHT_MID, 0, 0);
-    lv_obj_set_style_bg_color(_switch_tcp_enabled, Theme::border(), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(_switch_tcp_enabled, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
+void SettingsScreen::create_radio_section(lv_obj_t* parent) {
+    create_section_header(parent, "== Radio ==");
 
     // LoRa Enable row
     lv_obj_t* lora_row = lv_obj_create(parent);
@@ -741,26 +750,6 @@ void SettingsScreen::create_delivery_section(lv_obj_t* parent) {
     lv_obj_align(_switch_prop_only, LV_ALIGN_RIGHT_MID, 0, 0);
     lv_obj_set_style_bg_color(_switch_prop_only, Theme::border(), LV_PART_MAIN);
     lv_obj_set_style_bg_color(_switch_prop_only, Theme::primary(), LV_PART_INDICATOR | LV_STATE_CHECKED);
-}
-
-void SettingsScreen::create_gps_section(lv_obj_t* parent) {
-    create_section_header(parent, "== GPS Status ==");
-
-    _label_gps_sats = create_label_row(parent, "Satellites: --");
-    _label_gps_coords = create_label_row(parent, "Location: No fix");
-    _label_gps_alt = create_label_row(parent, "Altitude: --");
-    _label_gps_hdop = create_label_row(parent, "HDOP: --");
-    _label_gps_time = create_label_row(parent, "Time: --");
-}
-
-void SettingsScreen::create_system_section(lv_obj_t* parent) {
-    create_section_header(parent, "== System Info ==");
-
-    _label_identity_hash = create_label_row(parent, "Identity: --");
-    _label_lxmf_address = create_label_row(parent, "LXMF: --");
-    _label_firmware = create_label_row(parent, "Firmware: " FIRMWARE_VERSION);
-    _label_storage = create_label_row(parent, "Storage: --");
-    _label_ram = create_label_row(parent, "RAM: --");
 }
 
 void SettingsScreen::create_advanced_section(lv_obj_t* parent) {
@@ -1388,140 +1377,6 @@ void SettingsScreen::update_settings_from_ui() {
     }
 }
 
-void SettingsScreen::update_gps_display() {
-    LVGL_LOCK();
-
-    // Current system clock (independent of the GPS object): verify the time-sync at
-    // a glance. A sane local date means a good fix synced; "not set" means unsynced;
-    // a far-future year would flag a GPS week-rollover slipping through.
-    {
-        time_t now = time(nullptr);
-        struct tm lt;
-        localtime_r(&now, &lt);
-        if (lt.tm_year + 1900 >= 2024) {  // < 2024 == unsynced (1970 or the ESP32 ~2016 boot default)
-            char tbuf[48];
-            strftime(tbuf, sizeof(tbuf), "Time: %Y-%m-%d %H:%M:%S", &lt);
-            lv_label_set_text(_label_gps_time, tbuf);
-        } else {
-            lv_label_set_text(_label_gps_time, "Time: not set (awaiting GPS)");
-        }
-    }
-
-    if (!_gps) {
-        lv_label_set_text(_label_gps_sats, "Satellites: N/A");
-        lv_label_set_text(_label_gps_coords, "Location: GPS not available");
-        lv_label_set_text(_label_gps_alt, "Altitude: --");
-        lv_label_set_text(_label_gps_hdop, "HDOP: --");
-        return;
-    }
-
-    // Satellites
-    String sats = "Satellites: " + String(_gps->satellites.value());
-    lv_label_set_text(_label_gps_sats, sats.c_str());
-
-    // Coordinates
-    if (_gps->location.isValid()) {
-        String coords = "Location: " +
-                        String(_gps->location.lat(), 4) + ", " +
-                        String(_gps->location.lng(), 4);
-        lv_label_set_text(_label_gps_coords, coords.c_str());
-        lv_obj_set_style_text_color(_label_gps_coords, Theme::success(), 0);
-    } else {
-        lv_label_set_text(_label_gps_coords, "Location: No fix");
-        lv_obj_set_style_text_color(_label_gps_coords, Theme::error(), 0);
-    }
-
-    // Altitude
-    if (_gps->altitude.isValid()) {
-        String alt = "Altitude: " + String(_gps->altitude.meters(), 1) + "m";
-        lv_label_set_text(_label_gps_alt, alt.c_str());
-    } else {
-        lv_label_set_text(_label_gps_alt, "Altitude: --");
-    }
-
-    // HDOP (fix quality)
-    if (_gps->hdop.isValid()) {
-        double hdop = _gps->hdop.hdop();  // hdop() already returns the true value (raw value()/100)
-        String quality;
-        if (hdop < 1.0) quality = "Ideal";
-        else if (hdop < 2.0) quality = "Excellent";
-        else if (hdop < 5.0) quality = "Good";
-        else if (hdop < 10.0) quality = "Moderate";
-        else quality = "Poor";
-
-        String hdop_str = "HDOP: " + String(hdop, 1) + " (" + quality + ")";
-        lv_label_set_text(_label_gps_hdop, hdop_str.c_str());
-    } else {
-        lv_label_set_text(_label_gps_hdop, "HDOP: --");
-    }
-}
-
-void SettingsScreen::update_system_info() {
-    LVGL_LOCK();
-    // Identity hash
-    if (_identity_hash.size() > 0) {
-        String hash = "Identity: " + String(_identity_hash.toHex().substr(0, 16).c_str()) + "...";
-        lv_label_set_text(_label_identity_hash, hash.c_str());
-    }
-
-    // LXMF address
-    if (_lxmf_address.size() > 0) {
-        String addr = "LXMF: " + String(_lxmf_address.toHex().substr(0, 16).c_str()) + "...";
-        lv_label_set_text(_label_lxmf_address, addr.c_str());
-    }
-
-    // Storage
-    size_t total = LittleFS.totalBytes();
-    size_t used = LittleFS.usedBytes();
-    String storage;
-    if (total == 0 || used > total) {
-        storage = "Storage: unavailable";
-    } else {
-        size_t free = total - used;
-        storage = "Storage: " + String(free / 1024) + " KB free";
-    }
-    lv_label_set_text(_label_storage, storage.c_str());
-
-    // RAM
-    size_t free_heap = ESP.getFreeHeap();
-    String ram = "RAM: " + String(free_heap / 1024) + " KB free";
-    lv_label_set_text(_label_ram, ram.c_str());
-}
-
-void SettingsScreen::set_identity_hash(const Bytes& hash) {
-    _identity_hash = hash;
-}
-
-void SettingsScreen::set_lxmf_address(const Bytes& hash) {
-    _lxmf_address = hash;
-}
-
-void SettingsScreen::set_firmware_version(const String& version) {
-    if (_label_firmware) {
-        String text = "Firmware: " + version;
-        lv_label_set_text(_label_firmware, text.c_str());
-    }
-}
-
-void SettingsScreen::set_gps(TinyGPSPlus* gps) {
-    _gps = gps;
-}
-
-void SettingsScreen::refresh() {
-    update_gps_display();
-    update_system_info();
-}
-
-void SettingsScreen::tick() {
-    // Called every main-loop pass while Settings is the active screen. Throttled to
-    // ~1s, it refreshes the live readouts so the clock (and GPS/system info) updates
-    // on screen instead of being a static snapshot from when the screen was opened.
-    uint32_t now = millis();
-    if (now - _last_tick_ms < 1000) return;
-    _last_tick_ms = now;
-    refresh();
-}
-
 void SettingsScreen::set_back_callback(BackCallback callback) {
     _back_callback = callback;
 }
@@ -1542,9 +1397,12 @@ void SettingsScreen::set_propagation_nodes_callback(PropagationNodesCallback cal
     _propagation_nodes_callback = callback;
 }
 
+void SettingsScreen::set_status_callback(StatusScreenCallback callback) {
+    _status_callback = callback;
+}
+
 void SettingsScreen::show() {
     LVGL_LOCK();
-    refresh();
     lv_obj_clear_flag(_screen, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(_screen);
 
@@ -1679,6 +1537,13 @@ void SettingsScreen::on_transport_cancel_enable(lv_event_t* event) {
     screen->_transport_enable_confirmed = false;
     lv_obj_clear_state(screen->_switch_transport_enabled, LV_STATE_CHECKED);
     screen->close_transport_warning();
+}
+
+void SettingsScreen::on_status_clicked(lv_event_t* event) {
+    SettingsScreen* screen = (SettingsScreen*)lv_event_get_user_data(event);
+    if (screen->_status_callback) {
+        screen->_status_callback();
+    }
 }
 
 void SettingsScreen::on_propagation_nodes_clicked(lv_event_t* event) {

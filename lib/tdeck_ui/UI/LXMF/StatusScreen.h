@@ -12,6 +12,9 @@
 #include <microReticulum/Bytes.h>
 #include <microReticulum/Identity.h>
 
+// Forward declaration
+class TinyGPSPlus;
+
 namespace UI {
 namespace LXMF {
 
@@ -23,6 +26,8 @@ namespace LXMF {
  * - LXMF delivery destination hash
  * - WiFi status and IP
  * - RNS connection status
+ * - GPS fix (satellites, location, altitude, HDOP, time)
+ * - System (firmware build, storage, RAM)
  *
  * Layout:
  * ┌─────────────────────────────────────┐
@@ -76,6 +81,16 @@ public:
      * @param server_name Server hostname
      */
     void set_rns_status(bool connected, const String& server_name = "");
+
+    /**
+     * Set the GPS receiver for live fix readouts
+     */
+    void set_gps(TinyGPSPlus* gps);
+
+    /**
+     * Set the exact running firmware build string (e.g. "v0.3.7 [ota_0]")
+     */
+    void set_firmware_version(const String& version);
 
     /**
      * Set propagation node display string
@@ -153,6 +168,18 @@ private:
     lv_obj_t* _label_rns_status;
     lv_obj_t* _label_prop_node;
 
+    // GPS readout labels (read-only)
+    lv_obj_t* _label_gps_sats;
+    lv_obj_t* _label_gps_coords;
+    lv_obj_t* _label_gps_alt;
+    lv_obj_t* _label_gps_hdop;
+    lv_obj_t* _label_gps_time;
+
+    // System readout labels (read-only)
+    lv_obj_t* _label_firmware;
+    lv_obj_t* _label_storage;
+    lv_obj_t* _label_ram;
+
     // BLE peer labels (pre-allocated, hidden when unused)
     lv_obj_t* _label_ble_header;
     lv_obj_t* _label_ble_peers[MAX_BLE_PEERS];  // Each shows identity + rssi + mac
@@ -162,6 +189,9 @@ private:
     bool _rns_connected;
     String _rns_server;
     String _prop_node_display;
+    String _firmware_version;
+    TinyGPSPlus* _gps;
+    uint32_t _last_heavy_ms;  // throttles storage/RAM stat reads in update_labels()
 
     // BLE peer data (cached for display)
     BLEPeerInfo _ble_peers[MAX_BLE_PEERS];
@@ -174,6 +204,8 @@ private:
     void create_header();
     void create_content();
     void update_labels();
+    void update_gps_labels();
+    void update_system_labels();
 
     static void on_back_clicked(lv_event_t* event);
     static void on_share_clicked(lv_event_t* event);
