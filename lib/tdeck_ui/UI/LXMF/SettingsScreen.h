@@ -10,11 +10,6 @@
 #include <Preferences.h>
 #include <functional>
 #include <atomic>
-#include <microReticulum/Bytes.h>
-#include <microReticulum/Identity.h>
-
-// Forward declaration
-class TinyGPSPlus;
 
 namespace UI {
 namespace LXMF {
@@ -96,43 +91,18 @@ struct AppSettings {
 /**
  * Settings Screen
  *
- * Allows configuration of WiFi, TCP server, display, and other settings.
- * Also shows GPS status and system info.
+ * Hub-and-spoke layout (Columba-inspired): the top level is a list of
+ * navigation cards; tapping a card opens a dedicated sub-view holding
+ * that area's controls. Live status readouts live on the Status screen
+ * (Route::STATUS); the Status card links there.
  *
- * Layout:
- * +---------------------------------------+
- * | [<]  Settings                 [Save] | 36px
- * +---------------------------------------+
- * | == Network ==                        |
- * |   WiFi SSID: [__________________]    |
- * |   Password:  [******************]    |
- * |   TCP Server: [_________________]    |
- * |   TCP Port: [____]    [Reconnect]    |
- * |                                      |
- * | == Identity ==                       |
- * |   Display Name: [_______________]    |
- * |                                      |
- * | == Display ==                        |
- * |   Brightness: [=======o------] 180   |
- * |   Timeout: [1 min        v]          |
- * |                                      |
- * | == GPS Status ==                     |
- * |   Satellites: 8                      |
- * |   Location: 40.7128, -74.0060        |
- * |   Altitude: 10.5m                    |
- * |   HDOP: 1.2 (Excellent)              |
- * |                                      |
- * | == System Info ==                    |
- * |   Identity: a1b2c3d4e5f6...          |
- * |   LXMF: f7e8d9c0b1a2...              |
- * |   Firmware: v1.0.0                   |
- * |   Storage: 1.2 MB free               |
- * |   RAM: 145 KB free                   |
- * |                                      |
- * | == Advanced ==                       |
- * |   Announce: [60] seconds             |
- * |   GPS Sync: [ON]                     |
- * +---------------------------------------+
+ * Cards (order mirrors Columba; Transport Mode must stay last):
+ *   Status, Network, Identity, Radio, Delivery, Appearance, Advanced,
+ *   Transport
+ *
+ * Save model: simple controls apply immediately; a Save button appears
+ * only on the form sub-views (Network, Radio, Identity) where a
+ * multi-field value must commit as one unit.
  */
 class SettingsScreen {
 public:
@@ -143,6 +113,8 @@ public:
     using WifiReconnectCallback = std::function<void(const String&, const String&)>;
     using BrightnessChangeCallback = std::function<void(uint8_t)>;
     using PropagationNodesCallback = std::function<void()>;
+    using StatusScreenCallback = std::function<void()>;
+    using IdentityScreenCallback = std::function<void()>;
 
     /**
      * Create settings screen
@@ -171,32 +143,12 @@ public:
      */
     const AppSettings& get_settings() const { return _settings; }
 
-    /**
-     * Set identity hash for display
-     */
-    void set_identity_hash(const RNS::Bytes& hash);
-
-    /**
-     * Set LXMF delivery address hash
-     */
-    void set_lxmf_address(const RNS::Bytes& hash);
-
     /** Set the exact running firmware build for post-reboot verification. */
     void set_firmware_version(const String& version);
 
     /**
-     * Set GPS pointer for status display
-     */
-    void set_gps(TinyGPSPlus* gps);
-
-    /**
-     * Refresh GPS and system info displays
-     */
-    void refresh();
-    void tick();  // periodic update while the screen is shown (ticks clock/GPS/system readouts)
-
-    /**
-     * Set callback for back button
+     * Set callback for back button (leaves Settings entirely; when a
+     * sub-view is open, the back button first returns to the hub)
      */
     void set_back_callback(BackCallback callback);
 
@@ -221,7 +173,17 @@ public:
     void set_propagation_nodes_callback(PropagationNodesCallback callback);
 
     /**
-     * Show the screen
+     * Set callback for the Status card (opens Route::STATUS)
+     */
+    void set_status_callback(StatusScreenCallback callback);
+
+    /**
+     * Set callback for the Identity "View Identity" row (opens Route::QR)
+     */
+    void set_identity_callback(IdentityScreenCallback callback);
+
+    /**
+     * Show the screen (always on the hub)
      */
     void show();
 
@@ -242,51 +204,55 @@ private:
         SAVE_PROCESSING = 2U,
         SAVE_APPLY_RETRY = 3U
     };
-    // Main UI components
+
+    // Sub-views; HUB is the card list, the rest are dedicated pages.
+    enum View : std::uint8_t {
+        VIEW_HUB = 0,
+        VIEW_NETWORK,
+        VIEW_IDENTITY,
+        VIEW_RADIO,
+        VIEW_DELIVERY,
+        VIEW_APPEARANCE,
+        VIEW_ADVANCED,
+        VIEW_TRANSPORT,
+        VIEW_COUNT
+    };
+
+    // Header (shared across hub + sub-views)
     lv_obj_t* _screen;
     lv_obj_t* _header;
-    lv_obj_t* _content;
+    lv_obj_t* _title;
     lv_obj_t* _btn_back;
     lv_obj_t* _btn_save;
 
-    // Network section inputs
+    // Hub: navigation cards
+    lv_obj_t* _hub;
+    lv_obj_t* _cards[VIEW_COUNT - 1];
+
+    // Sub-view content containers (one per non-hub view)
+    lv_obj_t* _pages[VIEW_COUNT];
+
+    // Network sub-view inputs
     lv_obj_t* _ta_wifi_ssid;
     lv_obj_t* _ta_wifi_password;
     lv_obj_t* _ta_tcp_host;
     lv_obj_t* _ta_tcp_port;
     lv_obj_t* _btn_reconnect;
 
-    // Identity section
+    // Identity sub-view
     lv_obj_t* _ta_display_name;
+    lv_obj_t* _btn_view_identity;
 
-    // Display section
+    // Appearance sub-view (display + notifications)
     lv_obj_t* _slider_brightness;
     lv_obj_t* _label_brightness_value;
     lv_obj_t* _switch_kb_light;
     lv_obj_t* _dropdown_timeout;
-
-    // Notifications section
     lv_obj_t* _switch_notification_sound;
     lv_obj_t* _slider_notification_volume;
     lv_obj_t* _label_notification_volume_value;
 
-    // GPS status labels (read-only)
-    lv_obj_t* _label_gps_sats;
-    lv_obj_t* _label_gps_coords;
-    lv_obj_t* _label_gps_alt;
-    lv_obj_t* _label_gps_hdop;
-    lv_obj_t* _label_gps_time;
-    uint32_t _last_tick_ms = 0;  // throttle for tick()
-
-    // System info labels (read-only)
-    lv_obj_t* _label_identity_hash;
-    lv_obj_t* _label_lxmf_address;
-    lv_obj_t* _label_firmware;
-    lv_obj_t* _label_storage;
-    lv_obj_t* _label_ram;
-
-    // Interfaces section
-    lv_obj_t* _switch_tcp_enabled;
+    // Radio sub-view (LoRa)
     lv_obj_t* _switch_lora_enabled;
     lv_obj_t* _ta_lora_frequency;
     lv_obj_t* _dropdown_lora_bandwidth;
@@ -295,21 +261,25 @@ private:
     lv_obj_t* _slider_lora_power;
     lv_obj_t* _label_lora_power_value;
     lv_obj_t* _lora_params_container;  // Container for LoRa params (shown/hidden based on enabled)
+
+    // Interface row on the Network sub-view (TCP / Auto / BLE / LoRa)
+    lv_obj_t* _switch_tcp_enabled;
     lv_obj_t* _switch_auto_enabled;
     lv_obj_t* _switch_ble_enabled;
+    lv_obj_t* _switch_lora_interface;
 
-    // Advanced section
+    // Advanced sub-view
     lv_obj_t* _ta_announce_interval;
     lv_obj_t* _ta_sync_interval;
     lv_obj_t* _switch_gps_sync;
 
-    // Dangerous transport-mode section (must remain last in Settings)
+    // Dangerous transport-mode sub-view (Transport must remain the last card)
     lv_obj_t* _switch_transport_enabled;
     lv_obj_t* _transport_warning_modal;
     lv_group_t* _transport_modal_group;
     bool _transport_enable_confirmed;
 
-    // Delivery/Propagation section
+    // Delivery/Propagation sub-view
     lv_obj_t* _btn_propagation_nodes;
     lv_obj_t* _switch_prop_fallback;
     lv_obj_t* _switch_prop_only;
@@ -319,9 +289,7 @@ private:
     AppSettings _pending_save_settings;
     std::atomic<std::uint8_t> _save_state; // 0 idle, 1 pending, 2 processing
     std::uint32_t _apply_retry_at_ms;
-    RNS::Bytes _identity_hash;
-    RNS::Bytes _lxmf_address;
-    TinyGPSPlus* _gps;
+    View _view;
 
     // Callbacks
     BackCallback _back_callback;
@@ -329,42 +297,59 @@ private:
     WifiReconnectCallback _wifi_reconnect_callback;
     BrightnessChangeCallback _brightness_change_callback;
     PropagationNodesCallback _propagation_nodes_callback;
+    StatusScreenCallback _status_callback;
+    IdentityScreenCallback _identity_callback;
 
     // UI construction
     void create_header();
     void create_content();
-    void create_network_section(lv_obj_t* parent);
-    void create_identity_section(lv_obj_t* parent);
-    void create_display_section(lv_obj_t* parent);
-    void create_notifications_section(lv_obj_t* parent);
-    void create_interfaces_section(lv_obj_t* parent);
-    void create_gps_section(lv_obj_t* parent);
-    void create_system_section(lv_obj_t* parent);
-    void create_advanced_section(lv_obj_t* parent);
-    void create_transport_mode_section(lv_obj_t* parent);
-    void create_delivery_section(lv_obj_t* parent);
+    lv_obj_t* create_page(View view);
+    lv_obj_t* create_card(lv_obj_t* parent, const char* symbol, const char* title,
+                          const char* detail, View target);
+    void create_identity_view(lv_obj_t* parent);
+    void create_network_view(lv_obj_t* parent);
+    void create_radio_view(lv_obj_t* parent);
+    void create_delivery_view(lv_obj_t* parent);
+    void create_appearance_view(lv_obj_t* parent);
+    void create_advanced_view(lv_obj_t* parent);
+    void create_transport_mode_view(lv_obj_t* parent);
+
+    // View switching
+    void ensure_view_built(View view);
+    void switch_view(View view);
+    void focus_group_for(View view);
+    // Remove every settings object (header, cards, and all sub-view
+    // controls) from the given group. Used by focus_group_for to rebuild
+    // the per-view group and by hide() so no hidden control stays focusable.
+    void remove_all_from_focus_group(lv_group_t* group);
+    static const char* view_title(View view);
 
     // Helpers
-    lv_obj_t* create_section_header(lv_obj_t* parent, const char* title);
     lv_obj_t* create_label_row(lv_obj_t* parent, const char* label);
     lv_obj_t* create_text_input(lv_obj_t* parent, const char* placeholder,
                                  bool password = false, int max_len = 64);
 
     // Update UI from settings
     void update_ui_from_settings();
-    void update_settings_from_ui();
-    void update_gps_display();
-    void update_system_info();
+    void update_settings_from_ui(View view = VIEW_HUB);
 
     // Event handlers
     static void on_back_clicked(lv_event_t* event);
     static void on_save_clicked(lv_event_t* event);
+    static void on_card_clicked(lv_event_t* event);
+    static void on_view_identity_clicked(lv_event_t* event);
     static void on_reconnect_clicked(lv_event_t* event);
     static void on_brightness_changed(lv_event_t* event);
     static void on_lora_enabled_changed(lv_event_t* event);
     static void on_lora_power_changed(lv_event_t* event);
     static void on_propagation_nodes_clicked(lv_event_t* event);
+    static void on_kb_light_changed(lv_event_t* event);
+    static void on_notif_sound_changed(lv_event_t* event);
     static void on_notification_volume_changed(lv_event_t* event);
+    static void on_interface_switch_changed(lv_event_t* event);
+    static void on_prop_switch_changed(lv_event_t* event);
+    static void on_timeout_changed(lv_event_t* event);
+    static void on_gps_sync_changed(lv_event_t* event);
     static void on_transport_enabled_changed(lv_event_t* event);
     static void on_transport_confirm_enable(lv_event_t* event);
     static void on_transport_cancel_enable(lv_event_t* event);
