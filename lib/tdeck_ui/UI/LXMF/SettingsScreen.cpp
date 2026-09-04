@@ -1083,7 +1083,9 @@ void SettingsScreen::load_settings() {
 }
 
 void SettingsScreen::save_settings() {
-    update_settings_from_ui();
+    // _view is the view whose control just changed (LVGL events only
+    // fire for visible widgets), so only that view's edits are read.
+    update_settings_from_ui(_view);
     std::uint8_t expected = SAVE_IDLE;
     if (!_save_state.compare_exchange_strong(
             expected, SAVE_PROCESSING, std::memory_order_acq_rel)) {
@@ -1315,113 +1317,131 @@ void SettingsScreen::update_ui_from_settings() {
     }
 }
 
-void SettingsScreen::update_settings_from_ui() {
+void SettingsScreen::update_settings_from_ui(View view) {
     LVGL_LOCK();
-    if (_ta_wifi_ssid) {
-        _settings.wifi_ssid = lv_textarea_get_text(_ta_wifi_ssid);
-    }
-    if (_ta_wifi_password) {
-        _settings.wifi_password = lv_textarea_get_text(_ta_wifi_password);
-    }
-    if (_ta_tcp_host) {
-        _settings.tcp_host = lv_textarea_get_text(_ta_tcp_host);
-    }
-    if (_ta_tcp_port) {
-        _settings.tcp_port = String(lv_textarea_get_text(_ta_tcp_port)).toInt();
-    }
-    if (_ta_display_name) {
-        _settings.display_name = lv_textarea_get_text(_ta_display_name);
-    }
-    if (_slider_brightness) {
-        _settings.brightness = lv_slider_get_value(_slider_brightness);
-    }
-    if (_switch_kb_light) {
-        _settings.keyboard_light = lv_obj_has_state(_switch_kb_light, LV_STATE_CHECKED);
-    }
-
-    // Notification settings
-    if (_switch_notification_sound) {
-        _settings.notification_sound = lv_obj_has_state(_switch_notification_sound, LV_STATE_CHECKED);
-    }
-    if (_slider_notification_volume) {
-        _settings.notification_volume = lv_slider_get_value(_slider_notification_volume);
-    }
-
-    if (_dropdown_timeout) {
-        int idx = lv_dropdown_get_selected(_dropdown_timeout);
-        switch (idx) {
-            case 0: _settings.screen_timeout = 30; break;
-            case 1: _settings.screen_timeout = 60; break;
-            case 2: _settings.screen_timeout = 300; break;
-            case 3: _settings.screen_timeout = 0; break;
+    // Each immediate control and each explicit Save persists exactly the
+    // sub-view the user is interacting with. Reading widgets from other,
+    // possibly edited-but-unsaved sub-views would silently commit drafts
+    // (e.g. typing a new TCP host, then adjusting brightness).
+    if (view == VIEW_NETWORK) {
+        if (_ta_wifi_ssid) {
+            _settings.wifi_ssid = lv_textarea_get_text(_ta_wifi_ssid);
+        }
+        if (_ta_wifi_password) {
+            _settings.wifi_password = lv_textarea_get_text(_ta_wifi_password);
+        }
+        if (_ta_tcp_host) {
+            _settings.tcp_host = lv_textarea_get_text(_ta_tcp_host);
+        }
+        if (_ta_tcp_port) {
+            _settings.tcp_port = String(lv_textarea_get_text(_ta_tcp_port)).toInt();
+        }
+        if (_switch_tcp_enabled) {
+            _settings.tcp_enabled = lv_obj_has_state(_switch_tcp_enabled, LV_STATE_CHECKED);
+        }
+        if (_switch_auto_enabled) {
+            _settings.auto_enabled = lv_obj_has_state(_switch_auto_enabled, LV_STATE_CHECKED);
+        }
+        if (_switch_ble_enabled) {
+            _settings.ble_enabled = lv_obj_has_state(_switch_ble_enabled, LV_STATE_CHECKED);
         }
     }
-    if (_ta_announce_interval) {
-        _settings.announce_interval = String(lv_textarea_get_text(_ta_announce_interval)).toInt() * 60;  // minutes -> seconds
-    }
-    if (_ta_sync_interval) {
-        // UI shows hours, store as seconds
-        _settings.sync_interval = String(lv_textarea_get_text(_ta_sync_interval)).toInt() * 3600;  // hours -> seconds
-    }
-    if (_switch_gps_sync) {
-        _settings.gps_time_sync = lv_obj_has_state(_switch_gps_sync, LV_STATE_CHECKED);
-    }
-    if (_switch_transport_enabled) {
-        _settings.transport_enabled = lv_obj_has_state(_switch_transport_enabled, LV_STATE_CHECKED);
-    }
-
-    // Interface settings
-    if (_switch_tcp_enabled) {
-        _settings.tcp_enabled = lv_obj_has_state(_switch_tcp_enabled, LV_STATE_CHECKED);
-    }
-    if (_switch_lora_enabled) {
-        // The Radio page's switch is the canonical lora_enabled handle.
-        // The Network interface row mirrors it (kept in sync below), so
-        // reading both would let a stale mirror clobber the last action.
-        _settings.lora_enabled = lv_obj_has_state(_switch_lora_enabled, LV_STATE_CHECKED);
-    }
-    if (_switch_lora_interface) {
-        if (_settings.lora_enabled) {
-            lv_obj_add_state(_switch_lora_interface, LV_STATE_CHECKED);
-        } else {
-            lv_obj_clear_state(_switch_lora_interface, LV_STATE_CHECKED);
+    if (view == VIEW_NETWORK || view == VIEW_RADIO) {
+        // One canonical merge for both handles: the Radio-page switch
+        // wins; while the Radio page is unbuilt, the Network mirror is
+        // the only handle and is therefore current (the mirror handlers
+        // keep the twins in sync, see on_interface_switch_changed and
+        // on_lora_enabled_changed).
+        if (_switch_lora_enabled) {
+            _settings.lora_enabled = lv_obj_has_state(_switch_lora_enabled, LV_STATE_CHECKED);
+        } else if (_switch_lora_interface) {
+            _settings.lora_enabled = lv_obj_has_state(_switch_lora_interface, LV_STATE_CHECKED);
+        }
+        // Keep the twins visually consistent.
+        if (_switch_lora_interface) {
+            if (_settings.lora_enabled) {
+                lv_obj_add_state(_switch_lora_interface, LV_STATE_CHECKED);
+            } else {
+                lv_obj_clear_state(_switch_lora_interface, LV_STATE_CHECKED);
+            }
         }
     }
-    if (_ta_lora_frequency) {
-        _settings.lora_frequency = String(lv_textarea_get_text(_ta_lora_frequency)).toFloat();
-    }
-    if (_dropdown_lora_bandwidth) {
-        // Map index to bandwidth: 0=62.5, 1=125, 2=250, 3=500
-        static const float bw_values[] = {62.5f, 125.0f, 250.0f, 500.0f};
-        int idx = lv_dropdown_get_selected(_dropdown_lora_bandwidth);
-        if (idx >= 0 && idx < 4) {
-            _settings.lora_bandwidth = bw_values[idx];
+    if (view == VIEW_RADIO) {
+        if (_ta_lora_frequency) {
+            _settings.lora_frequency = String(lv_textarea_get_text(_ta_lora_frequency)).toFloat();
+        }
+        if (_dropdown_lora_bandwidth) {
+            // Map index to bandwidth: 0=62.5, 1=125, 2=250, 3=500
+            static const float bw_values[] = {62.5f, 125.0f, 250.0f, 500.0f};
+            int idx = lv_dropdown_get_selected(_dropdown_lora_bandwidth);
+            if (idx >= 0 && idx < 4) {
+                _settings.lora_bandwidth = bw_values[idx];
+            }
+        }
+        if (_dropdown_lora_sf) {
+            // Index 0-7 maps to SF 5-12
+            _settings.lora_sf = lv_dropdown_get_selected(_dropdown_lora_sf) + 5;
+        }
+        if (_dropdown_lora_cr) {
+            // Index 0-3 maps to CR 5-8
+            _settings.lora_cr = lv_dropdown_get_selected(_dropdown_lora_cr) + 5;
+        }
+        if (_slider_lora_power) {
+            _settings.lora_power = lv_slider_get_value(_slider_lora_power);
         }
     }
-    if (_dropdown_lora_sf) {
-        // Index 0-7 maps to SF 5-12
-        _settings.lora_sf = lv_dropdown_get_selected(_dropdown_lora_sf) + 5;
+    if (view == VIEW_IDENTITY) {
+        if (_ta_display_name) {
+            _settings.display_name = lv_textarea_get_text(_ta_display_name);
+        }
     }
-    if (_dropdown_lora_cr) {
-        // Index 0-3 maps to CR 5-8
-        _settings.lora_cr = lv_dropdown_get_selected(_dropdown_lora_cr) + 5;
+    if (view == VIEW_APPEARANCE) {
+        if (_slider_brightness) {
+            _settings.brightness = lv_slider_get_value(_slider_brightness);
+        }
+        if (_switch_kb_light) {
+            _settings.keyboard_light = lv_obj_has_state(_switch_kb_light, LV_STATE_CHECKED);
+        }
+        if (_switch_notification_sound) {
+            _settings.notification_sound = lv_obj_has_state(_switch_notification_sound, LV_STATE_CHECKED);
+        }
+        if (_slider_notification_volume) {
+            _settings.notification_volume = lv_slider_get_value(_slider_notification_volume);
+        }
+        if (_dropdown_timeout) {
+            int idx = lv_dropdown_get_selected(_dropdown_timeout);
+            switch (idx) {
+                case 0: _settings.screen_timeout = 30; break;
+                case 1: _settings.screen_timeout = 60; break;
+                case 2: _settings.screen_timeout = 300; break;
+                case 3: _settings.screen_timeout = 0; break;
+            }
+        }
     }
-    if (_slider_lora_power) {
-        _settings.lora_power = lv_slider_get_value(_slider_lora_power);
+    if (view == VIEW_ADVANCED) {
+        if (_ta_announce_interval) {
+            _settings.announce_interval = String(lv_textarea_get_text(_ta_announce_interval)).toInt() * 60;  // minutes -> seconds
+        }
+        if (_ta_sync_interval) {
+            // UI shows hours, store as seconds
+            _settings.sync_interval = String(lv_textarea_get_text(_ta_sync_interval)).toInt() * 3600;  // hours -> seconds
+        }
+        if (_switch_gps_sync) {
+            _settings.gps_time_sync = lv_obj_has_state(_switch_gps_sync, LV_STATE_CHECKED);
+        }
     }
-    if (_switch_auto_enabled) {
-        _settings.auto_enabled = lv_obj_has_state(_switch_auto_enabled, LV_STATE_CHECKED);
+    if (view == VIEW_DELIVERY) {
+        if (_switch_prop_fallback) {
+            _settings.prop_fallback_enabled = lv_obj_has_state(_switch_prop_fallback, LV_STATE_CHECKED);
+        }
+        if (_switch_prop_only) {
+            _settings.prop_only = lv_obj_has_state(_switch_prop_only, LV_STATE_CHECKED);
+        }
     }
-    if (_switch_ble_enabled) {
-        _settings.ble_enabled = lv_obj_has_state(_switch_ble_enabled, LV_STATE_CHECKED);
-    }
-
-    // Propagation settings
-    if (_switch_prop_fallback) {
-        _settings.prop_fallback_enabled = lv_obj_has_state(_switch_prop_fallback, LV_STATE_CHECKED);
-    }
-    if (_switch_prop_only) {
-        _settings.prop_only = lv_obj_has_state(_switch_prop_only, LV_STATE_CHECKED);
+    if (view == VIEW_TRANSPORT) {
+        if (_switch_transport_enabled) {
+            _settings.transport_enabled = lv_obj_has_state(_switch_transport_enabled, LV_STATE_CHECKED);
+        }
     }
 }
 
@@ -1465,14 +1485,13 @@ void SettingsScreen::show() {
 void SettingsScreen::hide() {
     LVGL_LOCK();
     close_transport_warning();
-    // Remove from focus group when hiding
+    // Remove every settings object from the focus group when hiding —
+    // sub-view controls included (focus_group_for only runs while
+    // navigating, so hidden pages would otherwise keep their controls
+    // focusable from other screens).
     lv_group_t* group = LVGL::LVGLInit::get_default_group();
     if (group) {
-        if (_btn_back) lv_group_remove_obj(_btn_back);
-        if (_btn_save) lv_group_remove_obj(_btn_save);
-        for (int i = 0; i < VIEW_COUNT - 1; ++i) {
-            if (_cards[i]) lv_group_remove_obj(_cards[i]);
-        }
+        remove_all_from_focus_group(group);
     }
 
     lv_obj_add_flag(_screen, LV_OBJ_FLAG_HIDDEN);
@@ -1564,13 +1583,9 @@ void SettingsScreen::switch_view(View view) {
     focus_group_for(view);
 }
 
-void SettingsScreen::focus_group_for(View view) {
-    lv_group_t* group = LVGL::LVGLInit::get_default_group();
-    if (!group) return;
-
-    // Remove everything settings-related, then add exactly the objects the
-    // current view contains. Only-visible-object focus avoids the
-    // auto-scroll-to-the-last-object behavior on entry.
+void SettingsScreen::remove_all_from_focus_group(lv_group_t* group) {
+    // Every settings-owned focusable object, regardless of which sub-view
+    // has been built (lazy views keep pointers null until first use).
     lv_obj_t* all[] = {
         _btn_back, _btn_save,
         _cards[0], _cards[1], _cards[2], _cards[3], _cards[4], _cards[5], _cards[6], _cards[7],
@@ -1583,12 +1598,23 @@ void SettingsScreen::focus_group_for(View view) {
         _switch_lora_enabled,
         _switch_tcp_enabled, _switch_auto_enabled, _switch_ble_enabled, _switch_lora_interface,
         _switch_gps_sync,
+        _dropdown_lora_bandwidth, _dropdown_lora_sf, _dropdown_lora_cr,
         _switch_prop_fallback, _switch_prop_only,
         _switch_transport_enabled,
     };
     for (lv_obj_t* obj : all) {
         if (obj) lv_group_remove_obj(obj);
     }
+}
+
+void SettingsScreen::focus_group_for(View view) {
+    lv_group_t* group = LVGL::LVGLInit::get_default_group();
+    if (!group) return;
+
+    // Remove everything settings-related, then add exactly the objects the
+    // current view contains. Only-visible-object focus avoids the
+    // auto-scroll-to-the-last-object behavior on entry.
+    remove_all_from_focus_group(group);
 
     lv_group_focus_freeze(group, true);
     lv_group_add_obj(group, _btn_back);
@@ -1737,6 +1763,31 @@ void SettingsScreen::on_interface_switch_changed(lv_event_t* event) {
     // Immediate: interface start/stop is handled under RouterLock by the
     // save callback on the main loop.
     SettingsScreen* screen = (SettingsScreen*)lv_event_get_user_data(event);
+
+    // The Network-row LoRa switch and the Radio-page LoRa switch are the
+    // same setting. Whichever one was just flipped is now current, so
+    // propagate it to its twin before saving — otherwise the save path
+    // reads the stale twin and the toggle visibly reverts.
+    if (lv_event_get_target(event) == screen->_switch_lora_interface) {
+        bool enabled = lv_obj_has_state(screen->_switch_lora_interface, LV_STATE_CHECKED);
+        if (screen->_switch_lora_enabled) {
+            if (enabled) {
+                lv_obj_add_state(screen->_switch_lora_enabled, LV_STATE_CHECKED);
+            } else {
+                lv_obj_clear_state(screen->_switch_lora_enabled, LV_STATE_CHECKED);
+            }
+        }
+        if (screen->_lora_params_container) {
+            if (enabled) {
+                lv_obj_clear_flag(screen->_lora_params_container, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(screen->_lora_params_container, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+        if (screen->_view == VIEW_RADIO) {
+            screen->focus_group_for(VIEW_RADIO);
+        }
+    }
     screen->save_settings();
 }
 

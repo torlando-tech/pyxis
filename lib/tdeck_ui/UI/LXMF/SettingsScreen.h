@@ -318,6 +318,10 @@ private:
     void ensure_view_built(View view);
     void switch_view(View view);
     void focus_group_for(View view);
+    // Remove every settings object (header, cards, and all sub-view
+    // controls) from the given group. Used by focus_group_for to rebuild
+    // the per-view group and by hide() so no hidden control stays focusable.
+    void remove_all_from_focus_group(lv_group_t* group);
     static const char* view_title(View view);
 
     // Helpers
@@ -327,7 +331,7 @@ private:
 
     // Update UI from settings
     void update_ui_from_settings();
-    void update_settings_from_ui();
+    void update_settings_from_ui(View view = VIEW_HUB);
 
     // Event handlers
     static void on_back_clicked(lv_event_t* event);
