@@ -821,7 +821,7 @@ void SettingsScreen::create_advanced_view(lv_obj_t* parent) {
     }
     TextAreaHelper::enable_paste(_ta_announce_interval);
 
-    lv_obj_t* sec_label = lv_obj_create(announce_row);
+    lv_obj_t* sec_label = lv_label_create(announce_row);
     lv_label_set_text(sec_label, "sec");
     lv_obj_align(sec_label, LV_ALIGN_RIGHT_MID, 0, 0);
     lv_obj_set_style_text_color(sec_label, Theme::textMuted(), 0);
