@@ -802,6 +802,9 @@ void UIManager::update() {
     // whole page blocking it past LVGLLock's 5s timeout.
     if (_navigation.current() == Route::CHAT && _chat_screen) {
         _chat_screen->tick_background_fill();
+        // Long-press full-message view: the LVGL event handler only records
+        // the hash; the disk read + modal build run here on the main loop.
+        _chat_screen->tick_pending_full_message();
     }
     // Gather + render the announce list off the LVGL lock on the main loop (its
     // refresh() just arms a flag). Iterating the path table on the LVGL task raced

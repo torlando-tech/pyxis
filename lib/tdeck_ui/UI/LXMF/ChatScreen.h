@@ -109,6 +109,21 @@ public:
     void tick_background_fill();
 
     /**
+     * Complete a pending long-press full-message request. Call from
+     * UIManager::update() on the main loop after the chat screen is shown.
+     *
+     * The long-press handler (LVGL task) only records which message was
+     * pressed; the actual full content read
+     * (MessageStore::load_message_content — one bounded JSON read, no
+     * msgpack unpack) and the modal build happen here, off the LVGL task.
+     * The store is main-loop-only (it shares one JsonDocument between
+     * save + load), and the rendered rows only hold the display-capped
+     * content (the metadata cache caps at 600 chars), so the full view
+     * must come from disk.
+     */
+    void tick_pending_full_message();
+
+    /**
      * Set callback for back button
      * @param callback Function to call when back button is pressed
      */
@@ -216,6 +231,14 @@ private:
     // the viewport pinned to the newest message during only that initial fill;
     // user-triggered pagination at the top must preserve the user's position.
     std::atomic<bool> _keep_bottom_during_background_fill{false};
+
+    // Long-press full-message view, deferred to the main loop. The LVGL
+    // event handler only records the hash; tick_pending_full_message()
+    // does the (disk-bound) load_message_content() off the LVGL task and
+    // builds the modal. Same set-before-arm ordering as the background
+    // fill above.
+    std::atomic<bool> _pending_full_message{false};
+    RNS::Bytes _pending_full_message_hash;
 
     // Load more messages (infinite scroll + background fill)
     void load_more_messages(size_t batch = MESSAGES_PER_PAGE);
