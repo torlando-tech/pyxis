@@ -1410,6 +1410,10 @@ void SettingsScreen::set_status_callback(StatusScreenCallback callback) {
 }
 
 void SettingsScreen::entry_scroll_reset_cb(lv_timer_t* timer) {
+    // One-shot: null the owning pointer BEFORE deleting so the next show()
+    // recreates the timer. (Skipping the null-out leaves a dangling pointer
+    // and lv_timer_reset() on freed memory — no reset on the 2nd+ entry.)
+    _entry_scroll_reset_timer = nullptr;
     lv_timer_del(timer);
     SettingsScreen* screen = g_settings_entry_reset;
     g_settings_entry_reset = nullptr;
