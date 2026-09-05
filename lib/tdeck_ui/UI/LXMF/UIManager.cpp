@@ -818,6 +818,12 @@ void UIManager::update() {
     // loop, so each small batch only briefly holds the LVGL lock instead of the
     // whole page blocking it past LVGLLock's 5s timeout.
     if (_navigation.current() == Route::CHAT && _chat_screen) {
+        // Conversation open: the LVGL task only navigated + cleared the list
+        // (load_conversation); the store reads + bubble build run here on the
+        // main loop so a slow cold open can't hold the LVGL mutex past the 5s
+        // deadlock guard (same fix class as the send path). No-op once this
+        // peer is prepared; load_conversation() re-arms it per peer open.
+        _chat_screen->prepare_conversation();
         _chat_screen->tick_background_fill();
         // Long-press full-message view: the LVGL event handler only records
         // the hash; the disk read + modal build run here on the main loop.

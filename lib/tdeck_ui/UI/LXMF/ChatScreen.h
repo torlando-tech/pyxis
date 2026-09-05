@@ -84,6 +84,21 @@ public:
     void load_conversation(const RNS::Bytes& peer_hash, ::LXMF::MessageStore& store);
 
     /**
+     * Prepare the current conversation's content. Call from
+     * UIManager::update() on the main loop after the chat route is active.
+     *
+     * load_conversation() (LVGL task) only navigates and clears the list;
+     * the store reads (identity recall, display-name lookup, message index,
+     * per-message metadata) are slow on a degraded LittleFS — a cold open
+     * can take several seconds — so running them under the LVGL lock (as the
+     * old synchronous path did) held the mutex past the 5s deadlock guard
+     * and rebooted the device (assert at LVGLLock.h:45). This method does
+     * that I/O on the main loop, then commits header + initial bubbles
+     * under a brief LVGL_LOCK. No-op when this peer is already prepared.
+     */
+    void prepare_conversation();
+
+    /**
      * Add a new message to the chat
      * @param message LXMF message to add
      * @param outgoing true if message is outgoing
@@ -184,6 +199,14 @@ private:
 
     // Map message hash to bubble row for targeted updates
     std::map<RNS::Bytes, lv_obj_t*> _message_rows;
+
+    // Conversation-prepare state (main-loop I/O + LVGL commit). Both fields are
+    // only read/written while holding the LVGL lock (load_conversation, the
+    // prepare guard, and the commit are all locked sections), so they need no
+    // atomics. _prepare_generation disambiguates a same-peer re-open that
+    // happens while a prepare's I/O is in flight.
+    RNS::Bytes _prepared_peer_hash;
+    uint32_t _prepare_generation = 0;
 
     BackCallback _back_callback;
     SendMessageCallback _send_message_callback;

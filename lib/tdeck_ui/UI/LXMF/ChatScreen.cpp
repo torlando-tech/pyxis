@@ -168,29 +168,93 @@ void ChatScreen::create_input_area() {
 
 void ChatScreen::load_conversation(const Bytes& peer_hash, ::LXMF::MessageStore& store) {
     LVGL_LOCK();
-    _peer_hash = peer_hash;
     _message_store = &store;
+
+    // Same-peer re-open (back to the list and re-tap): the content is
+    // already committed by prepare_conversation() and the rows are still
+    // built — nothing to do. This keeps re-opens free of any store I/O.
+    if (_peer_hash == peer_hash && _prepared_peer_hash == peer_hash) {
+        return;
+    }
+
+    _peer_hash = peer_hash;
 
     // A peer change cancels any in-flight background fill from the
     // previous conversation (it would otherwise prepend the previous
-    // conversation's older rows into the new one). refresh() re-arms the
-    // fill for the new peer.
+    // conversation's older rows into the new one). prepare_conversation()
+    // re-arms the fill for the new peer once its metadata is gathered.
     if (_bg_fill_active.exchange(false)) {
         _keep_bottom_during_background_fill.store(false);
         _bg_fill_target = _display_start_idx;  // fill is a no-op now
     }
 
+    // LVGL-task side of a conversation open: navigation + list reset only.
+    // The store reads (identity recall, display name, message index, per-
+    // message metadata) moved to prepare_conversation() on the main loop —
+    // a cold open does dozens of LittleFS/ustore reads that take seconds on
+    // a degraded filesystem, and running them here (under the LVGL lock,
+    // held by replace_route) held the mutex past the 5s deadlock guard and
+    // rebooted the device (assert at LVGLLock.h:45). Same defect class as
+    // the send path; same fix (see OutgoingSendMailbox.h / UIManager::
+    // service_pending_sends).
     {
         char log_buf[64];
-        snprintf(log_buf, sizeof(log_buf), "Loading conversation with peer %.8s...",
+        snprintf(log_buf, sizeof(log_buf), "Opening conversation with peer %.8s...",
                  peer_hash.toHex().c_str());
         INFO(log_buf);
     }
 
+    // Clear existing messages and row tracking (rows are rebuilt by
+    // prepare_conversation()'s commit once the metadata is gathered).
+    lv_obj_clean(_message_list);
+    _messages.clear();
+    _message_rows.clear();
+    _all_message_hashes.clear();
+    _display_start_idx = 0;
+
+    // Header shows the truncated hash immediately; prepare_conversation()
+    // upgrades it to the resolved display name once recall completes.
+    lv_obj_t* label_peer = lv_obj_get_child(_header, 1);  // Second child is peer label
+    {
+        char hash_buf[20];
+        snprintf(hash_buf, sizeof(hash_buf), "%.12s...", peer_hash.toHex().c_str());
+        lv_label_set_text(label_peer, hash_buf);
+    }
+
+    // Arm a prepare for this peer. Bumping the generation discards any
+    // in-flight prepare for a previous (or same) peer: its commit re-checks
+    // the generation before touching the UI.
+    _prepared_peer_hash = Bytes();
+    _prepare_generation++;
+}
+
+void ChatScreen::prepare_conversation() {
+    // Called from UIManager::update() on the main loop. The guard and the
+    // commit are short locked sections; the store I/O between them (identity
+    // recall, display name, message index, per-message metadata) runs OFF the
+    // LVGL lock, so a slow cold open can't hold the mutex past the 5s
+    // deadlock guard.
+    Bytes peer_hash;
+    uint32_t generation = 0;
+    ::LXMF::MessageStore* store = nullptr;
+    {
+        LVGL_LOCK();
+        if (!_message_store || _peer_hash.size() == 0) {
+            return;
+        }
+        if (_prepared_peer_hash == _peer_hash) {
+            return;  // already prepared for this peer
+        }
+        peer_hash = _peer_hash;
+        generation = _prepare_generation;
+        store = _message_store;
+    }
+
+    // ── slow I/O, off the LVGL lock ────────────────────────────────────────
     // Three-tier display name resolution (mirrors ConversationListScreen):
     //   1. Live announce cache (Identity::recall_app_data)
     //   2. MessageStore-persisted name (survives reboots)
-    //   3. Truncated hash (last resort)
+    //   3. Truncated hash (already shown by load_conversation)
     // When (1) hits, write through to the persistent cache so future
     // cold boots get the name back without waiting for a re-announce.
     String peer_name;
@@ -198,97 +262,101 @@ void ChatScreen::load_conversation(const Bytes& peer_hash, ::LXMF::MessageStore&
     if (app_data && app_data.size() > 0) {
         peer_name = parse_display_name(app_data);
         if (peer_name.length() > 0) {
-            store.set_display_name(peer_hash, std::string(peer_name.c_str()));
+            store->set_display_name(peer_hash, std::string(peer_name.c_str()));
         }
     }
     if (peer_name.length() == 0) {
-        std::string cached = store.get_display_name(peer_hash);
+        std::string cached = store->get_display_name(peer_hash);
         if (!cached.empty()) {
             peer_name = String(cached.c_str());
         }
     }
-    if (peer_name.length() == 0) {
-        char hash_buf[20];
-        snprintf(hash_buf, sizeof(hash_buf), "%.12s...", peer_hash.toHex().c_str());
-        peer_name = hash_buf;
+
+    // Load all message hashes from store (sorted by timestamp).
+    std::vector<Bytes> all_hashes = store->get_messages_for_conversation(peer_hash);
+
+    // Gather only the few NEWEST messages (the rest of the page is streamed
+    // in by tick_background_fill() a couple per main-loop tick).
+    size_t display_start_idx = 0;
+    if (all_hashes.size() > INITIAL_RENDER) {
+        display_start_idx = all_hashes.size() - INITIAL_RENDER;
     }
 
-    // Update header with peer info
-    lv_obj_t* label_peer = lv_obj_get_child(_header, 1);  // Second child is peer label
-    lv_label_set_text(label_peer, peer_name.c_str());
-
-    refresh();
-}
-
-void ChatScreen::refresh() {
-    LVGL_LOCK();
-    if (!_message_store) {
-        return;
-    }
-
-    INFO("Refreshing chat messages");
-
-    // Clear existing messages and row tracking
-    lv_obj_clean(_message_list);
-    _messages.clear();
-    _message_rows.clear();
-
-    // Reserve capacity for message hashes to reduce fragmentation
-    _all_message_hashes.reserve(200);
-
-    // Load all message hashes from store (sorted by timestamp)
-    _all_message_hashes = _message_store->get_messages_for_conversation(_peer_hash);
-
-    // Render only the few NEWEST messages synchronously (under the LVGL lock) so
-    // the conversation opens fast. The rest of the page is streamed in by
-    // tick_background_fill() a couple per main-loop tick, so the UI never freezes.
-    // (This runs on the main loop, not a task: the MessageStore shares one
-    // _json_doc between save + load and isn't safe for concurrent access.)
-    if (_all_message_hashes.size() > INITIAL_RENDER) {
-        _display_start_idx = _all_message_hashes.size() - INITIAL_RENDER;
-    } else {
-        _display_start_idx = 0;
-    }
-
-    {
-        char log_buf[80];
-        snprintf(log_buf, sizeof(log_buf), "  Found %zu messages, displaying last %zu",
-                 _all_message_hashes.size(), _all_message_hashes.size() - _display_start_idx);
-        INFO(log_buf);
-    }
-
-    for (size_t i = _display_start_idx; i < _all_message_hashes.size(); i++) {
-        const auto& msg_hash = _all_message_hashes[i];
-
-        // Use fast metadata loader (cache hit: O(1) in-memory; miss: one
+    std::vector<MessageItem> items;
+    items.reserve(INITIAL_RENDER);
+    for (size_t i = display_start_idx; i < all_hashes.size(); i++) {
+        // Fast metadata loader (cache hit: O(1) in-memory; miss: one
         // LittleFS read that warms the cache for every later touch).
-        ::LXMF::MessageStore::MessageMetadata meta = _message_store->load_message_metadata(msg_hash);
+        ::LXMF::MessageStore::MessageMetadata meta =
+            store->load_message_metadata(all_hashes[i]);
         if (!meta.valid) {
             continue;
         }
-
         MessageItem item;
-        item.message_hash = msg_hash;
+        item.message_hash = all_hashes[i];
         item.content = String(meta.content.c_str());
         format_timestamp(meta.timestamp, item.timestamp_str, sizeof(item.timestamp_str));
         item.outgoing = !meta.incoming;
         item.delivered = (meta.state == static_cast<int>(::LXMF::Type::Message::DELIVERED));
         item.failed = (meta.state == static_cast<int>(::LXMF::Type::Message::FAILED));
-
-        _messages.push_back(item);
-        create_message_bubble(item);
+        items.push_back(item);
     }
 
-    // Queue the rest of the first page to stream in on the main loop. Set the
-    // target before activating so tick sees a consistent target.
-    _bg_fill_target = (_all_message_hashes.size() > MESSAGES_PER_PAGE)
-                          ? _all_message_hashes.size() - MESSAGES_PER_PAGE
-                          : 0;
-    const bool initial_fill_active = _display_start_idx > _bg_fill_target;
-    _keep_bottom_during_background_fill.store(initial_fill_active);
-    _bg_fill_active.store(initial_fill_active);
+    {
+        char log_buf[80];
+        snprintf(log_buf, sizeof(log_buf), "  Found %zu messages, displaying %zu",
+                 all_hashes.size(), items.size());
+        INFO(log_buf);
+    }
+    // ───────────────────────────────────────────────────────────────────────
 
-    scroll_to_bottom();
+    // ── commit, brief LVGL lock ────────────────────────────────────────────
+    {
+        LVGL_LOCK();
+        // The conversation changed (or this peer was re-opened) while the
+        // I/O ran; the newer open owns the UI now.
+        if (_peer_hash != peer_hash || _prepare_generation != generation) {
+            return;
+        }
+        if (peer_name.length() > 0) {
+            lv_obj_t* label_peer = lv_obj_get_child(_header, 1);  // Second child is peer label
+            lv_label_set_text(label_peer, peer_name.c_str());
+        }
+        _all_message_hashes = std::move(all_hashes);
+        for (const auto& item : items) {
+            _messages.push_back(item);
+            create_message_bubble(item);
+        }
+        _display_start_idx = display_start_idx;
+
+        // Queue the rest of the first page to stream in on the main loop. Set
+        // the target before activating so tick sees a consistent target.
+        _bg_fill_target = (_all_message_hashes.size() > MESSAGES_PER_PAGE)
+                              ? _all_message_hashes.size() - MESSAGES_PER_PAGE
+                              : 0;
+        const bool initial_fill_active = _display_start_idx > _bg_fill_target;
+        _keep_bottom_during_background_fill.store(initial_fill_active);
+        _bg_fill_active.store(initial_fill_active);
+
+        _prepared_peer_hash = peer_hash;
+        scroll_to_bottom();
+    }
+}
+
+void ChatScreen::refresh() {
+    // Request a full re-gather of this conversation's content: the main
+    // loop's prepare_conversation() does the store reads off the LVGL lock
+    // and commits the result under a brief lock. (The old synchronous
+    // implementation re-read the index + every page of metadata here under
+    // the lock — the same stall class this fix removes.) Bumping the
+    // generation discards any in-flight prepare so the re-gather is fresh.
+    LVGL_LOCK();
+    if (!_message_store || _peer_hash.size() == 0) {
+        return;
+    }
+    INFO("Refreshing chat messages");
+    _prepared_peer_hash = Bytes();
+    _prepare_generation++;
 }
 
 // Stream older messages in a few at a time, called from UIManager::update() on
