@@ -658,12 +658,21 @@ void ChatScreen::on_send_clicked(lv_event_t* event) {
     String message(text);
 
     if (message.length() > 0 && screen->_send_message_callback) {
-        if (screen->_send_message_callback(message)) {
-            // Clear only after persistence and queue admission succeed.
-            lv_textarea_set_text(screen->_text_area, "");
-            lv_group_focus_obj(screen->_text_area);
-        }
+        // Publish to the main loop; the composer is cleared only after
+        // persistence and queue admission succeed (clear_composer() from
+        // UIManager::apply_outbound_result). A rejected send (busy router,
+        // full queue, storage error) keeps the text for a normal re-send, so
+        // no typed input is ever lost to a failed send.
+        screen->_send_message_callback(message);
     }
+}
+
+void ChatScreen::clear_composer() {
+    // Recursive lock: apply_outbound_result() calls this while already
+    // holding the LVGL lock.
+    LVGL_LOCK();
+    lv_textarea_set_text(_text_area, "");
+    lv_group_focus_obj(_text_area);
 }
 
 void ChatScreen::format_timestamp(double timestamp, char* buf, size_t buf_size) {

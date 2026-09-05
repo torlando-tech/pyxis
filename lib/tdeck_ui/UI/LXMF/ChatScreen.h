@@ -91,6 +91,15 @@ public:
     void add_message(const ::LXMF::LXMessage& message, bool outgoing);
 
     /**
+     * Clear the composer text input and refocus it. Called from the main
+     * loop once an outgoing send has been persisted and admitted (the LVGL
+     * send callback no longer clears synchronously — it defers to this).
+     * Takes the LVGL lock internally; call with the lock already held
+     * (recursive) or from the main loop before UI work.
+     */
+    void clear_composer();
+
+    /**
      * Update delivery status of a message
      * @param message_hash Hash of message to update
      * @param delivered true if delivered, false if failed

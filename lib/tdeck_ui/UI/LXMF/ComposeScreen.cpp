@@ -290,8 +290,10 @@ void ComposeScreen::on_send_clicked(lv_event_t* event) {
     dest_hash.assignHex(dest_hash_str.c_str());
 
     if (screen->_send_callback && screen->_send_callback(dest_hash, message)) {
-        // Clear only after persistence and queue admission succeed.
-        screen->clear();
+        // Clearing is deferred to the main loop: on acceptance the Compose
+        // route is replaced with Chat (render_route re-clears the form on
+        // next entry), so a rejected send leaves both fields intact for a
+        // normal re-send.
     }
 }
 

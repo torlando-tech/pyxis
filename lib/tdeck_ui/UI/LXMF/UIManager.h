@@ -37,8 +37,9 @@
 #include "SettingsScreen.h"
 #include "PropagationNodesScreen.h"
 #include "CallScreen.h"
-#include "CallCommandMailbox.h"
 #include "CallStartMailbox.h"
+#include "CallCommandMailbox.h"
+#include "OutgoingSendMailbox.h"
 #include "CallGenerationGuard.h"
 #include "CallLinkOwnership.h"
 #include "CallLivenessWatchdog.h"
@@ -530,6 +531,26 @@ private:
     // LXMF message handling
     bool send_message(const RNS::Bytes& dest_hash, const String& content);
 
+    // Outgoing-send threading split. send_message (LVGL task) does only
+    // in-memory work and hands the packed message to update(), which
+    // persists and admits it off the LVGL lock; apply_outbound_result
+    // commits the UI under a short LVGL_LOCK. See OutgoingSendMailbox.h.
+    enum class OutboundResult {
+        RETRY,             // retained for retry; keep the user's input
+        ADDED,             // persisted + queued; append to the viewed chat
+        COMPOSE_NAVIGATED, // persisted + queued; replace Compose with Chat
+        STORAGE_ERROR,     // persistence failed; show storage dialog
+    };
+    enum class OutboundSource { CHAT, COMPOSE };
+    struct OutboundCommit {
+        OutboundResult result = OutboundResult::RETRY;
+        OutboundSource source = OutboundSource::CHAT;
+        RNS::Bytes dest_hash;
+        RNS::Bytes packed;   // admitted packed form, for the UI commit
+    };
+    void service_pending_sends();
+    void apply_outbound_result(const OutboundCommit& commit);
+
     // UI updates
     void refresh_current_screen();
 
@@ -601,6 +622,9 @@ private:
     LXSTAudio* _lxst_audio;
     CallStartMailbox _call_starts;
     CallCommandMailbox _call_commands;
+    // One packed outgoing message at a time, handed from the LVGL task to
+    // the main loop for persistence + admission (see OutgoingSendMailbox.h).
+    OutgoingSendMailbox _outgoing_sends;
     CallGenerationGuard _call_generation_guard;
     CallLinkOwnership _call_link_ownership;
     CallLivenessWatchdog _call_liveness;

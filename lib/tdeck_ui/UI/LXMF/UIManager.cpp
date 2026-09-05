@@ -726,6 +726,11 @@ void UIManager::update() {
     // Settings Save only publishes a snapshot from the LVGL event. Persistence
     // and interface changes execute here on the main owner loop, before LVGL.
     if (_settings_screen) _settings_screen->service_pending_save();
+    // Outgoing sends only publish (destination, content, source) from the LVGL
+    // event; identity recall, pack/sign, RouterLock admission, and the
+    // LittleFS persistence execute here, before LVGL_LOCK. A multi-second
+    // save can therefore never hold the render lock (LVGLLock.h:45 guard).
+    service_pending_sends();
     // Flush display-name write-throughs the last conversation-list refresh
     // deferred. Done here, BEFORE LVGL_LOCK, so the microStore/LittleFS I/O
     // never runs under the render lock (same reason as on_message_received).
@@ -1442,10 +1447,10 @@ void UIManager::on_location_from_chat() {
 bool UIManager::on_send_message_from_compose(const Bytes& dest_hash, const String& message) {
     if (!send_message(dest_hash, message)) return false;
 
-    // Replace Compose with Chat so Back returns to Messages instead of
-    // reopening a cleared compose form.
-    _current_peer_hash = dest_hash;
-    replace_route(Route::CHAT);
+    // Clearing the compose form and replacing it with Chat are deferred to
+    // apply_outbound_result() (COMPOSE_NAVIGATED) once the main loop
+    // confirms persistence + admission. A rejected send keeps the user on
+    // the compose screen with both fields intact for a normal re-send.
     return true;
 }
 
@@ -1573,23 +1578,54 @@ void UIManager::set_rns_status(bool connected, const String& server_name) {
 }
 
 bool UIManager::send_message(const Bytes& dest_hash, const String& content) {
-    std::string hash_hex = dest_hash.toHex().substr(0, 8);
-    std::string msg = "Sending message to " + hash_hex + "...";
-    INFO(msg.c_str());
+    if (dest_hash.size() == 0 || content.length() == 0) return false;
 
-    // Pre-graft: Identity::mark_persistent(dest_hash) — fork-only API for
-    // the 5s fast-flush semantics. Vanilla upstream relies on microStore's
-    // dirty-tracking + reticulum->should_persist_data() to decide what
-    // gets written. If we observe lost contacts after crashes, revisit
-    // microStore flush cadence rather than re-adding the fork API.
-    // (void)Identity::mark_persistent(dest_hash);
+    std::string hash_hex = dest_hash.toHex().substr(0, 8);
+    INFO(("Sending message to " + hash_hex + "...").c_str());
+
+    // This runs on LVGL's 8 KiB task under the LVGL lock, so it must stay
+    // allocation-light and lock-free: no identity recall, no message
+    // construction, no router lock or admission. The canonical build,
+    // signing/pack, router admission, and LittleFS persistence all execute
+    // in service_pending_sends() on the main loop.
+    //
+    // While this work used to run here, a multi-second save held the LVGL
+    // mutex past the 5s deadlock guard and rebooted the device (assert at
+    // LVGLLock.h:45) — the same failure the receive path already fixed
+    // (see on_message_received).
+    const OutgoingSendMailbox::Source source_kind =
+        (_navigation.current() == Route::COMPOSE)
+            ? OutgoingSendMailbox::Source::Compose
+            : OutgoingSendMailbox::Source::Chat;
+    if (!_outgoing_sends.request(source_kind,
+                                 dest_hash.data(), dest_hash.size(),
+                                 content.c_str(), content.length())) {
+        WARNING("Outgoing send already pending; message retained for retry");
+        return false;
+    }
+
+    INFO("  Outgoing message handed to main loop");
+    return true;
+}
+
+void UIManager::service_pending_sends() {
+    // Runs in update() BEFORE the big LVGL_LOCK(), alongside the other
+    // mailbox servicing (settings save, conversation-list flushes, call
+    // starts). It is the only place in the send path that may take the
+    // router lock, block on router admission, or wait on LittleFS —
+    // mirroring on_message_received()'s receive-path discipline ("Don't
+    // take LVGL_LOCK across the LittleFS write").
+    OutgoingSendMailbox::Slot slot;
+    if (!_outgoing_sends.take(slot)) return;
+
+    Bytes dest_hash(slot.destination.data(), slot.destination.size());
+    Bytes content_bytes((const uint8_t*)slot.content.data(), slot.content.size());
+    const OutboundSource source = (slot.source == OutgoingSendMailbox::Source::Compose)
+                                       ? OutboundSource::COMPOSE
+                                       : OutboundSource::CHAT;
 
     // Get our source destination (needed for signing)
-    Destination source = _router.delivery_destination();
-
-    // Create message content
-    Bytes content_bytes((const uint8_t*)content.c_str(), content.length());
-    Bytes title;  // Empty title
+    Destination source_dest = _router.delivery_destination();
 
     // Look up destination identity
     Identity dest_identity = Identity::recall(dest_hash);
@@ -1605,13 +1641,13 @@ bool UIManager::send_message(const Bytes& dest_hash, const String& content) {
 
     // UI messages prefer single-packet opportunistic delivery on LoRa. The
     // router automatically promotes messages that exceed the LoRa packet MDU
-    // to DIRECT, so this preserves large-message support without forcing every
-    // short message through the heavier link/resource path.
+    // to DIRECT, so this preserves large-message support without forcing
+    // every short message through the heavier link/resource path.
     ::LXMF::LXMessage message(
         destination,
-        source,
+        source_dest,
         content_bytes,
-        title,
+        Bytes{},
         ::LXMF::Type::Message::OPPORTUNISTIC
     );
 
@@ -1621,19 +1657,19 @@ bool UIManager::send_message(const Bytes& dest_hash, const String& content) {
         DEBUG("  Set destination hash manually");
     }
 
-    // Pack the message to generate hash and signature before saving
-    message.pack();
-
     // Reject router contention or queue exhaustion before persistence. The
     // admission guard commits the final packed/stamped message immediately
     // before queue ownership transfer while RouterLock prevents a concurrent
-    // producer from consuming the checked capacity. This callback runs on
-    // LVGL's 8 KiB task, so MessageStore keeps its rollback snapshot
-    // object-owned rather than local to save_message().
+    // producer from consuming the checked capacity.
     RouterLock router_lock(0);
+    OutboundCommit commit;
+    commit.source = source;
+    commit.dest_hash = dest_hash;
     if (!router_lock.acquired()) {
         WARNING("Router busy; outgoing message retained for retry");
-        return false;
+        commit.result = OutboundResult::RETRY;
+        apply_outbound_result(commit);
+        return;
     }
 
     OutboundPersistenceContext persistence_context{&_store, &message};
@@ -1643,25 +1679,79 @@ bool UIManager::send_message(const Bytes& dest_hash, const String& content) {
             message, persistOutgoingMessage, &persistence_context);
     } catch (const std::exception& error) {
         WARNINGF("Outgoing message preparation failed: %s", error.what());
-        return false;
+        admission = ::LXMF::OutboundAdmissionResult::QUEUE_FULL;
     }
 
     if (admission == ::LXMF::OutboundAdmissionResult::GUARD_REJECTED) {
         ERROR("Outgoing message persistence failed; message not queued");
-        show_storage_error("Storage is unavailable. The message was not sent.");
-        return false;
-    }
-    if (admission != ::LXMF::OutboundAdmissionResult::ACCEPTED) {
+        commit.result = OutboundResult::STORAGE_ERROR;
+    } else if (admission != ::LXMF::OutboundAdmissionResult::ACCEPTED) {
         WARNING("Outbound queue full; outgoing message retained for retry");
-        return false;
+        commit.result = OutboundResult::RETRY;
+    } else {
+        INFO("  Message queued for delivery");
+        commit.result = (source == OutboundSource::COMPOSE)
+                            ? OutboundResult::COMPOSE_NAVIGATED
+                            : OutboundResult::ADDED;
+        // The admitted, packed form (post-stamp) is what the router will
+        // send and what delivery callbacks will address; retain it for the
+        // UI commit.
+        commit.packed = message.packed();
     }
+    apply_outbound_result(commit);
+}
 
-    if (_navigation.current() == Route::CHAT && _current_peer_hash == dest_hash) {
-        _chat_screen->add_message(message, true);
+// UI commit for a serviced outgoing send. The LVGL_LOCK here is short — no
+// I/O — so it cannot approach the 5s deadlock guard. Composer input is only
+// cleared on acceptance; a RETRY/STORAGE_ERROR keeps the user's text for a
+// normal re-send (same contract as the old "clear only after persistence and
+// queue admission succeed").
+void UIManager::apply_outbound_result(const OutboundCommit& commit) {
+    LVGL_LOCK();
+    switch (commit.result) {
+        case OutboundResult::STORAGE_ERROR:
+            show_storage_error("Storage is unavailable. The message was not sent.");
+            break;
+        case OutboundResult::COMPOSE_NAVIGATED:
+            // Replace Compose with Chat so Back returns to Messages instead
+            // of reopening a cleared compose form. Guarded on the current
+            // route: if the user already navigated away while the main loop
+            // was persisting (possible on a slow filesystem), leave their
+            // current location alone — the message is persisted and queued
+            // either way. The conversation reload from storage shows the
+            // just-persisted outgoing message.
+            if (_navigation.current() == Route::COMPOSE) {
+                _current_peer_hash = commit.dest_hash;
+                replace_route(Route::CHAT);
+            }
+            break;
+        case OutboundResult::ADDED:
+            if (_chat_screen && _current_peer_hash == commit.dest_hash) {
+                if (_navigation.current() == Route::CHAT &&
+                    !commit.packed.empty()) {
+                    // Reconstruct the display view of the admitted message.
+                    // unpack_from_bytes restores content/timestamp/hash and
+                    // the flags are re-set below, matching the live object
+                    // the old synchronous path displayed (outgoing, queued).
+                    try {
+                        ::LXMF::LXMessage message =
+                            ::LXMF::LXMessage::unpack_from_bytes(
+                                commit.packed,
+                                ::LXMF::Type::Message::OPPORTUNISTIC, true);
+                        message.incoming(false);
+                        message.state(::LXMF::Type::Message::OUTBOUND);
+                        _chat_screen->add_message(message, true);
+                    } catch (const std::exception& error) {
+                        WARNINGF("Failed to render sent message: %s", error.what());
+                    }
+                }
+                _chat_screen->clear_composer();
+            }
+            break;
+        case OutboundResult::RETRY:
+        default:
+            break;  // input retained; user re-sends
     }
-
-    INFO("  Message queued for delivery");
-    return true;
 }
 
 void UIManager::on_message_received(::LXMF::LXMessage& message) {
