@@ -223,9 +223,12 @@ void ChatScreen::load_conversation(const Bytes& peer_hash, ::LXMF::MessageStore&
 
     // Arm a prepare for this peer. Bumping the generation discards any
     // in-flight prepare for a previous (or same) peer: its commit re-checks
-    // the generation before touching the UI.
+    // the generation before touching the UI. The fill generation is bumped
+    // too, so a background-fill batch in flight while the list is reset
+    // drops its (now stale) result.
     _prepared_peer_hash = Bytes();
     _prepare_generation++;
+    _fill_generation++;
 }
 
 void ChatScreen::prepare_conversation() {
@@ -337,6 +340,8 @@ void ChatScreen::prepare_conversation() {
         const bool initial_fill_active = _display_start_idx > _bg_fill_target;
         _keep_bottom_during_background_fill.store(initial_fill_active);
         _bg_fill_active.store(initial_fill_active);
+        // The commit rebuilt the list; any in-flight fill batch is stale.
+        _fill_generation++;
 
         _prepared_peer_hash = peer_hash;
         scroll_to_bottom();
@@ -382,43 +387,51 @@ void ChatScreen::tick_background_fill() {
     }
 }
 
+// Stream older messages in a few at a time, called from UIManager::update() on
+// the main loop. Each batch's metadata reads run OFF the LVGL lock (a cold
+// batch is 2+ LittleFS reads, which on a degraded filesystem can approach the
+// 5s guard), and only the bubble prepend takes a brief lock.
 void ChatScreen::load_more_messages(size_t batch) {
-    LVGL_LOCK();
-    if (_loading_more || _display_start_idx == 0 || !_message_store) {
-        return;  // Already at the beginning or already loading
-    }
-
-    _loading_more = true;
-    INFO("Loading more messages...");
-
-    // Calculate how many more to load
-    size_t load_count = batch;
-    if (_display_start_idx < load_count) {
-        load_count = _display_start_idx;
-    }
-    size_t new_start_idx = _display_start_idx - load_count;
-
+    std::vector<Bytes> hashes;
+    RNS::Bytes peer_hash;
+    uint32_t generation = 0;
+    size_t new_start_idx = 0;
     {
-        char log_buf[64];
-        snprintf(log_buf, sizeof(log_buf), "  Loading messages %zu to %zu",
-                 new_start_idx, _display_start_idx - 1);
-        INFO(log_buf);
+        LVGL_LOCK();
+        if (_loading_more || _display_start_idx == 0 || !_message_store) {
+            return;  // Already at the beginning or already loading
+        }
+
+        _loading_more = true;
+        generation = _fill_generation;
+        peer_hash = _peer_hash;
+
+        // Calculate how many more to load
+        size_t load_count = batch;
+        if (_display_start_idx < load_count) {
+            load_count = _display_start_idx;
+        }
+        new_start_idx = _display_start_idx - load_count;
+
+        INFO("Loading more messages...");
+        // Copy the batch range out (newest first, matching the old loop
+        // order); it is only read off-lock afterwards.
+        for (size_t n = 0; n < load_count; n++) {
+            hashes.push_back(_all_message_hashes[_display_start_idx - 1 - n]);
+        }
     }
 
-    // Load and prepend messages directly (no temporary vector allocation)
-    // Process in reverse order so push_front maintains correct sequence
-    size_t items_added = 0;
-    for (size_t i = _display_start_idx; i > new_start_idx; ) {
-        --i;  // Decrement first since we're iterating backwards
-        const auto& msg_hash = _all_message_hashes[i];
-
-        // Use fast metadata loader (cache hit: O(1) in-memory; miss: one
+    // ── metadata I/O, off the LVGL lock ─────────────────────────────────
+    std::vector<MessageItem> items;
+    items.reserve(hashes.size());
+    for (const auto& msg_hash : hashes) {
+        // Fast metadata loader (cache hit: O(1) in-memory; miss: one
         // LittleFS read that warms the cache for every later touch).
-        ::LXMF::MessageStore::MessageMetadata meta = _message_store->load_message_metadata(msg_hash);
+        ::LXMF::MessageStore::MessageMetadata meta =
+            _message_store->load_message_metadata(msg_hash);
         if (!meta.valid) {
             continue;
         }
-
         MessageItem item;
         item.message_hash = msg_hash;
         item.content = String(meta.content.c_str());
@@ -426,16 +439,32 @@ void ChatScreen::load_more_messages(size_t batch) {
         item.outgoing = !meta.incoming;
         item.delivered = (meta.state == static_cast<int>(::LXMF::Type::Message::DELIVERED));
         item.failed = (meta.state == static_cast<int>(::LXMF::Type::Message::FAILED));
+        items.push_back(item);
+    }
+    // ─────────────────────────────────────────────────────────────────────
 
+    // ── commit, brief LVGL lock ─────────────────────────────────────────
+    LVGL_LOCK();
+    if (_peer_hash != peer_hash || _fill_generation != generation) {
+        // Conversation changed or was re-armed while the reads ran; the
+        // newer state owns the list. Drop the stale batch.
+        _loading_more = false;
+        return;
+    }
+    // Push in read order (newest first): each push_front lands the next
+    // older message at the top, leaving oldest→newest, matching the old
+    // loop's semantics.
+    for (const auto& item : items) {
         // Create bubble at index 0 (top of list)
         create_message_bubble(item);
         lv_obj_t* bubble_row = lv_obj_get_child(_message_list, lv_obj_get_child_cnt(_message_list) - 1);
         lv_obj_move_to_index(bubble_row, 0);
-
         // Prepend to deque (O(1) operation)
         _messages.push_front(item);
-        items_added++;
     }
+    // Advance past the whole batch (invalid entries included — they are
+    // dropped, same as the old loop), so they are not re-read on the next
+    // fill.
     _display_start_idx = new_start_idx;
 
     _loading_more = false;

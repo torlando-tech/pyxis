@@ -277,6 +277,11 @@ private:
     void scroll_to_bottom();
     static void on_scroll(lv_event_t* event);
 
+    // Guards background-fill batches against a peer change or a re-arm
+    // (prepare_conversation) that lands while a batch's metadata I/O is in
+    // flight; only read/written under the LVGL lock.
+    uint32_t _fill_generation = 0;
+
     // Utility
     static void format_timestamp(double timestamp, char* buf, size_t buf_size);
     static const char* get_delivery_indicator(bool outgoing, bool delivered, bool failed);
