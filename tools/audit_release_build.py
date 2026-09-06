@@ -45,7 +45,7 @@ EXCLUDED_SYMBOLS = (
     "MapTileHttpArduino::",
 )
 PINNED_DEPENDENCIES = {
-    "microReticulum": "ef071871421b244e4209f1c2b5b2a838b22bd756",
+    "microReticulum": "e2c9d4d17a510e40821a0b0651de07469f78d2cc",
     "microLXMF": "82d2e54d721d9e4ce3ffc0049d9996aa5632390a",
     "microStore": "2762f7606800ffb23f4a593947d4f58e259cda7a",
 }
