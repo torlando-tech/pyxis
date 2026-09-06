@@ -129,7 +129,11 @@ struct OutboundPersistenceContext {
 
 bool persistOutgoingMessage(void* raw_context) {
     auto& context = *static_cast<OutboundPersistenceContext*>(raw_context);
-    return context.store->save_message(*context.message);
+    const uint32_t t_save = millis();
+    bool ok = context.store->save_message(*context.message);
+    Serial.printf("[SENDT] save_message=%lu ms ok=%d\n",
+                  (unsigned long)(millis() - t_save), (int)ok);
+    return ok;
 }
 
 }  // namespace
@@ -1624,6 +1628,15 @@ void UIManager::service_pending_sends() {
     OutgoingSendMailbox::Slot slot;
     if (!_outgoing_sends.take(slot)) return;
 
+    // [SENDT] pipeline instrumentation (temporary; removed before merge)
+    const uint32_t t_send_start = millis();
+    Serial.printf("[SENDT] queue_wait=%lu ms\n",
+                  (unsigned long)(millis() - slot.enqueued_ms));
+    auto sendt_mark = [&](const char* label) {
+        Serial.printf("[SENDT] %s=%lu ms\n", label,
+                      (unsigned long)(millis() - t_send_start));
+    };
+
     Bytes dest_hash(slot.destination.data(), slot.destination.size());
     Bytes content_bytes((const uint8_t*)slot.content.data(), slot.content.size());
     const OutboundSource source = (slot.source == OutgoingSendMailbox::Source::Compose)
@@ -1635,6 +1648,7 @@ void UIManager::service_pending_sends() {
 
     // Look up destination identity
     Identity dest_identity = Identity::recall(dest_hash);
+    sendt_mark("identity_recall");
 
     // Create destination object - either real or placeholder
     Destination destination(Type::NONE);
@@ -1668,6 +1682,7 @@ void UIManager::service_pending_sends() {
     // before queue ownership transfer while RouterLock prevents a concurrent
     // producer from consuming the checked capacity.
     RouterLock router_lock(0);
+    sendt_mark("router_lock");
     OutboundCommit commit;
     commit.source = source;
     commit.dest_hash = dest_hash;
@@ -1704,7 +1719,9 @@ void UIManager::service_pending_sends() {
         // UI commit.
         commit.packed = message.packed();
     }
+    sendt_mark("admission_done");
     apply_outbound_result(commit);
+    sendt_mark("ui_commit_done");
 }
 
 // UI commit for a serviced outgoing send. The LVGL_LOCK here is short — no

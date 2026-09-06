@@ -98,7 +98,7 @@ def test_live_and_chat_outbound_share_a_router_mutex():
     assert service.index("RouterLock router_lock(0)") < service.index("_router.try_handle_outbound(")
     # UI commit (append to the viewed chat) happens only after admission.
     assert "_chat_screen->add_message(message, true)" in apply
-    assert "return context.store->save_message(*context.message);" in cpp
+    assert "context.store->save_message(*context.message)" in cpp
     network_pump = main[
         main.index("// Process Reticulum") :
         main.index("LOOP_STEP(8);  // Memory monitor")

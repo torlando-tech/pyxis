@@ -37,6 +37,7 @@ public:
         Source source = Source::None;
         std::string destination;  // raw peer-hash bytes (binary-safe)
         std::string content;      // UTF-8 message text
+        uint32_t enqueued_ms = 0;  // millis() at request() — queue-wait telemetry
     };
 
     // Returns false when a send is already pending (caller retains input).
@@ -47,6 +48,7 @@ public:
         _slot.source = source;
         _slot.destination.assign(static_cast<const char*>(destination), destinationSize);
         _slot.content.assign(content, contentSize);
+        _slot.enqueued_ms = millis();
         return true;
     }
 
