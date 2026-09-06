@@ -45,7 +45,7 @@ if os.environ.get("PYXIS_FLOW_SCENARIOS"):
 
 MANIFEST_BASE = "51e4b586c4c3867ae399f573557edda6f3b48a44"
 MANIFEST_BRANCH = "feat/nomadnet-partials-core"
-MANIFEST_MICRORETICULUM = "cd0338e7fc07d3a7785a450656ba766491cbf6e8"
+MANIFEST_MICRORETICULUM = "ef071871421b244e4209f1c2b5b2a838b22bd756"
 MANIFEST_FILES = (
     "tests/native/nomadnet_x86_flow/CMakeLists.txt",
     "tests/native/nomadnet_x86_flow/BuildManifest.h.in",
