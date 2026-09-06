@@ -129,10 +129,14 @@ struct OutboundPersistenceContext {
 
 bool persistOutgoingMessage(void* raw_context) {
     auto& context = *static_cast<OutboundPersistenceContext*>(raw_context);
+#ifdef PYXIS_SEND_DIAG
     const uint32_t t_save = millis();
+#endif
     bool ok = context.store->save_message(*context.message);
+#ifdef PYXIS_SEND_DIAG
     Serial.printf("[SENDT] save_message=%lu ms ok=%d\n",
                   (unsigned long)(millis() - t_save), (int)ok);
+#endif
     return ok;
 }
 
@@ -1628,7 +1632,8 @@ void UIManager::service_pending_sends() {
     OutgoingSendMailbox::Slot slot;
     if (!_outgoing_sends.take(slot)) return;
 
-    // [SENDT] pipeline instrumentation (temporary; removed before merge)
+#ifdef PYXIS_SEND_DIAG
+    // [SENDT] pipeline instrumentation (optional; -DPYXIS_SEND_DIAG, tdeck-test)
     const uint32_t t_send_start = millis();
     Serial.printf("[SENDT] queue_wait=%lu ms\n",
                   (unsigned long)(millis() - slot.enqueued_ms));
@@ -1636,6 +1641,10 @@ void UIManager::service_pending_sends() {
         Serial.printf("[SENDT] %s=%lu ms\n", label,
                       (unsigned long)(millis() - t_send_start));
     };
+#else
+    auto sendt_mark = [](const char*) {
+    };
+#endif
 
     Bytes dest_hash(slot.destination.data(), slot.destination.size());
     Bytes content_bytes((const uint8_t*)slot.content.data(), slot.content.size());

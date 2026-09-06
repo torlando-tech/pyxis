@@ -37,7 +37,7 @@ public:
         Source source = Source::None;
         std::string destination;  // raw peer-hash bytes (binary-safe)
         std::string content;      // UTF-8 message text
-        uint32_t enqueued_ms = 0;  // millis() at request() — queue-wait telemetry
+        uint32_t enqueued_ms = 0;  // millis() at request() — queue-wait telemetry (PYXIS_SEND_DIAG)
     };
 
     // Returns false when a send is already pending (caller retains input).
