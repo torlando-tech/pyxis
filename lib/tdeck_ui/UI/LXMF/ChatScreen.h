@@ -197,6 +197,12 @@ private:
     ::LXMF::MessageStore* _message_store;
     std::deque<MessageItem> _messages;
 
+    // Composer text captured when a send was accepted into the main-loop
+    // mailbox. apply_outbound_result() only clears the composer if it still
+    // holds exactly this text, so input typed into the composer while
+    // persistence/admission was in flight is never erased by a later commit.
+    std::string _pending_submitted_text;
+
     // Map message hash to bubble row for targeted updates
     std::map<RNS::Bytes, lv_obj_t*> _message_rows;
 
@@ -207,6 +213,12 @@ private:
     // happens while a prepare's I/O is in flight.
     RNS::Bytes _prepared_peer_hash;
     uint32_t _prepare_generation = 0;
+    // Message count at the moment the current rows were committed by
+    // prepare_conversation(). A same-peer re-open compares the store's live
+    // count against this: if it grew (a message for this peer landed while
+    // the chat was hidden), the early-return is not taken and prepare is
+    // re-armed. Zero means "nothing committed yet".
+    size_t _prepared_message_count = 0;
 
     BackCallback _back_callback;
     SendMessageCallback _send_message_callback;

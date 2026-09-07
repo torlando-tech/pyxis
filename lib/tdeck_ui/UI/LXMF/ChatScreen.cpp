@@ -172,9 +172,19 @@ void ChatScreen::load_conversation(const Bytes& peer_hash, ::LXMF::MessageStore&
 
     // Same-peer re-open (back to the list and re-tap): the content is
     // already committed by prepare_conversation() and the rows are still
-    // built — nothing to do. This keeps re-opens free of any store I/O.
+    // built — usually nothing to do, keeping re-opens free of store I/O.
+    // Exception: a message for this peer persisted while the chat was
+    // hidden (on_message_received only appends to the visible chat). The
+    // live count is one in-memory index read (no LittleFS); on a mismatch
+    // fall through to the peer-change path, which resets the list and
+    // re-arms prepare_conversation() so the main loop re-gathers off-lock.
     if (_peer_hash == peer_hash && _prepared_peer_hash == peer_hash) {
-        return;
+        size_t live_count = store.get_messages_for_conversation(peer_hash).size();
+        if (live_count == _prepared_message_count) {
+            return;
+        }
+        INFO("Same-peer re-open: new message(s) since prepare; re-gathering");
+        _prepared_message_count = 0;
     }
 
     _peer_hash = peer_hash;
@@ -227,6 +237,7 @@ void ChatScreen::load_conversation(const Bytes& peer_hash, ::LXMF::MessageStore&
     // too, so a background-fill batch in flight while the list is reset
     // drops its (now stale) result.
     _prepared_peer_hash = Bytes();
+    _prepared_message_count = 0;
     _prepare_generation++;
     _fill_generation++;
 }
@@ -344,6 +355,7 @@ void ChatScreen::prepare_conversation() {
         _fill_generation++;
 
         _prepared_peer_hash = peer_hash;
+        _prepared_message_count = _all_message_hashes.size();
         scroll_to_bottom();
     }
 }
@@ -361,6 +373,7 @@ void ChatScreen::refresh() {
     }
     INFO("Refreshing chat messages");
     _prepared_peer_hash = Bytes();
+    _prepared_message_count = 0;
     _prepare_generation++;
 }
 
@@ -755,12 +768,17 @@ void ChatScreen::on_send_clicked(lv_event_t* event) {
     String message(text);
 
     if (message.length() > 0 && screen->_send_message_callback) {
-        // Publish to the main loop; the composer is cleared only after
+        // Publish to the main loop. On acceptance, record the exact composer
+        // state that was submitted; the composer is cleared only after
         // persistence and queue admission succeed (clear_composer() from
-        // UIManager::apply_outbound_result). A rejected send (busy router,
-        // full queue, storage error) keeps the text for a normal re-send, so
-        // no typed input is ever lost to a failed send.
-        screen->_send_message_callback(message);
+        // UIManager::apply_outbound_result) AND only if the composer still
+        // holds that same text. A rejected send (busy router, full queue,
+        // storage error) keeps the text for a normal re-send, and anything
+        // typed into the composer after submission is never wiped by the
+        // later completion commit.
+        if (screen->_send_message_callback(message)) {
+            screen->_pending_submitted_text = message.c_str();
+        }
     }
 }
 
@@ -768,6 +786,17 @@ void ChatScreen::clear_composer() {
     // Recursive lock: apply_outbound_result() calls this while already
     // holding the LVGL lock.
     LVGL_LOCK();
+    // Only clear if the composer still holds the exact text we submitted.
+    // Persistence + router admission run on the main loop off the LVGL
+    // lock, so the user may have started typing the next message before the
+    // commit lands; wiping an edited composer here would erase fresh input.
+    // An empty _pending_submitted_text means nothing is pending, in which
+    // case a clear is a no-op-safe reset.
+    const char* current = lv_textarea_get_text(_text_area);
+    if (current != nullptr && _pending_submitted_text != current) {
+        return;
+    }
+    _pending_submitted_text.clear();
     lv_textarea_set_text(_text_area, "");
     lv_group_focus_obj(_text_area);
 }
