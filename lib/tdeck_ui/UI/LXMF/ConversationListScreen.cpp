@@ -532,7 +532,14 @@ void ConversationListScreen::create_conversation_item(const ConversationItem& it
     // Store peer hash in user data using pool (avoids per-item heap allocations)
     _peer_hash_pool.push_back(item.peer_hash);
     lv_obj_set_user_data(container, &_peer_hash_pool.back());
-    lv_obj_add_event_cb(container, on_conversation_clicked, LV_EVENT_CLICKED, this);
+    // SHORT_CLICKED (not CLICKED): in LVGL 8.4 indev_proc_release()
+    // (lv_indev.c:973-980) CLICKED is sent on EVERY pointer release
+    // without scrolling — including a long-press release — while
+    // SHORT_CLICKED is gated on long_pr_sent == 0. With both CLICKED and
+    // LONG_PRESSED bound to the row, a long-press to delete would fire
+    // on_conversation_long_pressed AND, on release, on_conversation_clicked,
+    // navigating into the conversation and hiding the confirm dialog.
+    lv_obj_add_event_cb(container, on_conversation_clicked, LV_EVENT_SHORT_CLICKED, this);
     lv_obj_add_event_cb(container, on_conversation_long_pressed, LV_EVENT_LONG_PRESSED, this);
 
     // Track container for focus group management
