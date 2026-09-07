@@ -226,6 +226,30 @@ private:
     CacheResult quota_result_ = CacheResult::STORED;
     bool quota_recovery_ = false;
 
+    // Transient-stall guard. A storage op that returns BUSY/UNAVAILABLE (SPI
+    // mutex starved, card not mounted) is retried forever by the step machine;
+    // on a persistently unhealthy seam that pins operation_ != NONE and the
+    // NomadNet UI freezes at "Checking SD page cache...". service() compares
+    // this call's entry state to the previous call's: any advance (op change,
+    // offset, scan/cleanup index, scan count, open-flag) resets the stall
+    // counter, so slow-but-progressing steps (chunked reads/writes, directory
+    // scans) never false-trip; a tick with no advance is a transient stall.
+    // Past the bounded budget the cache bails: mark the namespace
+    // non-authoritative for the session (lookups/commits then bypass) and
+    // clear the op, so the flow falls through to a live fetch (the pre-cache
+    // behavior). 500 no-progress ticks far exceeds any real SPI contention or
+    // SD mount window (each op already waits only 100 ms on the bus mutex).
+    static constexpr std::uint32_t MAX_TRANSIENT_STALL_TICKS = 500;
+    Operation transient_prev_op_ = Operation::NONE;
+    std::size_t transient_prev_offset_ = 0;
+    std::size_t transient_prev_scan_index_ = 0;
+    std::size_t transient_prev_cleanup_index_ = 0;
+    std::size_t transient_prev_scan_seen_ = 0;
+    bool transient_prev_read_open_ = false;
+    bool transient_prev_write_open_ = false;
+    std::uint32_t transient_stall_count_ = 0;
+    void transient_bail();
+
     static constexpr std::size_t VERIFY_SCRATCH_BYTES = 1024;
     std::array<std::uint8_t, VERIFY_SCRATCH_BYTES> verify_scratch_{};
     std::uint64_t verify_hash_ = 1469598103934665603ULL;

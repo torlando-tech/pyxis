@@ -26,6 +26,25 @@ struct MemoryStorage final:NomadNetStorage{
  StorageResult endList()override{++operations;return StorageResult::OK;}std::vector<std::string>list;size_t li=0;
 };
 static CacheKey key(const char*path="/page/index.mu"){return CacheKey{"0123456789abcdef0123456789abcdef",path,RequestDataClass::NIL};}
+// A seam whose directory enumeration is permanently BUSY (SPI mutex starved
+// for longer than any real contention window) — the exact condition that
+// pinned the boot-time recovery and froze the UI at "Checking SD page cache...".
+struct HangListStorage final:NomadNetStorage{
+ StorageResult hang = StorageResult::OK;
+ bool isAvailable()const override{return true;}
+ StorageResult beginRead(const char*,uint32_t&s)override{s=0;return StorageResult::MISS;}
+ StorageResult readChunk(uint8_t*,size_t,size_t&n)override{n=0;return StorageResult::OK;}
+ StorageResult endRead()override{return StorageResult::OK;}
+ StorageResult beginWrite(const char*)override{return StorageResult::OK;}
+ StorageResult writeChunk(const uint8_t*,size_t z,size_t&n)override{n=z;return StorageResult::OK;}
+ StorageResult commitWrite()override{return StorageResult::OK;}
+ StorageResult abortWrite()override{return StorageResult::OK;}
+ StorageResult remove(const char*)override{return StorageResult::MISS;}
+ StorageResult rename(const char*,const char*)override{return StorageResult::MISS;}
+ StorageResult stat(const char*,uint32_t&)override{return StorageResult::MISS;}
+ StorageResult beginList(const char*)override{return hang;}
+ StorageResult nextList(char*,size_t,bool&d)override{d=true;return StorageResult::OK;}
+ StorageResult endList()override{return StorageResult::OK;}};
 static void drain(NomadNetCache&c,MemoryStorage*s=nullptr){for(int i=0;i<1000&&c.busy();++i){const auto before=s?s->operations:0;c.service();if(s&&s->operations-before>1)throw std::runtime_error("more than one storage operation per service tick");}}
 int main(){int f=0;auto ck=[&](bool x,const char*n){if(!x){++f;std::cerr<<"FAIL "<<n<<"\n";}};MemoryStorage s;CacheConfig cfg;cfg.max_entries=2;cfg.max_bytes=4096;cfg.max_scan_records=8;NomadNetCache c(s,cfg);drain(c,&s);const std::vector<uint8_t> body={'h','e','l','l','o'};
  ck(canonical_cache_key(key())=="0123456789abcdef0123456789abcdef\n/page/index.mu\nnil","canonical key");
@@ -45,7 +64,16 @@ int main(){int f=0;auto ck=[&](bool x,const char*n){if(!x){++f;std::cerr<<"FAIL 
  // Interrupted promotion keeps a valid prior generation.
  MemoryStorage s2;NomadNetCache c2(s2,cfg);drain(c2,&s2);ck(c2.beginCommit(key(),body,300,60)==CacheResult::PENDING,"seed");drain(c2);s2.fail_rename_at=2;ck(c2.beginCommit(key(),std::vector<uint8_t>{'x'},301,60)==CacheResult::PENDING,"crash commit");drain(c2);ck(c2.lastResult()==CacheResult::STORAGE_ERROR,"rename crash reported");s2.fail_rename_at=0;ck(c2.beginLookup(key(),302)==CacheResult::PENDING,"fallback after crash");drain(c2);ck(c2.takeBody(got)&&std::equal(got.begin(),got.end(),body.begin(),body.end()),"prior generation survives");
  // SD faults are cache misses to caller, never page failures.
- s2.available=false;ck(c2.beginLookup(key(),302)==CacheResult::PENDING,"unavailable begins");drain(c2);ck(c2.lastResult()==CacheResult::BYPASS,"unavailable bypass");s2.available=true;s2.busy=true;ck(c2.beginLookup(key(),302)==CacheResult::PENDING,"busy begins");drain(c2);ck(c2.lastResult()==CacheResult::BYPASS,"busy bypass");
+ s2.available=false;ck(c2.beginLookup(key(),302)==CacheResult::PENDING,"unavailable begins");drain(c2);ck(c2.lastResult()==CacheResult::BYPASS,"unavailable bypass");s2.available=true;s2.busy=true;ck(c2.beginLookup(key(),302)==CacheResult::PENDING,"busy begins");drain(c2);ck(c2.lastResult()==CacheResult::BYPASS,"busy bypass");s2.busy=false;
+ // A persistently transient seam during boot-time recovery must not pin the
+ // cache (and the UI). Before this fix the recovery retried beginList forever;
+ // now the stall budget expires, the namespace is marked non-authoritative,
+ // and the op clears so the flow can fall through to a live fetch.
+ MemoryStorage busy_boot;busy_boot.available=false;NomadNetCache bc(busy_boot,cfg);
+ for(int i=0;i<2000&&bc.busy();++i)bc.service();
+ ck(!bc.busy(),"persistent transient recovery bails instead of pinning");
+ ck(!bc.recoveryComplete(),"bailed recovery is not authoritative");
+ ck(bc.beginLookup(key(),100)==CacheResult::BYPASS,"post-bail lookup bypasses to live");
  // Deterministic expired-first then oldest quota eviction.
  MemoryStorage s3;NomadNetCache c3(s3,cfg);drain(c3,&s3);for(int i=0;i<3;i++){auto k=key((std::string("/page/")+char('a'+i)).c_str());ck(c3.beginCommit(k,body,400+i,i==0?1:100)==CacheResult::PENDING,"quota commit");drain(c3);}ck(c3.entryCount()<=2&&c3.totalBytes()<=cfg.max_bytes,"quotas bounded");ck(c3.beginLookup(key("/page/a"),500)==CacheResult::PENDING,"evicted lookup");drain(c3);ck(c3.lastResult()!=CacheResult::HIT,"expired evicted first");
 

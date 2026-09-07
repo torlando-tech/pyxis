@@ -929,6 +929,38 @@ CacheResult NomadNetCache::invalidate(const CacheKey& key) {
 }
 
 void NomadNetCache::service() {
+    // Transient-stall guard (cross-call): compare this call's entry state to
+    // the previous call's. A transient (BUSY/UNAVAILABLE) retry changes none
+    // of the tracked bits, so an unchanged entry across consecutive service()
+    // calls is a stall; any advance resets the counter. Past the bounded
+    // budget, bail so a persistently unhealthy SD seam can never pin the cache
+    // (and the NomadNet UI at "Checking SD page cache..."). The baseline is
+    // refreshed before the switch so every path — including early returns —
+    // leaves a correct entry for the next call.
+    if (operation_ != Operation::NONE &&
+        operation_ == transient_prev_op_ &&
+        offset_ == transient_prev_offset_ &&
+        scan_index_ == transient_prev_scan_index_ &&
+        cleanup_index_ == transient_prev_cleanup_index_ &&
+        scan_seen_ == transient_prev_scan_seen_ &&
+        read_open_ == transient_prev_read_open_ &&
+        write_open_ == transient_prev_write_open_) {
+        if (transient_stall_count_ < MAX_TRANSIENT_STALL_TICKS) {
+            ++transient_stall_count_;
+        } else {
+            transient_stall_count_ = 0;
+            transient_bail();
+        }
+    } else if (operation_ != Operation::NONE) {
+        transient_stall_count_ = 0;
+    }
+    transient_prev_op_ = operation_;
+    transient_prev_offset_ = offset_;
+    transient_prev_scan_index_ = scan_index_;
+    transient_prev_cleanup_index_ = cleanup_index_;
+    transient_prev_scan_seen_ = scan_seen_;
+    transient_prev_read_open_ = read_open_;
+    transient_prev_write_open_ = write_open_;
     switch (operation_) {
         case Operation::NONE:
             return;
@@ -1426,6 +1458,30 @@ void NomadNetCache::service() {
             return;
         }
     }
+}
+
+void NomadNetCache::transient_bail() {
+    // The storage seam has been stalled for far longer than any real SPI
+    // contention or SD mount window. Stop retrying: drop all namespace
+    // authority (lookups and commits now bypass), and clear the in-flight op
+    // so the caller's flow falls through to a live fetch, restoring the
+    // pre-cache page-load behavior instead of a frozen UI.
+    transient_stall_count_ = 0;
+    namespace_authoritative_ = false;
+    read_open_ = false;
+    write_open_ = false;
+    commit_job_ = false;
+    cleanup_stages_after_failure_ = false;
+    eviction_pending_ = false;
+    eviction_generation_ = -1;
+    quota_recovery_ = false;
+    recovery_complete_ = false;
+    offset_ = 0;
+    io_.clear();
+    metadata_bytes_.clear();
+    ExternalVector<std::uint8_t>().swap(body_);
+    operation_ = Operation::NONE;
+    result_ = CacheResult::BYPASS;
 }
 
 void NomadNetCache::cancel() {
