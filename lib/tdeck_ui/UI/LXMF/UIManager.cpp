@@ -1431,7 +1431,19 @@ void UIManager::on_back_to_conversation_list() {
 }
 
 bool UIManager::on_send_message_from_chat(const String& content) {
-    return send_message(_current_peer_hash, content);
+    const bool accepted = send_message(_current_peer_hash, content);
+    if (accepted && _chat_screen) {
+        // Race-critical: set the submitted-text marker in the SAME LVGL lock
+        // section as the mailbox publish above. If the marker were assigned
+        // later (on the ChatScreen side, after this callback returned), the
+        // main loop could take() + admit the send and run clear_composer()
+        // while the marker was still empty, neither clearing the submitted
+        // text nor matching the later commit to its submission. This handler
+        // runs on the LVGL task (click event, lock held), so the marker is
+        // visible to the main loop only after the mailbox entry is.
+        _chat_screen->set_pending_submitted_text(content.c_str());
+    }
+    return accepted;
 }
 
 void UIManager::on_call_from_chat() {

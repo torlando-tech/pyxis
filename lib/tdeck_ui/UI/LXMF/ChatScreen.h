@@ -155,9 +155,23 @@ public:
 
     /**
      * Set callback for sending messages
-     * @param callback Function to call when send button is pressed
+     * @param callback Function that sends the message; return true when the
+     *        send was accepted into the main-loop mailbox. The callback
+     *        (UIManager::on_send_message_from_chat) records the submitted
+     *        text via set_pending_submitted_text() in the same LVGL lock
+     *        section as the publish, so the main loop can never observe
+     *        the mailbox entry before the marker is set.
      */
     void set_send_message_callback(SendMessageCallback callback);
+
+    /**
+     * Record the composer text that was just published to the main-loop
+     * send mailbox. Must be called by the send callback in the same LVGL
+     * lock section as the publish so the completion commit (main loop) can
+     * match its clear to the exact submission. See ChatScreen.h field
+     * _pending_submitted_text.
+     */
+    void set_pending_submitted_text(const std::string& text);
 
     /**
      * Set callback for voice call button
@@ -198,9 +212,15 @@ private:
     std::deque<MessageItem> _messages;
 
     // Composer text captured when a send was accepted into the main-loop
-    // mailbox. apply_outbound_result() only clears the composer if it still
-    // holds exactly this text, so input typed into the composer while
-    // persistence/admission was in flight is never erased by a later commit.
+    // mailbox. apply_outbound_result() only clears the composer when a
+    // non-empty marker matches the current composer text exactly, so input
+    // typed into the composer while persistence/admission was in flight is
+    // never erased by a later commit. Empty means "no pending submission",
+    // which clears nothing (safe for retry/rejected sends, where the text
+    // is retained deliberately). The marker is assigned by
+    // UIManager::on_send_message_from_chat() in the same LVGL lock section
+    // as the mailbox publish, so the main loop can never observe the
+    // mailbox entry before the marker is set.
     std::string _pending_submitted_text;
 
     // Map message hash to bubble row for targeted updates

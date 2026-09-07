@@ -768,32 +768,42 @@ void ChatScreen::on_send_clicked(lv_event_t* event) {
     String message(text);
 
     if (message.length() > 0 && screen->_send_message_callback) {
-        // Publish to the main loop. On acceptance, record the exact composer
-        // state that was submitted; the composer is cleared only after
-        // persistence and queue admission succeed (clear_composer() from
-        // UIManager::apply_outbound_result) AND only if the composer still
-        // holds that same text. A rejected send (busy router, full queue,
-        // storage error) keeps the text for a normal re-send, and anything
-        // typed into the composer after submission is never wiped by the
-        // later completion commit.
-        if (screen->_send_message_callback(message)) {
-            screen->_pending_submitted_text = message.c_str();
-        }
+        // Publish to the main loop. On acceptance the callback records the
+        // exact composer state that was submitted (inside the callback, so
+        // the marker is set under this same LVGL lock section, BEFORE the
+        // main loop can observe the mailbox entry). The composer is cleared
+        // only after persistence and queue admission succeed AND only when
+        // it still holds that same text. A rejected send keeps the text for
+        // a normal re-send, and anything typed after submission is never
+        // wiped by the later completion commit.
+        screen->_send_message_callback(message);
     }
+}
+
+void ChatScreen::set_pending_submitted_text(const std::string& text) {
+    // Recursive lock: the send callback runs on the LVGL task under the
+    // LVGL lock (on_send_message_from_chat holds it via the click handler's
+    // event context); this keeps the marker consistent with the composer.
+    LVGL_LOCK();
+    _pending_submitted_text = text;
 }
 
 void ChatScreen::clear_composer() {
     // Recursive lock: apply_outbound_result() calls this while already
     // holding the LVGL lock.
     LVGL_LOCK();
-    // Only clear if the composer still holds the exact text we submitted.
-    // Persistence + router admission run on the main loop off the LVGL
-    // lock, so the user may have started typing the next message before the
-    // commit lands; wiping an edited composer here would erase fresh input.
-    // An empty _pending_submitted_text means nothing is pending, in which
-    // case a clear is a no-op-safe reset.
+    // Only clear when a submission is pending (non-empty marker) and the
+    // composer still holds exactly the submitted text. Persistence + router
+    // admission run on the main loop off the LVGL lock, so the user may
+    // have started typing the next message before the commit lands; wiping
+    // an edited composer here would erase fresh input. An empty marker
+    // (rejected/retained send, or no submission) clears nothing — the
+    // retained text is kept deliberately for a normal re-send.
+    if (_pending_submitted_text.empty()) {
+        return;
+    }
     const char* current = lv_textarea_get_text(_text_area);
-    if (current != nullptr && _pending_submitted_text != current) {
+    if (current == nullptr || _pending_submitted_text != current) {
         return;
     }
     _pending_submitted_text.clear();

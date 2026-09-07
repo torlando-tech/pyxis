@@ -51,29 +51,47 @@ def test_clear_composer_is_generation_checked():
         "void ChatScreen::clear_composer()",
         "lv_group_focus_obj(_text_area);",
     )
-    # The clear must compare the current composer text against the
-    # captured submitted text and bail when they differ.
-    assert "_pending_submitted_text" in body, (
-        "clear_composer() no longer consults the submitted-text generation"
+    # The clear must bail when no submission is pending (empty marker) and
+    # compare the current composer text against the captured submitted text.
+    assert "_pending_submitted_text.empty()" in body, (
+        "clear_composer() must no-op when no submission is pending"
     )
+    assert "_pending_submitted_text" in body
     assert "lv_textarea_get_text(_text_area)" in body
     assert "return;" in body, (
         "clear_composer() must skip the clear when the composer was edited"
     )
 
 
-def test_send_click_records_submitted_text():
+def test_send_path_records_submitted_text_in_lock_section():
     source = chat_source()
+    ui_source = (ROOT / "lib/tdeck_ui/UI/LXMF/UIManager.cpp").read_text()
+    # The ChatScreen click handler must not assign the marker itself — the
+    # marker has to be set inside the callback (UIManager), in the same LVGL
+    # lock section as the mailbox publish, or the main loop can observe the
+    # mailbox entry before the marker exists (Greptile P1: completion race).
     body = function_body(
         source,
         "void ChatScreen::on_send_clicked(",
-        "void ChatScreen::clear_composer()",
+        "void ChatScreen::set_pending_submitted_text(",
     )
-    assert "_pending_submitted_text" in body, (
-        "on_send_clicked() must capture the submitted composer text on "
-        "acceptance so the later completion can identify it"
+    assert "_pending_submitted_text" not in body, (
+        "on_send_clicked() must not assign the marker outside the callback "
+        "lock section (race with the main-loop completion)"
     )
     assert "_send_message_callback(message)" in body
+    # The callback-side handler sets the marker right after acceptance,
+    # under the same LVGL lock the click handler already holds.
+    ui_body = function_body(
+        ui_source,
+        "bool UIManager::on_send_message_from_chat(const String& content)",
+        "void UIManager::on_call_from_chat()",
+    )
+    assert "set_pending_submitted_text" in ui_body, (
+        "on_send_message_from_chat must record the submitted text in the "
+        "same LVGL lock section as the mailbox publish"
+    )
+    assert "send_message(_current_peer_hash, content)" in ui_body
 
 
 def test_same_peer_reopen_checks_live_message_count():
