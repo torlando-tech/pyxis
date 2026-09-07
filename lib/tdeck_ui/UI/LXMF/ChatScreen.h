@@ -84,11 +84,35 @@ public:
     void load_conversation(const RNS::Bytes& peer_hash, ::LXMF::MessageStore& store);
 
     /**
+     * Prepare the current conversation's content. Call from
+     * UIManager::update() on the main loop after the chat route is active.
+     *
+     * load_conversation() (LVGL task) only navigates and clears the list;
+     * the store reads (identity recall, display-name lookup, message index,
+     * per-message metadata) are slow on a degraded LittleFS — a cold open
+     * can take several seconds — so running them under the LVGL lock (as the
+     * old synchronous path did) held the mutex past the 5s deadlock guard
+     * and rebooted the device (assert at LVGLLock.h:45). This method does
+     * that I/O on the main loop, then commits header + initial bubbles
+     * under a brief LVGL_LOCK. No-op when this peer is already prepared.
+     */
+    void prepare_conversation();
+
+    /**
      * Add a new message to the chat
      * @param message LXMF message to add
      * @param outgoing true if message is outgoing
      */
     void add_message(const ::LXMF::LXMessage& message, bool outgoing);
+
+    /**
+     * Clear the composer text input and refocus it. Called from the main
+     * loop once an outgoing send has been persisted and admitted (the LVGL
+     * send callback no longer clears synchronously — it defers to this).
+     * Takes the LVGL lock internally; call with the lock already held
+     * (recursive) or from the main loop before UI work.
+     */
+    void clear_composer();
 
     /**
      * Update delivery status of a message
@@ -131,9 +155,23 @@ public:
 
     /**
      * Set callback for sending messages
-     * @param callback Function to call when send button is pressed
+     * @param callback Function that sends the message; return true when the
+     *        send was accepted into the main-loop mailbox. The callback
+     *        (UIManager::on_send_message_from_chat) records the submitted
+     *        text via set_pending_submitted_text() in the same LVGL lock
+     *        section as the publish, so the main loop can never observe
+     *        the mailbox entry before the marker is set.
      */
     void set_send_message_callback(SendMessageCallback callback);
+
+    /**
+     * Record the composer text that was just published to the main-loop
+     * send mailbox. Must be called by the send callback in the same LVGL
+     * lock section as the publish so the completion commit (main loop) can
+     * match its clear to the exact submission. See ChatScreen.h field
+     * _pending_submitted_text.
+     */
+    void set_pending_submitted_text(const std::string& text);
 
     /**
      * Set callback for voice call button
@@ -173,8 +211,34 @@ private:
     ::LXMF::MessageStore* _message_store;
     std::deque<MessageItem> _messages;
 
+    // Composer text captured when a send was accepted into the main-loop
+    // mailbox. apply_outbound_result() only clears the composer when a
+    // non-empty marker matches the current composer text exactly, so input
+    // typed into the composer while persistence/admission was in flight is
+    // never erased by a later commit. Empty means "no pending submission",
+    // which clears nothing (safe for retry/rejected sends, where the text
+    // is retained deliberately). The marker is assigned by
+    // UIManager::on_send_message_from_chat() in the same LVGL lock section
+    // as the mailbox publish, so the main loop can never observe the
+    // mailbox entry before the marker is set.
+    std::string _pending_submitted_text;
+
     // Map message hash to bubble row for targeted updates
     std::map<RNS::Bytes, lv_obj_t*> _message_rows;
+
+    // Conversation-prepare state (main-loop I/O + LVGL commit). Both fields are
+    // only read/written while holding the LVGL lock (load_conversation, the
+    // prepare guard, and the commit are all locked sections), so they need no
+    // atomics. _prepare_generation disambiguates a same-peer re-open that
+    // happens while a prepare's I/O is in flight.
+    RNS::Bytes _prepared_peer_hash;
+    uint32_t _prepare_generation = 0;
+    // Message count at the moment the current rows were committed by
+    // prepare_conversation(). A same-peer re-open compares the store's live
+    // count against this: if it grew (a message for this peer landed while
+    // the chat was hidden), the early-return is not taken and prepare is
+    // re-armed. Zero means "nothing committed yet".
+    size_t _prepared_message_count = 0;
 
     BackCallback _back_callback;
     SendMessageCallback _send_message_callback;
@@ -244,6 +308,11 @@ private:
     void load_more_messages(size_t batch = MESSAGES_PER_PAGE);
     void scroll_to_bottom();
     static void on_scroll(lv_event_t* event);
+
+    // Guards background-fill batches against a peer change or a re-arm
+    // (prepare_conversation) that lands while a batch's metadata I/O is in
+    // flight; only read/written under the LVGL lock.
+    uint32_t _fill_generation = 0;
 
     // Utility
     static void format_timestamp(double timestamp, char* buf, size_t buf_size);

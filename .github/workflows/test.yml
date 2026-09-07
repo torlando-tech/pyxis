@@ -20,7 +20,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: torlando-tech/microReticulum
-          ref: cd0338e7fc07d3a7785a450656ba766491cbf6e8
+          ref: 921b3aa030525f819671d99eff1d1f28350c9b69
           path: .ci/microReticulum
 
       - name: Set up Python

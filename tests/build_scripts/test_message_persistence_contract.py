@@ -16,28 +16,44 @@ def function_body(source: str, signature: str, next_signature: str) -> str:
     return source[start:end]
 
 
-def test_outgoing_message_is_committed_before_display_and_send():
+def test_outgoing_send_is_published_off_lock_and_persisted_on_main_loop():
+    # Regression: the LVGL send callback used to run identity recall,
+    # RouterLock admission, and the LittleFS persistence under the LVGL lock.
+    # A multi-second save then tripped the 5s deadlock guard (LVGLLock.h:45)
+    # and rebooted the device. send_message must now stay allocation-light
+    # and lock-free; the durable work belongs in service_pending_sends,
+    # which update() services before LVGL_LOCK.
     source = UI_MANAGER.read_text()
-    body = function_body(
+    send_body = function_body(
         source,
         "bool UIManager::send_message(",
-        "void UIManager::on_message_received(",
+        "void UIManager::service_pending_sends(",
+    )
+    service_body = function_body(
+        source,
+        "void UIManager::service_pending_sends(",
+        "void UIManager::apply_outbound_result(",
     )
 
-    display = body.index("_chat_screen->add_message(message, true)")
-    if "_router.try_handle_outbound(" in body:
-        lock = body.index("RouterLock router_lock(0)")
-        admission = body.index("_router.try_handle_outbound(")
-        assert lock < admission < display
-        assert "persistOutgoingMessage" in body
-        assert "_store.save_message(message)" not in body
-        assert "return context.store->save_message(*context.message);" in source
-    else:
-        save = body.index("if (!_store.save_message(message))")
-        send = body.index("_router.handle_outbound(message)")
-        assert save < display < send
-    assert "Outgoing message persistence failed; message not queued" in body
-    assert "The message was not sent" in body
+    # LVGL-task side: publish only. No router lock, no persistence, no
+    # router admission on this path.
+    assert "_outgoing_sends.request(" in send_body
+    assert "RouterLock" not in send_body
+    assert "_router.try_handle_outbound(" not in send_body
+    assert "_store.save_message(" not in send_body
+
+    # Main-loop side: admission guard commits the final packed/stamped
+    # message immediately before queue ownership transfer.
+    lock = service_body.index("RouterLock router_lock(0)")
+    admission = service_body.index("_router.try_handle_outbound(")
+    assert lock < admission
+    assert "persistOutgoingMessage" in service_body
+    assert "Outgoing message persistence failed; message not queued" in service_body
+    assert "The message was not sent" in source
+
+    # update() services the mailbox before acquiring LVGL_LOCK.
+    update_body = function_body(source, "void UIManager::update()", "bool UIManager::send_message(")
+    assert update_body.index("service_pending_sends();") < update_body.index("LVGL_LOCK();")
 
 
 def test_ui_messages_prefer_lora_safe_opportunistic_delivery():
@@ -109,8 +125,18 @@ def test_delivery_state_is_committed_before_ui_update():
 def test_rejected_outgoing_message_keeps_retryable_input():
     chat = CHAT_SCREEN.read_text()
     compose = COMPOSE_SCREEN.read_text()
-    assert "if (screen->_send_message_callback(message))" in chat
+    ui = UI_MANAGER.read_text()
+    # Both send callbacks publish through the main-loop handoff; the LVGL
+    # handler itself no longer clears the input.
+    assert "screen->_send_message_callback(message)" in chat
+    assert "lv_textarea_set_text(screen->_text_area" not in chat.split(
+        "void ChatScreen::on_send_clicked("
+    )[1].split("}")[0]
     assert "if (screen->_send_callback && screen->_send_callback(dest_hash, message))" in compose
+    # The composer is cleared only after persistence + admission succeed,
+    # from the main-loop commit.
+    apply_body = ui[ui.index("void UIManager::apply_outbound_result("):]
+    assert "_chat_screen->clear_composer();" in apply_body
 
 
 def test_storage_error_dialogs_are_coalesced():
@@ -135,7 +161,9 @@ def test_successful_boot_cancels_ota_rollback_after_subsystems_initialize():
 
 
 def test_system_info_reports_littlefs_not_unmounted_spiffs():
-    source = (REPO_ROOT / "lib/tdeck_ui/UI/LXMF/SettingsScreen.cpp").read_text()
+    # The live system readouts (firmware build, storage, RAM) moved from the
+    # Settings screen to the Status screen; the contract follows them there.
+    source = (REPO_ROOT / "lib/tdeck_ui/UI/LXMF/StatusScreen.cpp").read_text()
     assert '"Firmware: " FIRMWARE_VERSION' in source
     assert "LittleFS.totalBytes()" in source
     assert "LittleFS.usedBytes()" in source

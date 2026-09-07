@@ -22,9 +22,14 @@ def test_transport_mode_setting_is_persisted():
 
 
 def test_transport_toggle_is_last_and_requires_explicit_warning_confirmation():
-    advanced = SETTINGS_CPP.index("create_advanced_section(_content);")
-    transport = SETTINGS_CPP.index("create_transport_mode_section(_content);")
-    assert advanced < transport
+    # Hub-and-spoke layout: the hub card rows and the sub-view builders must
+    # both place Transport last, after Advanced.
+    advanced_card = SETTINGS_CPP.index('create_card(_hub, LV_SYMBOL_SETTINGS, "Advanced"')
+    transport_card = SETTINGS_CPP.index('create_card(_hub, LV_SYMBOL_WARNING, "Transport"')
+    assert advanced_card < transport_card
+    advanced_view = SETTINGS_CPP.index("create_advanced_view(create_page(VIEW_ADVANCED))")
+    transport_view = SETTINGS_CPP.index("create_transport_mode_view(create_page(VIEW_TRANSPORT))")
+    assert advanced_view < transport_view
 
     assert "DANGER: Transport Mode" in SETTINGS_CPP
     assert "NOT RECOMMENDED" in SETTINGS_CPP

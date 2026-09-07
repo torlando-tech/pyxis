@@ -1453,9 +1453,8 @@ void setup_ui_manager() {
     // Set GPS for satellite count display
     ui_manager->set_gps(&gps);
 
-    // Configure settings screen
-    UI::LXMF::SettingsScreen* settings = ui_manager->get_settings_screen();
-    if (settings) {
+    // Publish the exact running build (with OTA slot) to the Status screen
+    if (ui_manager->get_status_screen()) {
         String firmware_info = FIRMWARE_VERSION;
         const esp_partition_t* running_partition = esp_ota_get_running_partition();
         if (running_partition) {
@@ -1463,10 +1462,13 @@ void setup_ui_manager() {
             firmware_info += running_partition->label;
             firmware_info += "]";
         }
-        settings->set_firmware_version(firmware_info);
-        // Pass GPS for status display
-        settings->set_gps(&gps);
+        ui_manager->get_status_screen()->set_firmware_version(firmware_info);
+        ui_manager->get_status_screen()->set_gps(&gps);
+    }
 
+    // Configure settings screen
+    UI::LXMF::SettingsScreen* settings = ui_manager->get_settings_screen();
+    if (settings) {
         // Set brightness change callback (immediate)
         settings->set_brightness_change_callback([](uint8_t brightness) {
             // Apply brightness immediately via display backlight
