@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "version": "v0.4.0",
+  "source_commit": "a5f85f6756f3e84c9c89b6af0e5f4de05511ceca",
+  "environment": "tdeck-release",
+  "chip_family": "ESP32-S3",
+  "flash_size": 8388608,
+  "persistence_safe": true,
+  "images": {
+    "bootloader.bin": { "file": "bootloader.bin", "offset": 0, "size": 15104, "sha256": "1776e4dd896a69d0a5c2e79957b0e2a88aa4129b1381d6478683515a1f6af343" },
+    "partitions.bin": { "file": "partitions.bin", "offset": 32768, "size": 3072, "sha256": "e8785be76da37fe969c989688231b354011f108a630303bbb2b65ed7bd0d33fa" },
+    "boot_app0.bin": { "file": "boot_app0.bin", "offset": 57344, "size": 8192, "sha256": "f94c5d786a7a8fab06ac5d10e33bf37711a6697636dc037559ea19cc410a17f0" },
+    "firmware.bin": { "file": "firmware.bin", "offset": 65536, "size": 2910848, "sha256": "1768700178c40b49dc2b2be0b1d8e74233b56fe4b153913ab339529f3880a830" }
+  }
+}
