@@ -952,8 +952,11 @@ void NomadNetCache::service(std::uint64_t now_ms) {
         if (transient_stall_count_ < MAX_TRANSIENT_STALL_TICKS) {
             ++transient_stall_count_;
             if (transient_stall_count_ == 1) transient_stall_start_ms_ = now_ms;
-        } else if (now_ms >= transient_stall_start_ms_ &&
-                   now_ms - transient_stall_start_ms_ >= MAX_TRANSIENT_STALL_MS) {
+        } else if (static_cast<std::uint32_t>(now_ms - transient_stall_start_ms_) >=
+                   static_cast<std::uint32_t>(MAX_TRANSIENT_STALL_MS)) {
+            // 32-bit unsigned subtraction is wrap-safe across the millis()
+            // wraparound, so the 10s window measures true elapsed time even
+            // when the stall spans the 49.7-day counter rollover.
             transient_stall_count_ = 0;
             transient_bail();
         }

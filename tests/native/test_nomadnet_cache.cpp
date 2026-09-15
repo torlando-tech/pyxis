@@ -85,6 +85,19 @@ int main(){int f=0;auto ck=[&](bool x,const char*n){if(!x){++f;std::cerr<<"FAIL 
  MemoryStorage slow_boot;slow_boot.available=false;NomadNetCache sc(slow_boot,cfg);
  uint64_t flat=0;for(int i=0;i<600&&sc.busy();++i){flat+=1;sc.service(flat);}
  ck(sc.busy(),"fast ticks alone do not disable the session cache");
+ // F3/wrap: the wall-time window must measure true elapsed time across the
+ // 32-bit millis() rollover. millis() is a 32-bit counter zero-extended at the
+ // call site, so model it that way: a stall that starts 7.8s below the counter
+ // max and wraps must still bail after 10s of elapsed ticks, not wait ~49.7
+ // days for the counter to lap the pre-wrap start value.
+ MemoryStorage wrap_boot;wrap_boot.available=false;NomadNetCache wc(wrap_boot,cfg);
+ const uint64_t wrap_pre=4294959500ULL;
+ for(int i=0;i<500&&wc.busy();++i)wc.service(wrap_pre+i);
+ ck(wc.busy(),"stall still active at tick floor before wrap");
+ uint64_t now=4294960000ULL;int wcap=0;
+ while(wc.busy()&&wcap<200000){wc.service(static_cast<std::uint32_t>(now));++now;++wcap;}
+ ck(!wc.busy(),"stall spanning the millis wrap still bails");
+ ck(wcap<200000,"wrap-spanning stall bails in bounded ticks, not ~49.7 days");
  // A seam that heals within the window terminates recovery cleanly. Boot
  // recovery transients do not degrade the namespace (the RECOVERY_BEGIN/END
  // paths keep it authoritative), so a healable transient still completes
