@@ -3101,7 +3101,7 @@ void UIManager::nomad_update() {
         _nomad_cache_pending_now = 0;
         _nomad_cache_pending_ttl = 0;
     }
-    _nomad_cache_flow.service();
+    _nomad_cache_flow.service(millis());
     if (_nomad_state == NomadState::CACHE) {
         if (_nomad_cache_generation != _nomad_navigation_generation) {
             _nomad_cache_flow.cancel();

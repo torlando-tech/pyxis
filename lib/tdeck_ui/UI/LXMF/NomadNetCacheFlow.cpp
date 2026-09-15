@@ -31,10 +31,10 @@ CacheFlowState NomadNetCacheFlow::begin(const CacheKey& key, std::uint64_t now,
     return state_;
 }
 
-void NomadNetCacheFlow::service() {
+void NomadNetCacheFlow::service(std::uint64_t now_ms) {
     if (state_ == CacheFlowState::CANCELLED || state_ == CacheFlowState::FAILED)
         return;
-    if (cache_.busy()) cache_.service();
+    if (cache_.busy()) cache_.service(now_ms);
     if (state_ == CacheFlowState::INVALIDATE) {
         if (cache_.busy()) return;
         if (!invalidation_admitted_) {

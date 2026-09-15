@@ -928,7 +928,48 @@ CacheResult NomadNetCache::invalidate(const CacheKey& key) {
     return result_;
 }
 
-void NomadNetCache::service() {
+void NomadNetCache::service(std::uint64_t now_ms) {
+    // Transient-stall guard (cross-call): compare this call's entry state to
+    // the previous call's. A transient (BUSY/UNAVAILABLE) retry changes none
+    // of the tracked bits, so an unchanged entry across consecutive service()
+    // calls is a stall; any advance resets the counter. The bail is gated on
+    // BOTH a tick floor and an elapsed-time window: a not-ready SD seam
+    // returns UNAVAILABLE immediately (no bus wait), so a pure tick budget
+    // could expire during a legitimate mount window and disable caching for
+    // the whole session. Past both bounds, bail so a persistently unhealthy
+    // SD seam can never pin the cache (and the NomadNet UI at "Checking SD
+    // page cache..."). The baseline is refreshed before the switch so every
+    // path — including early returns — leaves a correct entry for the next
+    // call.
+    if (operation_ != Operation::NONE &&
+        operation_ == transient_prev_op_ &&
+        offset_ == transient_prev_offset_ &&
+        scan_index_ == transient_prev_scan_index_ &&
+        cleanup_index_ == transient_prev_cleanup_index_ &&
+        scan_seen_ == transient_prev_scan_seen_ &&
+        read_open_ == transient_prev_read_open_ &&
+        write_open_ == transient_prev_write_open_) {
+        if (transient_stall_count_ < MAX_TRANSIENT_STALL_TICKS) {
+            ++transient_stall_count_;
+            if (transient_stall_count_ == 1) transient_stall_start_ms_ = now_ms;
+        } else if (static_cast<std::uint32_t>(now_ms - transient_stall_start_ms_) >=
+                   static_cast<std::uint32_t>(MAX_TRANSIENT_STALL_MS)) {
+            // 32-bit unsigned subtraction is wrap-safe across the millis()
+            // wraparound, so the 10s window measures true elapsed time even
+            // when the stall spans the 49.7-day counter rollover.
+            transient_stall_count_ = 0;
+            transient_bail();
+        }
+    } else if (operation_ != Operation::NONE) {
+        transient_stall_count_ = 0;
+    }
+    transient_prev_op_ = operation_;
+    transient_prev_offset_ = offset_;
+    transient_prev_scan_index_ = scan_index_;
+    transient_prev_cleanup_index_ = cleanup_index_;
+    transient_prev_scan_seen_ = scan_seen_;
+    transient_prev_read_open_ = read_open_;
+    transient_prev_write_open_ = write_open_;
     switch (operation_) {
         case Operation::NONE:
             return;
@@ -1426,6 +1467,65 @@ void NomadNetCache::service() {
             return;
         }
     }
+}
+
+void NomadNetCache::transient_bail() {
+    // The storage seam has been stalled for far longer than any real SPI
+    // contention or SD mount window. Stop retrying: release any in-flight
+    // storage resources (read handle, partial write, directory enumeration)
+    // so nothing leaks, drop all namespace authority (lookups and commits now
+    // bypass), and clear the in-flight op so the caller's flow falls through
+    // to a live fetch, restoring the pre-cache page-load behavior instead of
+    // a frozen UI. Each release is a bounded best effort: transient
+    // (BUSY/UNAVAILABLE) retries are re-tried a few times, and a still-open
+    // handle is accepted rather than re-pinning the op — the storage seam
+    // stays abandoned for the rest of the session, and its destructor closes
+    // whatever is left.
+    transient_stall_count_ = 0;
+    namespace_authoritative_ = false;
+    const bool list_was_active =
+        operation_ == Operation::RECOVERY_BEGIN ||
+        operation_ == Operation::RECOVERY_NEXT ||
+        operation_ == Operation::RECOVERY_END;
+    if (list_was_active) {
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            const auto list_result = storage_.endList();
+            if (!storage_result_is_transient(list_result)) break;
+        }
+    }
+    if (read_open_) {
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            const auto read_result = storage_.endRead();
+            if (!storage_result_is_transient(read_result)) {
+                read_open_ = false;
+                break;
+            }
+        }
+    }
+    if (write_open_) {
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            const auto write_result = storage_.abortWrite();
+            if (!storage_result_is_transient(write_result)) {
+                write_open_ = false;
+                break;
+            }
+        }
+    }
+    commit_job_ = false;
+    cleanup_stages_after_failure_ = false;
+    eviction_pending_ = false;
+    eviction_generation_ = -1;
+    quota_recovery_ = false;
+    recovery_complete_ = false;
+    offset_ = 0;
+    io_.clear();
+    metadata_bytes_.clear();
+    ExternalVector<std::uint8_t>().swap(body_);
+    operation_ = Operation::NONE;
+    // MISS (not BYPASS): for an admitted reload invalidation the flow accepts
+    // MISS as "the stale generation will not be served", which correctly falls
+    // through to a live fetch; a failed bail must never report a hard error.
+    result_ = CacheResult::MISS;
 }
 
 void NomadNetCache::cancel() {

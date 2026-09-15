@@ -2,9 +2,10 @@
 #include <map>
 #include <vector>
 #include <cstring>
+#include "NomadNetCache.h"
 #include "NomadNetCacheFlow.h"
 using namespace UI::LXMF::NomadNet;
-struct Mem:NomadNetStorage{std::map<std::string,std::vector<uint8_t>>f;std::string a;size_t p=0;bool w=false;bool isAvailable()const override{return true;}StorageResult beginRead(const char*n,uint32_t&s)override{auto i=f.find(n);if(i==f.end())return StorageResult::MISS;a=n;p=0;s=i->second.size();return StorageResult::OK;}StorageResult readChunk(uint8_t*o,size_t c,size_t&n)override{auto&v=f[a];n=std::min(c,v.size()-p);memcpy(o,v.data()+p,n);p+=n;return StorageResult::OK;}StorageResult endRead()override{return StorageResult::OK;}StorageResult beginWrite(const char*n)override{a=n;f[a].clear();w=true;return StorageResult::OK;}StorageResult writeChunk(const uint8_t*d,size_t z,size_t&n)override{n=z;f[a].insert(f[a].end(),d,d+z);return StorageResult::OK;}StorageResult commitWrite()override{w=false;return StorageResult::OK;}StorageResult abortWrite()override{w=false;return StorageResult::OK;}StorageResult remove(const char*n)override{return f.erase(n)?StorageResult::OK:StorageResult::MISS;}StorageResult rename(const char*x,const char*y)override{auto i=f.find(x);if(i==f.end())return StorageResult::MISS;f[y]=i->second;f.erase(i);return StorageResult::OK;}StorageResult stat(const char*,uint32_t&)override{return StorageResult::MISS;}StorageResult beginList(const char*)override{return StorageResult::OK;}StorageResult nextList(char*,size_t,bool&d)override{d=true;return StorageResult::OK;}StorageResult endList()override{return StorageResult::OK;}};
+struct Mem:NomadNetStorage{std::map<std::string,std::vector<uint8_t>>f;std::string a;size_t p=0;bool w=false;bool list_busy=false;bool isAvailable()const override{return true;}StorageResult beginRead(const char*n,uint32_t&s)override{auto i=f.find(n);if(i==f.end())return StorageResult::MISS;a=n;p=0;s=i->second.size();return StorageResult::OK;}StorageResult readChunk(uint8_t*o,size_t c,size_t&n)override{auto&v=f[a];n=std::min(c,v.size()-p);memcpy(o,v.data()+p,n);p+=n;return StorageResult::OK;}StorageResult endRead()override{return StorageResult::OK;}StorageResult beginWrite(const char*n)override{a=n;f[a].clear();w=true;return StorageResult::OK;}StorageResult writeChunk(const uint8_t*d,size_t z,size_t&n)override{n=z;f[a].insert(f[a].end(),d,d+z);return StorageResult::OK;}StorageResult commitWrite()override{w=false;return StorageResult::OK;}StorageResult abortWrite()override{w=false;return StorageResult::OK;}StorageResult remove(const char*n)override{return f.erase(n)?StorageResult::OK:StorageResult::MISS;}StorageResult rename(const char*x,const char*y)override{auto i=f.find(x);if(i==f.end())return StorageResult::MISS;f[y]=i->second;f.erase(i);return StorageResult::OK;}StorageResult stat(const char*,uint32_t&)override{return StorageResult::MISS;}StorageResult beginList(const char*)override{return list_busy?StorageResult::BUSY:StorageResult::OK;}StorageResult nextList(char*,size_t,bool&d)override{d=true;return StorageResult::OK;}StorageResult endList()override{return StorageResult::OK;}};
 int main(){int f=0;auto ck=[&](bool x,const char*n){if(!x){f++;std::cerr<<"FAIL "<<n<<"\n";}};Mem s;NomadNetCache c(s);NomadNetCacheFlow flow(c);CacheKey k{"0123456789abcdef0123456789abcdef","/page/index.mu",RequestDataClass::NIL};
  ck(flow.begin(k,100,false)==CacheFlowState::LOOKUP,"lookup first");for(int i=0;i<10&&flow.state()==CacheFlowState::LOOKUP;i++)flow.service();ck(flow.state()==CacheFlowState::NEED_LIVE,"miss needs live");std::vector<uint8_t>b={'o','k'};CacheEligibility e{true,true,false,false,false,false,RequestDataClass::NIL};ck(flow.acceptLive(b,e,100),"valid live accepted");ck(flow.pageReady()&&flow.status()=="Page loaded (live)","render ready before commit");for(int i=0;i<20;i++)flow.service();
  NomadNetCacheFlow hit(c);ck(hit.begin(k,101,false)==CacheFlowState::LOOKUP,"second lookup");for(int i=0;i<10&&hit.state()==CacheFlowState::LOOKUP;i++)hit.service();ExternalVector<uint8_t>out;ck(hit.state()==CacheFlowState::READY&&hit.takePage(out)&&std::equal(out.begin(),out.end(),b.begin(),b.end())&&hit.status()=="Cached page; current reachability not checked","hit without peer and without internal-vector copy");
@@ -27,4 +28,38 @@ int main(){int f=0;auto ck=[&](bool x,const char*n){if(!x){f++;std::cerr<<"FAIL 
  ck(recovering_reload.state()==CacheFlowState::NEED_LIVE,"reload starts exactly one live fetch only after terminal invalidation");
  ck(recovering.beginLookup(k,102)==CacheResult::PENDING,"post reload invalidation lookup");for(int i=0;i<50&&recovering.busy();++i)recovering.service();
  ck(recovering.lastResult()!=CacheResult::HIT,"reload during recovery removed stale generation");
+ // The device symptom: boot-time recovery pinned by a permanently BUSY SD
+ // seam (SPI mutex starved). Before the fix the flow sat in LOOKUP forever
+ // and the UI froze at "Checking SD page cache..."; now the stall budget
+ // expires and the flow falls through to a live fetch.
+ {
+ Mem hang;hang.list_busy=true;NomadNetCache hc(hang);NomadNetCacheFlow hf(hc);
+ CacheKey hk{"fedcba9876543210fedcba9876543210","/page/hang.mu",RequestDataClass::NIL};
+ ck(hf.begin(hk,1000,false)==CacheFlowState::LOOKUP,"hang lookup admitted");
+ uint64_t hclock=0;int serviced=0;
+ while(hf.state()==CacheFlowState::LOOKUP&&serviced<200000){hf.service(++hclock);++serviced;}
+ ck(hf.state()==CacheFlowState::NEED_LIVE,"pinned recovery no longer freezes the lookup");
+ ck(serviced<200000,"lookup reached live in bounded service ticks");
+ ck(hc.recoveryComplete()==false,"bailed recovery is not authoritative");
+ // F3: a flat (non-advancing) clock must NOT bail — the wall-time window has to
+ // elapse, so 500 fast no-progress ticks alone keep the cache (session) alive.
+ {
+ Mem hangf;hangf.list_busy=true;NomadNetCache hcf(hangf);NomadNetCacheFlow hff(hcf);
+ CacheKey hkf{"fedcba9876543210fedcba9876543210","/page/hangf.mu",RequestDataClass::NIL};
+ hff.begin(hkf,1000,false);
+ uint64_t flat=0;for(int i=0;i<600&&hff.state()==CacheFlowState::LOOKUP;++i){hff.service(flat);++flat;}
+ ck(hff.state()==CacheFlowState::LOOKUP,"flat clock keeps a fast-ticking cache from bailing");
+ }
+ // F1: a bail during an admitted RELOAD invalidation must fall through to a
+ // live fetch (NEED_LIVE), not report a hard "Page cache invalidation failed".
+ {
+ Mem hangr;hangr.list_busy=true;NomadNetCache hcr(hangr);NomadNetCacheFlow hfr(hcr);
+ CacheKey hkr{"fedcba9876543210fedcba9876543210","/page/hangr.mu",RequestDataClass::NIL};
+ hfr.begin(hkr,1000,true);
+ uint64_t rclock=0;int svc=0;
+ while((hfr.state()==CacheFlowState::INVALIDATE)&&svc<200000){hfr.service(++rclock);++svc;}
+ ck(hfr.state()==CacheFlowState::NEED_LIVE,"reload invalidation bail falls through to live");
+ ck(hfr.state()!=CacheFlowState::FAILED,"reload invalidation bail is not a hard failure");
+ }
+ }
  std::cout<<(f?"failed":"passed")<<"\n";return f?1:0;}

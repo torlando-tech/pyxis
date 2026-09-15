@@ -93,7 +93,11 @@ public:
     CacheResult beginRecovery(std::uint64_t now, bool cleanup_stages = false);
     CacheResult invalidate(const CacheKey& key);
 
-    void service();
+    // now_ms is a monotonic millisecond clock used to bound the transient-stall
+    // bail in wall-time (see the stall-guard note below). Production passes
+    // millis(); 0 is a safe default for tests that never expect a stall (the
+    // time window is only reached after 500 consecutive no-progress ticks).
+    void service(std::uint64_t now_ms = 0);
     void cancel();
     bool busy() const { return operation_ != Operation::NONE; }
     bool recoveryComplete() const { return recovery_complete_; }
@@ -225,6 +229,40 @@ private:
     int eviction_generation_ = -1;
     CacheResult quota_result_ = CacheResult::STORED;
     bool quota_recovery_ = false;
+
+    // Transient-stall guard. A storage op that returns BUSY/UNAVAILABLE (SPI
+    // mutex starved, card not mounted) is retried forever by the step machine;
+    // on a persistently unhealthy seam that pins operation_ != NONE and the
+    // NomadNet UI freezes at "Checking SD page cache...". service() compares
+    // this call's entry state to the previous call's: any advance (op change,
+    // offset, scan/cleanup index, scan count, open-flag) resets the stall
+    // counter, so slow-but-progressing steps (chunked reads/writes, directory
+    // scans) never false-trip; a tick with no advance is a transient stall.
+    //
+    // The bail is time-bounded, not tick-bounded: a not-ready SD seam returns
+    // UNAVAILABLE immediately (no bus wait), so the main loop can spin many
+    // ticks in a second and a pure tick budget would expire during a
+    // legitimate mount window and disable caching for the whole session.
+    // Both a tick floor (protects a pathological fast tick loop) AND an elapsed
+    // wall-time window must pass before the cache bails. 10s comfortably
+    // exceeds the one-time boot mount window (~2.5s, and recovery starts after
+    // UI-ready with the card already mounted) and any SPI contention burst.
+    // On bail the namespace is marked non-authoritative for the session
+    // (lookups/commits then bypass) and the in-flight op is cleared, so the
+    // flow falls through to a live fetch (the pre-cache behavior) instead of
+    // a frozen UI.
+    static constexpr std::uint32_t MAX_TRANSIENT_STALL_TICKS = 500;
+    static constexpr std::uint64_t MAX_TRANSIENT_STALL_MS = 10000;
+    Operation transient_prev_op_ = Operation::NONE;
+    std::size_t transient_prev_offset_ = 0;
+    std::size_t transient_prev_scan_index_ = 0;
+    std::size_t transient_prev_cleanup_index_ = 0;
+    std::size_t transient_prev_scan_seen_ = 0;
+    bool transient_prev_read_open_ = false;
+    bool transient_prev_write_open_ = false;
+    std::uint32_t transient_stall_count_ = 0;
+    std::uint64_t transient_stall_start_ms_ = 0;
+    void transient_bail();
 
     static constexpr std::size_t VERIFY_SCRATCH_BYTES = 1024;
     std::array<std::uint8_t, VERIFY_SCRATCH_BYTES> verify_scratch_{};
