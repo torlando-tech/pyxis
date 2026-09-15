@@ -22,7 +22,7 @@ public:
     explicit NomadNetCacheFlow(NomadNetCache& cache) : cache_(cache) {}
 
     CacheFlowState begin(const CacheKey&, std::uint64_t now, bool reload);
-    void service();
+    void service(std::uint64_t now_ms = 0);
     bool acceptLive(const std::vector<std::uint8_t>&, const CacheEligibility&,
                     std::uint64_t now);
     void cancel();

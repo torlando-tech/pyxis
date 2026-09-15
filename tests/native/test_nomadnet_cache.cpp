@@ -23,7 +23,7 @@ struct MemoryStorage final:NomadNetStorage{
  StorageResult stat(const char*n,uint32_t&s)override{++operations;if(n==stat_fail_path&&stat_fail_result!=StorageResult::OK)return stat_fail_result;auto i=files.find(n);if(i==files.end())return StorageResult::MISS;s=i->second.size();return StorageResult::OK;}
  StorageResult beginList(const char*d)override{++operations;list.clear();for(auto&f:files)if(f.first.rfind(std::string(d)+"/",0)==0)list.push_back(f.first);li=0;return available?list_result:StorageResult::UNAVAILABLE;}
  StorageResult nextList(char*n,size_t c,bool&done)override{++operations;if(next_list_fail_at&&static_cast<int>(li+1)==next_list_fail_at)return StorageResult::IO_ERROR;if(li==list.size()){done=true;return StorageResult::OK;}done=false;if(list[li].size()+1>c){++li;return StorageResult::TOO_LARGE;}std::memcpy(n,list[li].c_str(),list[li].size()+1);++li;return StorageResult::OK;}
- StorageResult endList()override{++operations;return StorageResult::OK;}std::vector<std::string>list;size_t li=0;
+ StorageResult endList()override{++operations;if(list_close_busy)return StorageResult::BUSY;return StorageResult::OK;}std::vector<std::string>list;size_t li=0;bool list_close_busy=false;
 };
 static CacheKey key(const char*path="/page/index.mu"){return CacheKey{"0123456789abcdef0123456789abcdef",path,RequestDataClass::NIL};}
 // A seam whose directory enumeration is permanently BUSY (SPI mutex starved
@@ -68,12 +68,43 @@ int main(){int f=0;auto ck=[&](bool x,const char*n){if(!x){++f;std::cerr<<"FAIL 
  // A persistently transient seam during boot-time recovery must not pin the
  // cache (and the UI). Before this fix the recovery retried beginList forever;
  // now the stall budget expires, the namespace is marked non-authoritative,
- // and the op clears so the flow can fall through to a live fetch.
+ // and the op clears so the flow can fall through to a live fetch. The bail is
+ // gated on wall-time, so the driver advances a fake monotonic clock (1ms per
+ // tick) so the time window elapses in a bounded number of ticks.
+ auto stall_run=[](NomadNetCache&c){uint64_t now=0;for(int i=0;i<200000&&c.busy();++i){now+=1;c.service(now);}};
  MemoryStorage busy_boot;busy_boot.available=false;NomadNetCache bc(busy_boot,cfg);
- for(int i=0;i<2000&&bc.busy();++i)bc.service();
+ stall_run(bc);
  ck(!bc.busy(),"persistent transient recovery bails instead of pinning");
  ck(!bc.recoveryComplete(),"bailed recovery is not authoritative");
  ck(bc.beginLookup(key(),100)==CacheResult::BYPASS,"post-bail lookup bypasses to live");
+ ck(busy_boot.active.empty(),"bail does not leak a read handle");
+ // F3: 500 fast no-progress ticks are NOT enough to bail; the wall-time window
+ // (10s) must also elapse. With a flat (slow) clock the stall must survive well
+ // past the tick floor so a healthy SD that stays briefly quiet keeps its cache
+ // authority for the session.
+ MemoryStorage slow_boot;slow_boot.available=false;NomadNetCache sc(slow_boot,cfg);
+ uint64_t flat=0;for(int i=0;i<600&&sc.busy();++i){flat+=1;sc.service(flat);}
+ ck(sc.busy(),"fast ticks alone do not disable the session cache");
+ // A seam that heals within the window terminates recovery cleanly. Boot
+ // recovery transients do not degrade the namespace (the RECOVERY_BEGIN/END
+ // paths keep it authoritative), so a healable transient still completes
+ // recovery authoritatively and the session cache remains usable.
+ MemoryStorage recover;recover.available=false;NomadNetCache hr(recover,cfg);
+ uint64_t hrnow=0;int guard=0;for(;hr.busy()&&guard<100000;++guard,++hrnow){if(guard==500)recover.available=true;hr.service(hrnow);}
+ ck(!hr.busy(),"seam that heals within the window terminates recovery");
+ ck(hr.recoveryComplete(),"healable transient keeps the namespace authoritative");
+ ck(hr.beginLookup(key(),100)==CacheResult::PENDING,"post-heal lookup uses the cache, not a bypass");
+ // F2: a bail while the directory enumeration handle is open (RECOVERY_END
+ // endList stuck BUSY) must release it rather than leak it. A fresh boot
+ // recovery opens the list in RECOVERY_BEGIN and closes it in RECOVERY_END, so
+ // a seam whose endList is persistently BUSY reaches the guard with the list
+ // handle open — exactly the device case a stale SPI mutex can produce.
+ MemoryStorage list_seam;list_seam.list_close_busy=true;
+ NomadNetCache list_recover(list_seam,cfg);
+ uint64_t lnow=0;for(int i=0;i<200000&&list_recover.busy();++i){lnow+=1;list_recover.service(lnow);}
+ ck(!list_recover.busy(),"list-open stall bails instead of pinning");
+ ck(!list_recover.recoveryComplete(),"bailed recovery is not authoritative");
+ ck(list_recover.beginLookup(key(),100)==CacheResult::BYPASS,"post list-bail lookup bypasses to live");
  // Deterministic expired-first then oldest quota eviction.
  MemoryStorage s3;NomadNetCache c3(s3,cfg);drain(c3,&s3);for(int i=0;i<3;i++){auto k=key((std::string("/page/")+char('a'+i)).c_str());ck(c3.beginCommit(k,body,400+i,i==0?1:100)==CacheResult::PENDING,"quota commit");drain(c3);}ck(c3.entryCount()<=2&&c3.totalBytes()<=cfg.max_bytes,"quotas bounded");ck(c3.beginLookup(key("/page/a"),500)==CacheResult::PENDING,"evicted lookup");drain(c3);ck(c3.lastResult()!=CacheResult::HIT,"expired evicted first");
 

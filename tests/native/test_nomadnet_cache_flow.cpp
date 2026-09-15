@@ -36,9 +36,30 @@ int main(){int f=0;auto ck=[&](bool x,const char*n){if(!x){f++;std::cerr<<"FAIL 
  Mem hang;hang.list_busy=true;NomadNetCache hc(hang);NomadNetCacheFlow hf(hc);
  CacheKey hk{"fedcba9876543210fedcba9876543210","/page/hang.mu",RequestDataClass::NIL};
  ck(hf.begin(hk,1000,false)==CacheFlowState::LOOKUP,"hang lookup admitted");
- int serviced=0;
- while(hf.state()==CacheFlowState::LOOKUP&&serviced<10000){hf.service();++serviced;}
+ uint64_t hclock=0;int serviced=0;
+ while(hf.state()==CacheFlowState::LOOKUP&&serviced<200000){hf.service(++hclock);++serviced;}
  ck(hf.state()==CacheFlowState::NEED_LIVE,"pinned recovery no longer freezes the lookup");
- ck(serviced<10000,"lookup reached live in bounded service ticks");
+ ck(serviced<200000,"lookup reached live in bounded service ticks");
+ ck(hc.recoveryComplete()==false,"bailed recovery is not authoritative");
+ // F3: a flat (non-advancing) clock must NOT bail — the wall-time window has to
+ // elapse, so 500 fast no-progress ticks alone keep the cache (session) alive.
+ {
+ Mem hangf;hangf.list_busy=true;NomadNetCache hcf(hangf);NomadNetCacheFlow hff(hcf);
+ CacheKey hkf{"fedcba9876543210fedcba9876543210","/page/hangf.mu",RequestDataClass::NIL};
+ hff.begin(hkf,1000,false);
+ uint64_t flat=0;for(int i=0;i<600&&hff.state()==CacheFlowState::LOOKUP;++i){hff.service(flat);++flat;}
+ ck(hff.state()==CacheFlowState::LOOKUP,"flat clock keeps a fast-ticking cache from bailing");
+ }
+ // F1: a bail during an admitted RELOAD invalidation must fall through to a
+ // live fetch (NEED_LIVE), not report a hard "Page cache invalidation failed".
+ {
+ Mem hangr;hangr.list_busy=true;NomadNetCache hcr(hangr);NomadNetCacheFlow hfr(hcr);
+ CacheKey hkr{"fedcba9876543210fedcba9876543210","/page/hangr.mu",RequestDataClass::NIL};
+ hfr.begin(hkr,1000,true);
+ uint64_t rclock=0;int svc=0;
+ while((hfr.state()==CacheFlowState::INVALIDATE)&&svc<200000){hfr.service(++rclock);++svc;}
+ ck(hfr.state()==CacheFlowState::NEED_LIVE,"reload invalidation bail falls through to live");
+ ck(hfr.state()!=CacheFlowState::FAILED,"reload invalidation bail is not a hard failure");
+ }
  }
  std::cout<<(f?"failed":"passed")<<"\n";return f?1:0;}
