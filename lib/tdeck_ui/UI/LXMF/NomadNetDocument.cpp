@@ -897,6 +897,117 @@ bool parse_partial_descriptor(const std::string& line, Partial& partial,
     return true;
 }
 
+// Parse an image width/height property value into an ImageSize, mirroring the
+// reference NomadNet _check_size_spec semantics (a positive integer is a size,
+// "n" is native resolution, "NN%" is a percent). The reference treats an
+// integer as terminal columns/rows; the fixed-pixel device reinterprets it as
+// a bounded pixel budget. Invalid specs return false (the reference drops an
+// invalid width/height in its per-property try/except, so the widget keeps its
+// default), and the caller leaves the dimension NONE.
+bool parse_image_size(const std::string& value, ImageSize& out) {
+    if (value == "n") {
+        out.kind = ImageDimension::NATIVE;
+        out.value = 0;
+        return true;
+    }
+    if (!value.empty() && std::all_of(value.begin(), value.end(),
+            [](unsigned char c) { return std::isdigit(c) != 0; })) {
+        char* end = nullptr;
+        const long parsed = std::strtol(value.c_str(), &end, 10);
+        if (!end || *end != '\0' || parsed <= 0) return false;
+        out.kind = ImageDimension::PIXELS;
+        out.value = static_cast<uint16_t>(
+            std::min<long>(parsed, DocumentParser::MAX_IMAGE_PIXEL_BUDGET));
+        return true;
+    }
+    if (value.size() >= 2 && value.back() == '%') {
+        const std::string digits = value.substr(0, value.size() - 1);
+        if (!digits.empty() && std::all_of(digits.begin(), digits.end(),
+                [](unsigned char c) { return std::isdigit(c) != 0; })) {
+            char* end = nullptr;
+            const long parsed = std::strtol(digits.c_str(), &end, 10);
+            if (!end || *end != '\0' || parsed <= 0) return false;
+            out.kind = ImageDimension::PERCENT;
+            out.value = static_cast<uint16_t>(std::min<long>(parsed, 100));
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string trim_copy(const std::string& value) {
+    std::size_t first = 0;
+    while (first < value.size() && std::isspace(static_cast<unsigned char>(value[first]))) ++first;
+    std::size_t last = value.size();
+    while (last > first && std::isspace(static_cast<unsigned char>(value[last - 1]))) --last;
+    return value.substr(first, last - first);
+}
+
+// Attempt to parse a line that has already been confirmed to begin with "`("
+// as an image tag, per reference parse_image semantics (MicronParser.py:221):
+// rfind(")"), split on backticks, fields[0] = alt (stripped), fields[-1] = url
+// (stripped), middle fields are key=value properties (unknown keys ignored;
+// a/l/c align shorthands). On success fills `image` and returns true. On
+// failure (no closing paren, fewer than two backtick fields) returns false so
+// the caller renders the line as ordinary inline text. A bounded url that
+// overflows IMAGE_URL_BYTES also returns false (with the reason set) because a
+// truncated fetch/cache path would be corrupt; an overlong alt is truncated
+// (reason set) but still admitted.
+bool parse_image_tag(const std::string& line, Image& image,
+                     TruncationReason& limit_reason) {
+    limit_reason = TruncationReason::NONE;
+    const std::size_t endpos = line.rfind(")");
+    if (endpos == std::string::npos || endpos == 0) return false;
+    const std::string image_data = line.substr(0, endpos);
+    std::vector<std::string> fields;
+    std::size_t start = 0;
+    while (true) {
+        const std::size_t sep = image_data.find('`', start);
+        fields.push_back(image_data.substr(start,
+            sep == std::string::npos ? std::string::npos : sep - start));
+        if (sep == std::string::npos) break;
+        start = sep + 1;
+    }
+    if (fields.size() < 2) return false;
+
+    std::string alt = trim_copy(fields.front());
+    std::string url = trim_copy(fields.back());
+    if (url.size() > DocumentParser::MAX_IMAGE_URL_BYTES) {
+        limit_reason = TruncationReason::IMAGE_URL_BYTES;
+        return false;
+    }
+    if (alt.size() > DocumentParser::MAX_IMAGE_ALT_BYTES) {
+        std::size_t retained = DocumentParser::MAX_IMAGE_ALT_BYTES;
+        while (retained > 0 && retained < alt.size() &&
+               (static_cast<unsigned char>(alt[retained]) & 0xc0) == 0x80) --retained;
+        alt.resize(retained);
+        limit_reason = TruncationReason::IMAGE_ALT_BYTES;
+    }
+    image.alt = std::move(alt);
+    image.url = std::move(url);
+
+    Alignment align = Alignment::LEFT;
+    ImageSize width;
+    ImageSize height;
+    for (std::size_t i = 1; i + 1 < fields.size(); ++i) {
+        const std::size_t eq = fields[i].find('=');
+        if (eq == std::string::npos) continue;
+        const std::string key = trim_copy(fields[i].substr(0, eq));
+        const std::string value = trim_copy(fields[i].substr(eq + 1));
+        if (key == "w") parse_image_size(value, width);
+        else if (key == "h") parse_image_size(value, height);
+        else if (key == "a") {
+            if (value == "c" || value == "center") align = Alignment::CENTER;
+            else if (value == "l" || value == "left") align = Alignment::LEFT;
+            else if (value == "r" || value == "right") align = Alignment::RIGHT;
+        }
+    }
+    image.align = align;
+    image.width = width;
+    image.height = height;
+    return true;
+}
+
 } // namespace
 
 Document DocumentParser::parse(const std::string& source) const {
@@ -1132,6 +1243,44 @@ Document DocumentParser::parse(const char* source, std::size_t size) const {
                 line.size() == 1 + codepoint_bytes && codepoint >= 32) {
                 block.divider_codepoint = codepoint;
             }
+        } else if (line.rfind("`(", 0) == 0) {
+            // Mirror the reference exactly: parse_image(line[2:]) — the tag
+            // opener "`(" is stripped before the alt/props/url are split.
+            Image image;
+            TruncationReason image_limit = TruncationReason::NONE;
+            if (parse_image_tag(line.substr(2), image, image_limit)) {
+                if (image_limit != TruncationReason::NONE) doc.mark_truncated(image_limit);
+                if (doc.images.size() >= MAX_IMAGES) {
+                    doc.mark_truncated(TruncationReason::IMAGES);
+                    block.type = BlockType::UNSUPPORTED;
+                    Run run;
+                    run.text = "[Image omitted: limits exceeded]";
+                    block.runs.push_back(std::move(run));
+                } else {
+                    block.type = BlockType::IMAGE;
+                    doc.images.push_back(std::move(image));
+                    block.image_index = static_cast<int16_t>(doc.images.size() - 1);
+                    Run run;
+                    run.text = "[Image: loading]";
+                    block.runs.push_back(std::move(run));
+                }
+            } else if (image_limit != TruncationReason::NONE) {
+                // A recognized image tag with a bounded field (url) that
+                // overflowed: record the truncation and render a placeholder
+                // rather than attempting a fetch/cache path that would be
+                // corrupt.
+                doc.mark_truncated(image_limit);
+                block.type = BlockType::UNSUPPORTED;
+                Run run;
+                run.text = "[Image omitted: field exceeds limits]";
+                block.runs.push_back(std::move(run));
+            } else {
+                // Not a valid image tag: the reference renders such a line as
+                // ordinary inline text, so re-apply the escape marker and fall
+                // through to the inline path below.
+                if (pre_escaped) line.insert(line.begin(), '\\');
+                parse_inline(doc, block, line, style);
+            }
         } else if (line.rfind("`{", 0) == 0) {
             Partial partial;
             TruncationReason partial_limit = TruncationReason::NONE;
@@ -1274,6 +1423,15 @@ std::string truncation_notice(const Document& document) {
         return "[Page truncated: too many dynamic partial fields]";
     if (document.has_truncation(TruncationReason::PARTIAL_FIELD_BYTES))
         return "[Page truncated: dynamic partial field exceeds limits]";
+    if (document.has_truncation(TruncationReason::IMAGES))
+        return "[Page truncated: more than " +
+            std::to_string(DocumentParser::MAX_IMAGES) + " images]";
+    if (document.has_truncation(TruncationReason::IMAGE_ALT_BYTES))
+        return "[Page truncated: image alt-text exceeds " +
+            std::to_string(DocumentParser::MAX_IMAGE_ALT_BYTES) + " bytes]";
+    if (document.has_truncation(TruncationReason::IMAGE_URL_BYTES))
+        return "[Page truncated: image URL exceeds " +
+            std::to_string(DocumentParser::MAX_IMAGE_URL_BYTES) + " bytes]";
     if (document.has_truncation(TruncationReason::FORM_NAME_BYTES))
         return "[Page truncated: form field name exceeds " +
             std::to_string(DocumentParser::MAX_FIELD_NAME_BYTES) + " bytes]";

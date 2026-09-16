@@ -64,6 +64,7 @@ bool CompactPage::assign(const Document& document) {
                 anchor.name.size() <= DocumentParser::MAX_ANCHOR_NAME_BYTES)
                 ++anchor_count;
         }
+        const std::size_t image_count = std::min(document.images.size(), MAX_IMAGES);
         std::size_t run_count = 0;
         std::size_t arena_size = 0;
         for (std::size_t i = 0; i < block_count; ++i) {
@@ -104,6 +105,12 @@ bool CompactPage::assign(const Document& document) {
             if (bytes > MAX_ARENA_BYTES - std::min(arena_size, MAX_ARENA_BYTES)) return false;
             arena_size += bytes;
         }
+        for (std::size_t i = 0; i < image_count; ++i) {
+            const std::size_t bytes = document.images[i].alt.size() +
+                document.images[i].url.size() + 2;
+            if (bytes > MAX_ARENA_BYTES - std::min(arena_size, MAX_ARENA_BYTES)) return false;
+            arena_size += bytes;
+        }
         std::size_t anchors_accounted = 0;
         for (const auto& anchor : document.anchors) {
             if (anchors_accounted >= anchor_count) break;
@@ -127,6 +134,7 @@ bool CompactPage::assign(const Document& document) {
         _table_cells.reserve(table_cell_count);
         _partials.reserve(partial_count);
         _partial_fields.reserve(partial_field_count);
+        _images.reserve(image_count);
 
         for (std::size_t i = 0; i < link_count; ++i) {
             LinkRecord link;
@@ -185,6 +193,22 @@ bool CompactPage::assign(const Document& document) {
             _partials.push_back(partial);
         }
 
+        for (std::size_t i = 0; i < image_count; ++i) {
+            const auto& source = document.images[i];
+            ImageRecord image;
+            if (!append(source.alt, image.alt_offset, image.alt_length) ||
+                !append(source.url, image.url_offset, image.url_length)) {
+                clear();
+                return false;
+            }
+            image.width_kind = source.width.kind;
+            image.height_kind = source.height.kind;
+            image.width_value = source.width.value;
+            image.height_value = source.height.value;
+            image.align = source.align;
+            _images.push_back(image);
+        }
+
         for (const auto& source_anchor : document.anchors) {
             if (_anchors.size() >= anchor_count) break;
             if (source_anchor.block_index >= block_count ||
@@ -219,6 +243,9 @@ bool CompactPage::assign(const Document& document) {
             block.partial_region_index = source_block.partial_region_index >= 0 &&
                 static_cast<std::size_t>(source_block.partial_region_index) < partial_count
                     ? source_block.partial_region_index : -1;
+            block.image_index = source_block.image_index >= 0 &&
+                static_cast<std::size_t>(source_block.image_index) < image_count
+                    ? source_block.image_index : -1;
             for (const auto& source_run : source_block.runs) {
                 if (_runs.size() >= run_limit || block.run_count == std::numeric_limits<uint16_t>::max()) {
                     _truncated = true;
@@ -713,6 +740,7 @@ void CompactPage::clear() {
     ExternalVector<FieldRecord>().swap(_fields);
     ExternalVector<PartialRecord>().swap(_partials);
     ExternalVector<PartialFieldRecord>().swap(_partial_fields);
+    ExternalVector<ImageRecord>().swap(_images);
     _has_background = false;
     _background = 0;
     _has_foreground = false;
@@ -734,6 +762,7 @@ CompactPage& CompactPage::operator=(CompactPage&& other) noexcept {
     _fields.swap(other._fields);
     _partials.swap(other._partials);
     _partial_fields.swap(other._partial_fields);
+    _images.swap(other._images);
     std::swap(_has_background, other._has_background);
     std::swap(_background, other._background);
     std::swap(_has_foreground, other._has_foreground);
@@ -784,6 +813,16 @@ bool CompactPage::append_notice(const std::string& value) {
 CompactPage::TextView CompactPage::text(const RunRecord& run) const {
     if (run.text_offset > _arena.size() || run.text_length > _arena.size() - run.text_offset) return {};
     return {_arena.data() + run.text_offset, run.text_length};
+}
+
+CompactPage::TextView CompactPage::image_alt(const ImageRecord& image) const {
+    if (image.alt_offset > _arena.size() || image.alt_length > _arena.size() - image.alt_offset) return {};
+    return {_arena.data() + image.alt_offset, image.alt_length};
+}
+
+CompactPage::TextView CompactPage::image_url(const ImageRecord& image) const {
+    if (image.url_offset > _arena.size() || image.url_length > _arena.size() - image.url_offset) return {};
+    return {_arena.data() + image.url_offset, image.url_length};
 }
 
 CompactPage::TextView CompactPage::target(std::size_t index) const {

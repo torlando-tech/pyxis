@@ -1,0 +1,237 @@
+{
+  "commit": "ca332209cb5567c9b249c86788cb2dbf8847e760",
+  "files": {
+    "src/dec/alpha_dec.c": {
+      "bytes": 7722,
+      "sha256": "a20cece11ec9f30f3afae96c65ee434eea56ad67398705b3976a20be812aaba9"
+    },
+    "src/dec/alphai_dec.h": {
+      "bytes": 1664,
+      "sha256": "63c06bb81e8df0a5eaffa8886ec9307e92c4c3c2d028d862fafa386fb30c4ef0"
+    },
+    "src/dec/buffer_dec.c": {
+      "bytes": 10694,
+      "sha256": "d8f306069dfa3d330599b15c0b268540e710854b04a9e57aa9d0d11f89ad19c5"
+    },
+    "src/dec/common_dec.h": {
+      "bytes": 1684,
+      "sha256": "93cd2ce0ecddbf36d407e31277519ac5a14bc527c1f3b1a954299f6b0eac9e8f"
+    },
+    "src/dec/frame_dec.c": {
+      "bytes": 28258,
+      "sha256": "ba2ab685f1a15988167ec063bd49b4eccbdc9a42716c7d8306fa46f724f4b3bf"
+    },
+    "src/dec/idec_dec.c": {
+      "bytes": 31164,
+      "sha256": "040a558190264e102f7b55412da6c8e6e1523b3a89780e3104fa808a6c6b1e26"
+    },
+    "src/dec/io_dec.c": {
+      "bytes": 23945,
+      "sha256": "8e876062c177aac6625fbb9eafed5de267ac644a0868e51242120d010617fec7"
+    },
+    "src/dec/quant_dec.c": {
+      "bytes": 4061,
+      "sha256": "5f21409c8f46d91474ed56ff671fab0a5ac60457f8abc8188f4025992dad80f5"
+    },
+    "src/dec/tree_dec.c": {
+      "bytes": 23519,
+      "sha256": "ce07ffb41f06501b703df88e2a3775c70a52dd168f82621392c02eba01c1d27f"
+    },
+    "src/dec/vp8_dec.c": {
+      "bytes": 22356,
+      "sha256": "fd15a60a254d03290c27a3e51074bd22836e5b9b88895d443ebd25239f6d1271"
+    },
+    "src/dec/vp8_dec.h": {
+      "bytes": 6989,
+      "sha256": "185ed65221b4929c70572f4a48bdb8eb76e3cada8e954c036b90c1d4c6e0fa5e"
+    },
+    "src/dec/vp8i_dec.h": {
+      "bytes": 11643,
+      "sha256": "6f2b39d5334bcc596d513624c92086bf55dc4fc9525451428246b319610e71f3"
+    },
+    "src/dec/vp8l_dec.c": {
+      "bytes": 60560,
+      "sha256": "0285c8681f9219bd9d1c1fa0b4991e2596b21bba94b400190cf50211a1d140cc"
+    },
+    "src/dec/vp8li_dec.h": {
+      "bytes": 4732,
+      "sha256": "a8c6e758825b9a4261229827aa90e3568cdb346139146e6693e62ce57b4ce6f7"
+    },
+    "src/dec/webp_dec.c": {
+      "bytes": 30622,
+      "sha256": "060c2a7a9caca443b60e55decbaaed2d2726370be057cdbe4f22fc7acd27f3d3"
+    },
+    "src/dec/webpi_dec.h": {
+      "bytes": 6379,
+      "sha256": "0894e0958feea2fd5d5a69dc5d324f3eeac37964ae89f4ba75798563da4c24f5"
+    },
+    "src/dsp/alpha_processing.c": {
+      "bytes": 19458,
+      "sha256": "775d21b679db69eb6f1eb3dcc46e72fe6c2cc10d12410ede5fb527d848e7f4f6"
+    },
+    "src/dsp/cpu.c": {
+      "bytes": 8019,
+      "sha256": "512700fce190fa4cda9a1a320860444d08f9014945603ac144fc4d0effca1665"
+    },
+    "src/dsp/cpu.h": {
+      "bytes": 8835,
+      "sha256": "4707141935d0cf24c6c85856140b1dfd4ea88a4f217f10ca247aee7cf885d6fc"
+    },
+    "src/dsp/dec.c": {
+      "bytes": 27341,
+      "sha256": "ae4c7616cbb980f0fd5cacebfe1d1b7706c20d3246922cc5e8a7446d70ca9d94"
+    },
+    "src/dsp/dec_clip_tables.c": {
+      "bytes": 23956,
+      "sha256": "9755a04260ffef50eea7ffcf97f24c6853ab75bc3b99a2a93795283e98644877"
+    },
+    "src/dsp/dsp.h": {
+      "bytes": 21696,
+      "sha256": "79110cee5f728504fae5c6e80ceee49cbbaed297507aefdfe24e97db5451967d"
+    },
+    "src/dsp/filters.c": {
+      "bytes": 9442,
+      "sha256": "a31cea6ff53ef30aa9904bb891b4eb0f0cc030263e70251c9ae9058a107cf531"
+    },
+    "src/dsp/lossless.c": {
+      "bytes": 25652,
+      "sha256": "937cd76b4297f13538f4cc82923495cff0d799a83c7ceb01ea4b45f14461b650"
+    },
+    "src/dsp/lossless.h": {
+      "bytes": 11941,
+      "sha256": "bcc870e51147a7c84ebe1c58f29810f9362fa522378f29dbeda11776a1b4b890"
+    },
+    "src/dsp/lossless_common.h": {
+      "bytes": 7366,
+      "sha256": "a71312f03a9d82689634b034ae48b431afd51fe9b245ff55e517cc82b380c34d"
+    },
+    "src/dsp/rescaler.c": {
+      "bytes": 8120,
+      "sha256": "f359b25b3b892a71e6d92ebb558860f02dbe6271fc172f12f4bd15f2e423169b"
+    },
+    "src/dsp/upsampling.c": {
+      "bytes": 14789,
+      "sha256": "e2cb451308010b82f6c1cf036ad0d5c28e669ff0f8b54e82d155c8908c58ccdd"
+    },
+    "src/dsp/yuv.c": {
+      "bytes": 8833,
+      "sha256": "8df42195553a32b5dd28c9c6543f2be92c73450a23474c9dab414e26f2ddaf6a"
+    },
+    "src/dsp/yuv.h": {
+      "bytes": 7452,
+      "sha256": "2db2f63c0dd3e2896f6f81ceb969aa9a4edbba9d784a624507630a1eff912ca7"
+    },
+    "src/enc/backward_references_enc.h": {
+      "bytes": 8820,
+      "sha256": "376eb5e729b9b93b6a2215cfd72211cccbf4229e926864d93ffa1973b14d0ccd"
+    },
+    "src/enc/histogram_enc.h": {
+      "bytes": 5242,
+      "sha256": "4045529257bba49368faf77b6532ef42def05fcd68427ff5e45421a2de2bf612"
+    },
+    "src/utils/bit_reader_inl_utils.h": {
+      "bytes": 5894,
+      "sha256": "899bfdb65700e3a601c0978d97b027a32d8f829347e461ed302295a1f08622f2"
+    },
+    "src/utils/bit_reader_utils.c": {
+      "bytes": 8997,
+      "sha256": "4896cc7be6130c4da4d39d9ce5001bc4aaf24ffb4e9ae8191b90859b3e3f51fa"
+    },
+    "src/utils/bit_reader_utils.h": {
+      "bytes": 7639,
+      "sha256": "7c897fa9a9492eb564388b1794e69ec7e71b98b8f861947ff9fb7f5b880cc94f"
+    },
+    "src/utils/color_cache_utils.c": {
+      "bytes": 1685,
+      "sha256": "46306e6e4cf75f1da28648aef4a9aeeb6b1f1b28de669b236c5702d61610922a"
+    },
+    "src/utils/color_cache_utils.h": {
+      "bytes": 2903,
+      "sha256": "6242b6d9970d108e1175152bd1b5dc9329888a660f3de8febaebd887f5d687de"
+    },
+    "src/utils/endian_inl_utils.h": {
+      "bytes": 2851,
+      "sha256": "7bdca5f4b45730eecdb92b2ece48618a664466065886e0e0115b122ecd2fc748"
+    },
+    "src/utils/filters_utils.h": {
+      "bytes": 986,
+      "sha256": "5ed942e2235bdbb4d8daa9f661705dc9e5adafed9ada8457a545b4a0065a61e1"
+    },
+    "src/utils/huffman_utils.c": {
+      "bytes": 10501,
+      "sha256": "76f5806c72e84054e629052f3d26dc86e1fc7c2ff0446ea7dd1fc28953b954c4"
+    },
+    "src/utils/huffman_utils.h": {
+      "bytes": 4349,
+      "sha256": "02d259ac3a23a3bf2fd71605f38456b213e989bf08c5f5dc85f1d82c6b669fb6"
+    },
+    "src/utils/quant_levels_dec_utils.c": {
+      "bytes": 9140,
+      "sha256": "1c7f2aaac6a66902501c3d76e1a7f27ed46bfc0be0476cd2b676c1bd7602478e"
+    },
+    "src/utils/quant_levels_dec_utils.h": {
+      "bytes": 1254,
+      "sha256": "bb046261ae6e07530a0aedbb9f73e8e83924815734119dca8c88afa4e1588350"
+    },
+    "src/utils/random_utils.c": {
+      "bytes": 1842,
+      "sha256": "5fbe916accf377c4678c7058370f3dfa656eb1a802cf0872ebbd5d2a28f9cc19"
+    },
+    "src/utils/random_utils.h": {
+      "bytes": 2125,
+      "sha256": "709760c8608e9faafe182a6d696b283fb4cb9c0e4fb6ccc45bbc492f5df09083"
+    },
+    "src/utils/rescaler_utils.c": {
+      "bytes": 5916,
+      "sha256": "ef4eddc2e4eb686fdca9e2acc3e90bfbb985bf0ca7fe25b8ecb1eb1f8b46dcb6"
+    },
+    "src/utils/rescaler_utils.h": {
+      "bytes": 4111,
+      "sha256": "ea2e5cb89d1c6050613f758a91f9a35c53b5e0d9d4dfa9245e837b3e2c4835ae"
+    },
+    "src/utils/thread_utils.c": {
+      "bytes": 11211,
+      "sha256": "d8b7480cfe9c68b8ac980454e6a893a3175a348bd76e739f1f82833586a5c97e"
+    },
+    "src/utils/thread_utils.h": {
+      "bytes": 3690,
+      "sha256": "5ec1e8d613288070f1f723e10c15dfca70e94156e67c2d9db4bfdca7ab81abe7"
+    },
+    "src/utils/utils.c": {
+      "bytes": 10510,
+      "sha256": "b042916d08d4a7b804041ea0319543cc5fae720a45842834c28cda392430d20f"
+    },
+    "src/utils/utils.h": {
+      "bytes": 7142,
+      "sha256": "29b665a4486ff723744fe045a682db0be66f662f305620f6da17b1e3085438d5"
+    },
+    "src/webp/config.h": {
+      "bytes": 1096,
+      "sha256": "576e3172f7c07379752b8e41651620544ffd07dc3c0176dc095dc61569ddb489",
+      "source": "vendored-stub"
+    },
+    "src/webp/decode.h": {
+      "bytes": 23781,
+      "sha256": "00ee3d5716a5c334fc82b794356b8065276224d7ad484cf0fde71e62e642dd45"
+    },
+    "src/webp/encode.h": {
+      "bytes": 28010,
+      "sha256": "f5c2b687b7be49635afb07ddc3fb69402eb9ab990449c6a5400537537bacf9c4"
+    },
+    "src/webp/format_constants.h": {
+      "bytes": 3860,
+      "sha256": "d8e96b2d11a9d5138f78f409404340c411ea9ca0ba5e6a6fd1b6af01b13f6d51"
+    },
+    "src/webp/mux_types.h": {
+      "bytes": 3193,
+      "sha256": "624d40af94f4b842ccdd8dcc14a198b40703e167e4323719d2d16320c941f81b"
+    },
+    "src/webp/types.h": {
+      "bytes": 2214,
+      "sha256": "e44edea00ce2de2b9a9c59d5a13bafe4334094985205eb68e6a96bb31c2d8d93"
+    }
+  },
+  "license": "BSD-3-Clause",
+  "upstream": "https://chromium.googlesource.com/webm/libwebp",
+  "version": "v1.3.2"
+}

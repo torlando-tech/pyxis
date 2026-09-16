@@ -26,6 +26,9 @@
 #include "NomadNetPageApplication.h"
 #include "NomadNetLibrary.h"
 #include "NomadNetCacheFlow.h"
+#include "NomadNetImageLoader.h"
+#include "NomadNetImageProtocol.h"
+#include "NomadNetImageDecoder.h"
 #include "Hardware/TDeck/NomadNetStorageSD.h"
 #include "ConversationListScreen.h"
 #include "ChatScreen.h"
@@ -452,6 +455,18 @@ private:
     RNS::Link _nomad_link{RNS::Type::NONE};
     bool _nomad_link_identified = false;
     RNS::RequestReceipt _nomad_request{RNS::Type::NONE};
+    // ── Page-image transport (upstream e1e8ab8) ─────────────────────────────
+    // After a live page apply the page Link is retained (nomad_finish_request_
+    // keep_link); page images are then fetched sequentially over that same
+    // Link via the registered "/media" path. A dedicated single-slot mailbox
+    // (same proven pattern as _nomad_mailbox) keeps image responses isolated
+    // from page/partial responses so the two never collide. The loader owns
+    // ordering/policy/cancellation; this block owns the transport.
+    NomadNet::ImageLoader _nomad_image_loader;
+    NomadNet::AsyncMailbox _nomad_image_mailbox;
+    RNS::RequestReceipt _nomad_image_request{RNS::Type::NONE};
+    NomadNet::ExternalVector<uint8_t> _nomad_image_response;
+    uint32_t _nomad_image_deadline_ms = 0; // 0 = no in-flight image request
     enum class NomadState {
         IDLE, CACHE, LIVE_PENDING, PARTIAL_PENDING, PATH, LINK, REQUEST
     };
@@ -474,6 +489,18 @@ private:
     void nomad_begin_live_transport();
     void nomad_begin_partial_transport();
     void nomad_poll_partials(uint32_t now_ms);
+    // ── Page-image transport owner-loop methods ────────────────────────────
+    // Configure the loader for a just-applied page (called from the page
+    // publication path). No-op when the page has no images or the policy gate
+    // rejects everything.
+    void nomad_configure_page_images(const NomadNet::Document& document);
+    // Advance the sequential image fetcher. Runs only when the page transport
+    // has settled to IDLE and the page Link is still ACTIVE (same-destination
+    // images reuse it). One /media request at a time.
+    void nomad_poll_images(uint32_t now_ms);
+    void nomad_send_image_request();
+    void nomad_release_image_request();
+    void nomad_cancel_images();
     void nomad_finish_partial(bool success, const char* status);
     void nomad_defer_partial(const char* status, bool retain_link = true);
     void nomad_release_partial(bool success, bool deferred, const char* status,
@@ -504,6 +531,9 @@ private:
     static void on_nomad_progress(const RNS::RequestReceipt& receipt);
     static void on_nomad_resource_started(const RNS::Resource& resource);
     static void on_nomad_resource_progress(const RNS::Resource& resource);
+    static void on_nomad_image_response(const RNS::RequestReceipt& receipt);
+    static void on_nomad_image_failed(const RNS::RequestReceipt& receipt);
+    static void on_nomad_image_progress(const RNS::RequestReceipt& receipt);
 
     // Screen navigation handlers
     void on_conversation_selected(const RNS::Bytes& peer_hash);

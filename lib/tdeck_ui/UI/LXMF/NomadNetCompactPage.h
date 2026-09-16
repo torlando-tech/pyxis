@@ -114,6 +114,7 @@ public:
     static constexpr std::size_t MAX_PARTIALS = DocumentParser::MAX_PARTIALS;
     static constexpr std::size_t MAX_PARTIAL_FIELDS =
         MAX_PARTIALS * DocumentParser::MAX_PARTIAL_FIELDS;
+    static constexpr std::size_t MAX_IMAGES = DocumentParser::MAX_IMAGES;
     // Text runs, link targets, and anchor names originate in the bounded source.
     // Link targets also remain visible in runs, while anchor declarations are
     // zero-width. Account for both bounded copies and one terminator per record.
@@ -123,6 +124,8 @@ public:
         DocumentParser::MAX_FORM_BYTES + MAX_FIELDS * 3 +
         MAX_ANCHORS * (DocumentParser::MAX_ANCHOR_NAME_BYTES + 1) +
         DocumentParser::MAX_PARTIAL_BYTES +
+        MAX_IMAGES * (DocumentParser::MAX_IMAGE_ALT_BYTES +
+                      DocumentParser::MAX_IMAGE_URL_BYTES + 2) +
         MAX_RUNS + MAX_LINKS + MAX_NOTICE_BYTES + 1;
 
     enum Style : uint8_t {
@@ -143,6 +146,7 @@ public:
         int16_t table_index = -1;
         int16_t partial_index = -1;
         int16_t partial_region_index = -1;
+        int16_t image_index = -1;
     };
 
     struct RunRecord {
@@ -215,6 +219,18 @@ public:
         uint16_t value_length = 0;
     };
 
+    struct ImageRecord {
+        uint32_t alt_offset = 0;
+        uint32_t url_offset = 0;
+        uint16_t alt_length = 0;
+        uint16_t url_length = 0;
+        ImageDimension width_kind = ImageDimension::NONE;
+        ImageDimension height_kind = ImageDimension::NONE;
+        uint16_t width_value = 0;
+        uint16_t height_value = 0;
+        Alignment align = Alignment::LEFT;
+    };
+
     struct TextView {
         const char* value = nullptr;
         std::size_t length = 0;
@@ -247,6 +263,19 @@ public:
     const ExternalVector<TableCellRecord>& table_cells() const { return _table_cells; }
     const ExternalVector<FieldRecord>& fields() const { return _fields; }
     const ExternalVector<PartialRecord>& partials() const { return _partials; }
+    const ExternalVector<ImageRecord>& images() const { return _images; }
+    // True when any retained block is an image block (its index is valid
+    // against the image record list). Used by the screen to decide whether a
+    // decode requires a layout reflow.
+    bool has_image_blocks() const {
+        for (const auto& block : _blocks)
+            if (block.image_index >= 0 &&
+                static_cast<std::size_t>(block.image_index) < _images.size())
+                return true;
+        return false;
+    }
+    TextView image_alt(const ImageRecord& image) const;
+    TextView image_url(const ImageRecord& image) const;
     TextView text(const RunRecord& run) const;
     TextView target(std::size_t index) const;
     TextView field_name(std::size_t index) const;
@@ -281,6 +310,7 @@ private:
     ExternalVector<FieldRecord> _fields;
     ExternalVector<PartialRecord> _partials;
     ExternalVector<PartialFieldRecord> _partial_fields;
+    ExternalVector<ImageRecord> _images;
     bool _has_background = false;
     uint32_t _background = 0;
     bool _has_foreground = false;

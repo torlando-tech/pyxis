@@ -37,6 +37,30 @@ public:
     void clear_status();
     void set_partial_activity(bool active);
     bool set_page(const NomadNet::Document& document);
+    // Main-thread decode seam: stores decoded RGB565 pixels for one page
+    // image (bounded slot LRU, PSRAM) and returns true when the stored
+    // image should reflow layout (intrinsic size unknown until now). The
+    // owner loop calls this after a successful /media fetch + decode; it
+    // must run only while the page generation is unchanged.
+    bool set_page_image(uint16_t image_index, const uint16_t* rgb565,
+                        uint32_t width, uint32_t height);
+    // Post-decode reflow: rebuilds the full layout + focus index while
+    // preserving logical scroll and selection state. No-op when the page
+    // holds no image blocks. Returns false on layout failure (the page
+    // stays as-is; the placeholder remains visible).
+    bool relayout_images();
+    // Reference-faithful image display sizing (NomadNet e1e8ab8
+    // ImageWidget._display_size), exposed for host testing: computes the
+    // placement rect of one image block inside the content box.
+    struct ImagePlacement {
+        int16_t x = 0;
+        int16_t width = 0;
+        int16_t height = 0;
+    };
+    static ImagePlacement compute_image_placement(
+        uint16_t x0, uint32_t content_width, uint32_t content_height,
+        const NomadNet::CompactPage::ImageRecord& record,
+        uint32_t native_w, uint32_t native_h);
     bool prepare_submission(uint16_t link_id, uint32_t generation,
                             std::string& target,
                             NomadNet::ExternalVector<uint8_t>& request_data,
@@ -109,6 +133,13 @@ private:
         bool table_cell = false;
         bool table_header = false;
         uint8_t heading_style = 0;
+        // Image fragments: image_index indexes the page image record; the
+        // placeholder is drawn until decode_image() publishes pixels.
+        int16_t image_index = -1;
+        uint8_t image_align = 0; // Alignment
+        uint16_t image_native_w = 0;
+        uint16_t image_native_h = 0;
+        bool image_decoded = false;
         LayoutFragment() = default;
         LayoutFragment(uint16_t run, uint16_t offset, uint16_t length, int16_t link,
                        int16_t left, int16_t top, int16_t w, int16_t h,
@@ -145,6 +176,26 @@ private:
     lv_timer_t* _status_timer=nullptr;
     lv_obj_t* _directory=nullptr;
     NomadNet::CompactPage _page;
+    // Decoded page-image pixels. Bounded slot LRU in PSRAM; one 640x640
+    // RGB565 slot is 768 KiB, so four slots cap at 3 MiB. Caps are
+    // provisional: they must be re-measured in the physical low-water pass
+    // before release (skill requirement), because a live page + LVGL +
+    // map cache share the same PSRAM.
+    static constexpr uint16_t MAX_DECODED_IMAGE_SLOTS = 4;
+    struct DecodedImageSlot {
+        uint16_t* pixels = nullptr; // lv_mem_alloc pool (LVGL src classification)
+        uint32_t pixel_count = 0;
+        uint16_t width = 0;
+        uint16_t height = 0;
+        uint16_t lru_rank = 0;
+        uint16_t tag = 0; // compact image index this slot holds
+        bool valid = false;
+    };
+    DecodedImageSlot _image_slots[MAX_DECODED_IMAGE_SLOTS];
+    uint16_t _image_slot_rank = 0;
+    const uint16_t* decoded_image(uint16_t image_index, uint16_t& width,
+                                  uint16_t& height);
+    void invalidate_page_images();
     NomadNet::FormState _form_state;
     NomadNet::ExternalVector<LayoutFragment> _page_layout;
     NomadNet::ExternalVector<LayoutFragment> _line_layout;

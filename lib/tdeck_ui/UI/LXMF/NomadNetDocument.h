@@ -8,10 +8,14 @@
 
 namespace UI::LXMF::NomadNet {
 
-enum class BlockType { TEXT, HEADING, DIVIDER, TABLE, PARTIAL, UNSUPPORTED };
+enum class BlockType { TEXT, HEADING, DIVIDER, TABLE, PARTIAL, IMAGE, UNSUPPORTED };
 enum class Alignment { LEFT, CENTER, RIGHT };
 enum class FormFieldType : uint8_t { TEXT, PASSWORD, CHECKBOX, RADIO };
 enum class ParseStatus : uint8_t { OK, INVALID_INPUT, ALLOCATION_FAILED };
+// An authored image width/height: `n` (native), a pixel budget, a percent,
+// or unspecified. Reference NomadNet uses terminal columns/rows; the device
+// reinterprets a number as a bounded pixel budget.
+enum class ImageDimension : uint8_t { NONE, NATIVE, PIXELS, PERCENT };
 
 enum class TruncationReason : uint32_t {
     NONE = 0,
@@ -40,6 +44,9 @@ enum class TruncationReason : uint32_t {
     PARTIAL_DESCRIPTOR_BYTES = 1u << 22,
     PARTIAL_FIELDS = 1u << 23,
     PARTIAL_FIELD_BYTES = 1u << 24,
+    IMAGES = 1u << 25,
+    IMAGE_ALT_BYTES = 1u << 26,
+    IMAGE_URL_BYTES = 1u << 27,
 };
 
 struct Run {
@@ -90,6 +97,19 @@ struct Partial {
     uint32_t refresh_interval_ms = 0;
 };
 
+struct ImageSize {
+    ImageDimension kind = ImageDimension::NONE;
+    uint16_t value = 0; // PIXELS: pixel budget; PERCENT: 1..100
+};
+
+struct Image {
+    std::string alt;
+    std::string url;
+    ImageSize width;
+    ImageSize height;
+    Alignment align = Alignment::LEFT;
+};
+
 struct Block {
     BlockType type = BlockType::TEXT;
     uint8_t depth = 0;
@@ -98,6 +118,7 @@ struct Block {
     int16_t table_index = -1;
     int16_t partial_index = -1;
     int16_t partial_region_index = -1;
+    int16_t image_index = -1;
     std::vector<Run> runs;
 };
 
@@ -131,6 +152,7 @@ struct Document {
     std::vector<Run> table_runs;
     std::vector<FormField> fields;
     std::vector<Partial> partials;
+    std::vector<Image> images;
     uint32_t cache_seconds = 12U * 60U * 60U;
     bool has_cache_directive = false;
     bool cache_directive_valid = true;
@@ -188,6 +210,10 @@ public:
     static constexpr std::size_t MAX_PARTIAL_ID_BYTES = 64;
     static constexpr uint32_t MAX_PARTIAL_REFRESH_MS = 604800000U;
     static constexpr std::size_t MAX_PARTIAL_BYTES = 8 * 1024;
+    static constexpr std::size_t MAX_IMAGES = 16;
+    static constexpr std::size_t MAX_IMAGE_ALT_BYTES = 128;
+    static constexpr std::size_t MAX_IMAGE_URL_BYTES = 256;
+    static constexpr uint16_t MAX_IMAGE_PIXEL_BUDGET = 640;
     static constexpr uint16_t DEFAULT_FIELD_WIDTH = 24;
     static constexpr uint16_t MAX_FIELD_WIDTH = 256;
     static constexpr uint16_t DEFAULT_TABLE_WIDTH = 100;

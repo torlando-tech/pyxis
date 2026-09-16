@@ -1,0 +1,45 @@
+{
+    "name": "webp",
+    "version": "1.3.2",
+    "description": "Vendored libwebp decode-only subset (upstream v1.3.2, see VENDOR_MANIFEST.json) for NomadNet inline page images",
+    "keywords": "webp, decode, image",
+    "license": "BSD-3-Clause",
+    "platforms": ["*"],
+    "build": {
+        "flags": [
+            "-DWEBP_DECODER_BUILD",
+            "-DWEBP_BUILD",
+            "-DWEBP_REDUCE_SIZE=1",
+            "-DHAVE_CONFIG_H=1"
+        ],
+        "srcFilter": [
+            "+<dec/alpha_dec.c>",
+            "+<dec/buffer_dec.c>",
+            "+<dec/frame_dec.c>",
+            "+<dec/idec_dec.c>",
+            "+<dec/io_dec.c>",
+            "+<dec/quant_dec.c>",
+            "+<dec/tree_dec.c>",
+            "+<dec/vp8_dec.c>",
+            "+<dec/vp8l_dec.c>",
+            "+<dec/webp_dec.c>",
+            "+<dsp/alpha_processing.c>",
+            "+<dsp/cpu.c>",
+            "+<dsp/dec.c>",
+            "+<dsp/dec_clip_tables.c>",
+            "+<dsp/filters.c>",
+            "+<dsp/lossless.c>",
+            "+<dsp/rescaler.c>",
+            "+<dsp/upsampling.c>",
+            "+<dsp/yuv.c>",
+            "+<utils/bit_reader_utils.c>",
+            "+<utils/color_cache_utils.c>",
+            "+<utils/huffman_utils.c>",
+            "+<utils/quant_levels_dec_utils.c>",
+            "+<utils/random_utils.c>",
+            "+<utils/rescaler_utils.c>",
+            "+<utils/thread_utils.c>",
+            "+<utils/utils.c>"
+        ]
+    }
+}
