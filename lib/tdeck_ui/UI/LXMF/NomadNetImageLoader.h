@@ -48,7 +48,7 @@ struct ImageLoadEntry {
 };
 
 enum class ImageState : uint8_t {
-    SKIPPED = 0,  // policy rejected or url invalid at configure time
+    SKIPPED = 0,  // policy rejected, url invalid, or manual mode not yet triggered
     PENDING,      // admitted, waiting for its turn
     REQUESTING,   // the single outstanding request is this image
     LOADED,       // response validated (and, where wired, decoded)
@@ -68,12 +68,21 @@ public:
     // Reference auto-load gate: RTT < 1.5 s.
     static constexpr uint32_t AUTO_MAX_RTT_MS = 1500;
     // Reference auto-load gate: expected data rate > 10000 bits/s.
+    // The pinned microReticulum Link does not expose EDR, so the AUTO policy
+    // applies the RTT clause only; edr_bps=0 is the sentinel for "not
+    // measurable" and must not gate the load. (Passing a fixed threshold as
+    // the measured value would make `> AUTO_MIN_EDR_BPS` permanently false
+    // and block every non-loopback image.)
     static constexpr uint32_t AUTO_MIN_EDR_BPS = 10000;
+    static constexpr uint32_t EDR_UNMEASURABLE = 0;
 
     // Decide the reference auto gate. loopback (own node) always loads.
     static bool auto_gate_allows(bool loopback, uint32_t rtt_ms, uint32_t edr_bps) {
         if (loopback) return true;
-        return rtt_ms < AUTO_MAX_RTT_MS && edr_bps > AUTO_MIN_EDR_BPS;
+        if (edr_bps != EDR_UNMEASURABLE && edr_bps <= AUTO_MIN_EDR_BPS) {
+            return false;  // measurable and below the reference floor
+        }
+        return rtt_ms < AUTO_MAX_RTT_MS;
     }
 
     // Decide whether the active page Link can carry this image's request.
@@ -132,12 +141,34 @@ public:
     ImageState state_of(uint16_t image_index) const;
     // The entry currently REQUESTING (valid when state_of says REQUESTING).
     const ImageLoadEntry* active_entry() const;
+    // 1-based document position of the active (REQUESTING) entry; 0 when no
+    // entry is in flight. For the "Image N of M" progress display.
+    std::size_t active_position() const;
+    // True when at least one later entry (after the active one) is PENDING,
+    // i.e. another image will be requested once the active one finishes.
+    bool has_next_after_active() const;
     std::size_t loaded_count() const;
     std::size_t failed_count() const;
     bool all_done() const;
     bool empty() const { return _count == 0; }
+    // True when the active page was configured MANUAL and its images are
+    // still un-loaded (the "Load images" browser button is actionable).
+    bool manual_pending() const;
     // The active entry's resolved destination for Link-reuse decisions.
     std::string active_destination() const;
+
+#if defined(PYXIS_TEST_HOOKS) || defined(PYXIS_NOMAD_LINK_DIAGNOSTIC)
+    // Test-only entry accessors for serial diagnostics (T:IMG_STATE):
+    // position (1-based) -> compact image index, state, and path.
+    std::size_t entry_count() const { return _count; }
+    const ImageLoadEntry* entry_data(std::size_t position) const {
+        return (position < _count) ? &_entries[position].data : nullptr;
+    }
+    ImageState entry_state(std::size_t position) const {
+        return (position < _count) ? _entries[position].state
+                                   : ImageState::SKIPPED;
+    }
+#endif
 
 private:
     struct Entry {
@@ -151,6 +182,7 @@ private:
     std::uint32_t _generation = 0;
     std::uint32_t _active = 0; // index into _entries, or _count when none
     std::string _resolved_destination;
+    bool _manual_policy = false; // active page configured with MANUAL
     Entry _entries[CAPACITY];
 };
 

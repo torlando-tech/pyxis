@@ -32,17 +32,20 @@ def test_nomadnet_x86_real_peer_flow():
         cwd=HERE.parent.parent,
         capture_output=True,
         text=True,
-        timeout=180,
+        # 12 real-peer scenarios, each spinning up a full RNS node + client.
+        # The 11-scenario suite ran near 180s on CI runners; the added media
+        # scenario needs headroom.
+        timeout=300,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     scenario_records = re.findall(
         r"^SCENARIO ([a-z-]+): (PASS|FAIL) server=(-?\d+) client=(-?\d+)$",
         result.stdout, flags=re.MULTILINE)
-    assert len(scenario_records) == 11
-    assert len({record[0] for record in scenario_records}) == 11
+    assert len(scenario_records) == 12
+    assert len({record[0] for record in scenario_records}) == 12
     assert all(record[1:] == ("PASS", "0", "0") for record in scenario_records)
     result_records = re.findall(r"^RESULT ([^\n]+)$", result.stdout, flags=re.MULTILINE)
-    assert len(result_records) == 11
+    assert len(result_records) == 12
     parsed_results = {}
     for record in result_records:
         fields = record.split()
@@ -74,12 +77,12 @@ def test_nomadnet_x86_real_peer_flow():
     assert "SERVER PASS exact form request data anonymous=True" in result.stdout
     assert "SERVER PASS exact form request data anonymous=False" in result.stdout
     reference_markers = (
-        "REFERENCE NomadNet Git 89e3eea10c60d8fe597d36d2e091d5aab86bdfb8 hash-pinned",
-        "REFERENCE NomadNet package 1.2.8 hash-pinned",
+        "REFERENCE NomadNet Git e1e8ab83800fec0df358796b44d5fcec4b2cd12b hash-pinned",
+        "REFERENCE NomadNet package 1.4.3 hash-pinned",
     )
     assert any(marker in result.stdout for marker in reference_markers)
-    assert "REFERENCE RNS 1.4.2" in result.stdout
-    assert "REFERENCE RNS tree b5398e7bae0cdd47212e0c6bff3f3a51b21012db0c23cb20d43b5103612f6c5e" in result.stdout
+    assert "REFERENCE RNS 1.5.4" in result.stdout
+    assert "REFERENCE RNS tree 8433a6868dca8e01bee21541ba9690e539994f783d4f8193cdbb5c93565b453e" in result.stdout
     assert "REFERENCE Browser.handle_link oracle: PASS" in result.stdout
 
 
@@ -115,12 +118,12 @@ def test_x86_flow_proves_exact_form_maps_for_anonymous_and_identified_links():
     client = (ROOT / "tests/native/nomadnet_x86_flow/client.cpp").read_text()
 
     assert '"form-anonymous"' in runner and '"form-identified"' in runner
-    assert '89e3eea10c60d8fe597d36d2e091d5aab86bdfb8' in runner
+    assert 'e1e8ab83800fec0df358796b44d5fcec4b2cd12b' in runner
     assert 'nomadnet/ui/textui/Browser.py' in runner
     assert '"nomadnet/Node.py"' in runner
     assert 'git", "rev-parse", "HEAD"' in runner
     assert 'NOMADNET_COMMIT' in runner
-    assert 'RNS_VERSION = "1.4.2"' in server
+    assert 'RNS_VERSION = "1.5.4"' in server
     assert '"/page/form.mu"' in server
     assert '"var_fixed": "yes"' in server
     assert '"field_name": "Example User"' in server
@@ -176,7 +179,7 @@ def test_nomadnet_package_tree_provenance_accepts_exact_hashes_without_git(tmp_p
         ["python3", str(RUNNER), "--verify-reference", str(package)],
         cwd=ROOT, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "REFERENCE NomadNet package 1.2.8 hash-pinned" in result.stdout
+    assert "REFERENCE NomadNet package 1.4.3 hash-pinned" in result.stdout
     assert "REFERENCE PROVENANCE: PASS" in result.stdout
 
 

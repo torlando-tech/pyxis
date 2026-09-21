@@ -3,6 +3,13 @@
 #include <UDPInterface.h>
 #include <microReticulum.h>
 #include "TCPClientInterface.h"
+// microReticulum's CMake exports NATIVE as a PUBLIC define (it only gates
+// BZ2.cpp internals, not the public headers). Pyxis headers reuse NATIVE as a
+// real identifier (NomadNetDocument::ImageDimension::NATIVE), so it must not
+// leak into their parse.
+#ifdef NATIVE
+#undef NATIVE
+#endif
 
 #include "NomadNetActionMailbox.h"
 #include "NomadNetDocument.h"
@@ -15,6 +22,7 @@
 #include "NomadNetPartialController.h"
 #include "NomadNetPartialScheduler.h"
 #include "NomadNetProtocol.h"
+#include "NomadNetImageProtocol.h"
 #include "NomadNetUrl.h"
 #include "BuildManifest.h"
 
@@ -115,6 +123,62 @@ static bool prepare_form_request(NN::ExternalVector<uint8_t>& output) {
 static std::vector<uint8_t> bytes_vector(const RNS::Bytes& bytes) {
     if (bytes.size() == 0) return {};
     return std::vector<uint8_t>(bytes.data(), bytes.data() + bytes.size());
+}
+
+// The x86 media server serves a deterministic 4096-byte RIFF/WEBP payload:
+// b"RIFF" + (32+4096-8).to_bytes(4,"little") + b"WEBPVP8 " +
+// bytes(range(256))*16 truncated to 4056 bytes.
+static void fail(const char* message);
+static bool expected_media_bytes(std::vector<uint8_t>& out) {
+    out.assign(4096, 0);
+    const char riff[] = "RIFF";
+    std::memcpy(out.data(), riff, 4);
+    // RIFF size field = (32 + 4096 - 8) = 4120 = 0x1018, little-endian.
+    out[4] = 0x18; out[5] = 0x10; out[6] = 0x00; out[7] = 0x00;
+    const char webp[] = "WEBPVP8 ";
+    std::memcpy(out.data() + 8, webp, 8);
+    std::vector<uint8_t> ramp(256 * 16);
+    for (std::size_t i = 0; i < ramp.size(); ++i) ramp[i] = static_cast<uint8_t>(i & 0xFF);
+    std::memcpy(out.data() + 16, ramp.data(), 4096 - 16);
+    return true;
+}
+
+static bool validate_media(const RNS::Bytes& response) {
+    // The file-response path must deliver the RAW file bytes: the RIFF/WEBP
+    // header intact (metadata prefix stripped, no msgpack envelope). This is
+    // exactly what NomadNetImageProtocol::normalize_image_response requires.
+    if (response.size() != 4096) {
+        std::printf("FAIL media size=%zu (expected 4096)\n", response.size());
+        fail("media response size");
+        return false;
+    }
+    if (std::memcmp(response.data(), "RIFF", 4) != 0 ||
+        std::memcmp(response.data() + 8, "WEBPVP8 ", 8) != 0) {
+        std::printf("FAIL media header first=%02x%02x%02x%02x\n",
+                    response.data()[0], response.data()[1],
+                    response.data()[2], response.data()[3]);
+        fail("media RIFF/WEBP header (envelope leaked or metadata not stripped)");
+        return false;
+    }
+    std::vector<uint8_t> expected;
+    expected_media_bytes(expected);
+    if (std::memcmp(response.data(), expected.data(), response.size()) != 0) {
+        fail("media payload mismatch");
+        return false;
+    }
+    NN::ExternalVector<uint8_t> normalized;
+    const auto result = NN::normalize_image_response(
+        response.data(), response.size(), normalized);
+    if (result != NN::ImageResponseResult::OK || normalized.size() != response.size() ||
+        std::memcmp(normalized.data(), response.data(), response.size()) != 0) {
+        std::printf("FAIL media normalize result=%d size=%zu\n",
+                    static_cast<int>(result), normalized.size());
+        fail("media image normalization");
+        return false;
+    }
+    std::printf("MEDIA OK bytes=%zu progress_callbacks=%d\n",
+                response.size(), progress_callbacks);
+    return true;
 }
 
 static void fail(const char* message) {
@@ -333,6 +397,7 @@ static void on_link_established(RNS::Link& established_link) {
     else if (scenario == "near-limit") path = "/page/near-limit.mu";
     else if (scenario == "oversized") path = "/page/oversized.mu";
     else if (scenario == "cancel") path = "/page/cancel.mu";
+    else if (scenario == "media") path = "/media";
     else if (scenario == "form-anonymous" || scenario == "form-identified" ||
              scenario == "owner-form-history")
         path = "/page/form.mu";
@@ -353,6 +418,9 @@ static void on_link_established(RNS::Link& established_link) {
             return;
         }
         if (scenario == "form-identified") established_link.identify(local_identity);
+    } else if (scenario == "media") {
+        const auto wire = NN::media_request_data("/media/image.webp");
+        request_data.assign(wire.begin(), wire.end());
     } else {
         const auto nil = NN::no_form_request_data();
         request_data.assign(nil.begin(), nil.end());
@@ -413,6 +481,20 @@ static void consume_event() {
             if (scenario == "cancel") {
                 fail("response arrived after Back cancellation");
                 return;
+            }
+            if (scenario == "media") {
+                // File-response (raw Resource) path: the response must be the
+                // exact raw file bytes, progress must have fired per part.
+                if (progress_callbacks == 0) {
+                    fail("media resource response had no progress callback");
+                    return;
+                }
+                const RNS::Bytes response(event.data.data(), event.data.size());
+                if (validate_media(response)) {
+                    completed = true;
+                    passed = true;
+                }
+                break;
             }
             const RNS::Bytes response(event.data.data(), event.data.size());
             if (scenario == "partial") {
@@ -627,6 +709,7 @@ int main(int argc, char** argv) {
     if (scenario != "immediate" && scenario != "resource" && scenario != "near-limit" &&
         scenario != "oversized" &&
         scenario != "timeout" && scenario != "cancel" && scenario != "reuse" &&
+        scenario != "media" &&
         scenario != "form-anonymous" && scenario != "form-identified" &&
         scenario != "owner-form-history" && scenario != "partial" && scenario != "lan") return 2;
     if ((scenario == "lan" && argc != 5) || (scenario != "lan" && argc != 2)) return 2;

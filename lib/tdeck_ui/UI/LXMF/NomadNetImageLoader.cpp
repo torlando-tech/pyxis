@@ -38,6 +38,7 @@ bool ImageLoader::configure(std::size_t image_count, const ImageLoadEntry* entri
             _entries[i].terminal_failure = false;
         }
         _count = 0;
+        _manual_policy = (policy == ImagePolicy::MANUAL);
         for (std::size_t i = 0; i < image_count; ++i) {
             const ImageLoadEntry& source = entries[i];
             const std::string destination = source.same_destination
@@ -89,6 +90,11 @@ ImageAction ImageLoader::poll() {
 }
 
 std::size_t ImageLoader::request_images() {
+    // Manual-mode reload trigger (reference load_images). Only the MANUAL
+    // policy admits here; other policies either auto-loaded (AUTO/ALWAYS) or
+    // are permanently off (NEVER). Re-admits every SKIPPED, non-terminal
+    // entry so the sequential loader picks them up on the next poll.
+    if (!_manual_policy) return 0;
     std::size_t re_admitted = 0;
     for (std::size_t i = 0; i < _count; ++i) {
         if (_entries[i].state == ImageState::SKIPPED && !_entries[i].terminal_failure) {
@@ -97,6 +103,15 @@ std::size_t ImageLoader::request_images() {
         }
     }
     return re_admitted;
+}
+
+bool ImageLoader::manual_pending() const {
+    if (!_manual_policy || _count == 0) return false;
+    for (std::size_t i = 0; i < _count; ++i) {
+        if (_entries[i].state == ImageState::SKIPPED && !_entries[i].terminal_failure)
+            return true;
+    }
+    return false;
 }
 
 bool ImageLoader::finish_active(bool success) {
@@ -136,6 +151,19 @@ const ImageLoadEntry* ImageLoader::active_entry() const {
     if (_active >= _count) return nullptr;
     if (_entries[_active].state != ImageState::REQUESTING) return nullptr;
     return &_entries[_active].data;
+}
+
+std::size_t ImageLoader::active_position() const {
+    if (_active >= _count) return 0;
+    if (_entries[_active].state != ImageState::REQUESTING) return 0;
+    return _active + 1;
+}
+
+bool ImageLoader::has_next_after_active() const {
+    for (std::size_t i = _active + 1; i < _count; ++i) {
+        if (_entries[i].state == ImageState::PENDING) return true;
+    }
+    return false;
 }
 
 std::size_t ImageLoader::loaded_count() const {

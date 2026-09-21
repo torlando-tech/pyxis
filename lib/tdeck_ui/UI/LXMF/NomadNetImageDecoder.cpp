@@ -37,6 +37,23 @@ constexpr std::uint16_t rgba_to_rgb565(std::uint32_t rgba) {
         (((rgba >> 16) & 0xffU) >> 3));
 }
 
+// The firmware display (ST7789, T-Deck) runs with LV_COLOR_16_SWAP == 1
+// (lib/lv_conf.h): LVGL's in-memory pixel byte order is the byte-swap of the
+// mathematical RGB565 value (the proven map-tile path stores pixels via
+// lv_color_make, which honors the swap). Pixel buffers handed to
+// lv_draw_img_decoded must match that layout, so byte-swap the 16-bit value
+// on the device. (A pre-swap buffer renders with red and blue swapped on the
+// physical display.) The host decode-test build keeps native order: it has no
+// LVGL config and asserts against mathematical RGB565.
+constexpr std::uint16_t to_display_pixel(std::uint16_t rgb565) {
+#if defined(ARDUINO_ARCH_ESP32)
+    return static_cast<std::uint16_t>(
+        ((rgb565 & 0x00ffU) << 8) | ((rgb565 & 0xff00U) >> 8));
+#else
+    return rgb565;
+#endif
+}
+
 // Staging bound: RGBA bytes for the largest decodable image (640x640).
 constexpr long long MAX_STAGING_BYTES =
     (long long)MAX_DECODABLE_DIMENSION * (long long)MAX_DECODABLE_DIMENSION * 4LL;
@@ -95,7 +112,7 @@ ImageDecodeResult decode_webp_rgb565(const std::uint8_t* data, std::size_t bytes
                 (static_cast<std::uint32_t>(src[o + 1]) << 8) |
                 (static_cast<std::uint32_t>(src[o + 2]) << 16) |
                 (static_cast<std::uint32_t>(src[o + 3]) << 24);
-            dst[x] = rgba_to_rgb565(rgba);
+            dst[x] = to_display_pixel(rgba_to_rgb565(rgba));
         }
     }
 

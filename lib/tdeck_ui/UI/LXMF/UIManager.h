@@ -130,7 +130,11 @@ public:
     // Physical-test surface. Opening is mailbox-only so Reticulum and UI
     // ownership remains on the normal main-loop path.
     bool test_nomad_open(const std::string& address);
+    bool test_nomad_reload();
+    bool test_nomad_load_images();
+    void test_nomad_scroll(int32_t logical);
     void test_nomad_status() const;
+    void test_nomad_image_state() const;
 #endif
 
     /**
@@ -466,7 +470,15 @@ private:
     NomadNet::AsyncMailbox _nomad_image_mailbox;
     RNS::RequestReceipt _nomad_image_request{RNS::Type::NONE};
     NomadNet::ExternalVector<uint8_t> _nomad_image_response;
+    // Progress-aware image deadline (replaces the blind 10 s). Set at
+    // send time to a generous base window + an RTT-based slack, then
+    // refreshed by every per-part transfer progress event, so an actively
+    // transferring image stays alive at any size while a truly stalled
+    // request (no progress for the whole window) still fails. The fork's
+    // own receipt timeout (requested as 0.0 = RNS-derived default) is a
+    // separate, second backstop.
     uint32_t _nomad_image_deadline_ms = 0; // 0 = no in-flight image request
+    uint32_t _nomad_image_total_bytes = 0; // advertisement size for the bar
     enum class NomadState {
         IDLE, CACHE, LIVE_PENDING, PARTIAL_PENDING, PATH, LINK, REQUEST
     };
@@ -499,6 +511,20 @@ private:
     // images reuse it). One /media request at a time.
     void nomad_poll_images(uint32_t now_ms);
     void nomad_send_image_request();
+    // Status-line text for the image progress display: "Image 2 of 3 - 45% -
+    // 8.2 KB of 24.0 KB" (percent/bytes clauses omitted when unknown).
+    std::string nomad_image_progress_status(std::size_t position,
+                                            std::size_t total, uint16_t percent,
+                                            uint64_t received_bytes,
+                                            uint64_t total_bytes) const;
+    // Push one progress display update to the NomadNet screen (under the
+    // LVGL lock) from the current loader state. finished=false: a transfer
+    // is in flight (percent/bytes of the ACTIVE image). finished=true: the
+    // active image just ended; success picks the loaded/failed wording.
+    void nomad_publish_image_progress(uint16_t percent,
+                                      uint64_t received_bytes,
+                                      uint64_t total_bytes,
+                                      bool finished, bool success);
     void nomad_release_image_request();
     void nomad_cancel_images();
     void nomad_finish_partial(bool success, const char* status);

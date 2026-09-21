@@ -705,6 +705,7 @@ void load_app_settings() {
     app_settings.brightness = prefs.getUChar("brightness", 180);
     app_settings.keyboard_light = prefs.getBool("kb_light", false);
     app_settings.screen_timeout = prefs.getUShort("timeout", 60);
+    app_settings.image_loading = prefs.getUChar("img_load", 2);  // default auto
 
     // Notifications
     app_settings.notification_sound = prefs.getBool("notif_snd", true);
@@ -1511,6 +1512,9 @@ void setup_ui_manager() {
             bool ble_settings_changed = (new_settings.ble_enabled != app_settings.ble_enabled);
             bool transport_settings_changed = (new_settings.transport_enabled != app_settings.transport_enabled);
             bool display_name_changed = (new_settings.display_name != app_settings.display_name);
+            // Immediate: the next NomadNet page load reads the policy from
+            // app_settings; no interface restart required.
+            app_settings.image_loading = new_settings.image_loading;
 
             // Reconnect is serviced by the main loop's existing bounded,
             // watchdog-fed reconnect path after this settings application
@@ -2207,6 +2211,33 @@ static void handle_test_hook_command(const String& line) {
         }
         Serial.println("T:OK queued");
     }
+    else if (cmd == "T:NOMAD_RELOAD") {
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        if (!ui_manager->test_nomad_reload()) {
+            Serial.println("T:ERR nomad action queue full");
+            return;
+        }
+        Serial.println("T:OK queued");
+    }
+    else if (cmd == "T:LOAD_IMAGES") {
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        if (!ui_manager->test_nomad_load_images()) {
+            Serial.println("T:ERR nomad action queue full");
+            return;
+        }
+        Serial.println("T:OK queued");
+    }
+    else if (cmd == "T:IMG_STATE") {
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        ui_manager->test_nomad_image_state();
+    }
+    else if (cmd.startsWith("T:NOMAD_SCROLL")) {
+        if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
+        const int32_t pos = atoi(args.c_str());
+        ui_manager->test_nomad_scroll(pos);
+        Serial.print("T:OK scrolled ");
+        Serial.println(pos);
+    }
     else if (cmd == "T:NOMAD_STATUS") {
         if (!ui_manager) { Serial.println("T:ERR no ui_manager"); return; }
         ui_manager->test_nomad_status();
@@ -2547,6 +2578,8 @@ static void handle_test_hook_command(const String& line) {
             ui_manager->show_settings();
         } else if (args == "propagation_nodes") {
             ui_manager->show_propagation_nodes();
+        } else if (args == "nomadnet") {
+            ui_manager->show_nomadnet();
         } else {
             Serial.print("T:ERR unknown screen ");
             Serial.println(args);

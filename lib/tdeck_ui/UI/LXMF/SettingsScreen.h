@@ -32,6 +32,11 @@ struct AppSettings {
     uint16_t screen_timeout;  // seconds, 0 = never
     bool keyboard_light;      // Enable keyboard backlight on keypress
 
+    // Browser (NomadNet)
+    // Upstream image_loading policy (e1e8ab8): 0=never, 1=manual,
+    // 2=auto (default), 3=always.
+    uint8_t image_loading;
+
     // Notifications
     bool notification_sound;  // Play sound on message received
     uint8_t notification_volume;  // Volume 0-100
@@ -66,6 +71,7 @@ struct AppSettings {
         brightness(180),
         screen_timeout(60),
         keyboard_light(false),
+        image_loading(2),
         notification_sound(true),
         notification_volume(10),
         tcp_enabled(true),
@@ -213,6 +219,7 @@ private:
         VIEW_RADIO,
         VIEW_DELIVERY,
         VIEW_APPEARANCE,
+        VIEW_BROWSER,
         VIEW_ADVANCED,
         VIEW_TRANSPORT,
         VIEW_COUNT
@@ -251,6 +258,9 @@ private:
     lv_obj_t* _switch_notification_sound;
     lv_obj_t* _slider_notification_volume;
     lv_obj_t* _label_notification_volume_value;
+
+    // Browser sub-view (NomadNet)
+    lv_obj_t* _dropdown_image_loading;
 
     // Radio sub-view (LoRa)
     lv_obj_t* _switch_lora_enabled;
@@ -311,6 +321,7 @@ private:
     void create_radio_view(lv_obj_t* parent);
     void create_delivery_view(lv_obj_t* parent);
     void create_appearance_view(lv_obj_t* parent);
+    void create_browser_view(lv_obj_t* parent);
     void create_advanced_view(lv_obj_t* parent);
     void create_transport_mode_view(lv_obj_t* parent);
 
@@ -349,6 +360,7 @@ private:
     static void on_interface_switch_changed(lv_event_t* event);
     static void on_prop_switch_changed(lv_event_t* event);
     static void on_timeout_changed(lv_event_t* event);
+    static void on_image_load_changed(lv_event_t* event);
     static void on_gps_sync_changed(lv_event_t* event);
     static void on_transport_enabled_changed(lv_event_t* event);
     static void on_transport_confirm_enable(lv_event_t* event);

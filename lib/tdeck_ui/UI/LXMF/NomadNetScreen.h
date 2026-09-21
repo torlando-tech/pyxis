@@ -26,6 +26,33 @@ public:
     void set_home_callback(Callback cb) { _home = std::move(cb); }
     void set_reload_callback(OpenCallback cb) { _reload = std::move(cb); }
     void set_open_callback(OpenCallback cb) { _open = std::move(cb); }
+    // Manual image-load button (upstream "Load images" / ctrl-l): the owner
+    // loop re-admits this page's skipped images when the policy is MANUAL.
+    // Returns false when the action queue is busy (screen shows a hint).
+    void set_load_images_callback(OpenCallback cb) { _load_images = std::move(cb); }
+    // Progress bar + status for the in-flight /media transfers (owner loop
+    // owns the values; this screen only renders). The bar shows OVERALL page
+    // progress (completed images + current transfer fraction) so a sequential
+    // multi-image load visibly advances even between transfers. The status
+    // line is written directly (not via set_status) to avoid re-layout on
+    // every tick. Hidden when no image is loading.
+    struct ImageProgress {
+        bool active = false;
+        std::size_t total_images = 0;   // images admitted for this page
+        std::size_t position = 0;       // active image index, 1-based (0 = none)
+        uint16_t percent = 0;           // 0-100 of the ACTIVE transfer
+        std::size_t completed = 0;      // images already LOADED (bar baseline)
+        uint64_t received_bytes = 0;    // bytes of the active transfer so far
+        uint64_t total_bytes = 0;       // advertised size of the active transfer
+        bool has_next = false;          // another image follows the finished one
+        std::string status_text;        // written to the status line; empty = leave as-is
+    };
+    // The struct is passed by value so the screen can clamp percent without
+    // mutating the owner's copy.
+    void set_image_progress(ImageProgress progress);
+    // True when the "Load images" button should be shown: the current page
+    // has images that the MANUAL policy has not loaded yet.
+    void set_images_actionable(bool actionable);
     void set_link_callback(LinkCallback cb) { _link = std::move(cb); }
     void set_submit_callback(SubmitCallback cb) { _submit = std::move(cb); }
     void set_save_callback(SaveCallback cb) { _save = std::move(cb); }
@@ -81,6 +108,9 @@ public:
                             const char* id, std::size_t id_size) const;
     bool jump_to_anchor(const std::string& name);
     void restore_logical_scroll(int32_t logical);
+#if defined(PYXIS_TEST_HOOKS) || defined(PYXIS_NOMAD_LINK_DIAGNOSTIC)
+    void test_scroll(int32_t logical) { restore_logical_scroll(logical); }
+#endif
     int32_t logical_scroll() const { return _logical_scroll; }
     bool page_loaded() const { return _page_loaded; }
     void set_library(const NomadNet::Library& library);
@@ -170,8 +200,9 @@ private:
             : index(item_index), y(top), bottom(lower), order(source_order), field(is_field) {}
     };
     lv_obj_t* _screen=nullptr; lv_obj_t* _back_button=nullptr; lv_obj_t* _home_button=nullptr;
-    lv_obj_t* _reload_button=nullptr; lv_obj_t* _save_button=nullptr; lv_obj_t* _identify_button=nullptr; lv_obj_t* _address_row=nullptr; lv_obj_t* _address=nullptr;
-    lv_obj_t* _go_button=nullptr; lv_obj_t* _address_summary=nullptr; lv_obj_t* _edit_button=nullptr;
+ lv_obj_t* _reload_button=nullptr; lv_obj_t* _save_button=nullptr; lv_obj_t* _identify_button=nullptr; lv_obj_t* _address_row=nullptr; lv_obj_t* _address=nullptr;
+ lv_obj_t* _load_images_button=nullptr; lv_obj_t* _image_progress_bar=nullptr;
+ lv_obj_t* _go_button=nullptr; lv_obj_t* _address_summary=nullptr; lv_obj_t* _edit_button=nullptr;
     lv_obj_t* _status=nullptr; lv_obj_t* _content=nullptr; lv_obj_t* _field_editor=nullptr;
     lv_timer_t* _status_timer=nullptr;
     lv_obj_t* _directory=nullptr;
@@ -214,6 +245,12 @@ private:
 #ifdef PYXIS_NOMADNET_TEST_HOOKS
     int8_t _test_scroll_fail_countdown = -1;
 #endif
+#ifdef PYXIS_TEST_HOOKS
+    // Serial diagnostic: prints loader-independent slot state (tag/w/h/valid)
+    // and per-page-image block count so index mapping can be verified against
+    // the T:IMG lines during a physical image-load test.
+    void test_image_state_dump() const;
+#endif
     TableLayoutObservation _table_layout;
     int16_t _selected_link = -1;
     int16_t _selected_field = -1;
@@ -230,7 +267,7 @@ private:
     bool _editing = true;
     bool _page_loaded = false;
     bool _identify_enabled = false;
-    Callback _back,_home; OpenCallback _reload,_open; LinkCallback _link;
+    Callback _back,_home; OpenCallback _reload,_open,_load_images; LinkCallback _link;
     SubmitCallback _submit; SaveCallback _save; IdentifyCallback _identify;
     void set_address_editing(bool editing);
     static void status_timer_cb(lv_timer_t* timer);
