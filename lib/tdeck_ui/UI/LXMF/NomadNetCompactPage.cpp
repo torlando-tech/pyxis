@@ -461,6 +461,54 @@ PartialReplaceResult CompactPage::assign_replacing_partial(
             _partials.push_back(partial);
         }
 
+        // Image records are stable identity: the screen's decode slots and
+        // the loader entries are both keyed by the compact image index.
+        // Base images must therefore be re-copied in original order (same
+        // index), so a decoded image keeps rendering after a refresh. The
+        // reference detects images only at full page load — a partial
+        // refresh never scans the refreshed region for new images — so
+        // fragment images are appended after the base records (offset
+        // remap below) and render as alt-text placeholders: valid records,
+        // no loader entry, no fetch.
+        for (const auto& source : base._images) {
+            if (_images.size() >= MAX_IMAGES) {
+                clear();
+                return PartialReplaceResult::LIMIT_EXCEEDED;
+            }
+            ImageRecord image;
+            if (!append_view(base.image_alt(source), image.alt_offset,
+                             image.alt_length) ||
+                    !append_view(base.image_url(source), image.url_offset,
+                                 image.url_length)) {
+                clear();
+                return PartialReplaceResult::LIMIT_EXCEEDED;
+            }
+            image.width_kind = source.width_kind;
+            image.height_kind = source.height_kind;
+            image.width_value = source.width_value;
+            image.height_value = source.height_value;
+            image.align = source.align;
+            _images.push_back(image);
+        }
+        for (const auto& source : fragment_page._images) {
+            if (_images.size() >= MAX_IMAGES) break; // the rest fall back
+                                                     // to placeholders
+            ImageRecord image;
+            if (!append_view(fragment_page.image_alt(source), image.alt_offset,
+                             image.alt_length) ||
+                    !append_view(fragment_page.image_url(source), image.url_offset,
+                                 image.url_length)) {
+                clear();
+                return PartialReplaceResult::LIMIT_EXCEEDED;
+            }
+            image.width_kind = source.width_kind;
+            image.height_kind = source.height_kind;
+            image.width_value = source.width_value;
+            image.height_value = source.height_value;
+            image.align = source.align;
+            _images.push_back(image);
+        }
+
         struct CopyMaps {
             ExternalVector<int16_t> links;
             ExternalVector<int16_t> fields;
@@ -628,6 +676,18 @@ PartialReplaceResult CompactPage::assign_replacing_partial(
             block.partial_index = retain_partial_index ? old.partial_index : -1;
             block.partial_region_index = region_override >= 0
                 ? region_override : old.partial_region_index;
+            if (old.image_index >= 0) {
+                // Base images were re-copied in order (identity), fragment
+                // images were appended after them (offset remap).
+                const std::size_t base_count =
+                    (&source == &base) ? source._images.size()
+                                       : base._images.size();
+                const std::size_t mapped = (&source == &base)
+                    ? static_cast<std::size_t>(old.image_index)
+                    : base_count + static_cast<std::size_t>(old.image_index);
+                block.image_index = mapped < _images.size()
+                    ? static_cast<int16_t>(mapped) : -1;
+            }
             if (old.table_index >= 0) {
                 block.table_index = copy_table(source, maps, old.table_index);
                 if (block.table_index < 0) return false;

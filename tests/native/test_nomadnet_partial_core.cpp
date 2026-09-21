@@ -258,6 +258,51 @@ int main() {
           preserved_form.fields().size() == 1 &&
           std::string(preserved_form.fields()[0].value.data(),
                       preserved_form.fields()[0].value_length) == "user value");
+
+    // Image records must survive a partial refresh with stable identity:
+    // base images keep their compact index (decode slots and loader entries
+    // are keyed by it), fragment images append after the base records.
+    const auto img_source = parser.parse(
+        R"(before
+`(base img`a.webp)
+`{:img.mu`10}
+after)");
+    CompactPage img_base;
+    check("image + partial base fixture compacts", img_base.assign(img_source) &&
+          img_base.images().size() == 1 &&
+          img_base.blocks()[1].type == BlockType::IMAGE &&
+          img_base.blocks()[1].image_index == 0);
+    const auto img_fragment = parser.parse(
+        R"(updated
+`(frag img`b.webp))");
+    CompactPage img_candidate;
+    const auto img_replace = img_candidate.assign_replacing_partial(
+        img_base, 0, img_fragment, CompactPage::MAX_ARENA_BYTES);
+    check("partial refresh preserves base image records and identity",
+          img_replace == PartialReplaceResult::APPLIED &&
+          img_candidate.images().size() == 2 &&
+          img_candidate.has_image_blocks());
+    if (img_replace == PartialReplaceResult::APPLIED &&
+            img_candidate.images().size() == 2) {
+        // Base image: same compact index (0), same alt/url.
+        const auto& base_image = img_candidate.blocks()[1];
+        check("retained image block keeps its compact image index",
+              base_image.type == BlockType::IMAGE &&
+              base_image.image_index == 0);
+        check("retained image record keeps its alt and url",
+              img_candidate.image_alt(img_candidate.images()[0]) == "base img" &&
+              img_candidate.image_url(img_candidate.images()[0]) == "a.webp");
+        // Fragment image: inserted at the region position (after the
+        // fragment text), appended to the record list after the base
+        // records (offset remap), valid record but no loader entry
+        // (rendered as placeholder).
+        const auto& frag_image = img_candidate.blocks()[3];
+        check("fragment image is appended after base records with offset remap",
+              frag_image.type == BlockType::IMAGE &&
+              frag_image.image_index == 1 &&
+              img_candidate.image_alt(img_candidate.images()[1]) == "frag img" &&
+              img_candidate.image_url(img_candidate.images()[1]) == "b.webp");
+    }
     const auto region_source = parser.parse(
         "base `<same`base-default>\n"
         "`{:region.mu}\n"

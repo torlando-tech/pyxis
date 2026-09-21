@@ -2546,6 +2546,17 @@ bool UIManager::nomad_refresh_path_after_link_failure() {
 }
 
 uint32_t UIManager::nomad_advance_navigation_generation() {
+    // Every navigation that starts a new page (open, home, back-empty,
+    // leave-route) bumps this generation, and only those do — same-page
+    // anchor jumps and same-page partial refreshes never reach here.
+    // Cancelling the page-image transport here releases a retained
+    // _nomad_image_request (which would otherwise block the next page's
+    // image transport and could fail a stale index on the new page) and
+    // resets the loader to a clean slate for the incoming page. Deliberately
+    // NOT in nomad_supersede_transport/nomad_stop_transport: those are also
+    // used by same-page partial refreshes, where an in-flight download is
+    // legitimate and must not be aborted.
+    nomad_cancel_images();
     _nomad_partial_scheduler.cancel(_nomad_navigation_generation);
     _nomad_partial_controller.cancel();
     _nomad_partial_request = NomadNet::PartialRequest{};
