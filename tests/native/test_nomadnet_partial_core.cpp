@@ -260,8 +260,9 @@ int main() {
                       preserved_form.fields()[0].value_length) == "user value");
 
     // Image records must survive a partial refresh with stable identity:
-    // base images keep their compact index (decode slots and loader entries
-    // are keyed by it), fragment images append after the base records.
+    // the base list is copied verbatim (same records, same indices), the
+    // count stays constant across repeated refreshes (no accumulation), and
+    // fragment images render as placeholders (image_index -1).
     const auto img_source = parser.parse(
         R"(before
 `(base img`a.webp)
@@ -280,11 +281,10 @@ after)");
         img_base, 0, img_fragment, CompactPage::MAX_ARENA_BYTES);
     check("partial refresh preserves base image records and identity",
           img_replace == PartialReplaceResult::APPLIED &&
-          img_candidate.images().size() == 2 &&
+          img_candidate.images().size() == 1 &&
           img_candidate.has_image_blocks());
-    if (img_replace == PartialReplaceResult::APPLIED &&
-            img_candidate.images().size() == 2) {
-        // Base image: same compact index (0), same alt/url.
+    if (img_replace == PartialReplaceResult::APPLIED) {
+        // Base image: same compact index, same alt/url.
         const auto& base_image = img_candidate.blocks()[1];
         check("retained image block keeps its compact image index",
               base_image.type == BlockType::IMAGE &&
@@ -292,16 +292,30 @@ after)");
         check("retained image record keeps its alt and url",
               img_candidate.image_alt(img_candidate.images()[0]) == "base img" &&
               img_candidate.image_url(img_candidate.images()[0]) == "a.webp");
-        // Fragment image: inserted at the region position (after the
-        // fragment text), appended to the record list after the base
-        // records (offset remap), valid record but no loader entry
-        // (rendered as placeholder).
+        // Fragment image: placeholder (no record, no fetch).
         const auto& frag_image = img_candidate.blocks()[3];
-        check("fragment image is appended after base records with offset remap",
+        check("fragment image renders as a placeholder block",
               frag_image.type == BlockType::IMAGE &&
-              frag_image.image_index == 1 &&
-              img_candidate.image_alt(img_candidate.images()[1]) == "frag img" &&
-              img_candidate.image_url(img_candidate.images()[1]) == "b.webp");
+              frag_image.image_index == -1);
+        // Second refresh: the candidate is the new base; the record list
+        // must not accumulate (constant count), and the base image keeps
+        // its index.
+        const auto img_fragment2 = parser.parse(
+            R"(v2
+`(frag2 img`c.webp))");
+        CompactPage img_candidate2;
+        const auto img_replace2 = img_candidate2.assign_replacing_partial(
+            img_candidate, 0, img_fragment2, CompactPage::MAX_ARENA_BYTES);
+        check("repeated partial refresh does not accumulate image records",
+              img_replace2 == PartialReplaceResult::APPLIED &&
+              img_candidate2.images().size() == 1);
+        if (img_replace2 == PartialReplaceResult::APPLIED &&
+                img_candidate2.images().size() == 1) {
+            check("base image keeps its index after the second refresh",
+                  img_candidate2.has_image_blocks() &&
+                  img_candidate2.image_alt(img_candidate2.images()[0]) ==
+                      "base img");
+        }
     }
     const auto region_source = parser.parse(
         "base `<same`base-default>\n"

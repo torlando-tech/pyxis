@@ -462,14 +462,15 @@ PartialReplaceResult CompactPage::assign_replacing_partial(
         }
 
         // Image records are stable identity: the screen's decode slots and
-        // the loader entries are both keyed by the compact image index.
-        // Base images must therefore be re-copied in original order (same
-        // index), so a decoded image keeps rendering after a refresh. The
-        // reference detects images only at full page load — a partial
-        // refresh never scans the refreshed region for new images — so
-        // fragment images are appended after the base records (offset
-        // remap below) and render as alt-text placeholders: valid records,
-        // no loader entry, no fetch.
+        // the loader entries are both keyed by the compact image index, and
+        // the loader is configured once at full page load. The reference
+        // detects images only at full page load — a partial refresh never
+        // scans (or loads) images, neither in the retained body nor in the
+        // refreshed region — so the record list is copied verbatim from the
+        // base: same records, same order, same indices, and a constant
+        // count across repeated refreshes (no accumulation, no remap).
+        // Fragment image blocks therefore carry no record (image_index -1)
+        // and render as alt-text placeholders until the next full load.
         for (const auto& source : base._images) {
             if (_images.size() >= MAX_IMAGES) {
                 clear();
@@ -479,24 +480,6 @@ PartialReplaceResult CompactPage::assign_replacing_partial(
             if (!append_view(base.image_alt(source), image.alt_offset,
                              image.alt_length) ||
                     !append_view(base.image_url(source), image.url_offset,
-                                 image.url_length)) {
-                clear();
-                return PartialReplaceResult::LIMIT_EXCEEDED;
-            }
-            image.width_kind = source.width_kind;
-            image.height_kind = source.height_kind;
-            image.width_value = source.width_value;
-            image.height_value = source.height_value;
-            image.align = source.align;
-            _images.push_back(image);
-        }
-        for (const auto& source : fragment_page._images) {
-            if (_images.size() >= MAX_IMAGES) break; // the rest fall back
-                                                     // to placeholders
-            ImageRecord image;
-            if (!append_view(fragment_page.image_alt(source), image.alt_offset,
-                             image.alt_length) ||
-                    !append_view(fragment_page.image_url(source), image.url_offset,
                                  image.url_length)) {
                 clear();
                 return PartialReplaceResult::LIMIT_EXCEEDED;
@@ -677,15 +660,15 @@ PartialReplaceResult CompactPage::assign_replacing_partial(
             block.partial_region_index = region_override >= 0
                 ? region_override : old.partial_region_index;
             if (old.image_index >= 0) {
-                // Base images were re-copied in order (identity), fragment
-                // images were appended after them (offset remap).
-                const std::size_t base_count =
-                    (&source == &base) ? source._images.size()
-                                       : base._images.size();
-                const std::size_t mapped = (&source == &base)
+                // Base records were copied verbatim (identity), so a
+                // retained image keeps its compact index. Fragment images
+                // have no record in the new page (a partial refresh never
+                // loads images) and fall back to -1.
+                const bool from_base = (&source == &base);
+                const std::size_t mapped = from_base
                     ? static_cast<std::size_t>(old.image_index)
-                    : base_count + static_cast<std::size_t>(old.image_index);
-                block.image_index = mapped < _images.size()
+                    : _images.size(); // out of range -> placeholder
+                block.image_index = (from_base && mapped < _images.size())
                     ? static_cast<int16_t>(mapped) : -1;
             }
             if (old.table_index >= 0) {
