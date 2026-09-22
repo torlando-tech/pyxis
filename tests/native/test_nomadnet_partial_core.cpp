@@ -259,10 +259,13 @@ int main() {
           std::string(preserved_form.fields()[0].value.data(),
                       preserved_form.fields()[0].value_length) == "user value");
 
-    // Image records must survive a partial refresh with stable identity:
-    // the base list is copied verbatim (same records, same indices), the
-    // count stays constant across repeated refreshes (no accumulation), and
-    // fragment images render as placeholders (image_index -1).
+    // Image records across a partial refresh (reference 1.4.3):
+    //   - a partial refresh never fetches images, but the refreshed region's
+    //     images keep their real alt text (records are replaced, not dropped);
+    //   - region-owned records are discarded each refresh, so the list stays
+    //     bounded (no accumulation across refreshes);
+    //   - retained (non-region) images keep their compact index, so a
+    //     decoded image keeps rendering.
     const auto img_source = parser.parse(
         R"(before
 `(base img`a.webp)
@@ -279,12 +282,12 @@ after)");
     CompactPage img_candidate;
     const auto img_replace = img_candidate.assign_replacing_partial(
         img_base, 0, img_fragment, CompactPage::MAX_ARENA_BYTES);
-    check("partial refresh preserves base image records and identity",
+    check("partial refresh replaces region image records (no accumulation)",
           img_replace == PartialReplaceResult::APPLIED &&
-          img_candidate.images().size() == 1 &&
+          img_candidate.images().size() == 2 &&
           img_candidate.has_image_blocks());
-    if (img_replace == PartialReplaceResult::APPLIED) {
-        // Base image: same compact index, same alt/url.
+    if (img_replace == PartialReplaceResult::APPLIED &&
+            img_candidate.images().size() == 2) {
         const auto& base_image = img_candidate.blocks()[1];
         check("retained image block keeps its compact image index",
               base_image.type == BlockType::IMAGE &&
@@ -292,29 +295,39 @@ after)");
         check("retained image record keeps its alt and url",
               img_candidate.image_alt(img_candidate.images()[0]) == "base img" &&
               img_candidate.image_url(img_candidate.images()[0]) == "a.webp");
-        // Fragment image: placeholder (no record, no fetch).
+        // Fragment image: region records replaced; real alt text present.
         const auto& frag_image = img_candidate.blocks()[3];
-        check("fragment image renders as a placeholder block",
+        check("fragment image keeps its real alt text (no loading string)",
               frag_image.type == BlockType::IMAGE &&
-              frag_image.image_index == -1);
-        // Second refresh: the candidate is the new base; the record list
-        // must not accumulate (constant count), and the base image keeps
-        // its index.
+              frag_image.image_index == 1 &&
+              img_candidate.image_alt(img_candidate.images()[1]) == "frag img" &&
+              img_candidate.image_url(img_candidate.images()[1]) == "b.webp");
+        // Second refresh (region now holds two images): the count reflects
+        // the region's NEW content, not the accumulated history, and the
+        // retained image still has index 0.
         const auto img_fragment2 = parser.parse(
             R"(v2
-`(frag2 img`c.webp))");
+`(frag2a`c.webp)
+`(frag2b`d.webp))");
         CompactPage img_candidate2;
         const auto img_replace2 = img_candidate2.assign_replacing_partial(
             img_candidate, 0, img_fragment2, CompactPage::MAX_ARENA_BYTES);
-        check("repeated partial refresh does not accumulate image records",
+        check("repeated partial refresh is bounded (1 retained + 2 region)",
               img_replace2 == PartialReplaceResult::APPLIED &&
-              img_candidate2.images().size() == 1);
+              img_candidate2.images().size() == 3);
         if (img_replace2 == PartialReplaceResult::APPLIED &&
-                img_candidate2.images().size() == 1) {
-            check("base image keeps its index after the second refresh",
-                  img_candidate2.has_image_blocks() &&
+                img_candidate2.images().size() == 3) {
+            check("retained image keeps its index after the second refresh",
+                  img_candidate2.blocks()[1].image_index == 0 &&
                   img_candidate2.image_alt(img_candidate2.images()[0]) ==
                       "base img");
+            check("second-refresh region images keep their real alt text",
+                  img_candidate2.blocks()[3].image_index == 1 &&
+                  img_candidate2.blocks()[4].image_index == 2 &&
+                  img_candidate2.image_alt(img_candidate2.images()[1]) ==
+                      "frag2a" &&
+                  img_candidate2.image_alt(img_candidate2.images()[2]) ==
+                      "frag2b");
         }
     }
     const auto region_source = parser.parse(
