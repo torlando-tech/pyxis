@@ -390,6 +390,62 @@ tail
                   drop_candidate.image_alt(drop_candidate.images()[0]) == "keep");
         }
     }
+    // Greptile round-5 P1: "Blank Slots Exhaust Capacity." A prior shrink
+    // blanks the region's removed records but leaves them in _images; if a
+    // later grow could not reuse those blanked records it would append past
+    // them, and repeated shrink/grow would consume the bounded record
+    // capacity until current images fell back to placeholder. The reusable
+    // pool must therefore include records a prior shrink blanked (any record
+    // not still referenced by a surviving non-region block), so overflow
+    // reuses them before appending. Run a grow/shrink cycle and pin the
+    // record count as bounded (retained + region max), never growing.
+    const auto cyc_source = parser.parse(
+        R"(`{:cyc.mu}
+tail
+`(keep`k.webp))");
+    CompactPage cyc_base;
+    check("cycle base fixture assigns",
+          cyc_base.assign(cyc_source) && cyc_base.images().size() == 1 &&
+          cyc_base.blocks()[2].image_index == 0);
+    const auto cyc_grow = R"(`(a`a.webp)
+`(b`b.webp)
+`(c`c.webp))";
+    const auto cyc_shrink = R"(h
+`(d`d.webp))";
+    CompactPage cyc_cur, cyc_next;
+    bool cyc_ok = cyc_cur.assign(cyc_source);
+    const std::size_t cyc_bound = 4; // 1 retained ("keep") + 3 region max
+    // Cycle: grow(3), shrink(1), grow(3), shrink(1), grow(3). After each
+    // refresh the record count must stay at or below the bound.
+    for (int round = 0; cyc_ok && round < 5; ++round) {
+        const bool growing = (round % 2 == 0);
+        const char* fragment = growing ? cyc_grow : cyc_shrink;
+        cyc_next = CompactPage();
+        cyc_ok = cyc_next.assign_replacing_partial(
+            cyc_cur, 0, parser.parse(fragment), CompactPage::MAX_ARENA_BYTES) ==
+            PartialReplaceResult::APPLIED;
+        if (!cyc_ok) break;
+        if (cyc_next.images().size() > cyc_bound) {
+            check("shrink/grow cycle stays within record capacity", false);
+            break;
+        }
+        cyc_cur = std::move(cyc_next);
+    }
+    check("shrink/grow cycle completes within record capacity",
+          cyc_ok && cyc_cur.images().size() <= cyc_bound);
+    // The final grow (3 region images + retained) renders every current
+    // image: all three region blocks resolve to live (non-blank) records.
+    if (cyc_ok) {
+        bool all_live = true;
+        for (const auto& b : cyc_cur.blocks())
+            if (b.type == BlockType::IMAGE && b.image_index >= 0) {
+                const auto url =
+                    cyc_cur.image_url(cyc_cur.images()[b.image_index]);
+                if (url.size() == 0) all_live = false;
+            }
+        check("final grow renders every current image (no blank fallback)",
+              all_live);
+    }
     const auto region_source = parser.parse(
         "base `<same`base-default>\n"
         "`{:region.mu}\n"
