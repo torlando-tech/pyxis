@@ -20,6 +20,11 @@ public:
         Kind kind = Kind::NONE;
         ExternalVector<uint8_t> data;
         std::size_t transfer_size = 0;
+        // Transfer progress for PROGRESS events: percent of the advertised
+        // response size received (0-100), plus the advertised total so the
+        // owner loop can refresh its progress-aware deadline.
+        std::uint16_t progress_percent = 0;
+        std::uint64_t progress_total_bytes = 0;
         std::uint32_t generation = 0;
     };
 
@@ -112,7 +117,7 @@ public:
         return true;
     }
 
-    bool publish_progress(const std::vector<uint8_t>& token, std::size_t transfer_size) {
+    bool publish_progress(const std::vector<uint8_t>& token, std::size_t transfer_size, std::uint16_t progress_percent = 0, std::uint64_t progress_total_bytes = 0) {
         Guard guard(_lock);
         if (_sealed) return false;
         if (token.empty()) return false;
@@ -124,6 +129,10 @@ public:
         _event.generation = _generation;
         _event.data.clear();
         _event.transfer_size = transfer_size;
+        // Monotonic per-request progress: the owner loop only ever moves the
+        // bar and deadline forward.
+        if (progress_percent > _event.progress_percent) _event.progress_percent = progress_percent;
+        if (progress_total_bytes > _event.progress_total_bytes) _event.progress_total_bytes = progress_total_bytes;
         return true;
     }
 

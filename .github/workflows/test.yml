@@ -20,7 +20,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: torlando-tech/microReticulum
-          ref: 921b3aa030525f819671d99eff1d1f28350c9b69
+          ref: 0487775e68417eb20e449b5f3d2e50ac723c9590
           path: .ci/microReticulum
 
       - name: Set up Python
@@ -32,7 +32,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libbz2-dev
-          pip install pytest platformio rns==1.4.2 nomadnet==1.2.8
+          pip install pytest platformio rns==1.5.4 nomadnet==1.4.3
 
       - name: Resolve and attest pinned LVGL dependency
         env:

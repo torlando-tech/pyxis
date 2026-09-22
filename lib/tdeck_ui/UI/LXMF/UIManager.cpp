@@ -43,10 +43,54 @@ static const char* KEY_AUTO_SELECT = "auto_select";
 static const char* KEY_NODE_HASH = "node_hash";
 static const char* KEY_STAMP_COST = "stamp_cost";
 
+// The global app settings (defined in main.cpp); used here for the
+// user-selected NomadNet image_loading policy.
+extern UI::LXMF::AppSettings app_settings;
+
 namespace UI {
 namespace LXMF {
 
 namespace {
+
+// Image transport deadline (progress-aware). The old blind 10 s killed real
+// /media transfers on slow LoRa-grade links; images are Resources that
+// report per-part transfer progress, so the deadline is refreshed by every
+// progress event instead. A transfer that produces NO progress for a full
+// window still fails, so a truly dead request cannot hang the browser.
+constexpr uint32_t NOMAD_IMAGE_BASE_WINDOW_MS = 15000U;
+constexpr uint32_t NOMAD_IMAGE_RTT_CAP_MS = 10000U;
+constexpr uint32_t NOMAD_IMAGE_RTT_WINDOW_MULT = 8U;
+// Generous Reticulum-side request timeout; the owner-loop deadline above is
+// the real backstop (the receipt's own packet timeout would otherwise fire
+// mid-resource-transfer before any progress could arrive).
+constexpr double NOMAD_IMAGE_TRANSPORT_TIMEOUT_S = 300.0;
+
+// Base deadline at send time: the response may be a small Packet (no progress
+// events) or a large Resource whose advertisement has not arrived yet, so the
+// initial window also covers link establishment + advertisement round-trip.
+inline uint32_t nomad_image_send_window(uint32_t rtt_ms) {
+    if (rtt_ms == 0U) rtt_ms = NOMAD_IMAGE_RTT_CAP_MS;
+    if (rtt_ms > NOMAD_IMAGE_RTT_CAP_MS) rtt_ms = NOMAD_IMAGE_RTT_CAP_MS;
+    return NOMAD_IMAGE_BASE_WINDOW_MS + rtt_ms * NOMAD_IMAGE_RTT_WINDOW_MULT;
+}
+
+// Progress-aware refresh: keep the deadline at least one full base window in
+// the future, plus a size-proportional allowance (remaining bytes at a modest
+// 20 KiB/s floor) so a large image keeps its headroom without ever running
+// out mid-transfer.
+inline uint32_t nomad_image_refresh_window(std::uint64_t total_bytes,
+                                           std::size_t transferred_bytes) {
+    uint32_t remaining_ms = NOMAD_IMAGE_BASE_WINDOW_MS;
+    if (total_bytes > 0U &&
+            transferred_bytes < static_cast<std::size_t>(total_bytes)) {
+        const uint64_t remaining = static_cast<uint64_t>(total_bytes) -
+                                   static_cast<uint64_t>(transferred_bytes);
+        uint64_t sized_ms = (remaining * 1000U) / 20480U; // 20 KiB/s
+        if (sized_ms > NOMAD_IMAGE_RTT_CAP_MS) sized_ms = NOMAD_IMAGE_RTT_CAP_MS;
+        remaining_ms += static_cast<uint32_t>(sized_ms);
+    }
+    return remaining_ms;
+}
 
 constexpr const char* NOMAD_LIBRARY_DIR = "/nomadnet";
 constexpr const char* NOMAD_LIBRARY_PATH = "/nomadnet/library.pxnn";
@@ -480,6 +524,9 @@ bool UIManager::init() {
     });
     _nomadnet_screen->set_save_callback([this](const std::string& target) {
         return _nomad_actions.publish(NomadNet::UserActionKind::SAVE, target);
+    });
+    _nomadnet_screen->set_load_images_callback([this](const std::string& target) {
+        return _nomad_actions.publish(NomadNet::UserActionKind::LOAD_IMAGES, target);
     });
     _nomadnet_screen->set_identify_callback([this](const std::string& target, bool identified) {
         return _nomad_actions.publish_identify(target, identified);
@@ -2316,6 +2363,29 @@ void UIManager::nomad_update_user_actions() {
             _nomad_actions.clear();
             home();
             break;
+        case NomadNet::UserActionKind::LOAD_IMAGES: {
+            // Manual image load (upstream load_images / "Load images" button).
+            // Only meaningful on the active page while its transport has
+            // settled: the loader re-admits its SKIPPED images and the next
+            // owner pass picks them up sequentially.
+            if (_nomad_url.destination_hex.empty() || target != _nomad_url.str()) break;
+            if (_nomad_image_request) {
+                LVGL_LOCK();
+                _nomadnet_screen->set_status("Image already loading");
+                break;
+            }
+            const std::size_t re_admitted = _nomad_image_loader.request_images();
+            LVGL_LOCK();
+            if (re_admitted == 0) {
+                _nomadnet_screen->set_status("No images to load for this page");
+            } else {
+                _nomadnet_screen->set_images_actionable(false);
+                _nomadnet_screen->set_status(
+                    re_admitted == 1 ? "Loading image..." :
+                    "Loading images...");
+            }
+            break;
+        }
         }
         if ((action.kind != NomadNet::UserActionKind::SAVE &&
              action.kind != NomadNet::UserActionKind::IDENTIFY) ||
@@ -2342,6 +2412,21 @@ bool UIManager::test_nomad_open(const std::string& address) {
     return _nomad_actions.publish(NomadNet::UserActionKind::OPEN, address);
 }
 
+bool UIManager::test_nomad_reload() {
+    return _nomad_actions.publish(NomadNet::UserActionKind::RELOAD, {});
+}
+bool UIManager::test_nomad_load_images() {
+    return _nomad_actions.publish(NomadNet::UserActionKind::LOAD_IMAGES,
+        _nomad_url.str());
+}
+
+void UIManager::test_nomad_scroll(int32_t logical) {
+    {
+        LVGL_LOCK();
+        _nomadnet_screen->test_scroll(logical);
+    }
+}
+
 void UIManager::test_nomad_status() const {
     const char* state = "IDLE";
     switch (_nomad_state) {
@@ -2363,6 +2448,22 @@ void UIManager::test_nomad_status() const {
         static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
         static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
         static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)));
+}
+
+void UIManager::test_nomad_image_state() const {
+    const std::size_t n = _nomad_image_loader.entry_count();
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto* e = _nomad_image_loader.entry_data(i);
+        Serial.printf("T:ENTRY %u idx=%u state=%d path=%s\n",
+                      static_cast<unsigned>(i + 1),
+                      e ? static_cast<unsigned>(e->image_index) : 0u,
+                      static_cast<int>(_nomad_image_loader.entry_state(i)),
+                      e ? e->path.c_str() : "?");
+    }
+    if (_nomadnet_screen) {
+        LVGL_LOCK();
+        _nomadnet_screen->test_image_state_dump();
+    }
 }
 #endif
 
@@ -2445,6 +2546,17 @@ bool UIManager::nomad_refresh_path_after_link_failure() {
 }
 
 uint32_t UIManager::nomad_advance_navigation_generation() {
+    // Every navigation that starts a new page (open, home, back-empty,
+    // leave-route) bumps this generation, and only those do — same-page
+    // anchor jumps and same-page partial refreshes never reach here.
+    // Cancelling the page-image transport here releases a retained
+    // _nomad_image_request (which would otherwise block the next page's
+    // image transport and could fail a stale index on the new page) and
+    // resets the loader to a clean slate for the incoming page. Deliberately
+    // NOT in nomad_supersede_transport/nomad_stop_transport: those are also
+    // used by same-page partial refreshes, where an in-flight download is
+    // legitimate and must not be aborted.
+    nomad_cancel_images();
     _nomad_partial_scheduler.cancel(_nomad_navigation_generation);
     _nomad_partial_controller.cancel();
     _nomad_partial_request = NomadNet::PartialRequest{};
@@ -2728,6 +2840,440 @@ void UIManager::nomad_poll_partials(uint32_t now_ms) {
         _nomadnet_screen->set_partial_activity(true);
     }
     nomad_begin_partial_transport();
+}
+
+// ── Page-image transport (upstream e1e8ab8) ─────────────────────────────────
+// Sequential /media fetch over the retained page Link, one image at a time.
+// Reuses the proven page-transport pattern: Reticulum callbacks publish into a
+// single-slot mailbox; the owner loop is the sole consumer and LVGL owner.
+void UIManager::nomad_configure_page_images(const NomadNet::Document& document) {
+    if (document.images.empty()) {
+        _nomad_image_loader.cancel_all();
+        {
+            LVGL_LOCK();
+            _nomadnet_screen->set_images_actionable(false);
+        }
+        return;
+    }
+    // Reference Browser.parse_url for image urls: a leading empty component
+    // (":/media/x.webp") means the current page destination; a 32-hex first
+    // component names a remote destination. Page images resolve to the page
+    // destination in practice (same-destination Link reuse).
+    std::vector<NomadNet::ImageLoadEntry> entries;
+    entries.reserve(document.images.size());
+    for (std::size_t i = 0; i < document.images.size() &&
+              entries.size() < NomadNet::ImageLoader::CAPACITY; ++i) {
+        const auto url = NomadNet::parse_image_url(document.images[i].url);
+        if (!url.valid) continue; // malformed url: skip, never fetch
+        NomadNet::ImageLoadEntry entry;
+        entry.image_index = static_cast<uint16_t>(i);
+        entry.same_destination = url.same_destination;
+        entry.destination_hex = url.destination_hex;
+        entry.path = url.path;
+        entries.push_back(std::move(entry));
+    }
+    // Auto gate (reference default): loopback always; otherwise Link RTT <
+    // 1.5 s. (The reference also requires EDR > 10000 bits/s, which the
+    // pinned microReticulum Link does not expose; the RTT gate alone is the
+    // conservative subset. Loopback images always load.)
+    uint32_t rtt_ms = 0;
+    bool loopback = false;
+    if (_nomad_link && _nomad_link.status() == Type::Link::ACTIVE) {
+        const double seconds = _nomad_link.rtt();
+        rtt_ms = seconds > 0.0
+            ? static_cast<uint32_t>(seconds * 1000.0)
+            : NomadNet::ImageLoader::AUTO_MAX_RTT_MS; // unknown -> gate
+        loopback = _nomad_destination_hash == _router.identity().hash();
+    }
+    // best-effort: a bad_alloc leaves the loader empty (images not loaded),
+    // never a page failure. EDR is not measurable on this transport, so
+    // pass the unmeasurable sentinel; the gate applies the RTT clause only.
+    // The policy is the user's image_loading setting (upstream e1e8ab8):
+    // 0=never, 1=manual, 2=auto, 3=always.
+    NomadNet::ImagePolicy policy = NomadNet::ImagePolicy::AUTO;
+    switch (app_settings.image_loading) {
+        case 0: policy = NomadNet::ImagePolicy::NEVER; break;
+        case 1: policy = NomadNet::ImagePolicy::MANUAL; break;
+        case 3: policy = NomadNet::ImagePolicy::ALWAYS; break;
+        case 2:
+        default: policy = NomadNet::ImagePolicy::AUTO; break;
+    }
+    _nomad_image_loader.configure(
+        entries.size(), entries.empty() ? nullptr : entries.data(),
+        _nomad_url.destination_hex, _nomad_navigation_generation,
+        policy, loopback, rtt_ms,
+        NomadNet::ImageLoader::EDR_UNMEASURABLE);
+    // Manual policy: surface the "Load images" toolbar button (reference
+    // load_images). Other policies load (or never load) automatically.
+    {
+        LVGL_LOCK();
+        _nomadnet_screen->set_images_actionable(
+            _nomad_image_loader.manual_pending());
+    }
+}
+
+// True when the page's image record at the entry's compact index no longer
+// matches the URL the entry was fetched for. Used by the RESPONSE branch of
+// nomad_poll_images: a dynamic partial refresh may have replaced the record
+// in place (same index, new or blank URL) while the response was in flight,
+// so the decoded bytes must be discarded rather than stored under the new
+// record. Comparison mirrors nomad_configure_page_images, which built the
+// entry from parse_image_url(record url): same-destination urls resolve to
+// the page destination, otherwise the record must still be valid with the
+// same destination and path.
+static bool nomad_image_entry_url_stale(
+        const NomadNet::ImageLoadEntry& entry,
+        const NomadNet::CompactPage& page, uint16_t image_index,
+        const std::string& page_destination_hex) {
+    const auto url_view = page.image_url(page.images()[image_index]);
+    const std::string url(url_view.data(), url_view.size());
+    const auto parsed = NomadNet::parse_image_url(url);
+    if (!parsed.valid) return true;
+    const std::string destination = parsed.same_destination
+        ? page_destination_hex : parsed.destination_hex;
+    return destination != entry.destination_hex || parsed.path != entry.path;
+}
+
+void UIManager::nomad_poll_images(uint32_t now_ms) {
+    // Only when the page transport has settled to IDLE, the browser route is
+    // active, the loader has admitted entries for the current generation, and
+    // no in-flight image request is outstanding. Takes its own RouterLock,
+    // exactly as nomad_begin_partial_transport / nomad_begin_live_transport.
+    if (_nomad_state != NomadState::IDLE) return;
+    if (_nomad_partial_controller.active()) return;
+    if (_navigation.current() != Route::NOMADNET) return;
+
+    // Drain an in-flight image response/failure first (consume the single-slot
+    // mailbox, decode under LVGL, mark the loader). This must run while the
+    // request is still outstanding so the receipt can be released in order.
+    if (_nomad_image_request) {
+        // In-flight request timeout (mirrors the page request deadline).
+        if (_nomad_image_deadline_ms != 0 &&
+                static_cast<int32_t>(now_ms - _nomad_image_deadline_ms) >= 0) {
+            const auto* entry = _nomad_image_loader.active_entry();
+            const uint16_t index = entry ? entry->image_index : 0;
+            _nomad_image_deadline_ms = 0;
+            nomad_release_image_request();
+            // Report the stall BEFORE the loader forgets the active entry.
+            nomad_publish_image_progress(0, 0, _nomad_image_total_bytes,
+                                         true, false);
+            _nomad_image_loader.fail_image(index, true);
+            _nomad_image_response.clear();
+            return;
+        }
+        NomadNet::AsyncMailbox::Event event;
+        if (!_nomad_image_mailbox.take(event)) return;
+        if (event.generation != _nomad_navigation_generation) return;
+        const auto* entry = _nomad_image_loader.active_entry();
+        const uint16_t index = entry ? entry->image_index : 0;
+        if (event.kind == NomadNet::AsyncMailbox::Kind::FAILED ||
+                event.kind == NomadNet::AsyncMailbox::Kind::OVERSIZED) {
+            nomad_publish_image_progress(0, 0, _nomad_image_total_bytes,
+                                         true, false);
+            _nomad_image_loader.fail_image(index, true);
+            _nomad_image_deadline_ms = 0;
+            nomad_release_image_request();
+            _nomad_image_response.clear();
+            return;
+        }
+        if (event.kind == NomadNet::AsyncMailbox::Kind::RESPONSE) {
+            // Stale-URL guard: a dynamic partial refresh may have replaced
+            // the record at this index in place (same compact image index,
+            // new or blank URL) while this response was in flight. The
+            // decoded pixels would then belong to the old URL and must not
+            // be stored — the reference re-parses the region and shows the
+            // (new) alt text without re-fetching, so the image is a
+            // per-image terminal failure and the page is unaffected.
+            bool stale = false;
+            {
+                LVGL_LOCK();
+                const auto& page = _nomadnet_screen->page();
+                stale = index >= static_cast<uint16_t>(page.images().size()) ||
+                    nomad_image_entry_url_stale(
+                        *entry, page, index,
+                        _nomad_url.destination_hex);
+            }
+            if (stale) {
+                nomad_publish_image_progress(0, 0, _nomad_image_total_bytes,
+                                             true, false);
+                _nomad_image_loader.fail_image(index, true);
+                _nomad_image_deadline_ms = 0;
+                nomad_release_image_request();
+                event.data.clear();
+                _nomad_image_response.clear();
+                return;
+            }
+            // normalize -> decode -> publish. A bad response is a per-image
+            // terminal failure; the page and other images are unaffected.
+            NomadNet::ExternalVector<uint8_t> webp;
+            const auto norm = NomadNet::normalize_image_response(
+                event.data.data(), event.data.size(), webp);
+            bool ok = false;
+            if (norm == NomadNet::ImageResponseResult::OK) {
+                NomadNet::DecodedImage decoded;
+                const auto res = NomadNet::decode_webp_rgb565(
+                    webp.data(), webp.size(),
+                    NomadNet::MAX_DECODABLE_DIMENSION, decoded);
+                if (res == NomadNet::ImageDecodeResult::OK && decoded.pixels) {
+                    bool stored = false;
+                    {
+                        LVGL_LOCK();
+                        stored = _nomadnet_screen->set_page_image(
+                            index, decoded.pixels, decoded.width,
+                            decoded.height);
+                    }
+                    ok = stored;
+                    NomadNet::release_decoded_image(decoded);
+                }
+            }
+            event.data.clear();
+            // Report the outcome (position still valid) before the loader
+            // marks the entry terminal.
+            nomad_publish_image_progress(
+                0, event.transfer_size, _nomad_image_total_bytes, true, ok);
+            // finish_active marks the REQUESTING entry LOADED (success) or
+            // FAILED (terminal). A failed image never affects the page or
+            // the remaining images (reference per-image terminal semantics).
+            _nomad_image_loader.finish_active(ok);
+            _nomad_image_deadline_ms = 0;
+            nomad_release_image_request();
+            _nomad_image_response.clear();
+            return;
+        }
+        if (event.kind == NomadNet::AsyncMailbox::Kind::PROGRESS) {
+            // Progress-aware timeout refresh: any forward progress moves the
+            // deadline out by one base window + a size-proportional allowance
+            // (the transfer is demonstrably alive; a truly stalled one never
+            // fires this path and fails at the deadline).
+            if (event.progress_total_bytes > _nomad_image_total_bytes)
+                _nomad_image_total_bytes = event.progress_total_bytes;
+            const uint32_t fresh = now_ms + nomad_image_refresh_window(
+                _nomad_image_total_bytes, event.transfer_size);
+            if (fresh > _nomad_image_deadline_ms) _nomad_image_deadline_ms = fresh;
+            {
+                // Live progress: the bar shows the overall page fraction
+                // (each image an equal slice; the active transfer contributes
+                // its own percent within its slice), and the status line
+                // reports the active image's position, percent, and bytes.
+                NomadNetScreen::ImageProgress progress;
+                progress.active = true;
+                progress.total_images = _nomad_image_loader.count();
+                progress.position = _nomad_image_loader.active_position();
+                progress.completed = _nomad_image_loader.loaded_count();
+                progress.has_next = _nomad_image_loader.has_next_after_active();
+                progress.percent = event.progress_percent;
+                progress.received_bytes = event.transfer_size;
+                progress.total_bytes = _nomad_image_total_bytes;
+                progress.status_text = nomad_image_progress_status(
+                    progress.position, progress.total_images,
+                    event.progress_percent, event.transfer_size,
+                    _nomad_image_total_bytes);
+                LVGL_LOCK();
+                _nomadnet_screen->set_image_progress(progress);
+            }
+            return;
+        }
+        // NONE: nothing to do yet.
+        return;
+    }
+
+    // No request outstanding: admit the next PENDING image and send it.
+    if (_nomad_image_loader.empty() || _nomad_image_loader.all_done() ||
+            _nomad_image_loader.generation() != _nomad_navigation_generation)
+        return;
+
+    RouterLock router_lock;
+    if (!router_lock.acquired()) return;
+
+    const NomadNet::ImageAction action = _nomad_image_loader.poll();
+    if (action != NomadNet::ImageAction::SEND_REQUEST) return;
+    const auto* entry = _nomad_image_loader.active_entry();
+    if (!entry) return;
+    // Same-destination images reuse the retained ACTIVE page Link. Page images
+    // resolve to the page destination in practice; a usable matching ACTIVE
+    // Link is required. The reference marks the image failed when its Link
+    // cannot be ACTIVE, so a missing/foreign Link is a per-image failure.
+    if (!(_nomad_link && _nomad_link.status() == Type::Link::ACTIVE) ||
+            !NomadNet::ImageLoader::can_use_page_link(
+                entry->destination_hex, _nomad_url.destination_hex, true)) {
+        _nomad_image_loader.fail_image(entry->image_index, true);
+        return;
+    }
+    nomad_send_image_request();
+}
+
+std::string UIManager::nomad_image_progress_status(std::size_t position,
+                                                   std::size_t total,
+                                                   uint16_t percent,
+                                                   uint64_t received_bytes,
+                                                   uint64_t total_bytes) const {
+    char buffer[96];
+    std::string text;
+    const bool have_position = position > 0 && total > 0;
+    std::snprintf(buffer, sizeof(buffer), "Image %u of %u",
+                  have_position ? static_cast<unsigned>(position) : 0,
+                  static_cast<unsigned>(total > 0 ? total : 1));
+    text = buffer;
+    if (percent > 0) {
+        std::snprintf(buffer, sizeof(buffer), " - %u%%", percent);
+        text += buffer;
+    }
+    if (total_bytes > 0 && received_bytes > 0) {
+        std::snprintf(buffer, sizeof(buffer), " - %.1f KB of %.1f KB",
+                      static_cast<double>(received_bytes) / 1024.0,
+                      static_cast<double>(total_bytes) / 1024.0);
+        text += buffer;
+    }
+    return text;
+}
+
+void UIManager::nomad_publish_image_progress(uint16_t percent,
+                                             uint64_t received_bytes,
+                                             uint64_t total_bytes,
+                                             bool finished, bool success) {
+    if (!_nomadnet_screen) return;
+    // Position/completed are read BEFORE the caller mutates the loader
+    // (finish_active / fail_image), so the just-finished image still counts
+    // as active (success adds its slice; a failure does not fill it).
+    const std::size_t total = _nomad_image_loader.count();
+    const std::size_t position = _nomad_image_loader.active_position();
+    const std::size_t completed = _nomad_image_loader.loaded_count();
+    const bool has_next = _nomad_image_loader.has_next_after_active();
+    NomadNetScreen::ImageProgress progress;
+    progress.active = true;
+    progress.total_images = total;
+    progress.position = position;
+    progress.completed = completed;
+    progress.has_next = has_next;
+    progress.percent = finished && success ? 100 : (finished ? 0 : percent);
+    progress.received_bytes = received_bytes;
+    progress.total_bytes = total_bytes;
+    if (finished) {
+        char buffer[64];
+        if (success && !has_next) {
+            // Last image: the bar goes away, so the status line carries the
+            // summary ("Images loaded (3)").
+            std::snprintf(buffer, sizeof(buffer), "Images loaded (%u)",
+                          static_cast<unsigned>(total));
+        } else {
+            std::snprintf(buffer, sizeof(buffer), "Image %u of %u %s",
+                          position > 0 ? static_cast<unsigned>(position)
+                                       : static_cast<unsigned>(total > 0 ? total : 1),
+                          static_cast<unsigned>(total > 0 ? total : 1),
+                          success ? "loaded" : "failed");
+        }
+        progress.status_text = buffer;
+    } else {
+        progress.status_text = nomad_image_progress_status(
+            position, total, percent, received_bytes, total_bytes);
+    }
+    LVGL_LOCK();
+    _nomadnet_screen->set_image_progress(progress);
+}
+
+void UIManager::nomad_send_image_request() {
+    if (!(_nomad_link && _nomad_link.status() == Type::Link::ACTIVE)) {
+        const auto* entry = _nomad_image_loader.active_entry();
+        if (entry) _nomad_image_loader.fail_image(entry->image_index, true);
+        return;
+    }
+    const auto* entry = _nomad_image_loader.active_entry();
+    if (!entry) return;
+    // Transport wire cap: the single-slot mailbox clamps to its proven 64 KiB
+    // ceiling (same as pages). Real page images for a 320x240 display are far
+    // below this; larger media degrade to the alt-text placeholder.
+    const uint32_t wire_cap = NomadNet::AsyncMailbox::MAX_WIRE_BYTES;
+    _nomad_image_mailbox.prepare(_nomad_navigation_generation, wire_cap);
+    RNS::Bytes packed;
+    try {
+        const std::vector<uint8_t> request_data =
+            NomadNet::media_request_data(entry->path);
+        packed = RNS::Bytes(request_data.data(), request_data.size());
+    } catch (const std::bad_alloc&) {
+        packed = RNS::Bytes(RNS::Bytes::NONE);
+    }
+    RNS::RequestReceipt receipt = RequestReceipt(Type::NONE);
+    uint32_t rtt_ms = 0U;
+    try {
+        const double rtt_s = _nomad_link.rtt();
+        if (rtt_s > 0.0) rtt_ms = static_cast<uint32_t>(rtt_s * 1000.0);
+        receipt = _nomad_link.request(
+            RNS::Bytes(reinterpret_cast<const uint8_t*>(
+                           NomadNet::MEDIA_PATH()),
+                       std::strlen(NomadNet::MEDIA_PATH())),
+            packed, on_nomad_image_response, on_nomad_image_failed,
+            on_nomad_image_progress, NOMAD_IMAGE_TRANSPORT_TIMEOUT_S,
+            wire_cap, true);
+    } catch (const std::bad_alloc&) {
+        receipt = RequestReceipt(Type::NONE);
+    }
+    if (!receipt) {
+        _nomad_image_loader.fail_image(entry->image_index, true);
+        return;
+    }
+    _nomad_image_request = receipt;
+    _nomad_image_mailbox.expect_request(token(receipt.request_id()));
+    _nomad_image_total_bytes = 0U;
+    // Progress-aware deadline: base window + RTT-scaled allowance. Replaced
+    // the blind 10 s; refreshed on every PROGRESS event below.
+    _nomad_image_deadline_ms = millis() + nomad_image_send_window(rtt_ms);
+    // Start-of-transfer: show the image position (0%) so the user sees
+    // which of the page's images is downloading before any byte lands.
+    nomad_publish_image_progress(0, 0, 0, false, true);
+}
+
+void UIManager::nomad_release_image_request() {
+    // Seal the image mailbox before dropping the receipt so a successful
+    // terminal state cannot be replaced by the synthetic failed callback that
+    // request_timed_out() generates (mirrors nomad_release_request).
+    _nomad_image_mailbox.seal();
+    if (!_nomad_image_request) return;
+    RNS::RequestReceipt receipt = _nomad_image_request;
+    _nomad_image_request = RequestReceipt(Type::NONE);
+    if (receipt.get_status() != Type::RequestReceipt::FAILED) {
+        receipt.request_timed_out(PacketReceipt(Type::NONE));
+    }
+}
+
+void UIManager::nomad_cancel_images() {
+    _nomad_image_deadline_ms = 0;
+    nomad_release_image_request();
+    _nomad_image_loader.cancel_all();
+    _nomad_image_response.clear();
+    NomadNetScreen::ImageProgress progress;
+    progress.active = false;
+    LVGL_LOCK();
+    _nomadnet_screen->set_image_progress(progress);
+}
+
+void UIManager::on_nomad_image_response(const RNS::RequestReceipt& receipt) {
+    if (!s_nomad_instance) return;
+    const std::size_t transfer = receipt.response_transfer_size();
+    const RNS::Bytes response = receipt.get_response();
+    s_nomad_instance->_nomad_image_mailbox.publish_response(
+        token(receipt.request_id()), response ? response.data() : nullptr,
+        response ? response.size() : 0, transfer);
+}
+
+void UIManager::on_nomad_image_failed(const RNS::RequestReceipt& receipt) {
+    if (!s_nomad_instance) return;
+    s_nomad_instance->_nomad_image_mailbox.publish_failed(
+        token(receipt.request_id()), receipt.response_size());
+}
+
+void UIManager::on_nomad_image_progress(const RNS::RequestReceipt& receipt) {
+    if (!s_nomad_instance) return;
+    const std::size_t transfer = receipt.response_transfer_size();
+    const float progress = receipt.get_progress();
+    std::uint16_t percent = 0;
+    if (progress >= 1.0f) {
+        percent = 100;
+    } else if (progress > 0.0f) {
+        percent = static_cast<std::uint16_t>(progress * 100.0f);
+    }
+    s_nomad_instance->_nomad_image_mailbox.publish_progress(
+        token(receipt.request_id()), transfer, percent,
+        static_cast<std::uint64_t>(receipt.response_size()));
 }
 
 void UIManager::nomad_begin_partial_transport() {
@@ -3070,6 +3616,13 @@ NomadNet::PageApplyResult UIManager::nomad_apply_page_document(
     _nomad_partial_scheduler.configure(
         document, _nomad_navigation_generation, millis());
     _nomad_partial_controller.reset_page(document.source_bytes);
+    // Admit this page's images for sequential /media fetch over the retained
+    // Link. Best-effort: a page with no images (or a rejected policy) simply
+    // leaves the loader empty; a bad_alloc leaves it empty and the page is
+    // unaffected. This cut only reuses the retained live Link, so cached pages
+    // (no live Link) keep their alt-text placeholders rather than establishing
+    // a fresh per-image Link (reference does; that is a later increment).
+    if (!cached) nomad_configure_page_images(document);
     if (library_changed) _nomad_library_dirty = true;
     _nomad_pending_scroll = -1;
     return result;
@@ -3131,6 +3684,8 @@ void UIManager::nomad_update() {
     }
     if (_nomad_state == NomadState::IDLE) {
         nomad_poll_partials(millis());
+        if (_nomad_state != NomadState::IDLE) return;
+        nomad_poll_images(millis());
         if (_nomad_state != NomadState::IDLE) return;
     }
     RouterLock router_lock;

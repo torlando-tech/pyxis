@@ -62,6 +62,113 @@ std::size_t safe_utf8_prefix(const char* value,std::size_t size,std::size_t limi
 }
 }
 
+// ── Page-image display sizing ──────────────────────────────────────────────
+// Reference-faithful image sizing (NomadNet e1e8ab8 ImageWidget._display_size).
+// The reference works in terminal columns/rows with a cell aspect ratio; the
+// device reinterprets the numeric specs as bounded pixel budgets inside the
+// 304 px content box and keeps the same four tiers:
+//   both w and h -> stretch: target box, uniformly scaled down only when it
+//                        overflows the available box
+//   w only       -> width given, height derived preserving aspect
+//   h only       -> height given, width derived preserving aspect
+//   neither      -> full content width, height derived preserving aspect
+// Without a decoded intrinsic size (placeholder state) the block reserves
+// one body-font row, matching the reference's (1, 1) failure size.
+NomadNetScreen::ImagePlacement NomadNetScreen::compute_image_placement(
+        uint16_t x0, uint32_t content_width, uint32_t content_height,
+        const NomadNet::CompactPage::ImageRecord& record,
+        uint32_t native_w, uint32_t native_h) {
+    ImagePlacement placement;
+    if (native_w == 0 || native_h == 0) {
+        placement.x = static_cast<int16_t>(x0);
+        placement.width = static_cast<int16_t>(content_width);
+        placement.height = 16; // one body-font row, drawn as placeholder text
+        return placement;
+    }
+    const uint32_t iw = native_w;
+    const uint32_t ih = native_h;
+    const uint32_t maxcol = content_width;
+    const uint32_t maxrow = content_height;
+    // Device interpretation of the authored specs:
+    //   NONE    -> unspecified (reference None)
+    //   NATIVE  -> intrinsic size (reference "n")
+    //   PIXELS  -> absolute pixel budget (reference int)
+    //   PERCENT -> fraction of the content box (reference "NN%")
+    const bool w_spec = record.width_kind != NomadNet::ImageDimension::NONE;
+    const bool h_spec = record.height_kind != NomadNet::ImageDimension::NONE;
+    auto raw_width = [&]() -> uint32_t {
+        switch (record.width_kind) {
+            case NomadNet::ImageDimension::NATIVE: return iw;
+            case NomadNet::ImageDimension::PIXELS: return record.width_value;
+            case NomadNet::ImageDimension::PERCENT:
+                return (maxcol * std::min<uint32_t>(record.width_value, 100u)) / 100u;
+            default: return maxcol;
+        }
+    };
+    auto raw_height = [&]() -> uint32_t {
+        switch (record.height_kind) {
+            case NomadNet::ImageDimension::NATIVE: return ih;
+            case NomadNet::ImageDimension::PIXELS: return record.height_value;
+            case NomadNet::ImageDimension::PERCENT:
+                return (maxrow * std::min<uint32_t>(record.height_value, 100u)) / 100u;
+            default: return 0u;
+        }
+    };
+    auto height_for_width = [&](uint32_t w) -> uint32_t {
+        return (w * ih + iw / 2u) / (iw == 0 ? 1u : iw);
+    };
+    auto width_for_height = [&](uint32_t h) -> uint32_t {
+        return (h * iw + ih / 2u) / (ih == 0 ? 1u : ih);
+    };
+    uint32_t cols = maxcol;
+    uint32_t rows = 1;
+    if (w_spec && h_spec) {
+        const uint32_t target_w = std::max<uint32_t>(1u, raw_width());
+        const uint32_t target_h = std::max<uint32_t>(1u, raw_height());
+        if (target_w <= maxcol && target_h <= maxrow) {
+            cols = target_w;
+            rows = target_h;
+        } else if (maxcol * target_h <= maxrow * target_w) {
+            // Width binds the proportional downscale
+            // (maxcol/target_w <= maxrow/target_h).
+            cols = maxcol;
+            rows = (maxcol * target_h + target_w / 2u) / (target_w == 0 ? 1u : target_w);
+        } else {
+            // Height binds.
+            rows = maxrow;
+            cols = (maxrow * target_w + target_h / 2u) / (target_h == 0 ? 1u : target_h);
+        }
+    } else if (w_spec) {
+        cols = std::min<uint32_t>(maxcol, std::max<uint32_t>(1u, raw_width()));
+        rows = std::max<uint32_t>(1u, height_for_width(cols));
+        if (rows > maxrow) {
+            rows = maxrow;
+            cols = std::min<uint32_t>(maxcol, std::max<uint32_t>(1u, width_for_height(rows)));
+        }
+    } else if (h_spec) {
+        rows = std::min<uint32_t>(maxrow, std::max<uint32_t>(1u, raw_height()));
+        cols = std::min<uint32_t>(maxcol, std::max<uint32_t>(1u, width_for_height(rows)));
+    } else {
+        cols = maxcol;
+        rows = std::max<uint32_t>(1u, height_for_width(cols));
+        if (rows > maxrow) {
+            rows = maxrow;
+            cols = std::min<uint32_t>(maxcol, std::max<uint32_t>(1u, width_for_height(rows)));
+        }
+    }
+    if (cols == 0) cols = 1;
+    if (rows == 0) rows = 1;
+    placement.width = static_cast<int16_t>(cols);
+    placement.height = static_cast<int16_t>(rows);
+    int16_t left = static_cast<int16_t>(x0);
+    if (record.align == NomadNet::Alignment::CENTER)
+        left = static_cast<int16_t>(x0 + (content_width - cols) / 2u);
+    else if (record.align == NomadNet::Alignment::RIGHT)
+        left = static_cast<int16_t>(x0 + (content_width - cols));
+    placement.x = left;
+    return placement;
+}
+
 NomadNetScreen::NomadNetScreen() {
     _screen=lv_obj_create(lv_scr_act()); lv_obj_set_size(_screen,320,240);
     lv_obj_set_style_bg_color(_screen,Theme::surface(),0); lv_obj_set_style_border_width(_screen,0,0); lv_obj_set_style_pad_all(_screen,0,0);
@@ -78,7 +185,11 @@ NomadNetScreen::NomadNetScreen() {
     lv_obj_t* sl=lv_label_create(_save_button);lv_label_set_text(sl,LV_SYMBOL_SAVE);lv_obj_center(sl);
     _identify_button=lv_btn_create(header);lv_obj_set_size(_identify_button,36,28);lv_obj_align(_identify_button,LV_ALIGN_RIGHT_MID,-80,0);
     lv_obj_t* il=lv_label_create(_identify_button);lv_label_set_text(il,"ID");lv_obj_center(il);
-    for(auto* button:{_back_button,_home_button,_reload_button,_save_button,_identify_button}) {
+    // "Load images" (manual policy; upstream ctrl-l / "Load images"). Hidden
+    // unless the current page has images the MANUAL policy has not loaded.
+    _load_images_button=lv_btn_create(header);lv_obj_set_size(_load_images_button,36,28);lv_obj_align(_load_images_button,LV_ALIGN_LEFT_MID,80,0);
+    lv_obj_t* lil=lv_label_create(_load_images_button);lv_label_set_text(lil,LV_SYMBOL_IMAGE);lv_obj_center(lil);
+    for(auto* button:{_back_button,_home_button,_reload_button,_save_button,_identify_button,_load_images_button}) {
         lv_obj_set_style_bg_color(button,Theme::surfaceContainer(),0);
         lv_obj_set_style_bg_color(button,Theme::primaryPressed(),LV_STATE_FOCUSED);
         lv_obj_set_style_border_width(button,0,0);
@@ -105,6 +216,17 @@ NomadNetScreen::NomadNetScreen() {
 
     _status=lv_label_create(_screen);lv_obj_set_size(_status,312,18);lv_obj_align(_status,LV_ALIGN_TOP_LEFT,4,72);
     lv_obj_set_style_text_font(_status,&lv_font_montserrat_12,0);lv_obj_set_style_text_color(_status,Theme::textTertiary(),0);
+    // Image-transfer progress bar: a thin full-width strip just below the
+    // header. Owner loop sets the value while a /media request is in flight;
+    // it is hidden otherwise. Kept out of the header so it never steals
+    // focus from the address/tools and never disturbs page layout.
+    _image_progress_bar=lv_bar_create(_screen);lv_obj_set_size(_image_progress_bar,320,4);lv_obj_align(_image_progress_bar,LV_ALIGN_TOP_LEFT,0,34);
+    lv_bar_set_range(_image_progress_bar,0,100);lv_bar_set_value(_image_progress_bar,0,LV_ANIM_OFF);
+    lv_obj_set_style_bg_opa(_image_progress_bar,LV_OPA_20,LV_PART_MAIN);
+    lv_obj_set_style_bg_color(_image_progress_bar,Theme::border(),LV_PART_MAIN);
+    lv_obj_set_style_bg_color(_image_progress_bar,Theme::primary(),LV_PART_INDICATOR);
+    lv_obj_add_flag(_image_progress_bar,LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(_image_progress_bar,LV_OBJ_FLAG_CLICKABLE);
     _content=lv_obj_create(_screen);lv_obj_set_size(_content,320,150);lv_obj_align(_content,LV_ALIGN_BOTTOM_MID,0,0);
     lv_obj_set_style_bg_color(_content,Theme::surface(),0);lv_obj_set_style_border_width(_content,0,0);lv_obj_set_style_pad_all(_content,8,0);
     lv_obj_set_flex_flow(_content,LV_FLEX_FLOW_COLUMN);lv_obj_set_flex_align(_content,LV_FLEX_ALIGN_START,LV_FLEX_ALIGN_START,LV_FLEX_ALIGN_START);
@@ -117,7 +239,7 @@ NomadNetScreen::NomadNetScreen() {
     lv_obj_set_style_bg_color(_directory,Theme::surface(),0);lv_obj_set_style_border_width(_directory,0,0);lv_obj_set_style_pad_all(_directory,7,0);
     lv_obj_set_flex_flow(_directory,LV_FLEX_FLOW_COLUMN);lv_obj_set_flex_align(_directory,LV_FLEX_ALIGN_START,LV_FLEX_ALIGN_START,LV_FLEX_ALIGN_START);
     lv_obj_set_style_pad_row(_directory,4,0);lv_obj_set_scroll_dir(_directory,LV_DIR_VER);lv_obj_set_scrollbar_mode(_directory,LV_SCROLLBAR_MODE_AUTO);
-    for(auto* o:{_back_button,_home_button,_reload_button,_save_button,_identify_button,_go_button,_edit_button})lv_obj_add_event_cb(o,clicked,LV_EVENT_CLICKED,this);
+    for(auto* o:{_back_button,_home_button,_reload_button,_save_button,_identify_button,_load_images_button,_go_button,_edit_button})lv_obj_add_event_cb(o,clicked,LV_EVENT_CLICKED,this);
     lv_obj_add_event_cb(_address,clicked,LV_EVENT_READY,this);
     lv_obj_add_flag(_save_button,LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(_identify_button,LV_OBJ_FLAG_HIDDEN);
@@ -157,6 +279,46 @@ void NomadNetScreen::set_identify_enabled(bool enabled){
     if(_page_loaded){
         lv_obj_clear_flag(_identify_button,LV_OBJ_FLAG_HIDDEN);
         rebuild_focus();
+    }
+}
+void NomadNetScreen::set_image_progress(ImageProgress progress){
+    if(!progress.active){
+        lv_obj_add_flag(_image_progress_bar,LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    if(progress.percent>100)progress.percent=100;
+    // Overall page fraction: each admitted image is an equal slice; the
+    // active transfer contributes its own percent within its slice. A
+    // finished-success adds the just-completed slice (the loader has not
+    // yet counted it as loaded); a finished-failure fills nothing (the
+    // next image's first tick resumes the advance).
+    const double total=progress.total_images>0?static_cast<double>(progress.total_images):1.0;
+    double overall=static_cast<double>(progress.completed)/total*100.0;
+    if(progress.position>0&&progress.position<=progress.total_images){
+        overall+=static_cast<double>(progress.percent)/100.0/total*100.0;
+    }
+    if(overall>100.0)overall=100.0;
+    const bool last_finished=progress.percent==100&&!progress.has_next;
+    if(!last_finished){
+        lv_obj_clear_flag(_image_progress_bar,LV_OBJ_FLAG_HIDDEN);
+        lv_bar_set_value(_image_progress_bar,static_cast<int32_t>(overall+0.5),LV_ANIM_OFF);
+    }else{
+        // Last image done: the bar has served its purpose; the status line
+        // now shows the summary until the next page/refresh.
+        lv_obj_add_flag(_image_progress_bar,LV_OBJ_FLAG_HIDDEN);
+    }
+    if(!progress.status_text.empty()){
+        // Direct label write (not set_status): progress ticks are frequent
+        // and must not churn the browser layout or the status timers.
+        lv_obj_clear_flag(_status,LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text(_status,progress.status_text.c_str());
+    }
+}
+void NomadNetScreen::set_images_actionable(bool actionable){
+    if(actionable&&_page_loaded&&!_page.images().empty()){
+        lv_obj_clear_flag(_load_images_button,LV_OBJ_FLAG_HIDDEN);
+    }else{
+        lv_obj_add_flag(_load_images_button,LV_OBJ_FLAG_HIDDEN);
     }
 }
 void NomadNetScreen::clear_document(){
@@ -236,6 +398,9 @@ void NomadNetScreen::show_browser(bool editing){
         lv_obj_add_flag(_save_button,LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(_identify_button,LV_OBJ_FLAG_HIDDEN);
     }
+    // The manual image-load button re-appears via set_images_actionable() once
+    // the owner loop has configured the page's image loader.
+    lv_obj_add_flag(_load_images_button,LV_OBJ_FLAG_HIDDEN);
     set_address_editing(editing);
     rebuild_focus();
 }
@@ -244,7 +409,7 @@ void NomadNetScreen::render_directory(View view){
     _view=view;
     _directory_visible.store(true,std::memory_order_release);
     lv_obj_clear_flag(_directory,LV_OBJ_FLAG_HIDDEN);
-    for(auto* object:{_address_row,_status,_content,_reload_button,_save_button})lv_obj_add_flag(object,LV_OBJ_FLAG_HIDDEN);
+    for(auto* object:{_address_row,_status,_content,_reload_button,_save_button,_identify_button,_load_images_button})lv_obj_add_flag(object,LV_OBJ_FLAG_HIDDEN);
 
     // LVGL automatically enrols newly constructed group-capable widgets in the
     // default group and focuses the first member of an empty group. Keep the
@@ -349,6 +514,7 @@ void NomadNetScreen::rebuild_focus(){
     lv_group_add_obj(group,_reload_button);
     if(!lv_obj_has_flag(_save_button,LV_OBJ_FLAG_HIDDEN))lv_group_add_obj(group,_save_button);
     if(!lv_obj_has_flag(_identify_button,LV_OBJ_FLAG_HIDDEN))lv_group_add_obj(group,_identify_button);
+    if(!lv_obj_has_flag(_load_images_button,LV_OBJ_FLAG_HIDDEN))lv_group_add_obj(group,_load_images_button);
     if(_editing){lv_group_add_obj(group,_address);lv_group_add_obj(group,_go_button);}
     else lv_group_add_obj(group,_edit_button);
     if(!_page.empty())lv_group_add_obj(group,_content);
@@ -499,11 +665,157 @@ bool NomadNetScreen::set_page(const NomadNet::Document& document) {
     lv_obj_set_style_bg_color(_content,_page.has_background()
         ?lv_color_hex(_page.background()):Theme::surface(),0);
     _page_loaded=true;
+    invalidate_page_images();
     lv_obj_scroll_to_y(_content,0,LV_ANIM_OFF);
     lv_obj_refresh_self_size(_content);
     lv_obj_invalidate(_content);
     return true;
 }
+
+// ── Page-image pixel store ────────────────────────────────────────────────
+// A decode publishes one RGB565 buffer into a bounded LRU slot. The slot
+// owns the pixels until the next page invalidates them, so the draw path
+// can blit them without re-decoding. Eviction is rank-based; the least
+// recently used valid slot is reused when all are occupied.
+void NomadNetScreen::invalidate_page_images() {
+    for (auto& slot : _image_slots) {
+        if (slot.pixels) lv_mem_free(slot.pixels);
+        slot.pixels = nullptr;
+        slot.pixel_count = 0;
+        slot.width = 0;
+        slot.height = 0;
+        slot.valid = false;
+    }
+    _image_slot_rank = 0;
+}
+
+uint32_t NomadNetScreen::image_url_hash(const char* data, std::size_t length) {
+    // FNV-1a 32-bit; empty (blanked) records hash to the offset basis so
+    // they never match a stored (non-empty) URL.
+    uint32_t value = 2166136261u;
+    for (std::size_t i = 0; i < length; ++i) {
+        value = static_cast<uint32_t>(
+            (value ^ static_cast<unsigned char>(data[i])) * 16777619u);
+    }
+    return value;
+}
+
+// True when the page's image record at `index` (if any) still matches the
+// URL the slot was stored for. A partial refresh replaces region image
+// records IN PLACE (same compact index, possibly a new URL); without this
+// check a decoded slot would keep showing the old image's pixels under the
+// new URL, and an index-shifted list would alias one image's pixels onto
+// another. Blank (replaced-away) records have an empty URL and mismatch
+// any stored hash.
+bool NomadNetScreen::slot_matches_record(const NomadNet::CompactPage& page,
+                                         uint16_t image_index,
+                                         uint32_t slot_url_hash) {
+    if (image_index >= page.images().size()) return false;
+    const auto url = page.image_url(page.images()[image_index]);
+    return image_url_hash(url.data(), url.size()) == slot_url_hash;
+}
+
+const uint16_t* NomadNetScreen::decoded_image(uint16_t image_index,
+                                              uint16_t& width, uint16_t& height) {
+    width = 0;
+    height = 0;
+    if (image_index >= _page.images().size()) return nullptr;
+    // Slots are tagged with the compact image index they currently hold.
+    for (uint16_t s = 0; s < MAX_DECODED_IMAGE_SLOTS; ++s) {
+        auto& slot = _image_slots[s];
+        if (slot.valid && slot.tag == image_index &&
+                slot_matches_record(_page, image_index, slot.url_hash)) {
+            width = slot.width;
+            height = slot.height;
+            return slot.pixels;
+        }
+    }
+    return nullptr;
+}
+
+bool NomadNetScreen::set_page_image(uint16_t image_index, const uint16_t* rgb565,
+                                    uint32_t width, uint32_t height) {
+    if (!rgb565 || width == 0 || height == 0) return false;
+    if (width > 640 || height > 640) return false; // decoder cap
+    if (image_index >= _page.images().size()) return false;
+    // The slot must be tagged with the record URL at store time so the draw
+    // path can reject it if a partial refresh later replaces the record in
+    // place (same index, new or blank URL).
+    const auto url = _page.image_url(
+        _page.images()[static_cast<std::size_t>(image_index)]);
+    const uint64_t pixel_count = static_cast<uint64_t>(width) * height;
+    if (pixel_count > 640u * 640u) return false;
+
+    // Prefer a slot already holding this image; otherwise evict LRU.
+    int16_t target = -1;
+    int16_t lru = -1;
+    for (uint16_t s = 0; s < MAX_DECODED_IMAGE_SLOTS; ++s) {
+        auto& slot = _image_slots[s];
+        if (slot.valid && slot.tag == image_index &&
+                slot_matches_record(_page, image_index, slot.url_hash)) {
+            target = s;
+            break;
+        }
+        if (!slot.valid || (lru < 0) || slot.lru_rank < _image_slots[static_cast<std::size_t>(lru)].lru_rank)
+            lru = s;
+    }
+    const uint16_t slot_index = (target >= 0) ? static_cast<uint16_t>(target)
+                                              : static_cast<uint16_t>(lru >= 0 ? lru : 0);
+    auto& slot = _image_slots[slot_index];
+    // Allocate in the LVGL pool so the raw buffer is classified as an image
+    // source by the draw path (lv_mem_alloc pool range); PSRAM-backed on
+    // the T-Deck. Allocation failure leaves the LRU intact.
+    uint16_t* pixels = static_cast<uint16_t*>(
+        lv_mem_alloc(pixel_count * sizeof(uint16_t)));
+    if (!pixels) return false;
+    std::memcpy(pixels, rgb565,
+                static_cast<std::size_t>(pixel_count) * sizeof(uint16_t));
+    if (slot.pixels) lv_mem_free(slot.pixels);
+    slot.pixels = pixels;
+    slot.pixel_count = static_cast<uint32_t>(pixel_count);
+    slot.width = static_cast<uint16_t>(width);
+    slot.height = static_cast<uint16_t>(height);
+    slot.tag = image_index;
+    slot.url_hash = image_url_hash(url.data(), url.size());
+    slot.valid = true;
+    slot.lru_rank = ++_image_slot_rank;
+    // A decode reveals the intrinsic size; reflow the layout now so the
+    // placeholder row becomes the correctly sized image box. Failure keeps
+    // the previous layout (placeholder stays visible) and returns false.
+    if (!relayout_images()) return false;
+    return true;
+}
+
+bool NomadNetScreen::relayout_images() {
+    if (!_page.has_image_blocks()) return true; // nothing to reflow
+    const int32_t logical = _logical_scroll;
+    // layout_page() rebuilds layout, checkpoints, focus and clears selection
+    // state; the image blocks re-measure against their newly known intrinsic
+    // sizes. Preserve the logical scroll so the viewport does not jump.
+    bool ok = false;
+    try { ok = layout_page(); } catch (const std::bad_alloc&) { ok = false; }
+    if (!ok) return false;
+    scroll_to_logical(logical, LV_ANIM_OFF);
+    lv_obj_invalidate(_content);
+    return true;
+}
+
+#ifdef PYXIS_TEST_HOOKS
+void NomadNetScreen::test_image_state_dump() const {
+    Serial.printf("T:IMG_STATE images=%u\n",
+                  static_cast<unsigned>(_page.images().size()));
+    for (uint16_t s = 0; s < MAX_DECODED_IMAGE_SLOTS; ++s) {
+        const auto& slot = _image_slots[s];
+        Serial.printf("T:SLOT %u valid=%d tag=%u w=%u h=%u rank=%u\n",
+                      static_cast<unsigned>(s),
+                      slot.valid ? 1 : 0,
+                      static_cast<unsigned>(slot.tag),
+                      static_cast<unsigned>(slot.width),
+                      static_cast<unsigned>(slot.height),
+                      static_cast<unsigned>(slot.lru_rank));
+    }
+}
+#endif
 
 bool NomadNetScreen::prepare_partial_request(
         const NomadNet::PartialRequest& request,
@@ -1212,6 +1524,35 @@ bool NomadNetScreen::layout_from(std::size_t start_block,int32_t start_y,
             if(!layout_table(block,y,window_top,window_bottom))return false;
             continue;
         }
+        if(block.type==NomadNet::BlockType::IMAGE){
+            const bool has_record=block.image_index>=0&&
+                static_cast<std::size_t>(block.image_index)<_page.images().size();
+            uint16_t native_w=0,native_h=0;
+            const uint16_t* decoded=has_record?
+                decoded_image(block.image_index,native_w,native_h):nullptr;
+            const auto& record=has_record?_page.images()[block.image_index]:
+                NomadNet::CompactPage::ImageRecord{};
+            const int32_t viewport=std::max<int32_t>(1,lv_obj_get_content_height(_content));
+            const auto placement=compute_image_placement(
+                0,static_cast<uint32_t>(width),
+                static_cast<uint32_t>(std::max<int32_t>(1,viewport*3)),
+                record,decoded?native_w:0,decoded?native_h:0);
+            if(y+placement.height>=window_top&&y<window_bottom){
+                if(_page_layout.size()>=MAX_WINDOW_FRAGMENTS)return false;
+                // run_index carries the placeholder run (the "[Image: ...]"
+                // text) so the fallback path can draw it before decode.
+                const uint16_t placeholder_run=block.run_count!=0?
+                    static_cast<uint16_t>(block.first_run):0;
+                LayoutFragment fragment(placeholder_run,0,0,-1,
+                    placement.x,static_cast<int16_t>(y-window_top),
+                    placement.width,placement.height,false);
+                fragment.image_index=block.image_index;
+                fragment.image_align=static_cast<uint8_t>(record.align);
+                fragment.image_decoded=decoded!=nullptr;
+                _page_layout.push_back(fragment);
+            }
+            y+=placement.height;continue;
+        }
         const bool heading=block.type==NomadNet::BlockType::HEADING;
         const bool has_runs=block.run_count!=0&&block.first_run<_page.runs().size();
         if(!heading&&!has_runs)continue;
@@ -1412,6 +1753,80 @@ void NomadNetScreen::draw_page(lv_event_t* event){
         lv_area_t area{static_cast<lv_coord_t>(left+fragment.x),static_cast<lv_coord_t>(draw_y),
             static_cast<lv_coord_t>(left+fragment.x+std::max<int16_t>(fragment.width,1)-1),
             static_cast<lv_coord_t>(draw_y+std::max<int16_t>(fragment.height,1)-1)};
+        if(fragment.image_index>=0&&
+           static_cast<std::size_t>(fragment.image_index)<_page.images().size()){
+            uint16_t iw=0,ih=0;
+            const uint16_t* pixels=decoded_image(fragment.image_index,iw,ih);
+            if(pixels&&iw>0&&ih>0){
+                // Decoded: blit the stored RGB565 buffer into the placement
+                // rect (lv_draw_img_decoded skips src-type/decoder heuristics
+                // entirely). LVGL 8.4 SW contract for the zoomed path: the
+                // coords area's SIZE is read as the NATIVE source dimensions
+                // (src_w/src_h, and the source stride), while its POSITION is
+                // the screen anchor where the native image's top-left sits;
+                // zoom/pivot scale it from there. (Using the display size as
+                // coords size made LVGL treat the iw-wide buffer as disp_w
+                // wide — a per-row stride drift that renders as a growing
+                // diagonal offset.) The placement box always satisfies
+                // width<=content_width and height<=maxrow (see
+                // compute_image_placement), but a width-derived aspect fit
+                // does NOT guarantee the intrinsic height matches the box:
+                // a box constrained by the height bound (or a width/height
+                // spec pair that does not preserve aspect) can be shorter
+                // than the width-scaled image. So scale on BOTH axes
+                // (uniform 8.8 zoom, no upscaling) so the result always fits
+                // inside the box, and center the leftovers on either axis by
+                // placing the native top-left anchor at the offset.
+                const int32_t box_w=std::max<int32_t>(1,fragment.width);
+                const int32_t box_h=std::max<int32_t>(1,fragment.height);
+                const uint32_t zoom=std::max<uint32_t>(1u,std::min<uint32_t>(
+                    (uint32_t)(box_w*256u/iw),
+                    (uint32_t)(box_h*256u/ih)));
+                // Display extent as LVGL's transform renders it (integer
+                // division, same as the 8.8 scaling) so centering matches
+                // the actual drawn size.
+                const uint32_t disp_w=(iw*zoom)/256u;
+                const uint32_t disp_h=(ih*zoom)/256u;
+                const int32_t left_off=(box_w-(int32_t)disp_w)/2;
+                const int32_t top_off=(box_h-(int32_t)disp_h)/2;
+                lv_area_t decoded_area{static_cast<lv_coord_t>(area.x1+left_off),
+                    static_cast<lv_coord_t>(area.y1+top_off),
+                    static_cast<lv_coord_t>(area.x1+left_off+iw-1),
+                    static_cast<lv_coord_t>(area.y1+top_off+ih-1)};
+                lv_draw_img_dsc_t img_dsc;
+                lv_draw_img_dsc_init(&img_dsc);
+                img_dsc.zoom=zoom;
+                lv_draw_img_decoded(draw_ctx,&img_dsc,&decoded_area,
+                    reinterpret_cast<const uint8_t*>(pixels),
+                    LV_IMG_CF_TRUE_COLOR);
+            }else{
+                // Placeholder: bounded surface box plus one body row of
+                // alt-text (or the default notice) centered in the row.
+                lv_draw_rect_dsc_t box;lv_draw_rect_dsc_init(&box);
+                box.bg_color=Theme::surface();
+                box.border_color=Theme::border();
+                box.border_width=1;
+                box.radius=3;
+                lv_draw_rect(draw_ctx,&box,&area);
+                const auto& image=_page.images()[fragment.image_index];
+                const auto alt=_page.image_alt(image);
+                const char* label=alt.size()!=0?
+                    reinterpret_cast<const char*>(alt.data()):"[Image]";
+                const std::size_t retained=safe_utf8_prefix(
+                    label,alt.size()!=0?alt.size():7,sizeof(scratch)-1);
+                if(retained!=0)std::memcpy(scratch,label,retained);
+                scratch[retained]='\0';
+                lv_draw_label_dsc_t dsc;lv_draw_label_dsc_init(&dsc);
+                dsc.font=&nomadnet_font_12;dsc.color=Theme::border();
+                const int32_t label_y=draw_y+(fragment.height-16)/2;
+                lv_area_t text_area{area.x1+4,static_cast<lv_coord_t>(label_y),
+                    static_cast<lv_coord_t>(std::max<int32_t>(area.x1,area.x2-4)),
+                    static_cast<lv_coord_t>(label_y+15)};
+                if(lv_area_get_height(&text_area)>0)
+                    lv_draw_label(draw_ctx,&dsc,&text_area,scratch,nullptr);
+            }
+            continue;
+        }
         if(fragment.divider){
             const std::size_t bytes=NomadNet::display_codepoint(fragment.divider_codepoint,scratch);
             const lv_font_t* font=&nomadnet_font_12;
@@ -1808,6 +2223,7 @@ void NomadNetScreen::clicked(lv_event_t* event){
     if(target==self->_back_button&&self->_back)self->_back();
     else if(target==self->_home_button&&self->_home)self->_home();
     else if(target==self->_reload_button&&self->_reload){const std::string address=self->address();if(!self->_reload(address))self->set_status("Browser action queue is busy");}
+    else if(target==self->_load_images_button&&self->_load_images){const std::string address=self->address();if(!self->_load_images(address))self->set_status("Browser action queue is busy");}
     else if(target==self->_save_button&&self->_save){if(!self->_save(self->address()))self->set_status("Browser action queue is busy");}
     else if(target==self->_identify_button&&self->_identify){if(!self->_identify(self->address(),!self->_identify_enabled))self->set_status("Browser action queue is busy");}
     else if(target==self->_edit_button){self->set_address_editing(true);self->set_status("Edit destination or page path");}

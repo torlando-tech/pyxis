@@ -27,6 +27,7 @@ static const char* KEY_DISPLAY_NAME = "disp_name";
 static const char* KEY_BRIGHTNESS = "brightness";
 static const char* KEY_KB_LIGHT = "kb_light";
 static const char* KEY_TIMEOUT = "timeout";
+static const char* KEY_IMAGE_LOAD = "img_load";
 static const char* KEY_ANNOUNCE_INT = "announce";
 static const char* KEY_SYNC_INT = "sync_int";
 static const char* KEY_GPS_SYNC = "gps_sync";
@@ -59,6 +60,7 @@ SettingsScreen::SettingsScreen(lv_obj_t* parent)
       _ta_display_name(nullptr), _btn_view_identity(nullptr),
       _slider_brightness(nullptr), _label_brightness_value(nullptr),
       _switch_kb_light(nullptr), _dropdown_timeout(nullptr),
+      _dropdown_image_loading(nullptr),
       _switch_notification_sound(nullptr), _slider_notification_volume(nullptr),
       _label_notification_volume_value(nullptr),
       _switch_lora_enabled(nullptr),
@@ -257,8 +259,9 @@ void SettingsScreen::create_content() {
     _cards[3] = create_card(_hub, LV_SYMBOL_UPLOAD, "Radio", "LoRa configuration", VIEW_RADIO);
     _cards[4] = create_card(_hub, LV_SYMBOL_LIST, "Delivery", "Propagation & delivery", VIEW_DELIVERY);
     _cards[5] = create_card(_hub, LV_SYMBOL_EYE_OPEN, "Appearance", "Display & keyboard light", VIEW_APPEARANCE);
-    _cards[6] = create_card(_hub, LV_SYMBOL_SETTINGS, "Advanced", "Intervals & time sync", VIEW_ADVANCED);
-    _cards[7] = create_card(_hub, LV_SYMBOL_WARNING, "Transport", "Transport mode", VIEW_TRANSPORT);
+    _cards[6] = create_card(_hub, LV_SYMBOL_IMAGE, "Browser", "NomadNet image loading", VIEW_BROWSER);
+    _cards[7] = create_card(_hub, LV_SYMBOL_SETTINGS, "Advanced", "Intervals & time sync", VIEW_ADVANCED);
+    _cards[8] = create_card(_hub, LV_SYMBOL_WARNING, "Transport", "Transport mode", VIEW_TRANSPORT);
 
     // Sub-views are built lazily on first navigation (see
     // ensure_view_built in switch_view). Pre-building all seven pages at
@@ -787,6 +790,42 @@ void SettingsScreen::create_appearance_view(lv_obj_t* parent) {
     lv_obj_set_style_text_font(_label_notification_volume_value, &lv_font_montserrat_14, 0);
 }
 
+void SettingsScreen::create_browser_view(lv_obj_t* parent) {
+    // NomadNet page image loading policy (upstream image_loading, e1e8ab8):
+    // never | manual | auto (default) | always.
+    lv_obj_t* image_row = lv_obj_create(parent);
+    lv_obj_set_width(image_row, LV_PCT(100));
+    lv_obj_set_height(image_row, 28);
+    lv_obj_set_style_bg_opa(image_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(image_row, 0, 0);
+    lv_obj_set_style_pad_all(image_row, 0, 0);
+    lv_obj_clear_flag(image_row, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* image_label = lv_label_create(image_row);
+    lv_label_set_text(image_label, "Page Images:");
+    lv_obj_align(image_label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_text_color(image_label, Theme::textTertiary(), 0);
+    lv_obj_set_style_text_font(image_label, &lv_font_montserrat_14, 0);
+
+    _dropdown_image_loading = lv_dropdown_create(image_row);
+    lv_dropdown_set_options(_dropdown_image_loading, "Never\nManual\nAutomatic\nAlways");
+    lv_obj_set_size(_dropdown_image_loading, 90, 28);
+    lv_obj_align(_dropdown_image_loading, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_set_style_bg_color(_dropdown_image_loading, Theme::surfaceInput(), 0);
+    lv_obj_set_style_text_color(_dropdown_image_loading, Theme::textPrimary(), 0);
+    lv_obj_set_style_border_color(_dropdown_image_loading, Theme::border(), 0);
+    lv_obj_set_style_text_font(_dropdown_image_loading, &lv_font_montserrat_14, 0);
+    lv_obj_add_event_cb(_dropdown_image_loading, on_image_load_changed,
+                        LV_EVENT_VALUE_CHANGED, this);
+
+    lv_obj_t* hint = lv_label_create(parent);
+    lv_label_set_text(hint, "Manual: a \"Load images\" button on the page loads them on demand.");
+    lv_obj_set_width(hint, LV_PCT(100));
+    lv_obj_set_style_text_color(hint, Theme::textTertiary(), 0);
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_pad_top(hint, 4, 0);
+}
+
 void SettingsScreen::create_advanced_view(lv_obj_t* parent) {
     // Announce interval row
     lv_obj_t* announce_row = lv_obj_create(parent);
@@ -1046,6 +1085,7 @@ void SettingsScreen::load_settings() {
     _settings.brightness = prefs.getUChar(KEY_BRIGHTNESS, 180);
     _settings.keyboard_light = prefs.getBool(KEY_KB_LIGHT, false);
     _settings.screen_timeout = prefs.getUShort(KEY_TIMEOUT, 60);
+    _settings.image_loading = prefs.getUChar(KEY_IMAGE_LOAD, 2);  // default auto
     _settings.announce_interval = prefs.getUInt(KEY_ANNOUNCE_INT, 14400);  // Default 14400s = 4 hours
     _settings.sync_interval = prefs.getUInt(KEY_SYNC_INT, 14400);  // Default 14400s = 4 hours
     _settings.gps_time_sync = prefs.getBool(KEY_GPS_SYNC, true);
@@ -1117,6 +1157,7 @@ void SettingsScreen::service_pending_save() {
         prefs.putUChar(KEY_BRIGHTNESS, settings.brightness);
         prefs.putBool(KEY_KB_LIGHT, settings.keyboard_light);
         prefs.putUShort(KEY_TIMEOUT, settings.screen_timeout);
+        prefs.putUChar(KEY_IMAGE_LOAD, settings.image_loading);
         prefs.putUInt(KEY_ANNOUNCE_INT, settings.announce_interval);
         prefs.putUInt(KEY_SYNC_INT, settings.sync_interval);
         prefs.putBool(KEY_GPS_SYNC, settings.gps_time_sync);
@@ -1200,6 +1241,13 @@ void SettingsScreen::update_ui_from_settings() {
         else if (_settings.screen_timeout == 300) idx = 2;
         else if (_settings.screen_timeout == 0) idx = 3;
         lv_dropdown_set_selected(_dropdown_timeout, idx);
+    }
+    if (_dropdown_image_loading) {
+        // Image loading policy (0=never, 1=manual, 2=auto, 3=always).
+        int idx = 2;
+        if (_settings.image_loading >= 0 && _settings.image_loading <= 3)
+            idx = _settings.image_loading;
+        lv_dropdown_set_selected(_dropdown_image_loading, idx);
     }
     if (_ta_announce_interval) {
         lv_textarea_set_text(_ta_announce_interval, String(_settings.announce_interval / 60).c_str());  // stored seconds -> shown minutes
@@ -1418,6 +1466,12 @@ void SettingsScreen::update_settings_from_ui(View view) {
             }
         }
     }
+    if (view == VIEW_BROWSER) {
+        if (_dropdown_image_loading) {
+            int idx = lv_dropdown_get_selected(_dropdown_image_loading);
+            if (idx >= 0 && idx <= 3) _settings.image_loading = static_cast<uint8_t>(idx);
+        }
+    }
     if (view == VIEW_ADVANCED) {
         if (_ta_announce_interval) {
             _settings.announce_interval = String(lv_textarea_get_text(_ta_announce_interval)).toInt() * 60;  // minutes -> seconds
@@ -1508,6 +1562,7 @@ const char* SettingsScreen::view_title(View view) {
         case VIEW_RADIO: return "Radio";
         case VIEW_DELIVERY: return "Delivery";
         case VIEW_APPEARANCE: return "Appearance";
+        case VIEW_BROWSER: return "Browser";
         case VIEW_ADVANCED: return "Advanced";
         case VIEW_TRANSPORT: return "Transport Mode";
         case VIEW_HUB:
@@ -1532,6 +1587,9 @@ void SettingsScreen::ensure_view_built(View view) {
             break;
         case VIEW_APPEARANCE:
             create_appearance_view(create_page(VIEW_APPEARANCE));
+            break;
+        case VIEW_BROWSER:
+            create_browser_view(create_page(VIEW_BROWSER));
             break;
         case VIEW_ADVANCED:
             create_advanced_view(create_page(VIEW_ADVANCED));
@@ -1588,12 +1646,12 @@ void SettingsScreen::remove_all_from_focus_group(lv_group_t* group) {
     // has been built (lazy views keep pointers null until first use).
     lv_obj_t* all[] = {
         _btn_back, _btn_save,
-        _cards[0], _cards[1], _cards[2], _cards[3], _cards[4], _cards[5], _cards[6], _cards[7],
+        _cards[0], _cards[1], _cards[2], _cards[3], _cards[4], _cards[5], _cards[6], _cards[7], _cards[8],
         _btn_view_identity, _btn_reconnect, _btn_propagation_nodes,
         _ta_wifi_ssid, _ta_wifi_password, _ta_tcp_host, _ta_tcp_port,
         _ta_display_name, _ta_lora_frequency, _ta_announce_interval, _ta_sync_interval,
         _slider_brightness, _slider_notification_volume, _slider_lora_power,
-        _switch_kb_light, _dropdown_timeout,
+        _switch_kb_light, _dropdown_timeout, _dropdown_image_loading,
         _switch_notification_sound,
         _switch_lora_enabled,
         _switch_tcp_enabled, _switch_auto_enabled, _switch_ble_enabled, _switch_lora_interface,
@@ -1659,6 +1717,8 @@ void SettingsScreen::focus_group_for(View view) {
             _switch_notification_sound, _slider_notification_volume,
         };
         for (lv_obj_t* obj : objs) if (obj) lv_group_add_obj(group, obj);
+    } else if (view == VIEW_BROWSER) {
+        if (_dropdown_image_loading) lv_group_add_obj(group, _dropdown_image_loading);
     } else if (view == VIEW_ADVANCED) {
         lv_obj_t* objs[] = {_ta_announce_interval, _ta_sync_interval, _switch_gps_sync};
         for (lv_obj_t* obj : objs) if (obj) lv_group_add_obj(group, obj);
@@ -1743,6 +1803,15 @@ void SettingsScreen::on_kb_light_changed(lv_event_t* event) {
 
 void SettingsScreen::on_timeout_changed(lv_event_t* event) {
     // Immediate: the main loop reads screen_timeout for display sleep.
+    SettingsScreen* screen = (SettingsScreen*)lv_event_get_user_data(event);
+    screen->save_settings();
+}
+
+void SettingsScreen::on_image_load_changed(lv_event_t* event) {
+    // Immediate: the next NomadNet page load picks up the new policy from
+    // the running app_settings; the current page's images are unaffected
+    // (reference load_images applies to the page currently shown, not
+    // retroactively).
     SettingsScreen* screen = (SettingsScreen*)lv_event_get_user_data(event);
     screen->save_settings();
 }

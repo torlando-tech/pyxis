@@ -23,20 +23,20 @@ elif len(sys.argv) == 4:
 else:
     raise SystemExit(
         "usage: run_flow.py CLIENT RNS_PYTHON NOMADNET_SOURCE | --verify-reference SOURCE")
-NOMADNET_COMMIT = "89e3eea10c60d8fe597d36d2e091d5aab86bdfb8"
-NOMADNET_VERSION = "1.2.8"
+NOMADNET_COMMIT = "e1e8ab83800fec0df358796b44d5fcec4b2cd12b"
+NOMADNET_VERSION = "1.4.3"
 REFERENCE_FILES = {
     "nomadnet/_version.py":
-        "09f5579b4c3094a3d6d2484e730856c3ad53a60b5988b8a309e3ec00838adda5",
+        "af1bd051649eea7bd2003908caece2ca2f08ae4ef4b360d94b1381f5cf1ca404",
     "nomadnet/ui/textui/MicronParser.py":
-        "c4b40918fe813a7cfbb696f33df8a08451fd0156a6919a185b75225f52402ffb",
+        "14116d24cd4e6977dc7521cb16b0f57cdfad76c3999160ac14191fb2a1bf697e",
     "nomadnet/ui/textui/Browser.py":
-        "b7bc37e0fd4e72261703a037ab1967ea4cc43b837dc1cd74f92a835bacab40a1",
+        "cbce04302ec092ae6bb3cc6ce9f423139b1339b9e903f14f12cf8e6ebe736729",
     "nomadnet/Node.py":
-        "2461a592b731cb1469bebb5ccc5f523892127881cb7a7e8ed586ac62a8c0c23a",
+        "1e2ba96f6dc040fcbe19e55bd2eb33961d9fb9443f7e590e02aeb32894aa695c",
 }
 SCENARIOS = ("immediate", "resource", "near-limit", "oversized", "timeout", "cancel", "reuse",
-             "form-anonymous", "form-identified", "owner-form-history", "partial")
+             "form-anonymous", "form-identified", "owner-form-history", "partial", "media")
 if os.environ.get("PYXIS_FLOW_SCENARIOS"):
     requested = tuple(item.strip() for item in os.environ["PYXIS_FLOW_SCENARIOS"].split(",") if item.strip())
     if not requested or any(item not in SCENARIOS for item in requested):
@@ -45,7 +45,7 @@ if os.environ.get("PYXIS_FLOW_SCENARIOS"):
 
 MANIFEST_BASE = "51e4b586c4c3867ae399f573557edda6f3b48a44"
 MANIFEST_BRANCH = "feat/nomadnet-partials-core"
-MANIFEST_MICRORETICULUM = "921b3aa030525f819671d99eff1d1f28350c9b69"
+MANIFEST_MICRORETICULUM = "0487775e68417eb20e449b5f3d2e50ac723c9590"
 MANIFEST_FILES = (
     "tests/native/nomadnet_x86_flow/CMakeLists.txt",
     "tests/native/nomadnet_x86_flow/BuildManifest.h.in",
@@ -164,6 +164,7 @@ def run_browser_oracle(source: Path) -> None:
 
     class Rns:
         LOG_DEBUG = 0
+        LOG_EXTREME = 7
 
         @staticmethod
         def log(*_args):
@@ -278,6 +279,15 @@ for scenario in SCENARIOS:
     if scenario == "partial":
         ok &= "partial_live=1" in client_text
         ok &= "path=/page/partial.mu" in server_text
+    if scenario == "media":
+        # The file-response (raw Resource, no msgpack envelope) path must
+        # deliver the exact raw file bytes after the fork's
+        # response_resource_concluded fix, with per-part progress callbacks.
+        ok &= "SERVER PASS file-response media request served" in server_text
+        ok &= "MEDIA OK bytes=4096" in client_text
+        ok &= "path=/media/image.webp" in server_text
+        ok &= "progress_callbacks=1" in client_text
+        ok &= "passed=1" in client_text
     print(f"SCENARIO {scenario}: {'PASS' if ok else 'FAIL'} server={server_rc} client={client_rc}")
     failed |= not ok
 

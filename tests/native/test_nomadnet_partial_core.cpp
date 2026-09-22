@@ -258,6 +258,194 @@ int main() {
           preserved_form.fields().size() == 1 &&
           std::string(preserved_form.fields()[0].value.data(),
                       preserved_form.fields()[0].value_length) == "user value");
+
+    // Image records across a partial refresh (reference 1.4.3):
+    //   - a partial refresh never fetches images, but the refreshed region's
+    //     images keep their real alt text (records are replaced, not dropped);
+    //   - region-owned records are discarded each refresh, so the list stays
+    //     bounded (no accumulation across refreshes);
+    //   - retained (non-region) images keep their compact index, so a
+    //     decoded image keeps rendering.
+    const auto img_source = parser.parse(
+        R"(before
+`(base img`a.webp)
+`{:img.mu`10}
+after)");
+    CompactPage img_base;
+    check("image + partial base fixture compacts", img_base.assign(img_source) &&
+          img_base.images().size() == 1 &&
+          img_base.blocks()[1].type == BlockType::IMAGE &&
+          img_base.blocks()[1].image_index == 0);
+    const auto img_fragment = parser.parse(
+        R"(updated
+`(frag img`b.webp))");
+    CompactPage img_candidate;
+    const auto img_replace = img_candidate.assign_replacing_partial(
+        img_base, 0, img_fragment, CompactPage::MAX_ARENA_BYTES);
+    check("partial refresh replaces region image records (no accumulation)",
+          img_replace == PartialReplaceResult::APPLIED &&
+          img_candidate.images().size() == 2 &&
+          img_candidate.has_image_blocks());
+    if (img_replace == PartialReplaceResult::APPLIED &&
+            img_candidate.images().size() == 2) {
+        const auto& base_image = img_candidate.blocks()[1];
+        check("retained image block keeps its compact image index",
+              base_image.type == BlockType::IMAGE &&
+              base_image.image_index == 0);
+        check("retained image record keeps its alt and url",
+              img_candidate.image_alt(img_candidate.images()[0]) == "base img" &&
+              img_candidate.image_url(img_candidate.images()[0]) == "a.webp");
+        // Fragment image: region records replaced; real alt text present.
+        const auto& frag_image = img_candidate.blocks()[3];
+        check("fragment image keeps its real alt text (no loading string)",
+              frag_image.type == BlockType::IMAGE &&
+              frag_image.image_index == 1 &&
+              img_candidate.image_alt(img_candidate.images()[1]) == "frag img" &&
+              img_candidate.image_url(img_candidate.images()[1]) == "b.webp");
+        // Second refresh (region now holds two images): the count reflects
+        // the region's NEW content, not the accumulated history, and the
+        // retained image still has index 0.
+        const auto img_fragment2 = parser.parse(
+            R"(v2
+`(frag2a`c.webp)
+`(frag2b`d.webp))");
+        CompactPage img_candidate2;
+        const auto img_replace2 = img_candidate2.assign_replacing_partial(
+            img_candidate, 0, img_fragment2, CompactPage::MAX_ARENA_BYTES);
+        check("repeated partial refresh is bounded (1 retained + 2 region)",
+              img_replace2 == PartialReplaceResult::APPLIED &&
+              img_candidate2.images().size() == 3);
+        if (img_replace2 == PartialReplaceResult::APPLIED &&
+                img_candidate2.images().size() == 3) {
+            check("retained image keeps its index after the second refresh",
+                  img_candidate2.blocks()[1].image_index == 0 &&
+                  img_candidate2.image_alt(img_candidate2.images()[0]) ==
+                      "base img");
+            check("second-refresh region images keep their real alt text",
+                  img_candidate2.blocks()[3].image_index == 1 &&
+                  img_candidate2.blocks()[4].image_index == 2 &&
+                  img_candidate2.image_alt(img_candidate2.images()[1]) ==
+                      "frag2a" &&
+                  img_candidate2.image_alt(img_candidate2.images()[2]) ==
+                      "frag2b");
+        }
+    }
+    // Greptile round-4 residual: "retained image identity is still not
+    // preserved when removing an earlier partial-owned image." Decode
+    // slots and loader entries are keyed by the compact image index, so
+    // removing a region image must NOT disturb the identity of the records
+    // still on the page: the refreshed region's records are replaced in
+    // place (same index, new URL — a stale slot for that index is rejected
+    // by the screen's url-hash check) and records the region no longer
+    // holds are blanked (empty URL), never dropped with the rest compacted.
+    // Two-refresh flow: refresh 1 populates the region with two images,
+    // refresh 2 shrinks it to one.
+    const auto drop_source = parser.parse(
+        R"(`{:drop.mu}
+tail
+`(keep`k.webp))");
+    CompactPage drop_base;
+    check("region-marker base fixture assigns",
+          drop_base.assign(drop_source) && drop_base.images().size() == 1 &&
+          drop_base.blocks()[0].type == BlockType::PARTIAL &&
+          drop_base.blocks()[2].image_index == 0 &&
+          drop_base.image_url(drop_base.images()[0]) == "k.webp");
+    const auto drop_fragment1 = parser.parse(
+        R"(`(regA`r1.webp)
+`(regB`r2.webp))");
+    CompactPage drop_mid;
+    check("first refresh populates the region with two images",
+          drop_mid.assign_replacing_partial(
+              drop_base, 0, drop_fragment1, CompactPage::MAX_ARENA_BYTES) ==
+              PartialReplaceResult::APPLIED &&
+          drop_mid.images().size() == 3);
+    if (drop_mid.images().size() == 3) {
+        check("first-refresh region images are appended after retained",
+              drop_mid.blocks()[0].image_index == 1 &&
+              drop_mid.blocks()[1].image_index == 2 &&
+              drop_mid.blocks()[3].image_index == 0 &&
+              drop_mid.image_url(drop_mid.images()[1]) == "r1.webp" &&
+              drop_mid.image_url(drop_mid.images()[2]) == "r2.webp");
+        const auto drop_fragment2 = parser.parse(R"(h2
+`(new`n.webp))");
+        CompactPage drop_candidate;
+        const auto drop_replace = drop_candidate.assign_replacing_partial(
+            drop_mid, 0, drop_fragment2, CompactPage::MAX_ARENA_BYTES);
+        check("shrink refresh keeps the record list at its current size",
+              drop_replace == PartialReplaceResult::APPLIED &&
+              drop_candidate.images().size() == 3);
+        if (drop_replace == PartialReplaceResult::APPLIED &&
+                drop_candidate.images().size() == 3) {
+            check("surviving region image is replaced in place (index 1)",
+                  drop_candidate.blocks()[1].image_index == 1 &&
+                  drop_candidate.image_url(drop_candidate.images()[1]) ==
+                      "n.webp" &&
+                  drop_candidate.image_alt(drop_candidate.images()[1]) == "new");
+            check("removed region image leaves a blanked record (empty url)",
+                  drop_candidate.image_url(drop_candidate.images()[2]).empty());
+            check("retained image keeps its index and url across the removal",
+                  drop_candidate.blocks()[3].image_index == 0 &&
+                  drop_candidate.image_url(drop_candidate.images()[0]) ==
+                      "k.webp" &&
+                  drop_candidate.image_alt(drop_candidate.images()[0]) == "keep");
+        }
+    }
+    // Greptile round-5 P1: "Blank Slots Exhaust Capacity." A prior shrink
+    // blanks the region's removed records but leaves them in _images; if a
+    // later grow could not reuse those blanked records it would append past
+    // them, and repeated shrink/grow would consume the bounded record
+    // capacity until current images fell back to placeholder. The reusable
+    // pool must therefore include records a prior shrink blanked (any record
+    // not still referenced by a surviving non-region block), so overflow
+    // reuses them before appending. Run a grow/shrink cycle and pin the
+    // record count as bounded (retained + region max), never growing.
+    const auto cyc_source = parser.parse(
+        R"(`{:cyc.mu}
+tail
+`(keep`k.webp))");
+    CompactPage cyc_base;
+    check("cycle base fixture assigns",
+          cyc_base.assign(cyc_source) && cyc_base.images().size() == 1 &&
+          cyc_base.blocks()[2].image_index == 0);
+    const auto cyc_grow = R"(`(a`a.webp)
+`(b`b.webp)
+`(c`c.webp))";
+    const auto cyc_shrink = R"(h
+`(d`d.webp))";
+    CompactPage cyc_cur, cyc_next;
+    bool cyc_ok = cyc_cur.assign(cyc_source);
+    const std::size_t cyc_bound = 4; // 1 retained ("keep") + 3 region max
+    // Cycle: grow(3), shrink(1), grow(3), shrink(1), grow(3). After each
+    // refresh the record count must stay at or below the bound.
+    for (int round = 0; cyc_ok && round < 5; ++round) {
+        const bool growing = (round % 2 == 0);
+        const char* fragment = growing ? cyc_grow : cyc_shrink;
+        cyc_next = CompactPage();
+        cyc_ok = cyc_next.assign_replacing_partial(
+            cyc_cur, 0, parser.parse(fragment), CompactPage::MAX_ARENA_BYTES) ==
+            PartialReplaceResult::APPLIED;
+        if (!cyc_ok) break;
+        if (cyc_next.images().size() > cyc_bound) {
+            check("shrink/grow cycle stays within record capacity", false);
+            break;
+        }
+        cyc_cur = std::move(cyc_next);
+    }
+    check("shrink/grow cycle completes within record capacity",
+          cyc_ok && cyc_cur.images().size() <= cyc_bound);
+    // The final grow (3 region images + retained) renders every current
+    // image: all three region blocks resolve to live (non-blank) records.
+    if (cyc_ok) {
+        bool all_live = true;
+        for (const auto& b : cyc_cur.blocks())
+            if (b.type == BlockType::IMAGE && b.image_index >= 0) {
+                const auto url =
+                    cyc_cur.image_url(cyc_cur.images()[b.image_index]);
+                if (url.size() == 0) all_live = false;
+            }
+        check("final grow renders every current image (no blank fallback)",
+              all_live);
+    }
     const auto region_source = parser.parse(
         "base `<same`base-default>\n"
         "`{:region.mu}\n"

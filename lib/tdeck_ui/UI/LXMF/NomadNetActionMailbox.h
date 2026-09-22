@@ -10,7 +10,7 @@
 
 namespace UI::LXMF::NomadNet {
 
-enum class UserActionKind : uint8_t { OPEN, RELOAD, SUBMIT, SAVE, IDENTIFY, BACK, HOME };
+enum class UserActionKind : uint8_t { OPEN, RELOAD, SUBMIT, SAVE, IDENTIFY, BACK, HOME, LOAD_IMAGES };
 
 struct UserAction {
     static constexpr std::size_t MAX_TARGET_BYTES = 511;

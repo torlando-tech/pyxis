@@ -12,6 +12,9 @@
 #include "LVGL/LVGLInit.h"
 #include "Theme.h"
 #include "../../../lib/tdeck_ui/UI/Clipboard.h"
+#include "../../../lib/tdeck_ui/UI/LXMF/NomadNetImageDecoder.h"
+#include "../../../lib/tdeck_ui/UI/LXMF/NomadNetImageProtocol.h"
+#include "demo_webp_generated.h"
 
 namespace UI {
 String Clipboard::_content;
@@ -573,6 +576,211 @@ int main() {
     const uint32_t remaining = lv_obj_get_child_cnt(lv_scr_act()) - baseline;
     teardown = teardown && remaining == 0 && lv_group_get_focused(group) == nullptr;
 
+    // ── Page-image render scenario (reference e1e8ab8) ────────────────────
+    // Drives the production parser -> compact -> screen pipeline with an
+    // image tag, then publishes decoded RGB565 pixels through set_page_image
+    // and asserts the actual framebuffer: placeholder box before decode,
+    // decoded true-color pixels at the computed placement after reflow.
+    bool image_placeholder = false, image_decoded_pixels = false;
+    bool image_placement = false, image_bounds = false;
+    bool image_decode_real = false;
+    {
+        using UI::LXMF::NomadNet::ImageDimension;
+        using UI::LXMF::NomadNetScreen;
+        using UI::LXMF::NomadNet::Alignment;
+        const uint32_t cw = 304;
+        const uint32_t ch = 500; // >= viewport*3 sizing window
+        auto rec = [](ImageDimension w, ImageDimension hv, uint16_t wv, uint16_t hvv) {
+            UI::LXMF::NomadNet::CompactPage::ImageRecord r;
+            r.width_kind = w; r.height_kind = hv;
+            r.width_value = wv; r.height_value = hvv;
+            return r;
+        };
+        // Sizing tiers (reference ImageWidget._display_size), intrinsic
+        // 120x40 (aspect 3:1) inside the 304-wide content box:
+        //   neither  -> full width, aspect-derived height 304*40/120 = 101;
+        //   w only   -> 120x40;
+        //   h only   -> 120x40;
+        //   both     -> 100x80;
+        //   both big -> stretch downscale: width binds, 304 x 304*200/400 = 304x152.
+        const auto p_neither = NomadNetScreen::compute_image_placement(0, cw, ch, rec(ImageDimension::NONE, ImageDimension::NONE, 0, 0), 120, 40);
+        const auto p_w = NomadNetScreen::compute_image_placement(0, cw, ch, rec(ImageDimension::PIXELS, ImageDimension::NONE, 120, 0), 120, 40);
+        const auto p_h = NomadNetScreen::compute_image_placement(0, cw, ch, rec(ImageDimension::NONE, ImageDimension::PIXELS, 0, 40), 120, 40);
+        const auto p_wh = NomadNetScreen::compute_image_placement(0, cw, ch, rec(ImageDimension::PIXELS, ImageDimension::PIXELS, 100, 80), 120, 40);
+        const auto p_stretch = NomadNetScreen::compute_image_placement(0, cw, ch, rec(ImageDimension::NATIVE, ImageDimension::NATIVE, 0, 0), 400, 200);
+        UI::LXMF::NomadNet::CompactPage::ImageRecord right = rec(ImageDimension::PIXELS, ImageDimension::NONE, 120, 0);
+        right.align = Alignment::RIGHT;
+        const auto p_right = NomadNetScreen::compute_image_placement(0, cw, ch, right, 120, 40);
+        UI::LXMF::NomadNet::CompactPage::ImageRecord center = rec(ImageDimension::PIXELS, ImageDimension::NONE, 100, 0);
+        center.align = Alignment::CENTER;
+        const auto p_center = NomadNetScreen::compute_image_placement(0, cw, ch, center, 100, 40);
+        image_placement =
+            p_neither.width == 304 && p_neither.height == 101 && p_neither.x == 0 &&
+            p_w.width == 120 && p_w.height == 40 &&
+            p_h.width == 120 && p_h.height == 40 &&
+            p_wh.width == 100 && p_wh.height == 80 &&
+            p_stretch.width == 304 && p_stretch.height == 152 &&
+            p_right.x == 184 && p_center.x == 102;
+        // No intrinsic size -> one 16px placeholder row across the box.
+        const auto p_ph = NomadNetScreen::compute_image_placement(0, cw, ch, rec(ImageDimension::NONE, ImageDimension::NONE, 0, 0), 0, 0);
+        image_placement = image_placement && p_ph.height == 16 && p_ph.width == 304;
+
+        UI::LXMF::NomadNetScreen screen;
+        screen.show();
+        const auto doc = parser.parse(
+            "top text\n"
+            "`(img`w=n`a=c`:/media/img.webp)\n"
+            "bottom text\n");
+        assert(doc.images.size() == 1);
+        assert(screen.set_page(doc));
+        lv_obj_update_layout(screen._screen);
+        // Locate the image fragment in the published layout.
+        int16_t img_y = -1, img_x = 0, img_w = 0, img_h = 0;
+        for (const auto& frag : screen._page_layout) {
+            if (frag.image_index == 0) {
+                img_y = frag.y; img_x = frag.x; img_w = frag.width; img_h = frag.height;
+            }
+        }
+        lv_area_t c1{};
+        lv_obj_get_content_coords(screen._content, &c1);
+        // Placeholder render: bounded box with a border row at the top of
+        // the image block plus centered alt text.
+        if (img_y >= 0 && img_h == 16) {
+            render();
+            const int32_t dy = c1.y1 + img_y;
+            image_placeholder = dy >= 0 && dy < 240 &&
+                count_color(c1.x1 + img_x + 2, dy, c1.x1 + img_x + img_w - 3, dy,
+                            lv_color_hex(0x4A454F)) >= 40;
+        }
+        // Publish decoded pixels (240x80 solid 0x001F red). w=n means native
+        // width -> the block reflows from the 16px placeholder row to a
+        // 240x80 box.
+        // Fill with the exact RGB565 encoding of the probe color (the raw
+        // 0x001F constant is an RGB888 byte pattern, not this display's
+        // lv_color_t value, so it would never match a drawn pixel).
+        const uint16_t probe_pixel = lv_color_hex(0x001F).full;
+        std::vector<uint16_t> pixels(240 * 80, probe_pixel);
+        const bool stored = screen.set_page_image(0, pixels.data(), 240, 80);
+        img_y = img_x = img_w = img_h = 0;
+        for (const auto& frag : screen._page_layout) {
+            if (frag.image_index == 0) {
+                img_y = frag.y; img_x = frag.x; img_w = frag.width; img_h = frag.height;
+            }
+        }
+        render();
+        if (stored && img_w > 16 && img_h > 16) {
+            const int32_t x1 = c1.x1 + img_x;
+            const int32_t y1 = c1.y1 + img_y;
+            // The decoded buffer must fill the interior of the reflowed
+            // image box with the exact stored pixels.
+            image_decoded_pixels =
+                count_color(x1 + 4, y1 + 4, x1 + img_w - 5, y1 + img_h - 5,
+                            lv_color_hex(0x001F)) >=
+                static_cast<std::size_t>((img_w - 10) * (img_h - 10));
+        }
+        // Bounds: oversized input (641px > 640 decoder cap) must be rejected
+        // without disturbing the stored page image.
+        std::vector<uint16_t> too_big(641 * 8, 0x001F);
+        image_bounds = !screen.set_page_image(0, too_big.data(), 641, 8);
+        uint16_t dw = 0, dh = 0;
+        image_bounds = image_bounds && screen.decoded_image(0, dw, dh) != nullptr && dw == 240 && dh == 80;
+        screen.hide();
+    }
+
+    // ── Real WebP decode -> framebuffer scenario ───────────────────────────
+    {
+        using UI::LXMF::NomadNet::ImageDecodeResult;
+        using UI::LXMF::NomadNet::decode_webp_rgb565;
+        using UI::LXMF::NomadNet::release_decoded_image;
+        using UI::LXMF::NomadNet::DecodedImage;
+        using UI::LXMF::NomadNet::MAX_DECODABLE_DIMENSION;
+        using UI::LXMF::NomadNet::normalize_image_response;
+        using UI::LXMF::NomadNet::ImageResponseResult;
+        using UI::LXMF::NomadNet::ExternalVector;
+        using UI::LXMF::NomadNet::BlockType;
+        const std::uint8_t* wire = demo_webp::kBytes;
+        const std::size_t wire_size = demo_webp::kSize;
+        ExternalVector<std::uint8_t> normalized;
+        const ImageResponseResult norm =
+            normalize_image_response(wire, wire_size, normalized);
+        DecodedImage decoded;
+        const ImageDecodeResult decode =
+            (norm == ImageResponseResult::OK)
+                ? decode_webp_rgb565(normalized.data(), normalized.size(),
+                                     MAX_DECODABLE_DIMENSION, decoded)
+                : ImageDecodeResult::NOT_IMAGE;
+        const bool dims_ok = norm == ImageResponseResult::OK &&
+            decode == ImageDecodeResult::OK &&
+            decoded.width == 256 && decoded.height == 256 && decoded.pixels;
+        if (dims_ok) {
+            const auto doc = parser.parse(
+                "top text\n"
+                "`(real webp`w=256`a=c`:/media/demo.webp)\n"
+                "bottom text\n");
+            UI::LXMF::NomadNetScreen screen;
+            screen.show();
+            bool pageok = screen.set_page(doc);
+            lv_obj_update_layout(screen._screen);
+            lv_area_t c1{};
+            lv_obj_get_content_coords(screen._content, &c1);
+            int16_t img_y = -1, img_x = 0, img_w = 0, img_h = 0;
+            int nimg = 0;
+            for (const auto& frag : screen._page_layout) {
+                if (frag.image_index == 0) {
+                    img_y = frag.y; img_x = frag.x; img_w = frag.width; img_h = frag.height;
+                    nimg++;
+                }
+            }
+            const bool stored = screen.set_page_image(
+                0, decoded.pixels, decoded.width, decoded.height);
+            img_y = img_x = img_w = img_h = 0; nimg = 0;
+            for (const auto& frag : screen._page_layout) {
+                if (frag.image_index == 0) {
+                    img_y = frag.y; img_x = frag.x; img_w = frag.width; img_h = frag.height;
+                    nimg++;
+                }
+            }
+            render();
+            if (stored && img_w == 256 && img_h == 256 && decoded.pixels) {
+                // The decoded WebP buffer is 256x256 but the display is only
+                // 240px tall with ~90px of chrome above, so the bottom of the
+                // image is below the fold (correctly clipped by draw_page's
+                // content clip). Assert pixel-identity over the actually
+                // visible rectangle: the image box, clipped to the content
+                // area and to the framebuffer. Every visible pixel must equal
+                // the decoded source pixel at the same local offset -- a
+                // 1:1 blit because w=256 equals the native width (zoom NONE).
+                const int32_t box_x = c1.x1 + img_x;
+                const int32_t box_y = c1.y1 + img_y;
+                const int32_t cx1 = c1.x1, cx2 = c1.x2, cy1 = c1.y1, cy2 = c1.y2;
+                int32_t vx1 = std::max(box_x, cx1);
+                int32_t vy1 = std::max(box_y, cy1);
+                int32_t vx2 = std::min(box_x + img_w - 1, cx2);
+                int32_t vy2 = std::min(box_y + img_h - 1, cy2);
+                vx1 = std::max(vx1, 0); vy1 = std::max(vy1, 0);
+                vx2 = std::min(vx2, 319); vy2 = std::min(vy2, 239);
+                bool all_match = true;
+                uint32_t checked = 0;
+                bool saw_nonzero = false;
+                for (int32_t sy = vy1; sy <= vy2; ++sy) {
+                    for (int32_t sx = vx1; sx <= vx2; ++sx) {
+                        const int32_t lx = sx - box_x;
+                        const int32_t ly = sy - box_y;
+                        if (lx < 0 || ly < 0 || lx >= 256 || ly >= 256) { all_match = false; break; }
+                        const uint16_t expected = decoded.pixels[static_cast<std::size_t>(ly) * 256 + lx];
+                        const uint16_t actual = framebuffer[static_cast<std::size_t>(sy) * 320 + sx].full;
+                        if (actual != expected) { all_match = false; break; }
+                        if (expected != 0x0000) saw_nonzero = true;
+                        ++checked;
+                    }
+                    if (!all_match) break;
+                }
+                image_decode_real = all_match && checked > 1000 && saw_nonzero;
+            }
+            screen.hide();
+            release_decoded_image(decoded);
+        }
+    }
     lv_indev_delete(keyboard);
 
     lv_group_del(group);
@@ -581,7 +789,7 @@ int main() {
         "eight_column_tier=%d eight_column_preserved=%d eight_column_pixels=%d table_link_focus=%d eight_column_objects=%d "
         "focus_events=%d edge_scroll=%d ready=%d cancel=%d enter=%d escape=%d focus_restore=%d "
         "teardown=%d cached_status_transient=%d cached_status_oom_collapses=%d partial_activity_no_layout=%d partial_failure_visible_during_retry=%d stale_group=%d background_pixels=%d table_pixels=%d form_pixels=%d "
-        "focus_pixels=%d glyph_pixels=%d partial_replace=%d partial_forms=%d partial_link_focus=%d partial_focus_fallback=%d partial_scroll_anchor=%d partial_second_scroll_rollback=%d partial_region_top_fallback=%d partial_empty=%d exact_fonts=1 objects=%u\n",
+        "focus_pixels=%d glyph_pixels=%d partial_replace=%d partial_forms=%d partial_link_focus=%d partial_focus_fallback=%d partial_scroll_anchor=%d partial_second_scroll_rollback=%d partial_region_top_fallback=%d partial_empty=%d image_placeholder=%d image_decoded=%d image_placement=%d image_bounds=%d image_decode_real=%d exact_fonts=1 objects=%u\n",
         fit_tier, fit_columns, reflow_tier, reflow_cards, eight_column_tier, eight_column_preserved,
         eight_column_pixels, table_link_focus, eight_column_objects, focus_events, edge_scroll,
         ready, cancel, enter, escape, focus_restore, teardown, cached_status_transient,
@@ -590,7 +798,8 @@ int main() {
         table_pixels, form_pixels, focus_pixels, glyph_pixels,
         partial_replace, partial_forms, partial_link_focus, partial_focus_fallback,
         partial_scroll_anchor, partial_second_scroll_rollback,
-        partial_region_top_fallback, partial_empty, remaining);
+        partial_region_top_fallback, partial_empty, image_placeholder, image_decoded_pixels,
+           image_placement, image_bounds, image_decode_real, remaining);
     return fit_tier && fit_columns && reflow_tier && reflow_cards && eight_column_tier &&
            eight_column_preserved && eight_column_pixels && table_link_focus && eight_column_objects &&
            focus_events && edge_scroll &&
@@ -600,6 +809,7 @@ int main() {
            table_pixels && form_pixels && focus_pixels && glyph_pixels &&
            partial_replace && partial_forms && partial_link_focus && partial_focus_fallback &&
            partial_scroll_anchor && partial_second_scroll_rollback &&
-           partial_region_top_fallback && partial_empty &&
+           partial_region_top_fallback && partial_empty && image_placeholder && image_decoded_pixels &&
+           image_placement && image_bounds && image_decode_real &&
            remaining == 0 ? 0 : 1;
 }

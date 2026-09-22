@@ -26,6 +26,33 @@ public:
     void set_home_callback(Callback cb) { _home = std::move(cb); }
     void set_reload_callback(OpenCallback cb) { _reload = std::move(cb); }
     void set_open_callback(OpenCallback cb) { _open = std::move(cb); }
+    // Manual image-load button (upstream "Load images" / ctrl-l): the owner
+    // loop re-admits this page's skipped images when the policy is MANUAL.
+    // Returns false when the action queue is busy (screen shows a hint).
+    void set_load_images_callback(OpenCallback cb) { _load_images = std::move(cb); }
+    // Progress bar + status for the in-flight /media transfers (owner loop
+    // owns the values; this screen only renders). The bar shows OVERALL page
+    // progress (completed images + current transfer fraction) so a sequential
+    // multi-image load visibly advances even between transfers. The status
+    // line is written directly (not via set_status) to avoid re-layout on
+    // every tick. Hidden when no image is loading.
+    struct ImageProgress {
+        bool active = false;
+        std::size_t total_images = 0;   // images admitted for this page
+        std::size_t position = 0;       // active image index, 1-based (0 = none)
+        uint16_t percent = 0;           // 0-100 of the ACTIVE transfer
+        std::size_t completed = 0;      // images already LOADED (bar baseline)
+        uint64_t received_bytes = 0;    // bytes of the active transfer so far
+        uint64_t total_bytes = 0;       // advertised size of the active transfer
+        bool has_next = false;          // another image follows the finished one
+        std::string status_text;        // written to the status line; empty = leave as-is
+    };
+    // The struct is passed by value so the screen can clamp percent without
+    // mutating the owner's copy.
+    void set_image_progress(ImageProgress progress);
+    // True when the "Load images" button should be shown: the current page
+    // has images that the MANUAL policy has not loaded yet.
+    void set_images_actionable(bool actionable);
     void set_link_callback(LinkCallback cb) { _link = std::move(cb); }
     void set_submit_callback(SubmitCallback cb) { _submit = std::move(cb); }
     void set_save_callback(SaveCallback cb) { _save = std::move(cb); }
@@ -37,6 +64,30 @@ public:
     void clear_status();
     void set_partial_activity(bool active);
     bool set_page(const NomadNet::Document& document);
+    // Main-thread decode seam: stores decoded RGB565 pixels for one page
+    // image (bounded slot LRU, PSRAM) and returns true when the stored
+    // image should reflow layout (intrinsic size unknown until now). The
+    // owner loop calls this after a successful /media fetch + decode; it
+    // must run only while the page generation is unchanged.
+    bool set_page_image(uint16_t image_index, const uint16_t* rgb565,
+                        uint32_t width, uint32_t height);
+    // Post-decode reflow: rebuilds the full layout + focus index while
+    // preserving logical scroll and selection state. No-op when the page
+    // holds no image blocks. Returns false on layout failure (the page
+    // stays as-is; the placeholder remains visible).
+    bool relayout_images();
+    // Reference-faithful image display sizing (NomadNet e1e8ab8
+    // ImageWidget._display_size), exposed for host testing: computes the
+    // placement rect of one image block inside the content box.
+    struct ImagePlacement {
+        int16_t x = 0;
+        int16_t width = 0;
+        int16_t height = 0;
+    };
+    static ImagePlacement compute_image_placement(
+        uint16_t x0, uint32_t content_width, uint32_t content_height,
+        const NomadNet::CompactPage::ImageRecord& record,
+        uint32_t native_w, uint32_t native_h);
     bool prepare_submission(uint16_t link_id, uint32_t generation,
                             std::string& target,
                             NomadNet::ExternalVector<uint8_t>& request_data,
@@ -57,8 +108,14 @@ public:
                             const char* id, std::size_t id_size) const;
     bool jump_to_anchor(const std::string& name);
     void restore_logical_scroll(int32_t logical);
+#if defined(PYXIS_TEST_HOOKS) || defined(PYXIS_NOMAD_LINK_DIAGNOSTIC)
+    void test_scroll(int32_t logical) { restore_logical_scroll(logical); }
+#endif
     int32_t logical_scroll() const { return _logical_scroll; }
     bool page_loaded() const { return _page_loaded; }
+    // The compact page currently rendered (used by the owner loop for
+    // URL-identity checks around decoded image slots).
+    const NomadNet::CompactPage& page() const { return _page; }
     void set_library(const NomadNet::Library& library);
     void set_page_saved(bool saved);
     void set_identify_enabled(bool enabled);
@@ -109,6 +166,13 @@ private:
         bool table_cell = false;
         bool table_header = false;
         uint8_t heading_style = 0;
+        // Image fragments: image_index indexes the page image record; the
+        // placeholder is drawn until decode_image() publishes pixels.
+        int16_t image_index = -1;
+        uint8_t image_align = 0; // Alignment
+        uint16_t image_native_w = 0;
+        uint16_t image_native_h = 0;
+        bool image_decoded = false;
         LayoutFragment() = default;
         LayoutFragment(uint16_t run, uint16_t offset, uint16_t length, int16_t link,
                        int16_t left, int16_t top, int16_t w, int16_t h,
@@ -139,12 +203,42 @@ private:
             : index(item_index), y(top), bottom(lower), order(source_order), field(is_field) {}
     };
     lv_obj_t* _screen=nullptr; lv_obj_t* _back_button=nullptr; lv_obj_t* _home_button=nullptr;
-    lv_obj_t* _reload_button=nullptr; lv_obj_t* _save_button=nullptr; lv_obj_t* _identify_button=nullptr; lv_obj_t* _address_row=nullptr; lv_obj_t* _address=nullptr;
-    lv_obj_t* _go_button=nullptr; lv_obj_t* _address_summary=nullptr; lv_obj_t* _edit_button=nullptr;
+ lv_obj_t* _reload_button=nullptr; lv_obj_t* _save_button=nullptr; lv_obj_t* _identify_button=nullptr; lv_obj_t* _address_row=nullptr; lv_obj_t* _address=nullptr;
+ lv_obj_t* _load_images_button=nullptr; lv_obj_t* _image_progress_bar=nullptr;
+ lv_obj_t* _go_button=nullptr; lv_obj_t* _address_summary=nullptr; lv_obj_t* _edit_button=nullptr;
     lv_obj_t* _status=nullptr; lv_obj_t* _content=nullptr; lv_obj_t* _field_editor=nullptr;
     lv_timer_t* _status_timer=nullptr;
     lv_obj_t* _directory=nullptr;
     NomadNet::CompactPage _page;
+    // Decoded page-image pixels. Bounded slot LRU in PSRAM; one 640x640
+    // RGB565 slot is 768 KiB, so four slots cap at 3 MiB. Caps are
+    // provisional: they must be re-measured in the physical low-water pass
+    // before release (skill requirement), because a live page + LVGL +
+    // map cache share the same PSRAM.
+    static constexpr uint16_t MAX_DECODED_IMAGE_SLOTS = 4;
+    struct DecodedImageSlot {
+        uint16_t* pixels = nullptr; // lv_mem_alloc pool (LVGL src classification)
+        uint32_t pixel_count = 0;
+        uint16_t width = 0;
+        uint16_t height = 0;
+        uint16_t lru_rank = 0;
+        uint16_t tag = 0; // compact image index this slot holds
+        uint32_t url_hash = 0; // FNV-1a of the record URL at store time;
+                               // a slot is only valid while the page's record
+                               // at `tag` still has this URL (a partial
+                               // refresh may replace region image records in
+                               // place, same index, new URL)
+        bool valid = false;
+    };
+    static uint32_t image_url_hash(const char* data, std::size_t length);
+    // Slot/record URL-identity check (see slot_matches_record in .cpp).
+    static bool slot_matches_record(const NomadNet::CompactPage& page,
+                                    uint16_t image_index, uint32_t slot_url_hash);
+    DecodedImageSlot _image_slots[MAX_DECODED_IMAGE_SLOTS];
+    uint16_t _image_slot_rank = 0;
+    const uint16_t* decoded_image(uint16_t image_index, uint16_t& width,
+                                  uint16_t& height);
+    void invalidate_page_images();
     NomadNet::FormState _form_state;
     NomadNet::ExternalVector<LayoutFragment> _page_layout;
     NomadNet::ExternalVector<LayoutFragment> _line_layout;
@@ -163,6 +257,12 @@ private:
 #ifdef PYXIS_NOMADNET_TEST_HOOKS
     int8_t _test_scroll_fail_countdown = -1;
 #endif
+#ifdef PYXIS_TEST_HOOKS
+    // Serial diagnostic: prints loader-independent slot state (tag/w/h/valid)
+    // and per-page-image block count so index mapping can be verified against
+    // the T:IMG lines during a physical image-load test.
+    void test_image_state_dump() const;
+#endif
     TableLayoutObservation _table_layout;
     int16_t _selected_link = -1;
     int16_t _selected_field = -1;
@@ -179,7 +279,7 @@ private:
     bool _editing = true;
     bool _page_loaded = false;
     bool _identify_enabled = false;
-    Callback _back,_home; OpenCallback _reload,_open; LinkCallback _link;
+    Callback _back,_home; OpenCallback _reload,_open,_load_images; LinkCallback _link;
     SubmitCallback _submit; SaveCallback _save; IdentifyCallback _identify;
     void set_address_editing(bool editing);
     static void status_timer_cb(lv_timer_t* timer);

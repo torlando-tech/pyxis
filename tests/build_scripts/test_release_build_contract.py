@@ -3,7 +3,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MICROSTORE_PIN = "https://github.com/torlando-tech/microStore.git#2762f7606800ffb23f4a593947d4f58e259cda7a"
-MICRORETICULUM_PIN = "https://github.com/torlando-tech/microReticulum.git#921b3aa030525f819671d99eff1d1f28350c9b69"
+MICRORETICULUM_PIN = "https://github.com/torlando-tech/microReticulum.git#0487775e68417eb20e449b5f3d2e50ac723c9590"
 MAX_RNS_PSRAM_POOL_BYTES = 1024 * 1024
 
 

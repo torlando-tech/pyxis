@@ -48,6 +48,21 @@ def test_partial_transport_is_generation_owned_bounded_and_non_cacheable():
     )[1].split("\n}", 1)[0]
     assert "_nomad_partial_scheduler.cancel(_nomad_navigation_generation);" in advance
     assert "_nomad_partial_controller.cancel();" in advance
+    # A new page must cancel an in-flight page-image request (the retained
+    # receipt otherwise blocks the next page's image transport and a stale
+    # expiry can fail an index on the new page).
+    assert "nomad_cancel_images();" in advance
+    # The cancel belongs at the generation boundary, NOT in the transport
+    # teardown: those are shared with same-page partial refreshes, where an
+    # in-flight download is legitimate and must not be aborted.
+    supersede = manager_cpp.split(
+        "bool UIManager::nomad_supersede_transport(const std::string& destination_hex) {", 1
+    )[1].split("\n}", 1)[0]
+    assert "nomad_cancel_images();" not in supersede
+    stop = manager_cpp.split("bool UIManager::nomad_stop_transport() {", 1)[1].split(
+        "\n}", 1
+    )[0]
+    assert "nomad_cancel_images();" not in stop
     publication = manager_cpp.split(
         "NomadNet::PageApplyResult UIManager::nomad_apply_page_document(", 1
     )[1].split("void UIManager::nomad_update()", 1)[0]

@@ -9,8 +9,8 @@ import time
 
 import RNS
 
-RNS_VERSION = "1.4.2"
-RNS_TREE_SHA256 = "b5398e7bae0cdd47212e0c6bff3f3a51b21012db0c23cb20d43b5103612f6c5e"
+RNS_VERSION = "1.5.4"
+RNS_TREE_SHA256 = os.environ.get("PYXIS_FLOW_RNS_TREE_SHA256", "8433a6868dca8e01bee21541ba9690e539994f783d4f8193cdbb5c93565b453e")
 if getattr(RNS, "__version__", None) != RNS_VERSION:
     raise SystemExit(f"wrong RNS reference version: {getattr(RNS, '__version__', None)}")
 if RNS.__file__ is None:
@@ -37,6 +37,7 @@ state = {
     "link_closed": False,
     "form_valid": False,
     "form_sequence": [],
+    "media_valid": False,
 }
 
 
@@ -70,6 +71,18 @@ EXPECTED_FORM_DATA = {
     "field_color": "red,blue",
 }
 
+# Deterministic WebP-shaped media payload: real RIFF/WEBP header + a lossy
+# VP8 chunk marker, then deterministic filler. 4 KiB is large enough to
+# span multiple RNS resource parts (MDU ~1280) so transfer progress is
+# observable, small enough for a sub-second transfer on loopback.
+def _media_file_bytes() -> bytes:
+    header = b"RIFF" + (32 + 4096 - 8).to_bytes(4, "little") + b"WEBPVP8 "
+    filler = bytes(range(256)) * 16
+    body = filler[: 4096 - len(header)]
+    return header + body
+
+MEDIA_FILE_BYTES = _media_file_bytes()
+
 
 def page_handler(path, data, request_id, link_id, remote_identity, requested_at):
     state["request_seen"] = True
@@ -80,6 +93,28 @@ def page_handler(path, data, request_id, link_id, remote_identity, requested_at)
         state["form_sequence"].append(data)
     print(f"SERVER request count={state['request_count']} path={path} bytes={len(PAGES[path])} anonymous={state['anonymous']}", flush=True)
     return PAGES[path]
+
+
+def media_handler(path, data, request_id, link_id, remote_identity, requested_at):
+    # Mirrors upstream NomadNet Node.serve_media: return a [file_handle,
+    # metadata] tuple so RNS sends a raw-file Resource response (NOT a
+    # msgpack envelope). This is the wire shape that exposed the C++ port's
+    # response_resource_concluded dropping every file/media response.
+    state["request_seen"] = True
+    state["request_count"] += 1
+    state["anonymous"] = remote_identity is None
+    if not isinstance(data, dict) or "path" not in data or "key" not in data:
+        print("SERVER FAIL media request missing path/key", flush=True)
+        return False
+    media_bytes = MEDIA_FILE_BYTES
+    # Write to a real file and return it as a BufferedReader, matching
+    # upstream exactly (RNS then constructs the Resource file response).
+    fd, media_path = tempfile.mkstemp(suffix=".webp", prefix="pyxis-flow-media-")
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(media_bytes)
+    name = os.path.basename(media_path).encode("utf-8")
+    print(f"SERVER media request path={data['path']} key={data['key']} bytes={len(media_bytes)} anonymous={state['anonymous']}", flush=True)
+    return [open(media_path, "rb"), {"name": name}]
 
 
 def on_link_established(link):
@@ -118,7 +153,7 @@ def write_config(config_dir: str):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("scenario", choices=("immediate", "resource", "near-limit", "oversized", "timeout", "cancel", "reuse", "form-anonymous", "form-identified", "owner-form-history", "partial"))
+    parser.add_argument("scenario", choices=("immediate", "resource", "near-limit", "oversized", "timeout", "cancel", "reuse", "form-anonymous", "form-identified", "owner-form-history", "partial", "media"))
     parser.add_argument("--timeout", type=float, default=20.0)
     args = parser.parse_args()
 
@@ -136,6 +171,13 @@ def main():
             destination.register_request_handler(path, page_handler,
                                                  allow=RNS.Destination.ALLOW_ALL,
                                                  auto_compress=False)
+    elif args.scenario == "media":
+        # Upstream registers the RNS handler at the fixed path "/media"; the
+        # real file path travels inside the msgpack request data (data["path"]),
+        # so the handler is keyed on "/media" exactly like Node.register_media.
+        destination.register_request_handler("/media", media_handler,
+                                             allow=RNS.Destination.ALLOW_ALL,
+                                             auto_compress=False)
     elif args.scenario != "timeout":
         path = ("/page/form.mu" if args.scenario.startswith("form-") or
                 args.scenario == "owner-form-history" else f"/page/{args.scenario}.mu")
@@ -186,6 +228,10 @@ def main():
                 continue
             print("SERVER FAIL owner form/history request sequence", flush=True)
             return 1
+        if args.scenario == "media" and state["request_seen"]:
+            time.sleep(1.5)
+            print("SERVER PASS file-response media request served", flush=True)
+            return 0
         if args.scenario in ("immediate", "resource", "near-limit", "oversized", "partial") and state["request_seen"]:
             time.sleep(1.0)
             print("SERVER PASS", flush=True)

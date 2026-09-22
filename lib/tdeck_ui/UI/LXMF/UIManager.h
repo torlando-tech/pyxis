@@ -26,6 +26,9 @@
 #include "NomadNetPageApplication.h"
 #include "NomadNetLibrary.h"
 #include "NomadNetCacheFlow.h"
+#include "NomadNetImageLoader.h"
+#include "NomadNetImageProtocol.h"
+#include "NomadNetImageDecoder.h"
 #include "Hardware/TDeck/NomadNetStorageSD.h"
 #include "ConversationListScreen.h"
 #include "ChatScreen.h"
@@ -127,7 +130,11 @@ public:
     // Physical-test surface. Opening is mailbox-only so Reticulum and UI
     // ownership remains on the normal main-loop path.
     bool test_nomad_open(const std::string& address);
+    bool test_nomad_reload();
+    bool test_nomad_load_images();
+    void test_nomad_scroll(int32_t logical);
     void test_nomad_status() const;
+    void test_nomad_image_state() const;
 #endif
 
     /**
@@ -452,6 +459,26 @@ private:
     RNS::Link _nomad_link{RNS::Type::NONE};
     bool _nomad_link_identified = false;
     RNS::RequestReceipt _nomad_request{RNS::Type::NONE};
+    // ── Page-image transport (upstream e1e8ab8) ─────────────────────────────
+    // After a live page apply the page Link is retained (nomad_finish_request_
+    // keep_link); page images are then fetched sequentially over that same
+    // Link via the registered "/media" path. A dedicated single-slot mailbox
+    // (same proven pattern as _nomad_mailbox) keeps image responses isolated
+    // from page/partial responses so the two never collide. The loader owns
+    // ordering/policy/cancellation; this block owns the transport.
+    NomadNet::ImageLoader _nomad_image_loader;
+    NomadNet::AsyncMailbox _nomad_image_mailbox;
+    RNS::RequestReceipt _nomad_image_request{RNS::Type::NONE};
+    NomadNet::ExternalVector<uint8_t> _nomad_image_response;
+    // Progress-aware image deadline (replaces the blind 10 s). Set at
+    // send time to a generous base window + an RTT-based slack, then
+    // refreshed by every per-part transfer progress event, so an actively
+    // transferring image stays alive at any size while a truly stalled
+    // request (no progress for the whole window) still fails. The fork's
+    // own receipt timeout (requested as 0.0 = RNS-derived default) is a
+    // separate, second backstop.
+    uint32_t _nomad_image_deadline_ms = 0; // 0 = no in-flight image request
+    uint32_t _nomad_image_total_bytes = 0; // advertisement size for the bar
     enum class NomadState {
         IDLE, CACHE, LIVE_PENDING, PARTIAL_PENDING, PATH, LINK, REQUEST
     };
@@ -474,6 +501,32 @@ private:
     void nomad_begin_live_transport();
     void nomad_begin_partial_transport();
     void nomad_poll_partials(uint32_t now_ms);
+    // ── Page-image transport owner-loop methods ────────────────────────────
+    // Configure the loader for a just-applied page (called from the page
+    // publication path). No-op when the page has no images or the policy gate
+    // rejects everything.
+    void nomad_configure_page_images(const NomadNet::Document& document);
+    // Advance the sequential image fetcher. Runs only when the page transport
+    // has settled to IDLE and the page Link is still ACTIVE (same-destination
+    // images reuse it). One /media request at a time.
+    void nomad_poll_images(uint32_t now_ms);
+    void nomad_send_image_request();
+    // Status-line text for the image progress display: "Image 2 of 3 - 45% -
+    // 8.2 KB of 24.0 KB" (percent/bytes clauses omitted when unknown).
+    std::string nomad_image_progress_status(std::size_t position,
+                                            std::size_t total, uint16_t percent,
+                                            uint64_t received_bytes,
+                                            uint64_t total_bytes) const;
+    // Push one progress display update to the NomadNet screen (under the
+    // LVGL lock) from the current loader state. finished=false: a transfer
+    // is in flight (percent/bytes of the ACTIVE image). finished=true: the
+    // active image just ended; success picks the loaded/failed wording.
+    void nomad_publish_image_progress(uint16_t percent,
+                                      uint64_t received_bytes,
+                                      uint64_t total_bytes,
+                                      bool finished, bool success);
+    void nomad_release_image_request();
+    void nomad_cancel_images();
     void nomad_finish_partial(bool success, const char* status);
     void nomad_defer_partial(const char* status, bool retain_link = true);
     void nomad_release_partial(bool success, bool deferred, const char* status,
@@ -504,6 +557,9 @@ private:
     static void on_nomad_progress(const RNS::RequestReceipt& receipt);
     static void on_nomad_resource_started(const RNS::Resource& resource);
     static void on_nomad_resource_progress(const RNS::Resource& resource);
+    static void on_nomad_image_response(const RNS::RequestReceipt& receipt);
+    static void on_nomad_image_failed(const RNS::RequestReceipt& receipt);
+    static void on_nomad_image_progress(const RNS::RequestReceipt& receipt);
 
     // Screen navigation handlers
     void on_conversation_selected(const RNS::Bytes& peer_hash);
