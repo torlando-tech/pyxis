@@ -689,6 +689,32 @@ void NomadNetScreen::invalidate_page_images() {
     _image_slot_rank = 0;
 }
 
+uint32_t NomadNetScreen::image_url_hash(const char* data, std::size_t length) {
+    // FNV-1a 32-bit; empty (blanked) records hash to the offset basis so
+    // they never match a stored (non-empty) URL.
+    uint32_t value = 2166136261u;
+    for (std::size_t i = 0; i < length; ++i) {
+        value = static_cast<uint32_t>(
+            (value ^ static_cast<unsigned char>(data[i])) * 16777619u);
+    }
+    return value;
+}
+
+// True when the page's image record at `index` (if any) still matches the
+// URL the slot was stored for. A partial refresh replaces region image
+// records IN PLACE (same compact index, possibly a new URL); without this
+// check a decoded slot would keep showing the old image's pixels under the
+// new URL, and an index-shifted list would alias one image's pixels onto
+// another. Blank (replaced-away) records have an empty URL and mismatch
+// any stored hash.
+bool NomadNetScreen::slot_matches_record(const NomadNet::CompactPage& page,
+                                         uint16_t image_index,
+                                         uint32_t slot_url_hash) {
+    if (image_index >= page.images().size()) return false;
+    const auto url = page.image_url(page.images()[image_index]);
+    return image_url_hash(url.data(), url.size()) == slot_url_hash;
+}
+
 const uint16_t* NomadNetScreen::decoded_image(uint16_t image_index,
                                               uint16_t& width, uint16_t& height) {
     width = 0;
@@ -697,7 +723,8 @@ const uint16_t* NomadNetScreen::decoded_image(uint16_t image_index,
     // Slots are tagged with the compact image index they currently hold.
     for (uint16_t s = 0; s < MAX_DECODED_IMAGE_SLOTS; ++s) {
         auto& slot = _image_slots[s];
-        if (slot.valid && slot.tag == image_index) {
+        if (slot.valid && slot.tag == image_index &&
+                slot_matches_record(_page, image_index, slot.url_hash)) {
             width = slot.width;
             height = slot.height;
             return slot.pixels;
@@ -711,6 +738,11 @@ bool NomadNetScreen::set_page_image(uint16_t image_index, const uint16_t* rgb565
     if (!rgb565 || width == 0 || height == 0) return false;
     if (width > 640 || height > 640) return false; // decoder cap
     if (image_index >= _page.images().size()) return false;
+    // The slot must be tagged with the record URL at store time so the draw
+    // path can reject it if a partial refresh later replaces the record in
+    // place (same index, new or blank URL).
+    const auto url = _page.image_url(
+        _page.images()[static_cast<std::size_t>(image_index)]);
     const uint64_t pixel_count = static_cast<uint64_t>(width) * height;
     if (pixel_count > 640u * 640u) return false;
 
@@ -719,7 +751,11 @@ bool NomadNetScreen::set_page_image(uint16_t image_index, const uint16_t* rgb565
     int16_t lru = -1;
     for (uint16_t s = 0; s < MAX_DECODED_IMAGE_SLOTS; ++s) {
         auto& slot = _image_slots[s];
-        if (slot.valid && slot.tag == image_index) { target = s; break; }
+        if (slot.valid && slot.tag == image_index &&
+                slot_matches_record(_page, image_index, slot.url_hash)) {
+            target = s;
+            break;
+        }
         if (!slot.valid || (lru < 0) || slot.lru_rank < _image_slots[static_cast<std::size_t>(lru)].lru_rank)
             lru = s;
     }
@@ -740,6 +776,7 @@ bool NomadNetScreen::set_page_image(uint16_t image_index, const uint16_t* rgb565
     slot.width = static_cast<uint16_t>(width);
     slot.height = static_cast<uint16_t>(height);
     slot.tag = image_index;
+    slot.url_hash = image_url_hash(url.data(), url.size());
     slot.valid = true;
     slot.lru_rank = ++_image_slot_rank;
     // A decode reveals the intrinsic size; reflow the layout now so the

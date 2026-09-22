@@ -2912,6 +2912,28 @@ void UIManager::nomad_configure_page_images(const NomadNet::Document& document) 
     }
 }
 
+// True when the page's image record at the entry's compact index no longer
+// matches the URL the entry was fetched for. Used by the RESPONSE branch of
+// nomad_poll_images: a dynamic partial refresh may have replaced the record
+// in place (same index, new or blank URL) while the response was in flight,
+// so the decoded bytes must be discarded rather than stored under the new
+// record. Comparison mirrors nomad_configure_page_images, which built the
+// entry from parse_image_url(record url): same-destination urls resolve to
+// the page destination, otherwise the record must still be valid with the
+// same destination and path.
+static bool nomad_image_entry_url_stale(
+        const NomadNet::ImageLoadEntry& entry,
+        const NomadNet::CompactPage& page, uint16_t image_index,
+        const std::string& page_destination_hex) {
+    const auto url_view = page.image_url(page.images()[image_index]);
+    const std::string url(url_view.data(), url_view.size());
+    const auto parsed = NomadNet::parse_image_url(url);
+    if (!parsed.valid) return true;
+    const std::string destination = parsed.same_destination
+        ? page_destination_hex : parsed.destination_hex;
+    return destination != entry.destination_hex || parsed.path != entry.path;
+}
+
 void UIManager::nomad_poll_images(uint32_t now_ms) {
     // Only when the page transport has settled to IDLE, the browser route is
     // active, the loader has admitted entries for the current generation, and
@@ -2955,6 +2977,32 @@ void UIManager::nomad_poll_images(uint32_t now_ms) {
             return;
         }
         if (event.kind == NomadNet::AsyncMailbox::Kind::RESPONSE) {
+            // Stale-URL guard: a dynamic partial refresh may have replaced
+            // the record at this index in place (same compact image index,
+            // new or blank URL) while this response was in flight. The
+            // decoded pixels would then belong to the old URL and must not
+            // be stored — the reference re-parses the region and shows the
+            // (new) alt text without re-fetching, so the image is a
+            // per-image terminal failure and the page is unaffected.
+            bool stale = false;
+            {
+                LVGL_LOCK();
+                const auto& page = _nomadnet_screen->page();
+                stale = index >= static_cast<uint16_t>(page.images().size()) ||
+                    nomad_image_entry_url_stale(
+                        *entry, page, index,
+                        _nomad_url.destination_hex);
+            }
+            if (stale) {
+                nomad_publish_image_progress(0, 0, _nomad_image_total_bytes,
+                                             true, false);
+                _nomad_image_loader.fail_image(index, true);
+                _nomad_image_deadline_ms = 0;
+                nomad_release_image_request();
+                event.data.clear();
+                _nomad_image_response.clear();
+                return;
+            }
             // normalize -> decode -> publish. A bad response is a per-image
             // terminal failure; the page and other images are unaffected.
             NomadNet::ExternalVector<uint8_t> webp;

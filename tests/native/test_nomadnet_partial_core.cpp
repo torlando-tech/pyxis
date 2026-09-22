@@ -330,6 +330,66 @@ after)");
                       "frag2b");
         }
     }
+    // Greptile round-4 residual: "retained image identity is still not
+    // preserved when removing an earlier partial-owned image." Decode
+    // slots and loader entries are keyed by the compact image index, so
+    // removing a region image must NOT disturb the identity of the records
+    // still on the page: the refreshed region's records are replaced in
+    // place (same index, new URL — a stale slot for that index is rejected
+    // by the screen's url-hash check) and records the region no longer
+    // holds are blanked (empty URL), never dropped with the rest compacted.
+    // Two-refresh flow: refresh 1 populates the region with two images,
+    // refresh 2 shrinks it to one.
+    const auto drop_source = parser.parse(
+        R"(`{:drop.mu}
+tail
+`(keep`k.webp))");
+    CompactPage drop_base;
+    check("region-marker base fixture assigns",
+          drop_base.assign(drop_source) && drop_base.images().size() == 1 &&
+          drop_base.blocks()[0].type == BlockType::PARTIAL &&
+          drop_base.blocks()[2].image_index == 0 &&
+          drop_base.image_url(drop_base.images()[0]) == "k.webp");
+    const auto drop_fragment1 = parser.parse(
+        R"(`(regA`r1.webp)
+`(regB`r2.webp))");
+    CompactPage drop_mid;
+    check("first refresh populates the region with two images",
+          drop_mid.assign_replacing_partial(
+              drop_base, 0, drop_fragment1, CompactPage::MAX_ARENA_BYTES) ==
+              PartialReplaceResult::APPLIED &&
+          drop_mid.images().size() == 3);
+    if (drop_mid.images().size() == 3) {
+        check("first-refresh region images are appended after retained",
+              drop_mid.blocks()[0].image_index == 1 &&
+              drop_mid.blocks()[1].image_index == 2 &&
+              drop_mid.blocks()[3].image_index == 0 &&
+              drop_mid.image_url(drop_mid.images()[1]) == "r1.webp" &&
+              drop_mid.image_url(drop_mid.images()[2]) == "r2.webp");
+        const auto drop_fragment2 = parser.parse(R"(h2
+`(new`n.webp))");
+        CompactPage drop_candidate;
+        const auto drop_replace = drop_candidate.assign_replacing_partial(
+            drop_mid, 0, drop_fragment2, CompactPage::MAX_ARENA_BYTES);
+        check("shrink refresh keeps the record list at its current size",
+              drop_replace == PartialReplaceResult::APPLIED &&
+              drop_candidate.images().size() == 3);
+        if (drop_replace == PartialReplaceResult::APPLIED &&
+                drop_candidate.images().size() == 3) {
+            check("surviving region image is replaced in place (index 1)",
+                  drop_candidate.blocks()[1].image_index == 1 &&
+                  drop_candidate.image_url(drop_candidate.images()[1]) ==
+                      "n.webp" &&
+                  drop_candidate.image_alt(drop_candidate.images()[1]) == "new");
+            check("removed region image leaves a blanked record (empty url)",
+                  drop_candidate.image_url(drop_candidate.images()[2]).empty());
+            check("retained image keeps its index and url across the removal",
+                  drop_candidate.blocks()[3].image_index == 0 &&
+                  drop_candidate.image_url(drop_candidate.images()[0]) ==
+                      "k.webp" &&
+                  drop_candidate.image_alt(drop_candidate.images()[0]) == "keep");
+        }
+    }
     const auto region_source = parser.parse(
         "base `<same`base-default>\n"
         "`{:region.mu}\n"

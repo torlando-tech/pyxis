@@ -113,6 +113,9 @@ public:
 #endif
     int32_t logical_scroll() const { return _logical_scroll; }
     bool page_loaded() const { return _page_loaded; }
+    // The compact page currently rendered (used by the owner loop for
+    // URL-identity checks around decoded image slots).
+    const NomadNet::CompactPage& page() const { return _page; }
     void set_library(const NomadNet::Library& library);
     void set_page_saved(bool saved);
     void set_identify_enabled(bool enabled);
@@ -220,8 +223,17 @@ private:
         uint16_t height = 0;
         uint16_t lru_rank = 0;
         uint16_t tag = 0; // compact image index this slot holds
+        uint32_t url_hash = 0; // FNV-1a of the record URL at store time;
+                               // a slot is only valid while the page's record
+                               // at `tag` still has this URL (a partial
+                               // refresh may replace region image records in
+                               // place, same index, new URL)
         bool valid = false;
     };
+    static uint32_t image_url_hash(const char* data, std::size_t length);
+    // Slot/record URL-identity check (see slot_matches_record in .cpp).
+    static bool slot_matches_record(const NomadNet::CompactPage& page,
+                                    uint16_t image_index, uint32_t slot_url_hash);
     DecodedImageSlot _image_slots[MAX_DECODED_IMAGE_SLOTS];
     uint16_t _image_slot_rank = 0;
     const uint16_t* decoded_image(uint16_t image_index, uint16_t& width,

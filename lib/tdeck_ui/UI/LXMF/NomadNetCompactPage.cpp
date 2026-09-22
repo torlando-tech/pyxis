@@ -468,93 +468,144 @@ PartialReplaceResult CompactPage::assign_replacing_partial(
         // never scans for or fetches images (reference: detect_images runs
         // only at full page load; a refreshed region re-parses but is not
         // image-detected), but the reference DOES show the region's real alt
-        // text for such images. So:
-        //   - base records owned by the replaced region (referenced by its
-        //     image blocks) are discarded — each refresh replaces them, so
-        //     the list stays bounded (no accumulation across refreshes);
-        //   - all other base records are copied verbatim (same order and
-        //     indices, so a decoded image keeps rendering);
-        //   - the fragment's records are appended with an offset remap, so
-        //     a refreshed-region image renders its real alt text (and a
-        //     decoded buffer, had one been stored) instead of a fixed
-        //     "loading" string. They are never fetched (no loader entry).
-        auto image_in_region = [&](const CompactPage& page,
-                                   std::size_t source_index) {
-            if (source_index >= page._blocks.size()) return false;
-            const BlockRecord& b = page._blocks[source_index];
-            return b.type == BlockType::IMAGE && b.image_index >= 0 &&
-                b.partial_region_index == static_cast<int16_t>(partial_index);
-        };
-        std::vector<bool> region_owned;
-        {
-            bool bad = false;
-            try {
-                region_owned.assign(base._images.size(), false);
-                for (std::size_t i = 0; i < base._blocks.size(); ++i)
-                    if (image_in_region(base, i))
-                        region_owned[static_cast<std::size_t>(
-                            base._blocks[i].image_index)] = true;
-            } catch (const std::bad_alloc&) { bad = true; }
-            if (bad) { clear(); return PartialReplaceResult::ALLOCATION_FAILED; }
-        }
-        for (std::size_t i = 0; i < base._images.size(); ++i) {
-            if (region_owned[i]) continue;
-            if (_images.size() >= MAX_IMAGES) {
-                clear();
-                return PartialReplaceResult::LIMIT_EXCEEDED;
-            }
-            const auto& source = base._images[i];
-            ImageRecord image;
-            if (!append_view(base.image_alt(source), image.alt_offset,
-                             image.alt_length) ||
-                    !append_view(base.image_url(source), image.url_offset,
-                                 image.url_length)) {
-                clear();
-                return PartialReplaceResult::LIMIT_EXCEEDED;
-            }
-            image.width_kind = source.width_kind;
-            image.height_kind = source.height_kind;
-            image.width_value = source.width_value;
-            image.height_value = source.height_value;
-            image.align = source.align;
-            _images.push_back(image);
-        }
-        for (const auto& source : fragment_page._images) {
-            if (_images.size() >= MAX_IMAGES) break; // the rest render via
-                                                     // their run fallback
-            ImageRecord image;
-            if (!append_view(fragment_page.image_alt(source), image.alt_offset,
-                             image.alt_length) ||
-                    !append_view(fragment_page.image_url(source), image.url_offset,
-                                 image.url_length)) {
-                clear();
-                return PartialReplaceResult::LIMIT_EXCEEDED;
-            }
-            image.width_kind = source.width_kind;
-            image.height_kind = source.height_kind;
-            image.width_value = source.width_value;
-            image.height_value = source.height_value;
-            image.align = source.align;
-            _images.push_back(image);
-        }
-        // Image map: base record i -> its new index, or -1 when the record
-        // was region-owned and discarded. Fragment records follow the kept
-        // base records (offset = number kept, NOT the base total).
+        // text for such images. The record list therefore must NEVER shift a
+        // surviving index: discarding a region-owned record and compacting
+        // the rest would move every later record into a decode slot / loader
+        // entry belonging to another image. Instead:
+        //   - every base record keeps its index (copied verbatim);
+        //   - a region-owned record is REPLACED IN PLACE with the
+        //     fragment's record of the same position, so a refreshed-region
+        //     image renders its real alt text at its own index (and a
+        //     decoded buffer, had one been stored);
+        //   - fragment images beyond the region's old record count are
+        //     appended (new indices, never fetched — no loader entry);
+        //   - region records the new fragment does not fill are blanked,
+        //     which also clears the URL so a stale decoded slot is rejected
+        //     by the screen's url-hash check.
+        // Bounded: records per refresh = base records + max(0,
+        // fragment_count - region_count); a shrinking region frees slots.
+        // Image maps: base record i keeps index i (identity); fragment
+        // record j maps through frag_image_map (-1 means the fragment image
+        // hit MAX_IMAGES and renders via its run text fallback).
         ExternalVector<int16_t> base_image_map;
-        base_image_map.assign(base._images.size(), -1);
-        std::size_t kept_base_images = 0;
+        base_image_map.assign(base._images.size(), 0);
+        for (std::size_t i = 0; i < base._images.size(); ++i)
+            base_image_map[i] = static_cast<int16_t>(i);
+        // frag_image_map: fragment record j -> its new compact index, or -1.
+        // Populated by the record-rebuild block below; read by copy_block.
+        std::vector<int16_t> frag_image_map(
+            fragment_page._images.size(), -1);
         {
+            std::vector<std::size_t> region_slots; // base record indices the
+                                                   // replaced region owns, in
+                                                   // block (document) order
+            std::vector<bool> region_flag;
             bool bad = false;
             try {
-                std::size_t next = 0;
-                for (std::size_t i = 0; i < base._images.size(); ++i) {
-                    if (region_owned[i]) continue;
-                    base_image_map[i] = static_cast<int16_t>(next);
-                    ++next;
+                region_flag.assign(base._images.size(), false);
+                for (std::size_t i = 0; i < base._blocks.size(); ++i) {
+                    const BlockRecord& b = base._blocks[i];
+                    if (b.type == BlockType::IMAGE && b.image_index >= 0 &&
+                            b.partial_region_index ==
+                                static_cast<int16_t>(partial_index)) {
+                        const std::size_t rec =
+                            static_cast<std::size_t>(b.image_index);
+                        if (rec < region_flag.size() && !region_flag[rec]) {
+                            region_flag[rec] = true;
+                            region_slots.push_back(rec);
+                        }
+                    }
                 }
-                kept_base_images = next;
             } catch (const std::bad_alloc&) { bad = true; }
             if (bad) { clear(); return PartialReplaceResult::ALLOCATION_FAILED; }
+            // The first region_count fragment entries reuse the region's
+            // existing indices (in place); the rest are appended after all
+            // base records (new index = base_count + position in the
+            // appended run).
+            for (std::size_t j = 0; j < fragment_page._images.size(); ++j) {
+                if (j < region_slots.size()) {
+                    frag_image_map[j] =
+                        static_cast<int16_t>(region_slots[j]);
+                } else if (base._images.size() + (j - region_slots.size()) <
+                           MAX_IMAGES) {
+                    frag_image_map[j] = static_cast<int16_t>(
+                        base._images.size() + (j - region_slots.size()));
+                }
+            }
+            // Build the full image list: base records first (indices
+            // 0..base_count-1, verbatim), then the appended fragment
+            // records, then region slots overwritten in place. Building in
+            // this order keeps append offsets stable; the in-place writes
+            // must not interleave with the base copy.
+            std::vector<ImageRecord> images;
+            images.reserve(std::min(MAX_IMAGES,
+                base._images.size() + fragment_page._images.size()));
+            for (std::size_t i = 0; i < base._images.size(); ++i) {
+                const auto& source = base._images[i];
+                ImageRecord image;
+                if (!append_view(base.image_alt(source), image.alt_offset,
+                                 image.alt_length) ||
+                        !append_view(base.image_url(source), image.url_offset,
+                                     image.url_length)) {
+                    clear();
+                    return PartialReplaceResult::LIMIT_EXCEEDED;
+                }
+                image.width_kind = source.width_kind;
+                image.height_kind = source.height_kind;
+                image.width_value = source.width_value;
+                image.height_value = source.height_value;
+                image.align = source.align;
+                images.push_back(image);
+            }
+            for (std::size_t j = region_slots.size();
+                    j < fragment_page._images.size(); ++j) {
+                if (frag_image_map[j] < 0) continue; // MAX_IMAGES: run fallback
+                const auto& source = fragment_page._images[j];
+                ImageRecord image;
+                if (!append_view(fragment_page.image_alt(source), image.alt_offset,
+                                 image.alt_length) ||
+                        !append_view(fragment_page.image_url(source), image.url_offset,
+                                     image.url_length)) {
+                    clear();
+                    return PartialReplaceResult::LIMIT_EXCEEDED;
+                }
+                image.width_kind = source.width_kind;
+                image.height_kind = source.height_kind;
+                image.width_value = source.width_value;
+                image.height_value = source.height_value;
+                image.align = source.align;
+                images.push_back(image);
+            }
+            for (std::size_t j = 0; j < region_slots.size(); ++j) {
+                if (j >= fragment_page._images.size()) break; // blanked below
+                const auto& source = fragment_page._images[j];
+                ImageRecord image;
+                if (!append_view(fragment_page.image_alt(source), image.alt_offset,
+                                 image.alt_length) ||
+                        !append_view(fragment_page.image_url(source), image.url_offset,
+                                     image.url_length)) {
+                    clear();
+                    return PartialReplaceResult::LIMIT_EXCEEDED;
+                }
+                image.width_kind = source.width_kind;
+                image.height_kind = source.height_kind;
+                image.width_value = source.width_value;
+                image.height_value = source.height_value;
+                image.align = source.align;
+                images[region_slots[j]] = image;
+            }
+            // Leftover region slots the new fragment does not fill: blank the
+            // record (empty URL) so a stale decoded slot for that index is
+            // rejected by the screen's url-hash check and no block resolves
+            // it to a wrong image.
+            for (std::size_t j = fragment_page._images.size();
+                    j < region_slots.size(); ++j)
+                images[region_slots[j]] = ImageRecord{};
+            if (images.size() > MAX_IMAGES) {
+                clear();
+                return PartialReplaceResult::LIMIT_EXCEEDED;
+            }
+            _images.assign(images.begin(), images.end());
         }
 
         struct CopyMaps {
@@ -725,24 +776,22 @@ PartialReplaceResult CompactPage::assign_replacing_partial(
             block.partial_region_index = region_override >= 0
                 ? region_override : old.partial_region_index;
             if (old.image_index >= 0) {
-                // Base records survive verbatim (remapped through the kept
-                // base map; region-owned records were discarded). Fragment
-                // records follow the kept base records (offset remap), so a
-                // refreshed-region image renders its real alt text and is
-                // still never fetched (no loader entry exists for it).
-                int16_t mapped_index = -1;
+                // Base records keep their compact index (identity map);
+                // region-owned records were replaced in place with the
+                // fragment's content, so a refreshed-region image renders
+                // its real alt text — and a decoded buffer, had one been
+                // stored — at the same index its decode slot is tagged with.
+                // Fragment images beyond the region's old record count map
+                // through frag_image_map (-1 renders the run text fallback).
+                const std::size_t source_index =
+                    static_cast<std::size_t>(old.image_index);
                 if (&source == &base) {
-                    mapped_index =
-                        base_image_map[static_cast<std::size_t>(old.image_index)];
-                } else if (static_cast<std::size_t>(old.image_index) <
-                           fragment_page._images.size() &&
-                           kept_base_images +
-                               static_cast<std::size_t>(old.image_index) <
-                               _images.size()) {
-                    mapped_index = static_cast<int16_t>(
-                        kept_base_images + static_cast<std::size_t>(old.image_index));
+                    block.image_index = (source_index < _images.size())
+                        ? base_image_map[source_index] : -1;
+                } else {
+                    block.image_index = (source_index < frag_image_map.size())
+                        ? frag_image_map[source_index] : -1;
                 }
-                block.image_index = mapped_index;
             }
             if (old.table_index >= 0) {
                 block.table_index = copy_table(source, maps, old.table_index);
