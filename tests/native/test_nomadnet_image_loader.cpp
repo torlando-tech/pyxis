@@ -154,11 +154,145 @@ static void test_cancellation_and_reconfigure() {
     CHECK(l.count() == 1 && l.state_of(0) == ImageState::PENDING, "reconfigured");
 }
 
+static void test_partial_refresh_reconfigure() {
+    // Scenario: base page has a retained image (index 0) and a region
+    // image (index 1). Partial refreshes grow/shrink the region; the
+    // loader must pick up new images, preserve loaded ones, and never
+    // refetch unchanged ones.
+    {
+        // Full page: base + region image, both loaded.
+        ImageLoader l;
+        ImageLoadEntry e[2] = {entry(0, "/media/base.webp", true),
+                              entry(1, "/media/r1.webp", true)};
+        l.configure(2, e, PAGE_HEX, 1, ImagePolicy::ALWAYS, false, 0, 0);
+        l.poll(); l.finish_active(true);   // image 0 loaded
+        l.poll(); l.finish_active(true);   // image 1 loaded
+        CHECK(l.loaded_count() == 2, "both loaded before refresh");
+
+        // Refresh 1: region shrinks to nothing (only base remains).
+        ImageLoadEntry s[1] = {entry(0, "/media/base.webp", true)};
+        CHECK(l.reconfigure(1, s, PAGE_HEX, 1, ImagePolicy::ALWAYS, false, 0, 0),
+              "shrink: no orphan (nothing in flight)");
+        CHECK(l.count() == 1 && l.state_of(0) == ImageState::LOADED,
+              "shrink: base stays LOADED");
+        CHECK(l.poll() == ImageAction::NONE, "shrink: nothing to fetch");
+
+        // Refresh 2: region grows to two NEW images (indices 1, 2).
+        ImageLoadEntry g[3] = {entry(0, "/media/base.webp", true),
+                              entry(1, "/media/g1.webp", true),
+                              entry(2, "/media/g2.webp", true)};
+        CHECK(l.reconfigure(3, g, PAGE_HEX, 1, ImagePolicy::ALWAYS, false, 0, 0),
+              "grow: no orphan");
+        CHECK(l.count() == 3, "grow: three entries");
+        CHECK(l.state_of(0) == ImageState::LOADED, "grow: base still LOADED");
+        CHECK(l.state_of(1) == ImageState::PENDING &&
+              l.state_of(2) == ImageState::PENDING, "grow: new images PENDING");
+        l.poll();
+        CHECK(l.active_entry() && l.active_entry()->image_index == 1,
+              "grow: fetch starts at first new image");
+        l.finish_active(true);
+        l.poll();
+        CHECK(l.active_entry()->image_index == 2, "grow: second new image next");
+        l.finish_active(true);
+        CHECK(l.loaded_count() == 3 && l.all_done(), "grow: all loaded");
+    }
+    {
+        // In-place replacement: index 1 keeps its slot but the region now
+        // points at a different file. The old LOADED state must NOT carry
+        // over (stale pixels); the new URL must be fetched.
+        ImageLoader l;
+        ImageLoadEntry e[2] = {entry(0, "/media/base.webp", true),
+                              entry(1, "/media/old.webp", true)};
+        l.configure(2, e, PAGE_HEX, 1, ImagePolicy::ALWAYS, false, 0, 0);
+        l.poll(); l.finish_active(true);
+        l.poll(); l.finish_active(true);
+        ImageLoadEntry r[2] = {entry(0, "/media/base.webp", true),
+                              entry(1, "/media/new.webp", true)};
+        CHECK(l.reconfigure(2, r, PAGE_HEX, 1, ImagePolicy::ALWAYS, false, 0, 0),
+              "replace: no orphan");
+        CHECK(l.state_of(0) == ImageState::LOADED, "replace: base preserved");
+        CHECK(l.state_of(1) == ImageState::PENDING,
+              "replace: replaced url re-admitted");
+        l.poll();
+        CHECK(l.active_entry()->cache_key == image_cache_key(PAGE_HEX, "/media/new.webp"),
+              "replace: fetch targets the new url");
+    }
+    {
+        // In-flight orphan: image 1 is REQUESTING when the fragment
+        // replaces its url. reconfigure must report the orphan so the
+        // caller releases the outstanding receipt.
+        ImageLoader l;
+        ImageLoadEntry e[2] = {entry(0, "/media/base.webp", true),
+                              entry(1, "/media/old.webp", true)};
+        l.configure(2, e, PAGE_HEX, 1, ImagePolicy::ALWAYS, false, 0, 0);
+        l.poll(); l.finish_active(true);   // base loaded
+        l.poll();                          // image 1 REQUESTING
+        CHECK(l.state_of(1) == ImageState::REQUESTING, "image 1 in flight");
+        ImageLoadEntry r[2] = {entry(0, "/media/base.webp", true),
+                              entry(1, "/media/new.webp", true)};
+        CHECK(!l.reconfigure(2, r, PAGE_HEX, 1, ImagePolicy::ALWAYS, false, 0, 0),
+              "orphan reported when in-flight url replaced");
+        CHECK(l.state_of(1) == ImageState::PENDING,
+              "orphaned slot re-admitted with new url");
+        CHECK(l.active_position() == 0, "no in-flight after orphan");
+    }
+    {
+        // In-flight preserved: the fragment does not touch the in-flight
+        // image. reconfigure must keep it REQUESTING (no orphan, no
+        // double request).
+        ImageLoader l;
+        ImageLoadEntry e[2] = {entry(0, "/media/base.webp", true),
+                              entry(1, "/media/r1.webp", true)};
+        l.configure(2, e, PAGE_HEX, 1, ImagePolicy::ALWAYS, false, 0, 0);
+        l.poll(); l.finish_active(true);
+        l.poll();                          // image 1 REQUESTING
+        CHECK(l.reconfigure(2, e, PAGE_HEX, 1, ImagePolicy::ALWAYS, false, 0, 0),
+              "unchanged in-flight: no orphan");
+        CHECK(l.state_of(1) == ImageState::REQUESTING, "in-flight preserved");
+        CHECK(l.active_position() == 2, "active slot preserved");
+        CHECK(l.poll() == ImageAction::NONE, "no second request");
+        l.finish_active(true);
+        CHECK(l.loaded_count() == 2, "in-flight completes normally");
+    }
+    {
+        // Manual policy: a refresh adds an image; it must wait for the
+        // user trigger, and already-loaded images stay loaded.
+        ImageLoader l;
+        ImageLoadEntry e[1] = {entry(0, "/media/base.webp", true)};
+        l.configure(1, e, PAGE_HEX, 1, ImagePolicy::MANUAL, false, 0, 0);
+        CHECK(l.request_images() == 1, "manual trigger admits base");
+        l.poll(); l.finish_active(true);
+        ImageLoadEntry g[2] = {entry(0, "/media/base.webp", true),
+                              entry(1, "/media/new.webp", true)};
+        CHECK(l.reconfigure(2, g, PAGE_HEX, 1, ImagePolicy::MANUAL, false, 0, 0),
+              "manual reconfigure: no orphan");
+        CHECK(l.state_of(0) == ImageState::LOADED, "manual: base stays loaded");
+        CHECK(l.state_of(1) == ImageState::SKIPPED,
+              "manual: new image waits for trigger");
+        CHECK(l.manual_pending(), "manual: pending trigger surfaced");
+        CHECK(l.request_images() == 1, "manual: trigger admits new image");
+        CHECK(l.state_of(1) == ImageState::PENDING, "manual: new image pending");
+    }
+    {
+        // NEVER policy: refresh adds images but nothing is admitted.
+        ImageLoader l;
+        ImageLoadEntry e[1] = {entry(0, "/media/base.webp", true)};
+        l.configure(1, e, PAGE_HEX, 1, ImagePolicy::NEVER, true, 0, 0);
+        ImageLoadEntry g[2] = {entry(0, "/media/base.webp", true),
+                              entry(1, "/media/new.webp", true)};
+        CHECK(l.reconfigure(2, g, PAGE_HEX, 1, ImagePolicy::NEVER, true, 0, 0),
+              "never: no orphan");
+        CHECK(l.state_of(1) == ImageState::SKIPPED, "never: new image skipped");
+        CHECK(l.poll() == ImageAction::NONE, "never: nothing fetched");
+    }
+}
+
 int main() {
     test_policy_gate();
     test_sequential_and_link_resolution();
     test_failure_is_per_image();
     test_cancellation_and_reconfigure();
+    test_partial_refresh_reconfigure();
     if (failures == 0) {
         std::printf("ALL IMAGE LOADER TESTS PASSED\n");
         return 0;
