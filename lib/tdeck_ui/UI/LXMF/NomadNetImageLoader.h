@@ -114,6 +114,30 @@ public:
                    std::uint32_t page_generation, ImagePolicy policy,
                    bool loopback, std::uint32_t rtt_ms, std::uint32_t edr_bps);
 
+    // Re-admit images after a dynamic partial refresh replaced the page's
+    // image records (reference: Browser.update_images rescans page_images
+    // every second and loads anything not yet updated, so images that enter
+    // a refreshed region are picked up by the same sequential updater).
+    //
+    // Per-image state is keyed by (image_index, cache_key):
+    //  - unchanged (index, url): the existing state is preserved verbatim
+    //    (LOADED stays loaded, FAILED stays terminal, PENDING/REQUESTING
+    //    stay in their queue position) — no refetch of identical images;
+    //  - same index, different url (in-place region replacement): treated
+    //    as a new image and re-admitted under the policy gate;
+    //  - new index: admitted under the policy gate;
+    //  - index no longer present (region shrank): entry dropped.
+    //
+    // Returns false when an in-flight REQUESTING entry was dropped or its
+    // url changed: the caller MUST release the outstanding request (the
+    // single-slot mailbox cannot carry a second request while the orphaned
+    // one is unreleased). Returns true when the in-flight entry survived
+    // unchanged or nothing was in flight.
+    bool reconfigure(std::size_t image_count, const ImageLoadEntry* entries,
+                     const std::string& resolved_destination,
+                     std::uint32_t page_generation, ImagePolicy policy,
+                     bool loopback, std::uint32_t rtt_ms, std::uint32_t edr_bps);
+
     // Advance the sequential loader. Exactly one entry may be REQUESTING.
     // Returns the action for the transport: SEND_REQUEST for the active
     // entry (whose path is active_path() / active_destination()) or NONE.

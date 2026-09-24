@@ -2912,6 +2912,76 @@ void UIManager::nomad_configure_page_images(const NomadNet::Document& document) 
     }
 }
 
+void UIManager::nomad_reconfigure_images_after_partial() {
+    // The applied partial fragment has already replaced region-owned image
+    // records in the compact page (stable indices, in-place replacement).
+    // Rebuild the loader entry list from the merged page and re-admit under
+    // the same policy gate as the full-page configure. Per-image state is
+    // preserved for unchanged (index, url) pairs, so identical images are
+    // never refetched and replaced records are fetched fresh.
+    std::vector<NomadNet::ImageLoadEntry> entries;
+    bool inflight_orphaned = false;
+    bool actionable = false;
+    {
+        LVGL_LOCK();
+        const auto& page = _nomadnet_screen->page();
+        const auto& images = page.images();
+        entries.reserve(images.size());
+        for (std::size_t i = 0; i < images.size() &&
+                  entries.size() < NomadNet::ImageLoader::CAPACITY; ++i) {
+            const auto url_view = page.image_url(images[i]);
+            const std::string url(url_view.data(), url_view.size());
+            const auto parsed = NomadNet::parse_image_url(url);
+            if (!parsed.valid) continue;  // blanked or malformed record
+            NomadNet::ImageLoadEntry entry;
+            entry.image_index = static_cast<uint16_t>(i);
+            entry.same_destination = parsed.same_destination;
+            entry.destination_hex = parsed.destination_hex;
+            entry.path = parsed.path;
+            entries.push_back(std::move(entry));
+        }
+        // Policy/loopback/RTT mirror nomad_configure_page_images exactly.
+        NomadNet::ImagePolicy policy = NomadNet::ImagePolicy::AUTO;
+        switch (app_settings.image_loading) {
+            case 0: policy = NomadNet::ImagePolicy::NEVER; break;
+            case 1: policy = NomadNet::ImagePolicy::MANUAL; break;
+            case 3: policy = NomadNet::ImagePolicy::ALWAYS; break;
+            case 2:
+            default: policy = NomadNet::ImagePolicy::AUTO; break;
+        }
+        uint32_t rtt_ms = 0;
+        bool loopback = false;
+        if (_nomad_link && _nomad_link.status() == Type::Link::ACTIVE) {
+            const double seconds = _nomad_link.rtt();
+            rtt_ms = seconds > 0.0
+                ? static_cast<uint32_t>(seconds * 1000.0)
+                : NomadNet::ImageLoader::AUTO_MAX_RTT_MS;
+            loopback = _nomad_destination_hash == _router.identity().hash();
+        }
+        inflight_orphaned = !_nomad_image_loader.reconfigure(
+            entries.size(), entries.empty() ? nullptr : entries.data(),
+            _nomad_url.destination_hex, _nomad_navigation_generation,
+            policy, loopback, rtt_ms,
+            NomadNet::ImageLoader::EDR_UNMEASURABLE);
+        actionable = _nomad_image_loader.manual_pending();
+    }
+    if (inflight_orphaned) {
+        // The in-flight /media fetch belongs to a record the fragment
+        // replaced in place. Release the receipt (sealing the mailbox first
+        // so the synthetic failed callback cannot race the next request) and
+        // report the abandoned image as finished-failed; the replacement
+        // image is queued PENDING and will be fetched on the next poll.
+        nomad_publish_image_progress(0, 0, _nomad_image_total_bytes, true, false);
+        _nomad_image_deadline_ms = 0;
+        nomad_release_image_request();
+        _nomad_image_response.clear();
+    }
+    {
+        LVGL_LOCK();
+        _nomadnet_screen->set_images_actionable(actionable);
+    }
+}
+
 // True when the page's image record at the entry's compact index no longer
 // matches the URL the entry was fetched for. Used by the RESPONSE branch of
 // nomad_poll_images: a dynamic partial refresh may have replaced the record
@@ -3818,6 +3888,11 @@ void UIManager::nomad_update() {
                             : "Dynamic content exceeds page limits");
                     break;
                 }
+                // The merged page may carry new/replaced image records in
+                // the refreshed region. Re-admit the loader so region
+                // images actually fetch (reference: the image updater
+                // rescans page images after every partial update).
+                nomad_reconfigure_images_after_partial();
                 nomad_finish_partial(true, nullptr);
                 break;
             }
