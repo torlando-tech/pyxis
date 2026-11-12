@@ -39,3 +39,6 @@ esptool.py --chip esp32s3 write_flash 0x0 pyxis-<tag>-merged.bin
 
 ## Why "Pyxis"
 Pyxis, latin for "compass," is a [constellation](https://en.wikipedia.org/wiki/Pyxis) in the southern sky depicting a mariner's compass. Small but essential, the compass ensures every message finds its destination - even when the path is uncertain. 
+
+## License
+GPLv3 except for the LXST port; there was a mistake regarding LXST's license that is being sorted out with Mark Qvist. 
