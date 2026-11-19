@@ -506,6 +506,12 @@ private:
     // publication path). No-op when the page has no images or the policy gate
     // rejects everything.
     void nomad_configure_page_images(const NomadNet::Document& document);
+    // Re-admit page images after a dynamic partial fragment replaced image
+    // records in the applied page. Mirrors the reference, whose sequential
+    // image updater rescans page images and loads anything not yet updated.
+    // Reads the merged compact page under LVGL; releases any orphaned
+    // in-flight image request. Best-effort: never fails the page.
+    void nomad_reconfigure_images_after_partial();
     // Advance the sequential image fetcher. Runs only when the page transport
     // has settled to IDLE and the page Link is still ACTIVE (same-destination
     // images reuse it). One /media request at a time.

@@ -74,6 +74,105 @@ bool ImageLoader::configure(std::size_t image_count, const ImageLoadEntry* entri
     }
 }
 
+bool ImageLoader::reconfigure(std::size_t image_count, const ImageLoadEntry* entries,
+                              const std::string& resolved_destination,
+                              std::uint32_t page_generation, ImagePolicy policy,
+                              bool loopback, std::uint32_t rtt_ms,
+                              std::uint32_t edr_bps) {
+    try {
+        if (image_count > CAPACITY) image_count = CAPACITY;
+        const bool gate = (policy == ImagePolicy::ALWAYS) ||
+                          (policy == ImagePolicy::AUTO &&
+                           auto_gate_allows(loopback, rtt_ms, edr_bps));
+        const bool manual = (policy == ImagePolicy::MANUAL);
+        // Effective admission: under MANUAL, entries already tracked keep
+        // their state (a user who pressed Load keeps loaded images loaded);
+        // newly appearing entries start SKIPPED until the next
+        // request_images() trigger, matching manual-mode semantics.
+        const bool new_gate = manual ? false : gate;
+
+        Entry rebuilt[CAPACITY];
+        std::size_t rebuilt_count = 0;
+        bool inflight_orphaned = false;
+        const bool had_inflight =
+            _active < _count && _entries[_active].state == ImageState::REQUESTING;
+
+        for (std::size_t i = 0; i < image_count; ++i) {
+            const ImageLoadEntry& source = entries[i];
+            const std::string destination = source.same_destination
+                ? resolved_destination : source.destination_hex;
+            if (destination.empty()) continue;
+            ImageLoadEntry entry;
+            entry.image_index = source.image_index;
+            entry.same_destination = source.same_destination;
+            entry.destination_hex = destination;
+            entry.path = source.path;
+            entry.cache_key = image_cache_key(destination, source.path);
+
+            // Find the prior entry for this compact index.
+            Entry* prior = nullptr;
+            for (std::size_t j = 0; j < _count; ++j) {
+                if (_entries[j].data.image_index == source.image_index) {
+                    prior = &_entries[j];
+                    break;
+                }
+            }
+            Entry next;
+            if (prior && prior->data.cache_key == entry.cache_key) {
+                // Same image at the same index: preserve state verbatim.
+                next.data = std::move(entry);
+                next.state = prior->state;
+                next.terminal_failure = prior->terminal_failure;
+            } else {
+                // New index, or same index with a replaced url (in-place
+                // region replacement): a different image. The old decoded
+                // pixels are no longer valid for this record; admit fresh.
+                next.data = std::move(entry);
+                if (prior && prior->state == ImageState::REQUESTING) {
+                    // The in-flight fetch belongs to the replaced record.
+                    inflight_orphaned = true;
+                }
+                // Manual policy: new images wait for the next
+                // request_images() trigger. Otherwise admit under the gate.
+                next.state = new_gate ? ImageState::PENDING : ImageState::SKIPPED;
+                next.terminal_failure = false;
+            }
+            rebuilt[rebuilt_count++] = std::move(next);
+        }
+
+        // Any prior REQUESTING entry that is NOT preserved above is orphaned.
+        if (had_inflight) {
+            bool inflight_preserved = false;
+            for (std::size_t j = 0; j < rebuilt_count; ++j) {
+                if (rebuilt[j].state == ImageState::REQUESTING) {
+                    inflight_preserved = true;
+                    break;
+                }
+            }
+            if (!inflight_preserved) inflight_orphaned = true;
+        }
+
+        // Commit the rebuilt table.
+        for (std::size_t i = 0; i < CAPACITY; ++i) _entries[i] = Entry{};
+        for (std::size_t i = 0; i < rebuilt_count; ++i) _entries[i] = std::move(rebuilt[i]);
+        _count = rebuilt_count;
+        _resolved_destination = resolved_destination;
+        _manual_policy = manual;
+        _generation = page_generation;
+        // Re-derive the active slot: the preserved REQUESTING entry if any,
+        // otherwise none in flight.
+        _active = _count;
+        for (std::size_t i = 0; i < _count; ++i) {
+            if (_entries[i].state == ImageState::REQUESTING) { _active = i; break; }
+        }
+        return !inflight_orphaned;
+    } catch (const std::bad_alloc&) {
+        // Leave the previous configuration intact on allocation failure:
+        // the page keeps whatever loader state it had (best-effort).
+        return false;
+    }
+}
+
 ImageAction ImageLoader::poll() {
     // Strictly sequential: at most one entry may be REQUESTING, and it is
     // always the first non-terminal entry in document order. The position is
